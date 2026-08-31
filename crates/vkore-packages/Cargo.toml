@@ -1,0 +1,21 @@
+[package]
+name = "vkore-packages"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verified package, runtime, model, and Kore artifact management for vKore."
+
+[dependencies]
+blake3.workspace = true
+ed25519-dalek = "2.2"
+hex = "0.4"
+semver = "1.0"
+serde.workspace = true
+serde_json.workspace = true
+tar = "0.4"
+tempfile = "3.23.0"
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+
+[lints]
+workspace = true

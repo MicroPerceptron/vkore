@@ -786,6 +786,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vkore-addon-sdk"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "vkore-hostlink-ab"
 version = "0.0.0"
 dependencies = [
@@ -796,6 +806,16 @@ dependencies = [
  "serde",
  "serde_json",
  "vkored",
+]
+
+[[package]]
+name = "vkore-reference-addon"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde_json",
+ "tempfile",
+ "vkore-addon-sdk",
 ]
 
 [[package]]

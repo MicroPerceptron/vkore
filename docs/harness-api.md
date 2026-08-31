@@ -85,11 +85,12 @@ cannot select an ambient executable or filesystem path.
 
 `DeterministicGuest` is the portable test oracle. It models a resident-broker
 commit and an exact executable/filesystem scope with three inert objects, and is
-used to make security tests reproducible without a model. The production guest
-bridge uses the same `GuestBridge` contract to deliver the intent and tool loop
-over HostLink to the Kore VM. The Kore PR #722 QEMU gate separately exercises
-the founded agent-runner, guest `cat`, result turn, teardown, stale-generation
-rejection, and route/KV lifecycle on this stack.
+used to make security tests reproducible without a model. In real-VM mode,
+`KoreVmRuntime` queues the authenticated intent directly on the HostLink host
+endpoint. Kore's resident broker and founded agent claim it in order, and only
+that generation-bound agent route can publish the terminal result.
+`scripts/kore-interactive-gate.sh` exercises this path from HTTP prompt
+submission through guest `cat` execution and back to the assistant event.
 
 ## Headless client
 

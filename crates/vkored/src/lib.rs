@@ -9,6 +9,7 @@ pub mod harness;
 pub mod hybrid;
 pub mod interactive;
 pub mod ivshmem;
+pub mod kore_runtime;
 pub mod llama;
 pub mod project;
 pub mod protocol;
@@ -37,6 +38,7 @@ pub use interactive::{
 pub use ivshmem::{
     IVSHMEM_BACKING_BYTES, IvshmemBulkHost, IvshmemError, IvshmemMetrics, frozen_layout,
 };
+pub use kore_runtime::{KoreVmRuntime, KoreVmRuntimeConfig};
 pub use llama::{LlamaServerBackend, LlamaServerConfig, LlamaServerError};
 pub use project::{
     AddonSelection, ApprovalProfile, InferenceConfig, ProjectConfig, ProjectError, ProjectStore,

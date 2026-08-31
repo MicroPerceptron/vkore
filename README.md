@@ -17,6 +17,13 @@ The migrated packages are:
 - `vkore-workspace`: root-confined host workspace snapshot, live range service, writeback journal, and image import tooling.
 - `vkore-hostlink-ab`: bounded HostLink transport measurement adapter.
 
+Product packages added in vKore include:
+
+- `vkore-addon-sdk`: capability-scoped host, guest, and split tool contracts and runtime.
+- `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
+
+See [the add-on SDK guide](docs/addons.md) for the public extension and security model.
+
 ## Build and test
 
 Kore is currently private, so Cargo is configured to use the authenticated Git CLI for the pinned shared dependencies.

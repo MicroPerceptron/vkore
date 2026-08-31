@@ -868,6 +868,7 @@ impl InferenceBackend for DeterministicBackend {
                 return Err(BackendError::InvalidEncoding);
             }
             let mut object = None;
+            let mut fallback_object = None;
             let mut executable = None;
             let mut view = None;
             let mut agent = None;
@@ -881,6 +882,20 @@ impl InferenceBackend for DeterministicBackend {
                         }
                     }
                     ("read X", BrokerOfferKind::Executable, "cat")
+                        if offer.permitted_ops != 0 && offer.max_uses != 0 =>
+                    {
+                        if executable.replace(offer.reference).is_some() {
+                            return Err(BackendError::InvalidEncoding);
+                        }
+                    }
+                    (_, BrokerOfferKind::Object, "workspace/identity")
+                        if offer.permitted_ops & 1 != 0 =>
+                    {
+                        if fallback_object.replace(offer.reference).is_some() {
+                            return Err(BackendError::InvalidEncoding);
+                        }
+                    }
+                    (_, BrokerOfferKind::Executable, "cat")
                         if offer.permitted_ops != 0 && offer.max_uses != 0 =>
                     {
                         if executable.replace(offer.reference).is_some() {
@@ -966,7 +981,12 @@ impl InferenceBackend for DeterministicBackend {
                     plan: planning.plan,
                     agent: agent.ok_or(BackendError::InvalidEncoding)?,
                 },
-                _ => return Err(BackendError::InvalidEncoding),
+                _ => BrokerPending::Create {
+                    plan: planning.plan,
+                    object: fallback_object.ok_or(BackendError::InvalidEncoding)?,
+                    executable: executable.ok_or(BackendError::InvalidEncoding)?,
+                    budget: planning.ceiling,
+                },
             })
         } else {
             None

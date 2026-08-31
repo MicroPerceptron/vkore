@@ -1,0 +1,27 @@
+[package]
+name = "vkore-hostlink-ab"
+version = "0.0.0"
+edition = "2024"
+description = "Bounded, reproducible HostLink serial-vs-ivshmem A/B runner (#538)."
+publish = false
+license = "MPL-2.0"
+
+[lib]
+# Preserve the extracted crate path while the package adopts its vKore name.
+name = "kore_hostlink_ab"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = "=1.8.6"
+hostlinkd = { package = "vkored", path = "../vkored" }
+kore-hostlink.workspace = true
+kore-hostlink-shmem.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "hostlink-measure-adapter"
+path = "src/bin/hostlink-measure-adapter.rs"

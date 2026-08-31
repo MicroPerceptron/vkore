@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "provenance": {
+    "kore_sha": "0123456789abcdef0123456789abcdef01234567",
+    "host_sha": "123456789abcdef0123456789abcdef012345678",
+    "qemu_sha": "23456789abcdef0123456789abcdef0123456789"
+  },
+  "warmup_blocks": 1,
+  "sample_blocks": 15,
+  "order_seed": 5745197522669,
+  "timeout_seconds": 300,
+  "shmem_capacity": 8,
+  "serial": {
+    "program": "target/release/hostlink-measure-adapter",
+    "args": [
+      "--transport", "serial",
+      "--qemu", "/usr/bin/qemu-system-x86_64",
+      "--image", "build/kore-x86_64.iso"
+    ],
+    "qemu_args": [
+      "-cdrom", "@KORE_IMAGE@",
+      "-chardev", "socket,id=hostlink_ctl,path=@HOSTLINK_CONTROL_SOCKET@,reconnect-ms=100",
+      "-chardev", "socket,id=hostlink_bulk,path=@HOSTLINK_BULK_SOCKET@,reconnect-ms=100",
+      "-device", "virtio-serial-pci,id=hostlink,bus=pcie.0,disable-legacy=on,iommu_platform=on,max_ports=3,vectors=2",
+      "-device", "virtserialport,bus=hostlink.0,nr=1,name=org.microperceptron.hostlink.control,chardev=hostlink_ctl",
+      "-device", "virtserialport,bus=hostlink.0,nr=2,name=org.microperceptron.hostlink.bulk,chardev=hostlink_bulk"
+    ],
+    "working_directory": null
+  },
+  "ivshmem": {
+    "program": "target/release/hostlink-measure-adapter",
+    "args": [
+      "--transport", "ivshmem",
+      "--qemu", "/usr/bin/qemu-system-x86_64",
+      "--image", "build/kore-x86_64.iso"
+    ],
+    "qemu_args": [
+      "-cdrom", "@KORE_IMAGE@",
+      "-chardev", "socket,id=hostlink_ctl,path=@HOSTLINK_CONTROL_SOCKET@,reconnect-ms=100",
+      "-chardev", "socket,id=hostlink_bulk,path=@HOSTLINK_BULK_SOCKET@,reconnect-ms=100",
+      "-device", "virtio-serial-pci,id=hostlink,bus=pcie.0,disable-legacy=on,iommu_platform=on,max_ports=3,vectors=2",
+      "-device", "virtserialport,bus=hostlink.0,nr=1,name=org.microperceptron.hostlink.control,chardev=hostlink_ctl",
+      "-device", "virtserialport,bus=hostlink.0,nr=2,name=org.microperceptron.hostlink.bulk,chardev=hostlink_bulk",
+      "-object", "memory-backend-file,id=hostlink_shmem,mem-path=@HOSTLINK_SHMEM_PATH@,size=@HOSTLINK_SHMEM_SIZE@,share=on",
+      "-device", "ivshmem-plain,id=hostlink_bulk_shmem,memdev=hostlink_shmem"
+    ],
+    "working_directory": null
+  }
+}

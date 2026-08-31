@@ -1,0 +1,30 @@
+[package]
+name = "vkore-workspace"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MPL-2.0"
+description = "Capability-rooted host workspace adapter for Kore guests."
+
+[dependencies]
+blake3 = { version = "=1.8.6", default-features = false, features = ["std"] }
+cap-std = "=4.0.2"
+kore-block.workspace = true
+kore-svc-fs.workspace = true
+kore-workspace-sync.workspace = true
+notify = "=8.2.0"
+zerocopy = { version = "0.8", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lib]
+name = "workspacectl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vkore-workspace"
+path = "src/main.rs"

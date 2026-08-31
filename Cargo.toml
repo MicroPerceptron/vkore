@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/vkored",
+    "crates/vkore-hostlink-ab",
+    "crates/vkore-vm",
+    "crates/vkore-workspace",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/MicroPerceptron/vkore"
+rust-version = "1.97"
+
+# PR #722 is the integration source for the initial extraction. These shared
+# crates remain Kore-owned wire/guest contracts; vKore consumes one exact
+# revision instead of copying protocol definitions into the host repository.
+[workspace.dependencies]
+kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

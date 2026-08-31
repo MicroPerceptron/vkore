@@ -1,0 +1,7 @@
+[toolchain]
+# The imported workspace image path links Kore's host-testable filesystem
+# service, which uses the allocator_api feature. Match the pinned guest
+# revision's toolchain until that host seam is split into a stable crate.
+channel = "nightly-2026-07-13"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

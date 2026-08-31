@@ -33,7 +33,7 @@ The deterministic backend is explicitly labeled as a test oracle. It drives the
 authenticated broker/agent/tool protocol and is useful for UI, policy, and
 capability-flow tests, but it is not a substitute for a booted Kore VM.
 
-## Real inference
+## Real inference without a VM
 
 Start the harness with caller-selected artifacts:
 
@@ -55,6 +55,20 @@ missing files during preflight. It never downloads a selected model implicitly.
 Verified import, signature/hash checks, compatibility selection, activation,
 and rollback are provided by `vkore-packages`; the current harness process must
 still be restarted to change its active backend.
+
+## Real Kore VM
+
+Start `vkore-harnessd` with `--qemu PATH` and the repeated base QEMU arguments
+needed by the selected Kore image. In this mode the project supplies the Kore
+image, workspace, backend, llama.cpp runtime, model, and resource limits. vKore
+adds loopback HostLink devices and starts one supervised VM for each submitted
+prompt. The inference backend remains resident between prompts.
+
+A submitted prompt is not reported as successful until the resident broker
+claims that exact authenticated intent, founds a scoped agent, the agent claims
+the same intent on its generation-bound route, and its terminal result returns
+to the harness. Capability, tool-call, and tool-result observations stream into
+the existing UI while the prompt runs.
 
 ## Add-ons and approvals
 
@@ -96,11 +110,9 @@ policy preferences; a maintenance process may enforce deletion.
 - Project paths are configuration. They do not enlarge a live agent's Kore
   capabilities.
 
-## Current integration boundary
+## Integration gate
 
-The host QEMU supervisor and workspace adapter exist in vKore, but PR #722's
-guest does not expose the interactive frontend ingress needed to route these UI
-prompts into a newly booted VM. The deterministic UI path is fully runnable and
-the llama.cpp path runs against the deterministic guest protocol oracle. Live
-UI-to-QEMU guest execution remains an explicit integration boundary rather than
-a simulated success indicator.
+Run `scripts/kore-interactive-gate.sh` from Linux or WSL with `KORE_ROOT` set to
+the matching Kore checkout. It creates a project and prompt through the same API
+used by the UI, then requires a real capability-scoped guest tool result to
+return before it passes.

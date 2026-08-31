@@ -112,15 +112,24 @@ transcript, and exits. If `vkored` stops first, it terminates the child VM.
 
 ## Cross-repository gate
 
-The product-level deterministic QEMU gate lives here and consumes the exact PR
-#722 checkout. It builds vKore's daemon/workspace tools, then asks Kore's thin
-guest-development Make target to build and boot the guest artifact:
+The interactive product gate starts the authenticated harness, creates a real
+project through its HTTP API, submits `read X`, boots Kore, and requires the
+broker proposal, capability installation, guest `cat` execution, tool result,
+assistant response, and terminal event to return through HostLink:
+
+```sh
+KORE_ROOT=/path/to/kore-frontend-ingress ./scripts/kore-interactive-gate.sh
+```
+
+The earlier deterministic QEMU security gate remains available. It builds
+vKore's daemon/workspace tools, then asks Kore's guest-development Make target
+to build and boot the guest artifact:
 
 ```sh
 KORE_ROOT=/path/to/kore-pr722 ./scripts/kore-qemu-gate.sh
 ```
 
-The gate proves the HostLink handshake, workspace import, two isolated agent
+That gate proves the HostLink handshake, workspace import, two isolated agent
 tool loops, prompt-scoped authority lifecycle, stale-generation protection,
 and pre-expansion denial of the sibling secret.
 

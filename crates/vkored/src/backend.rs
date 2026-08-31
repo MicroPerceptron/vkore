@@ -288,6 +288,67 @@ pub trait InferenceBackend {
     }
 }
 
+impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
+    fn reset(&mut self) {
+        (**self).reset();
+    }
+
+    fn open(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError> {
+        (**self).open(sequence)
+    }
+
+    fn close(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError> {
+        (**self).close(sequence)
+    }
+
+    fn submit(
+        &mut self,
+        sequence: SequenceIdentity,
+        request: RequestId,
+        payload: &[u8],
+        tick: u64,
+    ) -> Result<(), BackendError> {
+        (**self).submit(sequence, request, payload, tick)
+    }
+
+    fn submit_bulk(
+        &mut self,
+        sequence: SequenceIdentity,
+        request: RequestId,
+        bulk_id: BulkId,
+        content_kind: u16,
+        payload: &[u8],
+        tick: u64,
+    ) -> Result<(), BackendError> {
+        (**self).submit_bulk(sequence, request, bulk_id, content_kind, payload, tick)
+    }
+
+    fn cancel(
+        &mut self,
+        sequence: SequenceIdentity,
+        request: RequestId,
+        tick: u64,
+    ) -> Result<BackendEvent, BackendError> {
+        (**self).cancel(sequence, request, tick)
+    }
+
+    fn poll(&mut self, tick: u64) -> Option<BackendEvent> {
+        (**self).poll(tick)
+    }
+
+    fn metrics(&self) -> BackendMetrics {
+        (**self).metrics()
+    }
+
+    fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics> {
+        (**self).sequence_metrics(sequence)
+    }
+
+    fn take_observation(&mut self) -> Option<InferenceObservation> {
+        (**self).take_observation()
+    }
+}
+
 /// Host-only projection for the live inspector. Route/generation/request are
 /// correlation, never capability identifiers. Payloads are explicitly
 /// bounded by each backend before insertion.

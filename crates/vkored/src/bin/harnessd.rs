@@ -1,6 +1,7 @@
 use hostlinkd::{
     BackendHarness, BackendLimits, DeterministicBackend, DeterministicGuest, HarnessHttpServer,
-    HarnessService, LlamaServerBackend, LlamaServerConfig, TaskRuntime,
+    HarnessService, KoreVmRuntime, KoreVmRuntimeConfig, LlamaServerBackend, LlamaServerConfig,
+    TaskRuntime,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,6 +22,8 @@ fn run() -> Result<(), String> {
     let mut llama_model = None;
     let mut llama_port = 8_189u16;
     let mut llama_args = Vec::new();
+    let mut qemu = None;
+    let mut qemu_args = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -31,10 +34,23 @@ fn run() -> Result<(), String> {
             "--llama-model" => llama_model = Some(PathBuf::from(args.next().ok_or("missing --llama-model")?)),
             "--llama-port" => llama_port = args.next().and_then(|value| value.parse().ok()).ok_or("invalid --llama-port")?,
             "--llama-arg" => llama_args.push(args.next().ok_or("missing --llama-arg")?.into()),
-            _ => return Err("usage: vkore-harnessd [--listen 127.0.0.1:8787] --token TOKEN [--state PATH] [--llama-server PATH --llama-model PATH [--llama-port N] [--llama-arg ARG]...]".into()),
+            "--qemu" => qemu = Some(PathBuf::from(args.next().ok_or("missing --qemu")?)),
+            "--qemu-arg" => qemu_args.push(args.next().ok_or("missing --qemu-arg")?.into()),
+            _ => return Err("usage: vkore-harnessd [--listen 127.0.0.1:8787] --token TOKEN [--state PATH] [--qemu PATH [--qemu-arg ARG]...] [--llama-server PATH --llama-model PATH [--llama-port N] [--llama-arg ARG]...]".into()),
         }
     }
     let token = token.ok_or("--token is required")?;
+    if let Some(qemu_executable) = qemu {
+        if llama_server.is_some() || llama_model.is_some() || !llama_args.is_empty() {
+            return Err("real Kore mode reads llama.cpp settings from the selected project".into());
+        }
+        let runtime = KoreVmRuntime::new(KoreVmRuntimeConfig {
+            qemu_executable,
+            qemu_arguments: qemu_args,
+            project_root: state.join("projects"),
+        })?;
+        return run_server(listen, token, state, runtime, "real Kore VM over HostLink");
+    }
     match (llama_server, llama_model) {
         (None, None) => run_server(
             listen,

@@ -1440,7 +1440,15 @@ impl HarnessHttpServer {
         let project_root = project_root.into();
         let server = tiny_http::Server::http(address)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
-        let tiny_http::ListenAddr::IP(address) = server.server_addr();
+        let address = match server.server_addr() {
+            tiny_http::ListenAddr::IP(address) => address,
+            #[cfg(unix)]
+            tiny_http::ListenAddr::Unix(_) => {
+                return Err(HarnessError::Http(
+                    "TCP harness unexpectedly bound a Unix socket".into(),
+                ));
+            }
+        };
         Ok(Self {
             server,
             handle,

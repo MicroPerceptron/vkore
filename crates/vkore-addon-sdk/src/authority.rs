@@ -50,7 +50,7 @@ pub enum ArgConstraint {
 }
 
 impl ArgConstraint {
-    fn accepts(&self, value: Option<&Value>) -> bool {
+    pub fn accepts(&self, value: Option<&Value>) -> bool {
         match self {
             Self::Exact(expected) => value == Some(expected),
             Self::OneOf(expected) => value.is_some_and(|value| expected.contains(value)),

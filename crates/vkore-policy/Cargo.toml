@@ -1,0 +1,19 @@
+[package]
+name = "vkore-policy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Authenticated approval and standing-policy engine for vKore."
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vkore-addon-sdk = { path = "../vkore-addon-sdk" }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

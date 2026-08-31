@@ -29,6 +29,20 @@ See [the add-on SDK guide](docs/addons.md) for the public extension and security
 See [the policy guide](docs/policy.md) for approval lifetimes and matching semantics.
 See [the package guide](docs/packages.md) for installation, signing, offline use, and recovery.
 See [the harness API guide](docs/harness-api.md) for interactive sessions, events, and CLI usage.
+See [the project UI guide](docs/project-ui.md) for the setup wizard, authenticated chat, and real inference configuration.
+
+## Interactive harness UI
+
+Start the deterministic end-to-end harness from this repository:
+
+```powershell
+cargo run -p vkored --bin vkore-harnessd -- --token choose-a-local-token
+```
+
+Open `http://127.0.0.1:8787/` and enter the same token. The deterministic mode
+exercises broker planning, prompt-scoped capability installation, guest-domain
+tool calls, validated output, cancellation, teardown, and KV retirement without
+requiring a model download.
 
 ## Build and test
 
@@ -75,7 +89,8 @@ cargo run -p vkored -- `
   --workspace-write
 ```
 
-The current web page is a loopback-only observer. Interactive prompt submission and the project UI are tracked in issues #5 and #6.
+The `vkored` page is a low-level loopback observer. `vkore-harnessd` serves the
+authenticated project wizard and interactive harness UI.
 
 Managed VM launch is optional. Supply the QEMU base topology required by the
 Kore image as repeated arguments; vKore adds the two HostLink devices and the

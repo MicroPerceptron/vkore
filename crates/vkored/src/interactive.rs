@@ -1,6 +1,9 @@
 //! Authenticated, reconnectable interactive harness API.
 
-use crate::{BackendEvent, BackendRole, InferenceBackend, SequenceIdentity};
+use crate::{
+    BackendEvent, BackendRole, InferenceBackend, ProjectConfig, ProjectStore, SequenceIdentity,
+    UiApprovalService,
+};
 use kore_hostlink::{
     AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
     BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId, TaskBudget,
@@ -1416,13 +1419,25 @@ pub struct HarnessHttpServer {
     server: tiny_http::Server,
     handle: HarnessHandle,
     address: SocketAddr,
+    projects: Arc<ProjectStore>,
+    approvals: Arc<UiApprovalService>,
 }
 
 impl HarnessHttpServer {
     pub fn bind(address: SocketAddr, handle: HarnessHandle) -> Result<Self, HarnessError> {
+        let root = std::env::temp_dir().join(format!("vkore-projects-{}", std::process::id()));
+        Self::bind_with_state(address, handle, root)
+    }
+
+    pub fn bind_with_state(
+        address: SocketAddr,
+        handle: HarnessHandle,
+        project_root: impl Into<PathBuf>,
+    ) -> Result<Self, HarnessError> {
         if !address.ip().is_loopback() {
             return Err(HarnessError::NonLoopback);
         }
+        let project_root = project_root.into();
         let server = tiny_http::Server::http(address)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
         let tiny_http::ListenAddr::IP(address) = server.server_addr();
@@ -1430,6 +1445,13 @@ impl HarnessHttpServer {
             server,
             handle,
             address,
+            projects: Arc::new(
+                ProjectStore::open(&project_root)
+                    .map_err(|error| HarnessError::Io(error.to_string()))?,
+            ),
+            approvals: Arc::new(
+                UiApprovalService::open(&project_root.join("policy")).map_err(HarnessError::Io)?,
+            ),
         })
     }
 
@@ -1452,6 +1474,9 @@ impl HarnessHttpServer {
             .map(|header| header.value.as_str())
             .unwrap_or("")
             .to_owned();
+        let host = header_value(&request, "Host").unwrap_or_default();
+        let origin = header_value(&request, "Origin");
+        let ui_client = header_value(&request, "X-vKore-Client");
         let method = request.method().as_str().to_owned();
         let url = request.url().to_owned();
         let mut body = Vec::new();
@@ -1460,7 +1485,24 @@ impl HarnessHttpServer {
             .take(65_537)
             .read_to_end(&mut body)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
-        let result = route_http(&self.handle, &authorization, &method, &url, &body);
+        let result = validate_browser_request(
+            self.address,
+            &method,
+            &host,
+            origin.as_deref(),
+            ui_client.as_deref(),
+        )
+        .and_then(|_| {
+            route_http(
+                &self.handle,
+                &self.projects,
+                &self.approvals,
+                &authorization,
+                &method,
+                &url,
+                &body,
+            )
+        });
         let (status, content_type, response) = match result {
             Ok((content_type, body)) => (200, content_type, body),
             Err(error) => {
@@ -1494,11 +1536,19 @@ impl HarnessHttpServer {
 
 fn route_http(
     handle: &HarnessHandle,
+    projects: &ProjectStore,
+    approvals: &UiApprovalService,
     authorization: &str,
     method: &str,
     url: &str,
     body: &[u8],
 ) -> Result<(&'static str, Vec<u8>), HarnessError> {
+    if method == "GET" && url == "/" {
+        return Ok((
+            "text/html; charset=utf-8",
+            include_bytes!("harness-ui.html").to_vec(),
+        ));
+    }
     if method == "GET" && url == "/api/v1/health" {
         return Ok((
             "application/json",
@@ -1508,6 +1558,129 @@ fn route_http(
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let value = match (method, segments.as_slice()) {
+        ("GET", ["api", "v1", "catalog"]) => {
+            handle.authorize(authorization)?;
+            json!({
+                "api_version": HARNESS_API_VERSION,
+                "backends": [
+                    {"id":"deterministic","name":"Deterministic security oracle","real_inference":false,"status":"installed"},
+                    {"id":"llama_cpp","name":"llama.cpp","real_inference":true,"status":"caller_supplied"}
+                ],
+                "addons": [
+                    {"id":"reference.host","name":"Reference host add-on","version":"0.1.0","publisher":"MicroPerceptron","domain":"host","tools":[{"name":"echo","description":"Return a bounded message from an isolated host add-on process.","risk":"read_only"}],"network_destinations":[]},
+                    {"id":"reference.guest","name":"Reference guest add-on","version":"0.1.0","publisher":"MicroPerceptron","domain":"guest","tools":[{"name":"list_workspace","description":"List names in the agent's capability-scoped Kore workspace.","risk":"read_only"}],"network_destinations":[]}
+                ],
+                "package_actions":{"install":"Use vkore-packages verified local import or download APIs","automatic_download":false}
+            })
+        }
+        ("GET", ["api", "v1", "projects"]) => {
+            handle.authorize(authorization)?;
+            serde_json::to_value(projects.list()).unwrap()
+        }
+        ("GET", ["api", "v1", "approvals"]) => {
+            handle.authorize(authorization)?;
+            approvals.state().map_err(HarnessError::Io)?
+        }
+        ("POST", ["api", "v1", "projects", project, "approvals"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            approvals
+                .request(
+                    project,
+                    value["session_id"].as_str().unwrap_or("project-setup"),
+                    value["addon_id"]
+                        .as_str()
+                        .ok_or(HarnessError::InvalidIdentity)?,
+                    value["tool"]
+                        .as_str()
+                        .ok_or(HarnessError::InvalidIdentity)?,
+                )
+                .map_err(HarnessError::Io)?
+        }
+        ("POST", ["api", "v1", "approvals", request_id, "decision"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            approvals
+                .decide(
+                    request_id,
+                    value["allow"].as_bool().unwrap_or(false),
+                    value["lifetime"].as_str().unwrap_or("once"),
+                    value["ui_session"].as_str().unwrap_or("harness-ui"),
+                )
+                .map_err(HarnessError::Io)?
+        }
+        ("POST", ["api", "v1", "grants", grant_id, "revoke"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            approvals
+                .revoke(
+                    grant_id,
+                    value["ui_session"].as_str().unwrap_or("harness-ui"),
+                )
+                .map_err(HarnessError::Io)?
+        }
+        ("POST", ["api", "v1", "projects", "preflight"]) => {
+            handle.authorize(authorization)?;
+            let mut config: ProjectConfig = serde_json::from_slice(body).map_err(http_json)?;
+            if config.workspace.state.as_os_str().is_empty() {
+                config.workspace.state = projects.derived_state(&config.id, &config.workspace.root);
+            }
+            serde_json::to_value(crate::project::preflight(&config).map_err(project_error)?)
+                .unwrap()
+        }
+        ("POST", ["api", "v1", "projects"]) => {
+            handle.authorize(authorization)?;
+            let mut config: ProjectConfig = serde_json::from_slice(body).map_err(http_json)?;
+            if config.workspace.state.as_os_str().is_empty() {
+                config.workspace.state = projects.derived_state(&config.id, &config.workspace.root);
+            }
+            serde_json::to_value(projects.save(config).map_err(project_error)?).unwrap()
+        }
+        ("GET", ["api", "v1", "projects", project]) => {
+            handle.authorize(authorization)?;
+            serde_json::to_value(projects.get(project).map_err(project_error)?).unwrap()
+        }
+        ("POST", ["api", "v1", "projects", project, "archive"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            serde_json::to_value(
+                projects
+                    .archive(project, value["archived"].as_bool().unwrap_or(true))
+                    .map_err(project_error)?,
+            )
+            .unwrap()
+        }
+        ("POST", ["api", "v1", "projects", project, "duplicate"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let id = value["id"].as_str().ok_or(HarnessError::InvalidIdentity)?;
+            let name = value["name"]
+                .as_str()
+                .ok_or(HarnessError::InvalidIdentity)?;
+            serde_json::to_value(
+                projects
+                    .duplicate(project, id, name)
+                    .map_err(project_error)?,
+            )
+            .unwrap()
+        }
+        ("POST", ["api", "v1", "picker"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let kind = value["kind"].as_str().unwrap_or("directory");
+            let path = native_picker(kind == "directory")?;
+            json!({"path":path})
+        }
+        ("POST", ["api", "v1", "artifacts", "inspect"]) => {
+            handle.authorize(authorization)?;
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let path = PathBuf::from(
+                value["path"]
+                    .as_str()
+                    .ok_or(HarnessError::InvalidIdentity)?,
+            );
+            inspect_artifact(&path)?
+        }
         ("POST", ["api", "v1", "sessions"]) => {
             let request: CreateSession = serde_json::from_slice(body)
                 .map_err(|error| HarnessError::Http(error.to_string()))?;
@@ -1561,6 +1734,148 @@ fn route_http(
         "application/json",
         serde_json::to_vec(&value).unwrap_or_default(),
     ))
+}
+
+fn header_value(request: &tiny_http::Request, name: &'static str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(name))
+        .map(|header| header.value.as_str().to_owned())
+}
+
+fn validate_browser_request(
+    address: SocketAddr,
+    method: &str,
+    host: &str,
+    origin: Option<&str>,
+    ui_client: Option<&str>,
+) -> Result<(), HarnessError> {
+    let local_host = host.starts_with("127.0.0.1:")
+        || host.starts_with("localhost:")
+        || host.starts_with("[::1]:");
+    if !local_host {
+        return Err(HarnessError::Unauthorized);
+    }
+    if let Some(origin) = origin {
+        let allowed = [
+            format!("http://{}", address),
+            format!("http://localhost:{}", address.port()),
+            format!("http://127.0.0.1:{}", address.port()),
+        ];
+        if !allowed.iter().any(|value| value == origin) {
+            return Err(HarnessError::Unauthorized);
+        }
+        if method != "GET" && ui_client != Some("harness-ui-v1") {
+            return Err(HarnessError::Unauthorized);
+        }
+    }
+    Ok(())
+}
+
+fn http_json(error: serde_json::Error) -> HarnessError {
+    HarnessError::Http(error.to_string())
+}
+fn project_error(error: crate::project::ProjectError) -> HarnessError {
+    HarnessError::Http(error.to_string())
+}
+
+fn inspect_artifact(path: &Path) -> Result<Value, HarnessError> {
+    let mut file =
+        std::fs::File::open(path).map_err(|error| HarnessError::Io(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(HarnessError::InvalidIdentity);
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact");
+    let quantization = [
+        "Q2_K", "Q3_K", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16",
+    ]
+    .into_iter()
+    .find(|quant| name.to_ascii_uppercase().contains(quant))
+    .unwrap_or("unknown");
+    Ok(json!({
+        "path": path,
+        "name": name,
+        "bytes": metadata.len(),
+        "blake3": hasher.finalize().to_hex().to_string(),
+        "family": name.split(['-', '.']).next().unwrap_or("unknown"),
+        "quantization": quantization,
+        "estimated_memory_bytes": metadata.len().saturating_mul(6).saturating_div(5),
+        "license": "read from verified package manifest when installed",
+        "context_tokens": "configured by project; verify against GGUF metadata"
+    }))
+}
+
+#[cfg(target_os = "windows")]
+fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
+    let script = if directory {
+        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.SelectedPath)}"
+    } else {
+        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}"
+    };
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !output.status.success() {
+        return Err(HarnessError::Io(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
+}
+
+#[cfg(target_os = "linux")]
+fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
+    let mut command = std::process::Command::new("zenity");
+    command.arg("--file-selection");
+    if directory {
+        command.arg("--directory");
+    }
+    let output = command
+        .output()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
+}
+
+#[cfg(target_os = "macos")]
+fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
+    let script = if directory {
+        "POSIX path of (choose folder)"
+    } else {
+        "POSIX path of (choose file)"
+    };
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
 }
 
 fn encode_sse(events: &[HarnessEvent]) -> Vec<u8> {

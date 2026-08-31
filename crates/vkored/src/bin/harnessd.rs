@@ -20,6 +20,7 @@ fn run() -> Result<(), String> {
     let mut llama_server = None;
     let mut llama_model = None;
     let mut llama_port = 8_189u16;
+    let mut llama_args = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -29,7 +30,8 @@ fn run() -> Result<(), String> {
             "--llama-server" => llama_server = Some(PathBuf::from(args.next().ok_or("missing --llama-server")?)),
             "--llama-model" => llama_model = Some(PathBuf::from(args.next().ok_or("missing --llama-model")?)),
             "--llama-port" => llama_port = args.next().and_then(|value| value.parse().ok()).ok_or("invalid --llama-port")?,
-            _ => return Err("usage: vkore-harnessd [--listen 127.0.0.1:8787] --token TOKEN [--state PATH] [--llama-server PATH --llama-model PATH [--llama-port N]]".into()),
+            "--llama-arg" => llama_args.push(args.next().ok_or("missing --llama-arg")?.into()),
+            _ => return Err("usage: vkore-harnessd [--listen 127.0.0.1:8787] --token TOKEN [--state PATH] [--llama-server PATH --llama-model PATH [--llama-port N] [--llama-arg ARG]...]".into()),
         }
     }
     let token = token.ok_or("--token is required")?;
@@ -51,7 +53,7 @@ fn run() -> Result<(), String> {
             };
             let backend = LlamaServerBackend::start(LlamaServerConfig {
                 executable,
-                executable_args: Vec::new(),
+                executable_args: llama_args,
                 model,
                 port: llama_port,
                 total_context_tokens: 32_768,
@@ -85,7 +87,8 @@ fn run_server(
 ) -> Result<(), String> {
     let service = HarnessService::start(runtime, &token, state.join("transcripts"));
     let server =
-        HarnessHttpServer::bind(listen, service.handle()).map_err(|error| error.to_string())?;
+        HarnessHttpServer::bind_with_state(listen, service.handle(), state.join("projects"))
+            .map_err(|error| error.to_string())?;
     eprintln!("vKore interactive harness: http://{}", server.local_addr());
     eprintln!("backend: {backend_name}");
     loop {

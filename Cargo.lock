@@ -1501,6 +1501,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiny_http",
+ "vkore-addon-sdk",
+ "vkore-policy",
  "vkore-vm",
  "vkore-workspace",
  "zerocopy",

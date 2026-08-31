@@ -767,7 +767,15 @@ fn real_llama_server_runs_generic_broker_and_agents_on_one_continuously_batched_
     real_limits.request_timeout_ticks = 120_000;
     let mut backend = LlamaServerBackend::start(LlamaServerConfig {
         executable,
-        executable_args: Vec::new(),
+        executable_args: std::env::var("KORE_LLAMA_ARGS")
+            .ok()
+            .map(|value| {
+                value
+                    .split_whitespace()
+                    .map(std::ffi::OsString::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         model,
         port: free_port(),
         total_context_tokens: 12_288,

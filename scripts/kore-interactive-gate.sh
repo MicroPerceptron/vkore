@@ -123,11 +123,9 @@ cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkored \
     --bin vkore-harnessd --bin vkore
 harness="$vkore_root/target/debug/vkore-harnessd"
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-token="vkore-interactive-gate-$$"
 command=(
     "$harness"
     --listen "127.0.0.1:$port"
-    --token "$token"
     --state "$state"
     --qemu "$qemu"
 )
@@ -200,16 +198,16 @@ print(json.dumps({
 }))')
 
 api="http://127.0.0.1:$port/api/v1"
-auth=(-H "Authorization: Bearer $token" -H 'Content-Type: application/json')
-curl -fsS "${auth[@]}" -X POST "$api/projects" --data-binary "$project_json" >/dev/null
-curl -fsS "${auth[@]}" -X POST "$api/sessions" --data-binary \
+json=(-H 'Content-Type: application/json')
+curl -fsS "${json[@]}" -X POST "$api/projects" --data-binary "$project_json" >/dev/null
+curl -fsS "${json[@]}" -X POST "$api/sessions" --data-binary \
     '{"api_version":1,"project_id":"kore-live-gate","session_id":"gate"}' >/dev/null
-curl -fsS "${auth[@]}" -X POST "$api/sessions/gate/prompts" --data-binary \
+curl -fsS "${json[@]}" -X POST "$api/sessions/gate/prompts" --data-binary \
     '{"api_version":1,"prompt_id":"read-x","idempotency_key":"gate-read-x","text":"read X"}' >/dev/null
 
 deadline=$((SECONDS + gate_timeout))
 while test "$SECONDS" -lt "$deadline"; do
-    curl -fsS "${auth[@]}" "$api/sessions/gate/events?after=0" >"$events_file"
+    curl -fsS "$api/sessions/gate/events?after=0" >"$events_file"
     if grep -q '"kind":"prompt_terminal"' "$events_file"; then
         break
     fi

@@ -9,9 +9,11 @@ local applications can drive the same lifecycle.
 ```powershell
 cargo run -p vkored --bin vkore-harnessd -- `
   --listen 127.0.0.1:8787 `
-  --token YOUR_RANDOM_LOCAL_TOKEN `
   --state C:\path\to\.vkore
 ```
+
+Open `http://127.0.0.1:8787/` directly. The loopback harness has no login,
+bearer token, or browser credential session.
 
 The default backend is the deterministic broker/worker and guest-protocol test
 oracle. To use one caller-supplied llama.cpp server executable and GGUF model
@@ -20,7 +22,6 @@ through the same API:
 ```powershell
 cargo run -p vkored --bin vkore-harnessd -- `
   --listen 127.0.0.1:8787 `
-  --token YOUR_RANDOM_LOCAL_TOKEN `
   --state C:\path\to\.vkore `
   --llama-server C:\path\to\llama-server.exe `
   --llama-model C:\path\to\model.gguf
@@ -29,16 +30,16 @@ cargo run -p vkored --bin vkore-harnessd -- `
 The harness supervises llama.cpp, assigns separate broker and worker slots,
 uses continuous batching, and erases each slot when its route closes.
 
-## Authentication and provenance
+## Local boundary and provenance
 
-All endpoints except health require `Authorization: Bearer TOKEN`. The daemon
-stores only the token hash. An accepted prompt is bound to API version, project,
+The server refuses non-loopback binds. Browser mutations also require an exact
+local Origin and `X-vKore-Client: harness-ui-v1`; cross-origin requests fail
+without permissive CORS headers. An accepted prompt is bound to API version, project,
 session, generation, prompt ID, idempotency key, and exact text before it is
-encoded as a bounded `TaskIntentRequest`. Event projections contain a
-non-secret intent ID, never the authentication value.
+encoded as a bounded `TaskIntentRequest`.
 
 Model output, tool results, transcript data, workspace bytes, event payloads,
-and copied intent-looking strings cannot call the authenticated submission
+and copied intent-looking strings cannot invoke the host submission path
 method. Clients send no guest route, slot, capability, endpoint, mapping, or
 host descriptor.
 
@@ -48,10 +49,10 @@ All JSON records use `api_version: 1`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/v1/health` | Unauthenticated loopback liveness |
+| `GET` | `/api/v1/health` | Loopback liveness |
 | `POST` | `/api/v1/sessions` | Create or idempotently reopen a project session |
 | `GET` | `/api/v1/sessions/{session}` | Retrieve bounded reconnect state |
-| `POST` | `/api/v1/sessions/{session}/prompts` | Submit authenticated user intent |
+| `POST` | `/api/v1/sessions/{session}/prompts` | Submit user intent |
 | `GET` | `/api/v1/sessions/{session}/events?after=N` | SSE replay after a sequence cursor |
 | `POST` | `/api/v1/sessions/{session}/prompts/{prompt}/cancel` | Cancel queued or running work |
 | `DELETE` | `/api/v1/sessions/{session}` | Cancel, retire agent/routes, and erase KV state |
@@ -86,7 +87,7 @@ cannot select an ambient executable or filesystem path.
 `DeterministicGuest` is the portable test oracle. It models a resident-broker
 commit and an exact executable/filesystem scope with three inert objects, and is
 used to make security tests reproducible without a model. In real-VM mode,
-`KoreVmRuntime` queues the authenticated intent directly on the HostLink host
+`KoreVmRuntime` queues the intent directly on the HostLink host
 endpoint. Kore's resident broker and founded agent claim it in order, and only
 that generation-bound agent route can publish the terminal result.
 `scripts/kore-interactive-gate.sh` exercises this path from HTTP prompt
@@ -97,7 +98,6 @@ submission through guest `cat` execution and back to the assistant event.
 ```powershell
 cargo run -p vkored --bin vkore -- chat `
   --server 127.0.0.1:8787 `
-  --token YOUR_RANDOM_LOCAL_TOKEN `
   --project my-project
 ```
 

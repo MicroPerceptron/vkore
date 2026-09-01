@@ -369,6 +369,10 @@ pub struct InferenceObservation {
 pub enum ObservationKind {
     Input,
     ModelPrompt,
+    /// One exact, ordered content delta received from llama.cpp's host-side
+    /// SSE stream. This is inspector-only and never crosses HostLink before
+    /// the enclosing structured response has been validated.
+    ModelOutputChunk,
     RawModelCompletion,
     ReturnedModelFields,
     Validation,

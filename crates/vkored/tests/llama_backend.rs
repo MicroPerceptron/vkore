@@ -450,6 +450,47 @@ fn supervised_stub_turns_agent_json_into_typed_tool_call_and_completion() {
                 let event = decode_agent_event(&payload).unwrap();
                 assert_eq!(event.kind, AgentEventKind::Respond);
                 assert_eq!(event.text, "The file contains: architecture contents");
+                let observations: Vec<_> =
+                    std::iter::from_fn(|| backend.take_observation()).collect();
+                let streamed_turn = |turn| {
+                    observations
+                        .iter()
+                        .filter(|observation| {
+                            observation.kind == ObservationKind::ModelOutputChunk
+                                && observation.role == BackendRole::Agent
+                                && observation.turn == turn
+                        })
+                        .map(|observation| observation.payload.as_str())
+                        .collect::<String>()
+                };
+                assert_eq!(
+                    streamed_turn(1),
+                    r#"{"action":"tool_call","command":"cat","arguments":[{"kind":"path","value":"/workspace/docs/architecture.md"}]}"#
+                );
+                assert_eq!(
+                    streamed_turn(2),
+                    r#"{"action":"respond","text":"The file contains: architecture contents"}"#
+                );
+                for turn in [1, 2] {
+                    let chunk = observations
+                        .iter()
+                        .position(|observation| {
+                            observation.kind == ObservationKind::ModelOutputChunk
+                                && observation.turn == turn
+                        })
+                        .unwrap();
+                    let validated = observations
+                        .iter()
+                        .position(|observation| {
+                            observation.kind == ObservationKind::Validation
+                                && observation.turn == turn
+                        })
+                        .unwrap();
+                    assert!(
+                        chunk < validated,
+                        "turn {turn} was validated before it streamed"
+                    );
+                }
                 break;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("raw agent JSON escaped KAE1"),
@@ -483,6 +524,15 @@ fn supervised_stub_allows_a_bounded_response_without_a_tool_call() {
                 assert_eq!(event.text, "Hello! How can I help?");
                 let observations: Vec<_> =
                     std::iter::from_fn(|| backend.take_observation()).collect();
+                let streamed = observations
+                    .iter()
+                    .filter(|observation| observation.kind == ObservationKind::ModelOutputChunk)
+                    .map(|observation| observation.payload.as_str())
+                    .collect::<String>();
+                assert_eq!(
+                    streamed,
+                    r#"{"action":"respond","text":"Hello! How can I help?"}"#
+                );
                 assert!(observations.iter().any(|observation| {
                     observation.kind == ObservationKind::RawModelCompletion
                         && observation.payload

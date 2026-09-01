@@ -2,9 +2,9 @@
 
 use crate::{
     BackendLimits, DeterministicBackend, EventKind, HostLinkDaemon, InferenceBackend,
-    LlamaServerBackend, LlamaServerConfig, ObservationKind, ProjectConfig, ProjectStore,
-    PromptRequest, PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess,
-    WorkspaceBackend,
+    LlamaServerBackend, LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest,
+    PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
+    interactive::emit_inference_observation,
 };
 use kore_hostlink::{FrontendIntentId, FrontendResultKind};
 use serde_json::{Value, json};
@@ -182,25 +182,7 @@ impl ProjectRuntime {
             self.hostlink_trace_cursor = transcript.len();
         }
         while let Some(observation) = self.daemon.take_inference_observation() {
-            let kind = match observation.kind {
-                ObservationKind::BrokerProposal => EventKind::BrokerProposal,
-                ObservationKind::Validation => EventKind::Validation,
-                ObservationKind::ToolCall => EventKind::ToolCall,
-                ObservationKind::ToolResult => EventKind::ToolResult,
-                _ => EventKind::Inference,
-            };
-            emit(
-                kind,
-                false,
-                json!({
-                    "role": format!("{:?}", observation.role),
-                    "kind": format!("{:?}", observation.kind),
-                    "turn": observation.turn,
-                    "payload": observation.payload,
-                    "accepted": observation.accepted,
-                    "detail": observation.detail,
-                }),
-            );
+            emit_inference_observation(observation, emit);
         }
         while let Some(observation) = self.daemon.take_authority_observation() {
             emit(

@@ -654,6 +654,28 @@ impl LlamaServerBackend {
                     let payload_len = payload.len() as u64;
                     let first = (part == 0).then(|| tick.saturating_sub(submitted_tick));
                     if active.broker_protocol.is_some() || active.agent_protocol.is_some() {
+                        let streamed = match String::from_utf8(payload) {
+                            Ok(streamed) => streamed,
+                            Err(_) => {
+                                self.fail_all(BackendFailure::MalformedResponse);
+                                self.restart_server();
+                                return self.terminal.pop_front();
+                            }
+                        };
+                        push_observation(
+                            &mut self.observations,
+                            InferenceObservation {
+                                role: identity.role,
+                                route: identity.route,
+                                generation: identity.generation,
+                                request,
+                                turn,
+                                kind: ObservationKind::ModelOutputChunk,
+                                payload: streamed,
+                                accepted: None,
+                                detail: format!("unvalidated llama.cpp SSE content chunk {part}"),
+                            },
+                        );
                         continue;
                     }
                     let event = BackendEvent::Chunk {

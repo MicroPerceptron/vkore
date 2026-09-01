@@ -3,12 +3,15 @@ use axrd::axui_direct::render_xrgb;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Element, Length, Size, Theme, mouse,
+    Background, Border, Color, Element, Length, Shadow, Size, Theme, Vector, alignment, keyboard,
+    mouse,
     renderer::{self, Scale},
     shell,
 };
 use iced_runtime::user_interface::{self, UserInterface};
-use iced_widget::{button, column, container, row, scrollable, text, text_editor, text_input};
+use iced_widget::{
+    button, column, container, row, scrollable, space, stack, text, text_editor, text_input,
+};
 use iced_winit::{conversion, winit};
 use serde_json::{Value, json};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -38,13 +41,18 @@ enum Message {
     NewProject,
     EditProject,
     ConfigAction(iced_core::text::editor::Action),
+    WizardField(&'static str, String),
+    WizardToggle(&'static str),
+    WizardChoice(&'static str, &'static str),
+    WizardAddon(String),
+    WizardPage(u8),
     Preflight,
     SaveProject,
     Browse(RequestKind),
     CloseEditor,
     ToggleSession,
     CleanSession,
-    PromptChanged(String),
+    PromptAction(iced_core::text::editor::Action),
     SendPrompt,
     CancelPrompt,
     ArchiveProject,
@@ -52,7 +60,6 @@ enum Message {
     ExportProject,
     Rail(Rail),
     DecideApproval(bool),
-    Reload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +90,182 @@ enum RequestKind {
     PickKore,
     PickLlama,
     PickModel,
+}
+
+fn rgb(hex: u32) -> Color {
+    Color::from_rgb8(
+        ((hex >> 16) & 0xff) as u8,
+        ((hex >> 8) & 0xff) as u8,
+        (hex & 0xff) as u8,
+    )
+}
+
+fn panel_style(background: u32, border: Option<u32>, radius: f32) -> iced_widget::container::Style {
+    iced_widget::container::Style {
+        text_color: Some(rgb(0xf4f5f7)),
+        background: Some(Background::Color(rgb(background))),
+        border: Border {
+            color: border.map(rgb).unwrap_or(Color::TRANSPARENT),
+            width: border.map(|_| 1.0).unwrap_or(0.0),
+            radius: radius.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn divider_right(background: u32) -> iced_widget::container::Style {
+    let mut style = panel_style(background, None, 0.0);
+    style.border = Border {
+        color: rgb(0x272d37),
+        width: 1.0,
+        radius: 0.0.into(),
+    };
+    style
+}
+
+fn button_style(
+    kind: ButtonKind,
+) -> impl Fn(&Theme, iced_widget::button::Status) -> iced_widget::button::Style + Copy {
+    move |_theme, status| {
+        use iced_widget::button::Status;
+        let hovered = matches!(status, Status::Hovered | Status::Pressed);
+        let disabled = matches!(status, Status::Disabled);
+        let (background, text_color, border_color, border_width) = match kind {
+            ButtonKind::Primary => (
+                Some(if hovered { 0xc8ff80 } else { 0xb8ef6a }),
+                0x12170a,
+                0xb8ef6a,
+                1.0,
+            ),
+            ButtonKind::Danger => (
+                Some(if hovered { 0x1d2026 } else { 0x171b21 }),
+                0xff7d83,
+                0x353c46,
+                1.0,
+            ),
+            ButtonKind::Outline => (
+                Some(if hovered { 0x1d2229 } else { 0x171b21 }),
+                0xe8ebef,
+                if hovered { 0x596573 } else { 0x353c46 },
+                1.0,
+            ),
+            ButtonKind::Nav => (
+                hovered.then_some(0x171b21),
+                if hovered { 0xf4f5f7 } else { 0x8d96a5 },
+                0x000000,
+                0.0,
+            ),
+            ButtonKind::Project(active) => (
+                (active || hovered).then_some(0x171b21),
+                if active || hovered {
+                    0xf4f5f7
+                } else {
+                    0xbbc1ca
+                },
+                if active || hovered {
+                    0x2a3039
+                } else {
+                    0x000000
+                },
+                if active || hovered { 1.0 } else { 0.0 },
+            ),
+            ButtonKind::Addon(active) => (
+                Some(if active || hovered {
+                    0x171b21
+                } else {
+                    0x11151a
+                }),
+                0xf4f5f7,
+                if active { 0x4b6233 } else { 0x272d37 },
+                1.0,
+            ),
+            ButtonKind::New => (
+                hovered.then_some(0x11151a),
+                if hovered { 0xb8ef6a } else { 0xc8ced7 },
+                if hovered { 0xb8ef6a } else { 0x3a424e },
+                1.0,
+            ),
+            ButtonKind::Tab(active) => (
+                active.then_some(0x1a1f26),
+                if active { 0xf4f5f7 } else { 0x8d96a5 },
+                0x000000,
+                0.0,
+            ),
+        };
+        let mut color = rgb(text_color);
+        if disabled {
+            color.a = 0.4;
+        }
+        iced_widget::button::Style {
+            background: background.map(|value| {
+                let mut color = rgb(value);
+                if disabled {
+                    color.a = 0.4;
+                }
+                Background::Color(color)
+            }),
+            text_color: color,
+            border: Border {
+                color: rgb(border_color),
+                width: border_width,
+                radius: 8.0.into(),
+            },
+            shadow: Shadow {
+                color: Color::TRANSPARENT,
+                offset: Vector::ZERO,
+                blur_radius: 0.0,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ButtonKind {
+    Primary,
+    Danger,
+    Outline,
+    Nav,
+    Project(bool),
+    Addon(bool),
+    New,
+    Tab(bool),
+}
+
+fn editor_style(
+    _theme: &Theme,
+    status: iced_widget::text_editor::Status,
+) -> iced_widget::text_editor::Style {
+    let focused = matches!(status, iced_widget::text_editor::Status::Focused { .. });
+    iced_widget::text_editor::Style {
+        background: Background::Color(rgb(0x12161b)),
+        border: Border {
+            color: rgb(if focused { 0x596573 } else { 0x353d48 }),
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        placeholder: rgb(0x8d96a5),
+        value: rgb(0xf4f5f7),
+        selection: rgb(0x334024),
+    }
+}
+
+fn input_style(
+    _theme: &Theme,
+    status: iced_widget::text_input::Status,
+) -> iced_widget::text_input::Style {
+    let focused = matches!(status, iced_widget::text_input::Status::Focused { .. });
+    iced_widget::text_input::Style {
+        background: Background::Color(rgb(0x0c1014)),
+        border: Border {
+            color: rgb(if focused { 0x596573 } else { 0x343b45 }),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        placeholder: rgb(0x59616e),
+        value: rgb(0xeef0f3),
+        selection: rgb(0x334024),
+    }
 }
 
 struct Request {
@@ -196,10 +379,11 @@ struct Model {
     selected: Option<usize>,
     session: Option<String>,
     prompt_id: Option<String>,
-    prompt: String,
+    prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     rail: Rail,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
+    wizard_page: u8,
     preflight: Option<String>,
     approval: Option<Value>,
     status: String,
@@ -218,10 +402,11 @@ impl Model {
             selected: None,
             session: None,
             prompt_id: None,
-            prompt: String::new(),
+            prompt: text_editor::Content::new(),
             events: Vec::new(),
             rail: Rail::Agents,
             editor: None,
+            wizard_page: 0,
             preflight: None,
             approval: None,
             status: "Connecting to the vKore daemon…".into(),
@@ -282,6 +467,7 @@ impl Model {
                     }))
                     .unwrap()),
                 );
+                self.wizard_page = 0;
                 self.preflight = None;
             }
             Message::EditProject => {
@@ -289,12 +475,23 @@ impl Model {
                     self.editor = Some(text_editor::Content::with_text(
                         &serde_json::to_string_pretty(project).unwrap_or_default(),
                     ));
+                    self.wizard_page = 0;
                     self.preflight = None;
                 }
             }
             Message::ConfigAction(action) => {
                 if let Some(editor) = self.editor.as_mut() {
                     editor.perform(action);
+                    self.preflight = None;
+                }
+            }
+            Message::WizardField(pointer, value) => self.update_config(pointer, &value),
+            Message::WizardToggle(pointer) => self.toggle_config(pointer),
+            Message::WizardChoice(pointer, value) => self.update_config(pointer, value),
+            Message::WizardAddon(id) => self.toggle_addon(&id),
+            Message::WizardPage(page) => {
+                self.wizard_page = page.min(4);
+                if self.wizard_page == 4 {
                     self.preflight = None;
                 }
             }
@@ -355,7 +552,7 @@ impl Model {
                     self.update(Message::ToggleSession);
                 }
             }
-            Message::PromptChanged(value) => self.prompt = value,
+            Message::PromptAction(action) => self.prompt.perform(action),
             Message::SendPrompt => self.send_prompt(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
@@ -421,7 +618,6 @@ impl Model {
                     });
                 }
             }
-            Message::Reload => self.reload(),
         }
     }
 
@@ -447,6 +643,88 @@ impl Model {
         }
     }
 
+    fn update_config(&mut self, pointer: &str, value: &str) {
+        let Some(source) = self.editor.as_ref() else {
+            return;
+        };
+        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
+            return;
+        };
+        let Some(slot) = config.pointer_mut(pointer) else {
+            return;
+        };
+        *slot = match slot {
+            Value::Number(_) => value
+                .parse::<u64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| Value::from(0)),
+            Value::Array(_) if pointer == "/inference/extra_args" => Value::Array(
+                value
+                    .split_whitespace()
+                    .map(|part| Value::String(part.to_owned()))
+                    .collect(),
+            ),
+            Value::Null if value.is_empty() => Value::Null,
+            _ => Value::String(value.to_owned()),
+        };
+        self.editor = Some(text_editor::Content::with_text(
+            &serde_json::to_string_pretty(&config).unwrap_or_default(),
+        ));
+        self.preflight = None;
+    }
+
+    fn toggle_config(&mut self, pointer: &str) {
+        let Some(source) = self.editor.as_ref() else {
+            return;
+        };
+        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
+            return;
+        };
+        let Some(slot) = config.pointer_mut(pointer) else {
+            return;
+        };
+        *slot = Value::Bool(!slot.as_bool().unwrap_or(false));
+        self.editor = Some(text_editor::Content::with_text(
+            &serde_json::to_string_pretty(&config).unwrap_or_default(),
+        ));
+        self.preflight = None;
+    }
+
+    fn toggle_addon(&mut self, id: &str) {
+        let Some(source) = self.editor.as_ref() else {
+            return;
+        };
+        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
+            return;
+        };
+        let Some(addons) = config["addons"].as_array_mut() else {
+            return;
+        };
+        if let Some(addon) = addons.iter_mut().find(|addon| addon["id"] == id) {
+            addon["enabled"] = Value::Bool(!addon["enabled"].as_bool().unwrap_or(false));
+        } else if let Some(catalog) = self.catalog["addons"]
+            .as_array()
+            .and_then(|entries| entries.iter().find(|addon| addon["id"] == id))
+        {
+            let tools = catalog["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect::<Vec<_>>();
+            addons.push(json!({
+                "id": id,
+                "enabled": true,
+                "mediation": catalog["domain"].as_str().unwrap_or("host"),
+                "tool_ceiling": tools,
+            }));
+        }
+        self.editor = Some(text_editor::Content::with_text(
+            &serde_json::to_string_pretty(&config).unwrap_or_default(),
+        ));
+        self.preflight = None;
+    }
+
     fn start_session(&mut self) {
         let Some(project) = self.project() else {
             return;
@@ -466,7 +744,8 @@ impl Model {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let text = self.prompt.trim();
+        let text = self.prompt.text();
+        let text = text.trim();
         if text.is_empty() || self.prompt_id.is_some() {
             return;
         }
@@ -484,7 +763,7 @@ impl Model {
                 "text":text
             })),
         });
-        self.prompt.clear();
+        self.prompt = text_editor::Content::new();
     }
 
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
@@ -656,73 +935,129 @@ impl Model {
         }
     }
 
-    fn view(&self) -> UiElement<'_> {
-        let sidebar = self.sidebar();
-        let main = self.main_panel();
-        let rail = self.rail_panel();
-        let base = row![sidebar, main, rail].height(Length::Fill);
+    fn view(&self, viewport: Size) -> UiElement<'_> {
+        let base: UiElement<'_> = if viewport.width <= 720.0 {
+            self.main_panel()
+        } else if viewport.width <= 1050.0 {
+            row![self.sidebar(210.0), self.main_panel()]
+                .height(Length::Fill)
+                .into()
+        } else {
+            row![self.sidebar(248.0), self.main_panel(), self.rail_panel()]
+                .height(Length::Fill)
+                .into()
+        };
         if self.editor.is_some() {
-            container(self.editor_panel())
+            stack![base, self.modal_layer(self.editor_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         } else if self.approval.is_some() {
-            container(self.approval_panel())
+            stack![base, self.modal_layer(self.approval_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         } else {
-            base.into()
+            base
         }
     }
 
-    fn sidebar(&self) -> UiElement<'_> {
-        let mut projects = column![text("vKore").size(24), text("PROJECTS").size(11)].spacing(10);
+    fn modal_layer<'a>(&self, content: UiElement<'a>) -> UiElement<'a> {
+        container(content)
+            .center(Length::Fill)
+            .style(|_| {
+                let mut overlay = panel_style(0x050608, None, 0.0);
+                if let Some(Background::Color(color)) = overlay.background.as_mut() {
+                    color.a = 0.86;
+                }
+                overlay
+            })
+            .into()
+    }
+
+    fn sidebar(&self, width: f32) -> UiElement<'_> {
+        let mark = container(space::Space::new().width(18).height(18))
+            .padding(4)
+            .style(|_| panel_style(0xb8ef6a, Some(0x657348), 8.0));
+        let brand = row![mark, text("vKore").size(16).color(rgb(0xf4f5f7))]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center);
+        let mut projects = column![].spacing(4);
         for (index, project) in self
             .projects
             .iter()
             .enumerate()
             .filter(|(_, p)| !p["archived"].as_bool().unwrap_or(false))
         {
-            let label = if self.selected == Some(index) {
-                format!("● {}", project["name"].as_str().unwrap_or("Project"))
-            } else {
-                format!("○ {}", project["name"].as_str().unwrap_or("Project"))
-            };
+            let active = self.selected == Some(index);
+            let backend = project["inference"]["backend"]
+                .as_str()
+                .unwrap_or("deterministic")
+                .replace('_', " ");
+            let dot = text("●")
+                .size(12)
+                .color(rgb(if active { 0xb8ef6a } else { 0x59616e }));
+            let label = column![
+                text(project["name"].as_str().unwrap_or("Project")).size(14),
+                text(backend).size(11).color(rgb(0x80bfff)),
+            ]
+            .spacing(2);
             projects = projects.push(
-                button(text(label))
-                    .width(Length::Fill)
-                    .on_press(Message::SelectProject(index)),
+                button(
+                    row![dot, label]
+                        .spacing(9)
+                        .align_y(alignment::Vertical::Center),
+                )
+                .width(Length::Fill)
+                .padding([9, 10])
+                .style(button_style(ButtonKind::Project(active)))
+                .on_press(Message::SelectProject(index)),
             );
         }
-        projects = projects.push(
-            button(text("＋ New project"))
-                .width(Length::Fill)
-                .on_press_maybe(self.session.is_none().then_some(Message::NewProject)),
-        );
         let project_idle = self.project().is_some() && self.session.is_none();
-        let controls = column![
-            button(text("Project settings"))
+        let nav = |label, message| {
+            button(text(label).size(13))
+                .padding([8, 8])
                 .width(Length::Fill)
-                .on_press_maybe(project_idle.then_some(Message::EditProject)),
-            button(text("Duplicate project"))
+                .style(button_style(ButtonKind::Nav))
+                .on_press_maybe(message)
+        };
+        let body = column![
+            container(brand).padding([6, 8]),
+            container(text("PROJECTS").size(10).color(rgb(0x8d96a5))).padding([10, 9]),
+            scrollable(projects).height(Length::Fill),
+            button(text("+  New project").size(14))
                 .width(Length::Fill)
-                .on_press_maybe(project_idle.then_some(Message::DuplicateProject)),
-            button(text("Export configuration"))
-                .width(Length::Fill)
-                .on_press_maybe(self.project().map(|_| Message::ExportProject)),
-            button(text("Archive project"))
-                .width(Length::Fill)
-                .on_press_maybe(project_idle.then_some(Message::ArchiveProject)),
-            button(text("Reload daemon state"))
-                .width(Length::Fill)
-                .on_press(Message::Reload),
+                .padding([9, 10])
+                .style(button_style(ButtonKind::New))
+                .on_press_maybe(self.session.is_none().then_some(Message::NewProject)),
+            space::vertical(),
+            container(space::Space::new().height(1).width(Length::Fill))
+                .style(|_| panel_style(0x272d37, None, 0.0)),
+            nav(
+                "Project settings",
+                project_idle.then_some(Message::EditProject)
+            ),
+            nav(
+                "Duplicate project",
+                project_idle.then_some(Message::DuplicateProject)
+            ),
+            nav(
+                "Export configuration",
+                self.project().map(|_| Message::ExportProject)
+            ),
+            nav(
+                "Archive project",
+                project_idle.then_some(Message::ArchiveProject)
+            ),
+            nav("Transcript & audit", Some(Message::Rail(Rail::Activity))),
         ]
-        .spacing(6);
-        container(column![scrollable(projects).height(Length::Fill), controls].spacing(12))
-            .padding(14)
-            .width(230)
+        .spacing(3);
+        container(body)
+            .padding([10, 12])
+            .width(width)
             .height(Length::Fill)
+            .style(|_| divider_right(0x0c0f13))
             .into()
     }
 
@@ -731,32 +1066,83 @@ impl Model {
             .project()
             .and_then(|p| p["name"].as_str())
             .unwrap_or("No project open");
-        let health = if self.connected {
-            "● daemon"
-        } else {
-            "○ daemon"
-        };
         let start = if self.session.is_some() {
             "Stop"
         } else {
             "Start"
         };
-        let top = row![
-            column![text(project_name).size(18), text(&self.status).size(12)].width(Length::Fill),
-            text(health),
-            button(text(start)).on_press_maybe(
-                (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
-            ),
-            button(text("Clean"))
-                .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
-        ]
-        .spacing(10);
+        let runtime = self
+            .project()
+            .and_then(|p| p["inference"]["backend"].as_str())
+            .unwrap_or("Create a project to begin")
+            .replace('_', " ");
+        let health = |label: &'static str| {
+            container(
+                row![
+                    text("●").size(10).color(rgb(if self.session.is_some() {
+                        0xb8ef6a
+                    } else {
+                        0x606875
+                    })),
+                    text(label).size(11).color(rgb(0x8d96a5)),
+                ]
+                .spacing(6)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding([5, 8])
+            .style(|_| panel_style(0x0b0e12, Some(0x272d37), 99.0))
+        };
+        let top = container(
+            row![
+                column![
+                    text(project_name).size(14).color(rgb(0xf4f5f7)),
+                    text(runtime).size(11).color(rgb(0x8d96a5)),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                row![
+                    health("Sandbox"),
+                    health("HostLink"),
+                    health("Workspace"),
+                    health("Inference")
+                ]
+                .spacing(6),
+                button(text(start).size(13))
+                    .padding([8, 11])
+                    .style(button_style(ButtonKind::Outline))
+                    .on_press_maybe(
+                        (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
+                    ),
+                button(text("Clean").size(13))
+                    .padding([8, 11])
+                    .style(button_style(ButtonKind::Danger))
+                    .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
+            ]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center),
+        )
+        .padding([0, 22])
+        .height(64)
+        .width(Length::Fill)
+        .style(|_| divider_right(0x0b0e12));
 
         let conversation: UiElement<'_> = if self.session.is_none() {
             container(
                 column![
-                    text("Bounded agents, visible authority.").size(26),
-                    text("Select a project and start its Kore sandbox.")
+                    text(if self.project().is_some() {
+                        "Sandbox stopped."
+                    } else {
+                        "Bounded agents, visible authority."
+                    })
+                    .size(25)
+                    .color(rgb(0xf4f5f7)),
+                    text(if self.project().is_some() {
+                        "Start a fresh isolated conversation when you are ready."
+                    } else {
+                        "Create or open a project, then start its Kore sandbox."
+                    })
+                    .size(13)
+                    .color(rgb(0x8d96a5))
                 ]
                 .spacing(8),
             )
@@ -765,161 +1151,847 @@ impl Model {
         } else if self.events.is_empty() {
             container(
                 column![
-                    text("Sandbox ready.").size(24),
-                    text("Prompt-scoped authority will appear here.")
+                    text("Sandbox ready.").size(25).color(rgb(0xf4f5f7)),
+                    text("Try “read X” to watch prompt-scoped authority.")
+                        .size(13)
+                        .color(rgb(0x8d96a5))
                 ]
                 .spacing(8),
             )
             .center(Length::Fill)
             .into()
         } else {
-            let mut items = column![].spacing(8);
-            for event in &self.events {
-                let kind = event["kind"].as_str().unwrap_or("event");
-                let body = match kind {
-                    "user_prompt" => event["payload"]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    "assistant" if event["public"].as_bool().unwrap_or(false) => {
-                        event["payload"]["text"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned()
-                    }
-                    _ => serde_json::to_string_pretty(&event["payload"]).unwrap_or_default(),
-                };
+            let mut items = column![].spacing(16);
+            let prompts = self
+                .events
+                .iter()
+                .filter(|event| event["kind"] == "user_prompt");
+            for user in prompts {
+                let prompt_id = user["prompt_id"].as_str().unwrap_or_default();
+                let prompt_events = self
+                    .events
+                    .iter()
+                    .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
+                    .collect::<Vec<_>>();
                 items = items.push(
-                    container(
-                        column![text(kind.to_uppercase()).size(10), text(body).size(13)].spacing(4),
-                    )
-                    .padding(10)
-                    .width(Length::Fill),
+                    column![
+                        text("YOU").size(10).color(rgb(0x8d96a5)),
+                        container(
+                            text(
+                                user["payload"]["text"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            )
+                            .size(13)
+                            .color(rgb(0xd7dbe0)),
+                        )
+                        .padding([13, 15])
+                        .width(Length::Fill)
+                        .style(|_| panel_style(
+                            0x1a2115,
+                            Some(0x334024),
+                            13.0
+                        )),
+                    ]
+                    .spacing(7),
                 );
+
+                let working = prompt_events
+                    .iter()
+                    .filter(|event| {
+                        !matches!(
+                            event["kind"].as_str(),
+                            Some("user_prompt" | "assistant" | "prompt_terminal")
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if !working.is_empty() {
+                    let complete = prompt_events
+                        .iter()
+                        .any(|event| event["kind"] == "prompt_terminal");
+                    let mut timeline = column![
+                        row![
+                            text(if complete { "✓" } else { "●" })
+                                .size(11)
+                                .color(rgb(0xb8ef6a)),
+                            text(if complete {
+                                "Work completed"
+                            } else {
+                                "Working"
+                            })
+                            .size(12)
+                            .color(rgb(0xcdd2d9)),
+                            space::horizontal(),
+                            text(format!("{} event(s)", working.len()))
+                                .size(10)
+                                .color(rgb(0x8d96a5)),
+                        ]
+                        .spacing(9),
+                    ]
+                    .spacing(8);
+                    for event in working {
+                        let kind = event["kind"].as_str().unwrap_or("event");
+                        let detail =
+                            serde_json::to_string_pretty(&event["payload"]).unwrap_or_default();
+                        timeline = timeline.push(
+                            container(
+                                column![
+                                    text(kind.to_uppercase()).size(10).color(rgb(0x80bfff)),
+                                    text(detail).size(10).color(rgb(0xaeb6c1)),
+                                ]
+                                .spacing(4),
+                            )
+                            .padding([8, 10])
+                            .width(Length::Fill)
+                            .style(|_| panel_style(0x090c10, Some(0x242a32), 7.0)),
+                        );
+                    }
+                    items = items.push(
+                        container(timeline)
+                            .padding([10, 13])
+                            .width(Length::Fill)
+                            .style(|_| panel_style(0x0d1014, Some(0x272d37), 12.0)),
+                    );
+                }
+
+                if let Some(assistant) = prompt_events.iter().find(|event| {
+                    event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
+                }) {
+                    items = items.push(
+                        column![
+                            text("VALIDATED ASSISTANT").size(10).color(rgb(0x8d96a5)),
+                            container(
+                                text(
+                                    assistant["payload"]["text"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned()
+                                )
+                                .size(13)
+                                .color(rgb(0xd7dbe0)),
+                            )
+                            .padding([13, 15])
+                            .width(Length::Fill)
+                            .style(|_| panel_style(
+                                0x12161c,
+                                Some(0x4b6233),
+                                13.0
+                            )),
+                        ]
+                        .spacing(7),
+                    );
+                }
             }
-            scrollable(items).height(Length::Fill).into()
+            container(scrollable(items).height(Length::Fill))
+                .padding([28, 40])
+                .height(Length::Fill)
+                .into()
         };
 
         let send = if self.prompt_id.is_some() {
-            button(text("Cancel")).on_press(Message::CancelPrompt)
+            button(text("Cancel"))
+                .padding([8, 11])
+                .style(button_style(ButtonKind::Danger))
+                .on_press(Message::CancelPrompt)
         } else {
-            button(text("Send")).on_press_maybe(
-                (self.session.is_some() && !self.prompt.trim().is_empty())
-                    .then_some(Message::SendPrompt),
-            )
+            button(text("Send"))
+                .padding([8, 14])
+                .style(button_style(ButtonKind::Primary))
+                .on_press_maybe(
+                    (self.session.is_some() && !self.prompt.text().trim().is_empty())
+                        .then_some(Message::SendPrompt),
+                )
         };
-        let composer = row![
-            text_input("Ask the bounded agent…", &self.prompt)
-                .on_input(Message::PromptChanged)
-                .on_submit(Message::SendPrompt)
-                .padding(10)
-                .width(Length::Fill),
-            send
-        ]
-        .spacing(8);
-        container(column![top, conversation, composer].spacing(12))
-            .padding(18)
+        let prompt = text_editor(&self.prompt)
+            .placeholder("Ask the agent…")
+            .on_action(Message::PromptAction)
+            .key_binding(|press| {
+                if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
+                    && !press.modifiers.shift()
+                {
+                    Some(iced_core::text::editor::Binding::Custom(
+                        Message::SendPrompt,
+                    ))
+                } else {
+                    iced_core::text::editor::Binding::from_key_press(press)
+                }
+            })
+            .height(62)
+            .padding([10, 5])
+            .size(13)
+            .style(editor_style);
+        let composer = container(column![
+            prompt,
+            row![
+                text(if self.session.is_some() {
+                    "Enter to send · Shift+Enter for a new line"
+                } else {
+                    "No active sandbox"
+                })
+                .size(10)
+                .color(rgb(0x8d96a5)),
+                space::horizontal(),
+                send,
+            ]
+            .align_y(alignment::Vertical::Center),
+        ])
+        .padding(10)
+        .style(|_| panel_style(0x12161b, Some(0x353d48), 14.0));
+        let composer_wrap = container(composer)
+            .padding(iced_core::Padding {
+                top: 10.0,
+                right: 40.0,
+                bottom: 18.0,
+                left: 40.0,
+            })
+            .width(Length::Fill)
+            .style(|_| panel_style(0x080a0d, None, 0.0));
+        container(column![top, conversation, composer_wrap])
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(|_| panel_style(0x080a0d, None, 0.0))
             .into()
     }
 
     fn rail_panel(&self) -> UiElement<'_> {
+        let tab = |label, value| {
+            button(text(label).size(12))
+                .padding([6, 8])
+                .style(button_style(ButtonKind::Tab(self.rail == value)))
+                .on_press(Message::Rail(value))
+        };
         let tabs = row![
-            button(text("Agents")).on_press(Message::Rail(Rail::Agents)),
-            button(text("Authority")).on_press(Message::Rail(Rail::Authority)),
-            button(text("Activity")).on_press(Message::Rail(Rail::Activity)),
+            tab("Agents", Rail::Agents),
+            tab("Authority", Rail::Authority),
+            tab("Activity", Rail::Activity),
         ]
-        .spacing(4);
-        let body = match self.rail {
-            Rail::Agents => json!({
-                "status": if self.session.is_some() { if self.prompt_id.is_some() {"running"} else {"ready"} } else {"offline"},
-                "parent":"resident broker",
-                "inference_route":if self.session.is_some() {"isolated"} else {"retired"},
-                "limits":self.project().map(|p| p["resources"].clone()).unwrap_or(Value::Null)
-            }),
-            Rail::Authority => json!({
-                "broker_proposal":self.events.iter().rev().find(|e| e["kind"] == "broker_proposal").map(|e| e["payload"].clone()),
-                "capabilities":self.events.iter().filter(|e| e["kind"] == "capability").map(|e| e["payload"].clone()).collect::<Vec<_>>(),
-                "committed_policy":self.approvals
-            }),
-            Rail::Activity => Value::Array(self.events.iter().rev().take(30).cloned().collect()),
+        .spacing(3);
+        let body: UiElement<'_> = match self.rail {
+            Rail::Agents => self.agents_rail(),
+            Rail::Authority => self.authority_rail(),
+            Rail::Activity => self.activity_rail(),
         };
         container(
             column![
-                tabs,
-                scrollable(text(serde_json::to_string_pretty(&body).unwrap_or_default()).size(11))
-                    .height(Length::Fill)
+                container(tabs)
+                    .padding(iced_core::Padding {
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 10.0,
+                        left: 0.0,
+                    })
+                    .width(Length::Fill)
+                    .style(|_| divider_right(0x0c0f13)),
+                scrollable(body).height(Length::Fill)
             ]
-            .spacing(12),
+            .spacing(14),
         )
-        .padding(12)
-        .width(320)
+        .padding(14)
+        .width(330)
         .height(Length::Fill)
+        .style(|_| divider_right(0x0c0f13))
         .into()
+    }
+
+    fn agents_rail(&self) -> UiElement<'_> {
+        let status = if self.session.is_none() {
+            "offline"
+        } else if self.prompt_id.is_some() {
+            "running"
+        } else {
+            "ready"
+        };
+        let kv = |label: &'static str, value: String| {
+            row![
+                text(label).size(11).color(rgb(0x80bfff)),
+                space::horizontal(),
+                text(value).size(11).color(rgb(0xd3d7dd)),
+            ]
+        };
+        let worker = container(
+            column![
+                text("Worker agent").size(12).color(rgb(0xf4f5f7)),
+                kv("Status", status.into()),
+                kv(
+                    "Generation",
+                    if self.session.is_some() { "1" } else { "—" }.into()
+                ),
+                kv("Parent", "resident broker".into()),
+                kv(
+                    "Inference route",
+                    if self.session.is_some() {
+                        "isolated"
+                    } else {
+                        "retired"
+                    }
+                    .into()
+                ),
+                row![
+                    container(space::Space::new().height(4).width(Length::FillPortion(1)))
+                        .style(|_| panel_style(0xb8ef6a, None, 99.0)),
+                    container(space::Space::new().height(4).width(Length::FillPortion(3)))
+                        .style(|_| panel_style(0x262c34, None, 99.0)),
+                ],
+                text("Budget bounded by project limits")
+                    .size(11)
+                    .color(rgb(0x80bfff)),
+            ]
+            .spacing(8),
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0));
+
+        let resources = self.project().map(|p| &p["resources"]);
+        let resource = |key: &str, fallback: &str| {
+            resources
+                .and_then(|r| r[key].as_u64())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| fallback.into())
+        };
+        let limits = container(
+            column![
+                text("Project limits").size(12).color(rgb(0xf4f5f7)),
+                kv("Agents", resource("agent_limit", "—")),
+                kv("Timeout", format!("{}s", resource("prompt_seconds", "—"))),
+                kv("Memory", format!("{} MiB", resource("memory_mib", "—"))),
+            ]
+            .spacing(9),
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0));
+        column![worker, limits].spacing(10).into()
+    }
+
+    fn authority_rail(&self) -> UiElement<'_> {
+        let proposal = self
+            .events
+            .iter()
+            .rev()
+            .find(|event| event["kind"] == "broker_proposal");
+        let capability_count = self
+            .events
+            .iter()
+            .filter(|event| event["kind"] == "capability")
+            .count();
+        let proposal_text = proposal
+            .map(|event| serde_json::to_string_pretty(&event["payload"]).unwrap_or_default())
+            .unwrap_or_else(|| "No prompt-scoped authority has been proposed.".into());
+        column![
+            container(
+                column![
+                    text("Prompt authority").size(12).color(rgb(0xf4f5f7)),
+                    text(proposal_text).size(11).color(rgb(0xb7bec8)),
+                ]
+                .spacing(8)
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0)),
+            container(
+                column![
+                    text("Capability ledger").size(12).color(rgb(0xf4f5f7)),
+                    text(format!("{capability_count} visible capability events"))
+                        .size(11)
+                        .color(rgb(0x8d96a5)),
+                    text(if self.approvals.is_null() {
+                        "No committed grants"
+                    } else {
+                        "Committed policy loaded"
+                    })
+                    .size(11)
+                    .color(rgb(0xb8ef6a)),
+                ]
+                .spacing(8)
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0)),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn activity_rail(&self) -> UiElement<'_> {
+        if self.events.is_empty() {
+            return container(
+                column![
+                    text("Activity").size(12).color(rgb(0xf4f5f7)),
+                    text("Session events will appear here as they are validated by the broker.")
+                        .size(11)
+                        .color(rgb(0x8d96a5)),
+                ]
+                .spacing(8),
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0))
+            .into();
+        }
+        let mut activity = column![].spacing(10);
+        for event in self.events.iter().rev().take(30) {
+            let kind = event["kind"].as_str().unwrap_or("event");
+            let detail = serde_json::to_string(&event["payload"]).unwrap_or_default();
+            activity = activity.push(
+                container(
+                    column![
+                        text(kind).size(11).color(rgb(0xd7dbe0)),
+                        text(detail).size(10).color(rgb(0x8d96a5)),
+                    ]
+                    .spacing(3),
+                )
+                .padding([8, 10])
+                .width(Length::Fill)
+                .style(|_| panel_style(0x0e1116, Some(0x272d37), 8.0)),
+            );
+        }
+        activity.into()
     }
 
     fn editor_panel(&self) -> UiElement<'_> {
         let source = self.editor.as_ref().expect("editor panel requires content");
-        let report = self.preflight.as_deref().unwrap_or(
-            "Run preflight before saving. The daemon resolves paths and enforces writeback bounds.",
-        );
-        container(
+        let config = serde_json::from_str::<Value>(&source.text()).unwrap_or(Value::Null);
+        let value = |pointer: &str| {
+            config
+                .pointer(pointer)
+                .map(|value| match value {
+                    Value::String(value) => value.clone(),
+                    Value::Null => String::new(),
+                    Value::Array(values) => values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    other => other.to_string(),
+                })
+                .unwrap_or_default()
+        };
+        let field = |label: &'static str, pointer: &'static str, placeholder: &'static str| {
             column![
-                text("Project configuration").size(26),
-                text("Portable vKore schema · credentials and capabilities are never stored here."),
-                text_editor(source)
-                    .on_action(Message::ConfigAction)
-                    .height(Length::Fill),
+                text(label).size(11).color(rgb(0xaab1bb)),
+                text_input(placeholder, value(pointer))
+                    .on_input(move |value| Message::WizardField(pointer, value))
+                    .padding([9, 10])
+                    .size(12)
+                    .style(input_style),
+            ]
+            .spacing(6)
+        };
+        let picker = |label: &'static str,
+                      pointer: &'static str,
+                      placeholder: &'static str,
+                      kind: RequestKind| {
+            column![
+                text(label).size(11).color(rgb(0xaab1bb)),
                 row![
-                    button(text("Workspace…"))
-                        .on_press(Message::Browse(RequestKind::PickWorkspace)),
-                    button(text("Kore image…")).on_press(Message::Browse(RequestKind::PickKore)),
-                    button(text("llama-server…")).on_press(Message::Browse(RequestKind::PickLlama)),
-                    button(text("Model…")).on_press(Message::Browse(RequestKind::PickModel)),
+                    text_input(placeholder, value(pointer))
+                        .on_input(move |value| Message::WizardField(pointer, value))
+                        .padding([9, 10])
+                        .size(12)
+                        .style(input_style),
+                    button(text("Browse").size(12))
+                        .padding([9, 10])
+                        .style(button_style(ButtonKind::Outline))
+                        .on_press(Message::Browse(kind)),
                 ]
                 .spacing(6),
-                scrollable(text(report).size(11)).height(140),
+            ]
+            .spacing(6)
+        };
+        let toggle = |label: &'static str, pointer: &'static str| {
+            let checked = config
+                .pointer(pointer)
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            button(
                 row![
-                    button(text("Cancel")).on_press(Message::CloseEditor),
-                    button(text("Run preflight"))
-                        .on_press_maybe((!self.busy).then_some(Message::Preflight)),
-                    button(text("Save project")).on_press_maybe(
-                        (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
+                    text(if checked { "✓" } else { "□" })
+                        .size(13)
+                        .color(rgb(if checked { 0xb8ef6a } else { 0x8d96a5 })),
+                    text(label).size(12),
+                ]
+                .spacing(8),
+            )
+            .padding([7, 8])
+            .style(button_style(ButtonKind::Nav))
+            .on_press(Message::WizardToggle(pointer))
+        };
+        let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
+            let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
+            button(text(label).size(12))
+                .padding([8, 10])
+                .style(button_style(ButtonKind::Project(selected)))
+                .on_press(Message::WizardChoice(pointer, option))
+        };
+
+        let page: UiElement<'_> = match self.wizard_page {
+            0 => column![
+                row![
+                    field("Project name", "/name", "My project"),
+                    field("Portable project ID", "/id", "my-project"),
+                ]
+                .spacing(13),
+                picker(
+                    "Workspace root",
+                    "/workspace/root",
+                    "Choose a project folder",
+                    RequestKind::PickWorkspace,
+                ),
+                field(
+                    "vKore state directory",
+                    "/workspace/state",
+                    "Outside the workspace"
+                ),
+                column![
+                    text("Workspace access").size(11).color(rgb(0xaab1bb)),
+                    row![
+                        choice("Read only", "/workspace/access", "read_only"),
+                        choice("Review changes", "/workspace/access", "review_changes"),
+                        choice(
+                            "Automatic writeback",
+                            "/workspace/access",
+                            "automatic_writeback"
+                        ),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(6),
+                row![
+                    field("Maximum write bytes", "/workspace/max_write_bytes", "0"),
+                    field("Maximum write files", "/workspace/max_write_files", "0"),
+                ]
+                .spacing(13),
+            ]
+            .spacing(13)
+            .into(),
+            1 => {
+                let real = config.pointer("/inference/backend").and_then(Value::as_str)
+                    == Some("llama_cpp");
+                let mut form = column![
+                    column![
+                        text("Inference backend").size(11).color(rgb(0xaab1bb)),
+                        row![
+                            choice(
+                                "Deterministic security oracle",
+                                "/inference/backend",
+                                "deterministic"
+                            ),
+                            choice("llama.cpp", "/inference/backend", "llama_cpp"),
+                        ]
+                        .spacing(6),
+                    ]
+                    .spacing(6),
+                    picker(
+                        "Kore guest image",
+                        "/inference/kore_image",
+                        "Optional for deterministic testing",
+                        RequestKind::PickKore
                     ),
                 ]
-                .spacing(8)
+                .spacing(13);
+                if real {
+                    form = form
+                        .push(picker(
+                            "llama-server executable",
+                            "/inference/llama_server",
+                            "llama-server",
+                            RequestKind::PickLlama,
+                        ))
+                        .push(picker(
+                            "GGUF model",
+                            "/inference/model",
+                            "Model file",
+                            RequestKind::PickModel,
+                        ))
+                        .push(field(
+                            "Advanced llama.cpp arguments",
+                            "/inference/extra_args",
+                            "--device none",
+                        ));
+                }
+                form.push(
+                    row![
+                        field("Context tokens", "/inference/context_tokens", "32768"),
+                        field("Output tokens", "/inference/output_tokens", "512"),
+                        field("Threads", "/inference/threads", "4"),
+                        field("Inference slots", "/inference/slots", "3"),
+                    ]
+                    .spacing(10),
+                )
+                .push(
+                    container(text(if real {
+                        "llama.cpp runs behind the authenticated Kore bridge; paths remain host-side configuration."
+                    } else {
+                        "Deterministic mode tests the complete authenticated broker, agent, tool, and UI flow without downloading a model."
+                    }).size(11).color(rgb(0xb8ef6a)))
+                    .padding(10)
+                    .style(|_| panel_style(0x121d0e, Some(0x36532b), 8.0)),
+                )
+                .into()
+            }
+            2 => {
+                let mut addons = column![
+                    text("Host and guest add-ons").size(13).color(rgb(0xf4f5f7)),
+                    text("Enable only the bounded capabilities this project needs. Authority is still proposed per prompt.")
+                        .size(11)
+                        .color(rgb(0x8d96a5)),
+                ]
+                .spacing(8);
+                if let Some(entries) = self.catalog["addons"].as_array() {
+                    for addon in entries {
+                        let id = addon["id"].as_str().unwrap_or_default().to_owned();
+                        let name = addon["name"].as_str().unwrap_or("Add-on");
+                        let domain = addon["domain"].as_str().unwrap_or("bounded");
+                        let enabled = config["addons"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|selected| selected["id"] == id && selected["enabled"] == true);
+                        let detail = addon["tools"]
+                            .as_array()
+                            .map(|tools| format!("{} declared tool(s)", tools.len()))
+                            .unwrap_or_else(|| "No declared tools".into());
+                        addons = addons.push(
+                            button(
+                                row![
+                                    text(if enabled { "✓" } else { "□" })
+                                        .size(14)
+                                        .color(rgb(if enabled { 0xb8ef6a } else { 0x8d96a5 })),
+                                    column![
+                                        text(domain.to_uppercase()).size(9).color(rgb(0x80bfff)),
+                                        text(name.to_owned()).size(12).color(rgb(0xf4f5f7)),
+                                        text(detail).size(11).color(rgb(0x8d96a5)),
+                                    ]
+                                    .spacing(4),
+                                ]
+                                .spacing(10),
+                            )
+                            .padding(11)
+                            .width(Length::Fill)
+                            .style(button_style(ButtonKind::Addon(enabled)))
+                            .on_press(Message::WizardAddon(id)),
+                        );
+                    }
+                }
+                addons.into()
+            }
+            3 => column![
+                text("Authority defaults").size(13).color(rgb(0xf4f5f7)),
+                row![
+                    choice("Allow once", "/approvals/default_scope", "once"),
+                    choice("For this session", "/approvals/default_scope", "session"),
+                ]
+                .spacing(6),
+                toggle(
+                    "Confirm external writes",
+                    "/approvals/confirm_external_writes"
+                ),
+                toggle(
+                    "Confirm destructive operations",
+                    "/approvals/confirm_destructive"
+                ),
+                toggle(
+                    "Enable standing policy",
+                    "/approvals/standing_policy_enabled"
+                ),
+                container(space::Space::new().height(1).width(Length::Fill))
+                    .style(|_| panel_style(0x272d37, None, 0.0)),
+                text("Retention and project limits")
+                    .size(13)
+                    .color(rgb(0xf4f5f7)),
+                row![
+                    field("Transcript days", "/retention/transcript_days", "30"),
+                    field("Memory (MiB)", "/resources/memory_mib", "2048"),
+                    field("Virtual CPUs", "/resources/virtual_cpus", "2"),
+                ]
+                .spacing(10),
+                row![
+                    field("Prompt timeout (s)", "/resources/prompt_seconds", "300"),
+                    field("Agent limit", "/resources/agent_limit", "4"),
+                ]
+                .spacing(10),
+                toggle(
+                    "Clean Kore KV state on close",
+                    "/retention/clean_kv_on_close"
+                ),
+                toggle(
+                    "Retain raw model output",
+                    "/retention/retain_raw_model_output"
+                ),
             ]
-            .spacing(12),
-        )
-        .padding(24)
-        .width(Length::Fixed(920.0))
-        .center(Length::Fill)
-        .into()
+            .spacing(10)
+            .into(),
+            _ => {
+                let report = self.preflight.as_deref().unwrap_or(
+                    "Run preflight to resolve paths, scan workspace bounds, and verify the selected runtime before saving.",
+                );
+                column![
+                    text("Review and preflight").size(13).color(rgb(0xf4f5f7)),
+                    container(
+                        column![
+                            text(value("/name")).size(16).color(rgb(0xf4f5f7)),
+                            text(format!(
+                                "{} · {}",
+                                value("/workspace/access"),
+                                value("/inference/backend")
+                            ))
+                            .size(11)
+                            .color(rgb(0x80bfff)),
+                            text(value("/workspace/root")).size(11).color(rgb(0xb7bec8)),
+                        ]
+                        .spacing(6),
+                    )
+                    .padding(13)
+                    .width(Length::Fill)
+                    .style(|_| panel_style(0x0d1116, Some(0x272d37), 9.0)),
+                    container(text(report.to_owned()).size(11).color(rgb(
+                        if self.preflight.is_some() {
+                            0xb8ef6a
+                        } else {
+                            0xf5c66a
+                        }
+                    )))
+                    .padding(11)
+                    .width(Length::Fill)
+                    .style(|_| panel_style(
+                        if self.preflight.is_some() {
+                            0x121d0e
+                        } else {
+                            0x211b0d
+                        },
+                        Some(if self.preflight.is_some() {
+                            0x36532b
+                        } else {
+                            0x665326
+                        }),
+                        8.0
+                    )),
+                    text("Advanced portable configuration")
+                        .size(11)
+                        .color(rgb(0x8d96a5)),
+                    text_editor(source)
+                        .on_action(Message::ConfigAction)
+                        .height(150)
+                        .size(11)
+                        .style(editor_style),
+                ]
+                .spacing(11)
+                .into()
+            }
+        };
+
+        let mut steps = row![].spacing(4);
+        for index in 0..5 {
+            let done = index <= usize::from(self.wizard_page);
+            steps = steps.push(
+                container(space::Space::new().height(4).width(Length::Fill)).style(move |_| {
+                    panel_style(if done { 0xb8ef6a } else { 0x2c323b }, None, 99.0)
+                }),
+            );
+        }
+        let back = button(text("Back").size(12))
+            .padding([8, 11])
+            .style(button_style(ButtonKind::Outline))
+            .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
+        let next: UiElement<'_> = if self.wizard_page < 4 {
+            button(text("Next").size(12))
+                .padding([8, 13])
+                .style(button_style(ButtonKind::Primary))
+                .on_press(Message::WizardPage(self.wizard_page + 1))
+                .into()
+        } else {
+            row![
+                button(text("Run preflight").size(12))
+                    .padding([8, 11])
+                    .style(button_style(ButtonKind::Outline))
+                    .on_press_maybe((!self.busy).then_some(Message::Preflight)),
+                button(text("Save project").size(12))
+                    .padding([8, 13])
+                    .style(button_style(ButtonKind::Primary))
+                    .on_press_maybe(
+                        (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
+                    ),
+            ]
+            .spacing(8)
+            .into()
+        };
+        let dialog = column![
+            text("Project configuration").size(22).color(rgb(0xf4f5f7)),
+            text("Portable vKore schema · credentials and capabilities are never stored here.")
+                .size(11)
+                .color(rgb(0x8d96a5)),
+            steps,
+            scrollable(page).height(Length::Fill),
+            container(
+                row![
+                    button(text("Cancel").size(12))
+                        .padding([8, 11])
+                        .style(button_style(ButtonKind::Danger))
+                        .on_press(Message::CloseEditor),
+                    space::horizontal(),
+                    back,
+                    next,
+                ]
+                .spacing(8)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding(iced_core::Padding {
+                top: 16.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0
+            })
+            .width(Length::Fill)
+            .style(|_| divider_right(0x11151a)),
+        ]
+        .spacing(12);
+        container(dialog)
+            .padding(22)
+            .width(760)
+            .height(Length::FillPortion(9))
+            .style(|_| panel_style(0x11151a, Some(0x343b45), 16.0))
+            .into()
     }
 
     fn approval_panel(&self) -> UiElement<'_> {
         let request = self.approval.as_ref().unwrap_or(&Value::Null);
         container(
             column![
-                text("Review exact authority").size(26),
+                text("Review exact authority").size(22).color(rgb(0xf4f5f7)),
                 text(
                     request["effect_summary"]
                         .as_str()
                         .unwrap_or("The add-on requests a bounded tool ceiling.")
-                ),
-                text(serde_json::to_string_pretty(request).unwrap_or_default()).size(11),
+                )
+                .size(12)
+                .color(rgb(0xf5c66a)),
+                container(
+                    text(serde_json::to_string_pretty(request).unwrap_or_default())
+                        .size(11)
+                        .color(rgb(0xb7bec8)),
+                )
+                .padding(11)
+                .style(|_| panel_style(0x0d1116, Some(0x272d37), 9.0)),
                 row![
-                    button(text("Deny")).on_press(Message::DecideApproval(false)),
-                    button(text("Allow once")).on_press(Message::DecideApproval(true)),
+                    button(text("Deny").size(12))
+                        .padding([8, 11])
+                        .style(button_style(ButtonKind::Danger))
+                        .on_press(Message::DecideApproval(false)),
+                    space::horizontal(),
+                    button(text("Allow once").size(12))
+                        .padding([8, 13])
+                        .style(button_style(ButtonKind::Primary))
+                        .on_press(Message::DecideApproval(true)),
                 ]
                 .spacing(8)
             ]
             .spacing(14),
         )
         .padding(24)
-        .width(Length::Fixed(620.0))
-        .center(Length::Fill)
+        .width(620)
+        .style(|_| panel_style(0x11151a, Some(0x574525), 16.0))
         .into()
     }
 }
@@ -943,7 +2015,7 @@ impl App {
         }
         let size = logical_size(window);
         let mut interface = UserInterface::build(
-            self.model.view(),
+            self.model.view(size),
             size,
             std::mem::take(&mut self.cache),
             &mut self.renderer,
@@ -989,7 +2061,7 @@ impl App {
             application: 1.0,
         });
         let mut interface = UserInterface::build(
-            self.model.view(),
+            self.model.view(logical_size(window)),
             logical_size(window),
             std::mem::take(&mut self.cache),
             &mut self.renderer,
@@ -997,7 +2069,9 @@ impl App {
         interface.draw(
             &mut self.renderer,
             &Theme::Dark,
-            &renderer::Style::default(),
+            &renderer::Style {
+                text_color: rgb(0xf4f5f7),
+            },
             self.cursor,
         );
         self.cache = interface.into_cache();
@@ -1288,7 +2362,7 @@ mod tests {
             application: 1.0,
         });
         let mut interface = UserInterface::build(
-            model.view(),
+            model.view(Size::new(900.0, 600.0)),
             Size::new(900.0, 600.0),
             user_interface::Cache::new(),
             &mut renderer,
@@ -1325,6 +2399,62 @@ mod tests {
         assert_eq!(stats.scratch_high_water, 0);
         assert!(stats.changed_pixels > 900 * 600 / 8);
         assert!(target.iter().any(|pixel| *pixel != 0x0008_0a0d));
+    }
+
+    #[test]
+    fn every_native_wizard_page_records_and_renders() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.catalog = json!({
+            "addons":[
+                {"id":"reference.host","name":"Reference host add-on","domain":"host","tools":[{"name":"echo"}]},
+                {"id":"reference.guest","name":"Reference guest add-on","domain":"guest","tools":[{"name":"list_workspace"}]}
+            ]
+        });
+        model.update(Message::NewProject);
+
+        for page in 0..5 {
+            model.wizard_page = page;
+            let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+            renderer.hint(Scale {
+                window: 1.25,
+                application: 1.0,
+            });
+            let size = Size::new(1024.0, 640.0);
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style {
+                    text_color: rgb(0xf4f5f7),
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().unwrap();
+            axgfx::frame_requirements(frame.view()).unwrap();
+            assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
+
+            let mut target = vec![0u32; 1280 * 800];
+            let stats = render_xrgb(
+                frame.view(),
+                &mut target,
+                Extent2d::new(1280, 800).unwrap(),
+                1280,
+                Damage::Full,
+                0x0008_0a0d,
+            )
+            .unwrap();
+            assert!(stats.changed_pixels > 1280 * 800 / 5);
+        }
     }
 
     #[test]

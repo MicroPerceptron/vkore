@@ -171,7 +171,7 @@ fn daemon_recovery_retires_persisted_grants_before_serving_ui_state() {
 }
 
 #[test]
-fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
+fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -187,19 +187,14 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
     .unwrap();
     let address = server.local_addr();
 
-    let shell = transact(&server, address, "GET", "/", "", &[]);
-    assert!(shell.starts_with("HTTP/1.1 200"));
-    assert!(shell.contains("Bounded agents, visible authority"));
-    assert!(!shell.contains("launchToken"));
-    assert!(!shell.contains("Authorization"));
-    assert!(!shell.contains("tokenModal"));
-    assert!(shell.contains("if(!sid){await startSession();return}"));
-    assert!(shell.contains("ModelOutputChunk"));
-    assert!(shell.contains("class=\"working\""));
-    assert!(shell.contains("responded in"));
-    assert!(shell.contains("workOpen:new Set"));
-    assert!(shell.contains("if(e.sequence<=state.cursor)continue"));
-    assert!(shell.contains("['BrokerProposal','ToolCall','ToolResult'].includes(inspectorKind)"));
+    let discovery = transact(&server, address, "GET", "/", "", &[]);
+    assert!(discovery.starts_with("HTTP/1.1 200"));
+    assert!(discovery.contains("application/json"));
+    assert!(discovery.contains("vkore-ui"));
+    assert!(discovery.contains("axiom"));
+    assert!(!discovery.contains("text/html"));
+    assert!(!discovery.contains("launchToken"));
+    assert!(!discovery.contains("Authorization"));
 
     let body = serde_json::to_string(&config(&workspace, &temp.path().join("state"))).unwrap();
     let rejected = transact(

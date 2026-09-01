@@ -1,0 +1,27 @@
+[package]
+name = "vkore-ui"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MPL-2.0"
+description = "Native Axiom-rendered desktop control plane for vKore."
+
+[dependencies]
+axgfx = { path = "../../../axiom-vkore-ui/crates/axgfx" }
+axrd = { path = "../../../axiom-vkore-ui/crates/axrd", features = ["axui"] }
+axui-iced = { path = "../../../axiom-vkore-ui/crates/axui-iced" }
+iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
+iced_renderer = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["tiny-skia"] }
+iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
+iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
+iced_winit = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["x11", "wayland"] }
+serde_json.workspace = true
+softbuffer = "0.4.8"
+
+[dev-dependencies]
+hostlinkd = { package = "vkored", path = "../vkored" }
+tempfile = "3.27"
+
+[[bin]]
+name = "vkore-ui"
+path = "src/main.rs"

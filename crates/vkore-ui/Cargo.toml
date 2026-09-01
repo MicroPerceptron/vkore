@@ -7,9 +7,10 @@ license = "MPL-2.0"
 description = "Native Axiom-rendered desktop control plane for vKore."
 
 [dependencies]
-axgfx = { path = "../../../axiom-vkore-ui/crates/axgfx" }
-axrd = { path = "../../../axiom-vkore-ui/crates/axrd", features = ["axui"] }
-axui-iced = { path = "../../../axiom-vkore-ui/crates/axui-iced" }
+axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "a36410f6fb5fd6767bf4b0e92ae08cb03108b226" }
+axrd = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "a36410f6fb5fd6767bf4b0e92ae08cb03108b226", features = ["axui"] }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "a36410f6fb5fd6767bf4b0e92ae08cb03108b226" }
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
 iced_renderer = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["tiny-skia"] }
 iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }

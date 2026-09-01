@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
 use std::{
     alloc::System,
+    collections::BTreeSet,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     num::NonZeroU32,
@@ -55,6 +56,7 @@ enum Message {
     PromptAction(iced_core::text::editor::Action),
     SendPrompt,
     CancelPrompt,
+    ToggleWorking(String),
     ArchiveProject,
     DuplicateProject,
     ExportProject,
@@ -98,6 +100,196 @@ fn rgb(hex: u32) -> Color {
         ((hex >> 8) & 0xff) as u8,
         (hex & 0xff) as u8,
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkRow {
+    label: String,
+    detail: String,
+    body: String,
+    kind: String,
+}
+
+fn event_timestamp(event: &Value) -> Option<u64> {
+    event["timestamp_unix_ms"].as_u64()
+}
+
+fn format_event_time(timestamp_ms: u64) -> Option<String> {
+    let utc = chrono::DateTime::from_timestamp_millis(i64::try_from(timestamp_ms).ok()?)?;
+    let rendered = utc
+        .with_timezone(&chrono::Local)
+        .format("%I:%M:%S %p")
+        .to_string();
+    Some(rendered.strip_prefix('0').unwrap_or(&rendered).to_owned())
+}
+
+fn format_elapsed(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds} ms")
+    } else if milliseconds < 60_000 {
+        let seconds = milliseconds as f64 / 1_000.0;
+        if milliseconds < 10_000 {
+            format!("{seconds:.1} s")
+        } else {
+            format!("{seconds:.0} s")
+        }
+    } else {
+        let minutes = milliseconds / 60_000;
+        let seconds = ((milliseconds % 60_000) + 500) / 1_000;
+        format!("{minutes}m {seconds}s")
+    }
+}
+
+fn message_meta(label: &str, event: &Value, started_at: Option<u64>) -> String {
+    let timestamp = event_timestamp(event);
+    let mut parts = vec![label.to_owned()];
+    if let Some(time) = timestamp.and_then(format_event_time) {
+        parts.push(time);
+    }
+    if label == "VALIDATED ASSISTANT"
+        && let (Some(started), Some(finished)) = (started_at, timestamp)
+        && finished >= started
+    {
+        parts.push(format!(
+            "responded in {}",
+            format_elapsed(finished - started)
+        ));
+    }
+    parts.join(" · ")
+}
+
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
+    let mut rows: Vec<WorkRow> = Vec::new();
+    let has_chunks = |role: Option<&str>, turn: Option<u64>| {
+        events.iter().any(|event| {
+            event["kind"] == "inference"
+                && event["payload"]["kind"] == "ModelOutputChunk"
+                && event["payload"]["role"].as_str() == role
+                && event["payload"]["turn"].as_u64() == turn
+        })
+    };
+
+    for event in events {
+        let event_kind = event["kind"].as_str().unwrap_or("event");
+        if matches!(event_kind, "user_prompt" | "prompt_terminal")
+            || (event_kind == "assistant" && event["public"].as_bool().unwrap_or(false))
+        {
+            continue;
+        }
+
+        let model_kind = (event_kind == "inference")
+            .then(|| event["payload"]["kind"].as_str())
+            .flatten();
+        let inspector_kind = event["payload"]["kind"].as_str();
+        if matches!(
+            inspector_kind,
+            Some("BrokerProposal" | "ToolCall" | "ToolResult")
+        ) && events
+            .iter()
+            .any(|other| other["kind"] == event["kind"] && other["payload"]["kind"].is_null())
+        {
+            continue;
+        }
+        if model_kind == Some("RawModelCompletion")
+            && has_chunks(
+                event["payload"]["role"].as_str(),
+                event["payload"]["turn"].as_u64(),
+            )
+        {
+            continue;
+        }
+        if model_kind == Some("AssistantMessage") {
+            continue;
+        }
+
+        if model_kind == Some("ModelOutputChunk") {
+            let role = event["payload"]["role"].as_str().unwrap_or("agent");
+            let turn = event["payload"]["turn"].as_u64().unwrap_or_default();
+            let label = if role.eq_ignore_ascii_case("broker") {
+                "Broker output"
+            } else {
+                "Agent output"
+            };
+            let detail = format!("llama.cpp · turn {turn}");
+            if let Some(existing) = rows
+                .iter_mut()
+                .find(|row| row.kind == "stream" && row.label == label && row.detail == detail)
+            {
+                existing
+                    .body
+                    .push_str(event["payload"]["payload"].as_str().unwrap_or_default());
+            } else {
+                rows.push(WorkRow {
+                    label: label.into(),
+                    detail,
+                    body: event["payload"]["payload"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    kind: "stream".into(),
+                });
+            }
+            continue;
+        }
+
+        let generation = event["generation"].as_u64().unwrap_or_default();
+        if event_kind == "inference" && model_kind.is_none() {
+            rows.push(WorkRow {
+                label: "Agent submitted".into(),
+                detail: format!("generation {generation}"),
+                body: pretty(&event["payload"]),
+                kind: "inference".into(),
+            });
+            continue;
+        }
+
+        let label = match event_kind {
+            "broker_proposal" => "Broker proposal",
+            "capability" => "Authority",
+            "validation" => "Validation",
+            "tool_call" => "Tool request",
+            "tool_result" => "Tool result",
+            "error" => "Error",
+            _ => match model_kind {
+                Some("Input") => "Inference input",
+                Some("ModelPrompt") => "Prompt to llama.cpp",
+                Some("ReturnedModelFields") => "llama.cpp fields",
+                Some("Validation") => "Validation",
+                Some("RawModelCompletion") => "Model completion",
+                _ => event_kind,
+            },
+        };
+        let detail = if event_kind == "inference" {
+            let role = event["payload"]["role"].as_str().unwrap_or("model");
+            let turn = event["payload"]["turn"].as_u64().unwrap_or_default();
+            let suffix = event["payload"]["detail"]
+                .as_str()
+                .map(|detail| format!(" · {detail}"))
+                .unwrap_or_default();
+            format!("{role} · turn {turn}{suffix}")
+        } else {
+            format!("generation {generation}")
+        };
+        let body = if event_kind == "inference" {
+            event["payload"]["payload"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| pretty(&event["payload"]["payload"]))
+        } else {
+            pretty(&event["payload"])
+        };
+        rows.push(WorkRow {
+            label: label.replace('_', " "),
+            detail,
+            body,
+            kind: event_kind.into(),
+        });
+    }
+    rows
 }
 
 fn panel_style(background: u32, border: Option<u32>, radius: f32) -> iced_widget::container::Style {
@@ -381,6 +573,7 @@ struct Model {
     prompt_id: Option<String>,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
+    expanded_work: BTreeSet<String>,
     rail: Rail,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
     wizard_page: u8,
@@ -404,6 +597,7 @@ impl Model {
             prompt_id: None,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
+            expanded_work: BTreeSet::new(),
             rail: Rail::Agents,
             editor: None,
             wizard_page: 0,
@@ -562,6 +756,11 @@ impl Model {
                         path: format!("/api/v1/sessions/{session}/prompts/{prompt_id}/cancel"),
                         body: Some(json!({"api_version":1,"prompt_id":prompt_id})),
                     });
+                }
+            }
+            Message::ToggleWorking(prompt_id) => {
+                if !self.expanded_work.remove(&prompt_id) {
+                    self.expanded_work.insert(prompt_id);
                 }
             }
             Message::ArchiveProject => {
@@ -750,6 +949,7 @@ impl Model {
             return;
         }
         let prompt_id = format!("p-{}", now_id());
+        self.expanded_work.insert(prompt_id.clone());
         self.prompt_id = Some(prompt_id.clone());
         self.busy = true;
         self.network.request(Request {
@@ -811,6 +1011,7 @@ impl Model {
                     .map(str::to_owned)
                     .or_else(|| value["id"].as_str().map(str::to_owned));
                 self.events.clear();
+                self.expanded_work.clear();
                 self.prompt_id = None;
                 self.network.poll(self.session.clone());
                 self.status = "Fresh isolated sandbox started.".into();
@@ -820,6 +1021,7 @@ impl Model {
                 self.network.poll(None);
                 self.session = None;
                 self.prompt_id = None;
+                self.expanded_work.clear();
                 self.status = "Routes retired and session KV erased.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
@@ -1173,9 +1375,12 @@ impl Model {
                     .iter()
                     .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                     .collect::<Vec<_>>();
+                let started_at = event_timestamp(user);
                 items = items.push(
                     column![
-                        text("YOU").size(10).color(rgb(0x8d96a5)),
+                        text(message_meta("YOU", user, None))
+                            .size(10)
+                            .color(rgb(0x8d96a5)),
                         container(
                             text(
                                 user["payload"]["text"]
@@ -1197,48 +1402,79 @@ impl Model {
                     .spacing(7),
                 );
 
-                let working = prompt_events
+                let rows = work_rows(&prompt_events);
+                let terminal = prompt_events
                     .iter()
-                    .filter(|event| {
-                        !matches!(
-                            event["kind"].as_str(),
-                            Some("user_prompt" | "assistant" | "prompt_terminal")
-                        )
+                    .find(|event| event["kind"] == "prompt_terminal");
+                let active = terminal.is_none() && self.prompt_id.as_deref() == Some(prompt_id);
+                let ended_at = terminal
+                    .and_then(|event| event_timestamp(event))
+                    .or_else(|| {
+                        prompt_events
+                            .last()
+                            .and_then(|event| event_timestamp(event))
                     })
-                    .collect::<Vec<_>>();
-                if !working.is_empty() {
-                    let complete = prompt_events
-                        .iter()
-                        .any(|event| event["kind"] == "prompt_terminal");
-                    let mut timeline = column![
-                        row![
-                            text(if complete { "✓" } else { "●" })
-                                .size(11)
-                                .color(rgb(0xb8ef6a)),
-                            text(if complete {
-                                "Work completed"
-                            } else {
-                                "Working"
-                            })
-                            .size(12)
-                            .color(rgb(0xcdd2d9)),
-                            space::horizontal(),
-                            text(format!("{} event(s)", working.len()))
+                    .or(started_at);
+                let work_title = if active {
+                    "Working".to_owned()
+                } else if terminal.is_some_and(|event| event["payload"]["status"] == "failed") {
+                    "Stopped with an error".to_owned()
+                } else {
+                    format!(
+                        "Worked for {}",
+                        format_elapsed(
+                            ended_at
+                                .unwrap_or_default()
+                                .saturating_sub(started_at.unwrap_or_default())
+                        )
+                    )
+                };
+                let expanded = self.expanded_work.contains(prompt_id);
+                let work_header = button(
+                    row![
+                        text(if active { "●" } else { "✓" })
+                            .size(11)
+                            .color(rgb(0xb8ef6a)),
+                        text(work_title).size(12).color(rgb(0xcdd2d9)),
+                        space::horizontal(),
+                        text(if expanded { "⌃" } else { "⌄" })
+                            .size(15)
+                            .color(rgb(0x8d96a5)),
+                    ]
+                    .spacing(9)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding([10, 13])
+                .width(Length::Fill)
+                .style(button_style(ButtonKind::Nav))
+                .on_press(Message::ToggleWorking(prompt_id.to_owned()));
+                let mut timeline = column![work_header].spacing(0);
+                if expanded {
+                    let mut details = column![].spacing(8);
+                    if rows.is_empty() {
+                        details = details.push(
+                            text("Waiting for the sandbox…")
                                 .size(10)
                                 .color(rgb(0x8d96a5)),
-                        ]
-                        .spacing(9),
-                    ]
-                    .spacing(8);
-                    for event in working {
-                        let kind = event["kind"].as_str().unwrap_or("event");
-                        let detail =
-                            serde_json::to_string_pretty(&event["payload"]).unwrap_or_default();
-                        timeline = timeline.push(
+                        );
+                    }
+                    for work in rows {
+                        let body_color = if work.kind == "stream" {
+                            0xd8cffd
+                        } else if work.kind == "error" {
+                            0xffc0c4
+                        } else {
+                            0xaeb6c1
+                        };
+                        details = details.push(
                             container(
                                 column![
-                                    text(kind.to_uppercase()).size(10).color(rgb(0x80bfff)),
-                                    text(detail).size(10).color(rgb(0xaeb6c1)),
+                                    row![
+                                        text(work.label).size(10).color(rgb(0xd7dbe1)),
+                                        text(work.detail).size(9).color(rgb(0x8d96a5)),
+                                    ]
+                                    .spacing(8),
+                                    text(work.body).size(10).color(rgb(body_color)),
                                 ]
                                 .spacing(4),
                             )
@@ -1247,20 +1483,23 @@ impl Model {
                             .style(|_| panel_style(0x090c10, Some(0x242a32), 7.0)),
                         );
                     }
-                    items = items.push(
-                        container(timeline)
-                            .padding([10, 13])
-                            .width(Length::Fill)
-                            .style(|_| panel_style(0x0d1014, Some(0x272d37), 12.0)),
-                    );
+                    timeline =
+                        timeline.push(container(details).padding([12, 13]).width(Length::Fill));
                 }
+                items = items.push(
+                    container(timeline)
+                        .width(Length::Fill)
+                        .style(|_| panel_style(0x0d1014, Some(0x272d37), 12.0)),
+                );
 
                 if let Some(assistant) = prompt_events.iter().find(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) {
                     items = items.push(
                         column![
-                            text("VALIDATED ASSISTANT").size(10).color(rgb(0x8d96a5)),
+                            text(message_meta("VALIDATED ASSISTANT", assistant, started_at))
+                                .size(10)
+                                .color(rgb(0x8d96a5)),
                             container(
                                 text(
                                     assistant["payload"]["text"]
@@ -2338,6 +2577,63 @@ mod tests {
     };
 
     #[test]
+    fn working_rows_coalesce_live_model_streams_and_name_tool_activity() {
+        let events = vec![
+            json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"read X"}}),
+            json!({"kind":"inference","generation":1,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"grant "}}),
+            json!({"kind":"inference","generation":1,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"read"}}),
+            json!({"kind":"inference","generation":1,"payload":{"kind":"RawModelCompletion","role":"broker","turn":1,"payload":"grant read"}}),
+            json!({"kind":"tool_call","generation":1,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
+            json!({"kind":"tool_result","generation":1,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
+            json!({"kind":"assistant","public":true,"payload":{"text":"The code is MANIFOLD-ORANGE-742"}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+
+        let rows = work_rows(&refs);
+
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.label == "Broker output")
+                .count(),
+            1
+        );
+        assert_eq!(rows[0].body, "grant read");
+        assert!(!rows.iter().any(|row| row.label == "Model completion"));
+        assert!(rows.iter().any(|row| row.label == "Tool request"));
+        assert!(rows.iter().any(|row| row.label == "Tool result"));
+    }
+
+    #[test]
+    fn message_metadata_includes_timestamp_and_end_to_end_duration() {
+        let assistant = json!({
+            "timestamp_unix_ms": 1_750_000_002_500_u64,
+            "prompt_id": "p"
+        });
+
+        let metadata = message_meta("VALIDATED ASSISTANT", &assistant, Some(1_750_000_000_000));
+
+        assert!(metadata.starts_with("VALIDATED ASSISTANT · "));
+        assert!(metadata.contains("responded in 2.5 s"));
+    }
+
+    #[test]
+    fn working_panel_toggle_is_reversible() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.expanded_work.insert("p".into());
+
+        model.update(Message::ToggleWorking("p".into()));
+        assert!(!model.expanded_work.contains("p"));
+
+        model.update(Message::ToggleWorking("p".into()));
+        assert!(model.expanded_work.contains("p"));
+    }
+
+    #[test]
     fn complete_shell_records_text_and_renders_directly() {
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
@@ -2399,6 +2695,65 @@ mod tests {
         assert_eq!(stats.scratch_high_water, 0);
         assert!(stats.changed_pixels > 900 * 600 / 8);
         assert!(target.iter().any(|pixel| *pixel != 0x0008_0a0d));
+    }
+
+    #[test]
+    fn expanded_and_collapsed_working_panel_render_directly() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.session = Some("native-session".into());
+        model.expanded_work.insert("native-prompt".into());
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_000_000_u64,"payload":{"text":"Read the verification file"}}),
+            json!({"kind":"inference","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_001_000_u64,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"Granting the exact read capability."}}),
+            json!({"kind":"tool_call","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_002_000_u64,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
+            json!({"kind":"tool_result","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_003_000_u64,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
+            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742."}}),
+            json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
+        ];
+
+        for expanded in [true, false] {
+            if expanded != model.expanded_work.contains("native-prompt") {
+                model.update(Message::ToggleWorking("native-prompt".into()));
+            }
+            let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+            renderer.hint(Scale {
+                window: 1.0,
+                application: 1.0,
+            });
+            let size = Size::new(1100.0, 760.0);
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().unwrap();
+            axgfx::frame_requirements(frame.view()).unwrap();
+            assert!(frame.glyphs().len() > 30);
+
+            let mut target = vec![0u32; 1100 * 760];
+            let stats = render_xrgb(
+                frame.view(),
+                &mut target,
+                Extent2d::new(1100, 760).unwrap(),
+                1100,
+                Damage::Full,
+                0x0008_0a0d,
+            )
+            .unwrap();
+            assert!(stats.changed_pixels > 1100 * 760 / 8);
+        }
     }
 
     #[test]

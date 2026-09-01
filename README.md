@@ -31,7 +31,7 @@ See [the package guide](docs/packages.md) for installation, signing, offline use
 See [the harness API guide](docs/harness-api.md) for interactive sessions, events, and CLI usage.
 See [the project UI guide](docs/project-ui.md) for the setup wizard, local chat, and real inference configuration.
 
-## Interactive harness UI
+## Native Axiom UI
 
 Start the deterministic end-to-end harness from this repository:
 
@@ -39,8 +39,15 @@ Start the deterministic end-to-end harness from this repository:
 cargo run -p vkored --bin vkore-harnessd
 ```
 
-Open `http://127.0.0.1:8787/`. There is no login, token, or browser session
-step. The deterministic mode
+In a second terminal, launch the native client:
+
+```powershell
+cargo run -p vkore-ui -- --server 127.0.0.1:8787
+```
+
+The window is rendered by Axiom directly into its presentation surface; no
+HTML, browser engine, WGPU, or viewport-sized staging buffer is used. There is
+no login, token, or browser session step. The deterministic mode
 exercises broker planning, prompt-scoped capability installation, guest-domain
 tool calls, validated output, cancellation, teardown, and KV retirement without
 requiring a model download.

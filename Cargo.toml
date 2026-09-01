@@ -6,6 +6,7 @@ members = [
     "crates/vkore-packages",
     "crates/vkored",
     "crates/vkore-hostlink-ab",
+    "crates/vkore-ui",
     "crates/vkore-vm",
     "crates/vkore-workspace",
 ]

@@ -1559,8 +1559,14 @@ fn route_http(
 ) -> Result<(&'static str, Vec<u8>), HarnessError> {
     if method == "GET" && url == "/" {
         return Ok((
-            "text/html; charset=utf-8",
-            include_bytes!("harness-ui.html").to_vec(),
+            "application/json",
+            serde_json::to_vec(&json!({
+                "api_version": HARNESS_API_VERSION,
+                "client": "vkore-ui",
+                "renderer": "axiom",
+                "message": "Launch the native vKore UI and connect it to this loopback address."
+            }))
+            .unwrap(),
         ));
     }
     if method == "GET" && url == "/api/v1/health" {

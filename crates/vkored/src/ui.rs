@@ -165,8 +165,8 @@ impl LiveUi {
         } else if first.starts_with(b"GET / ") {
             (
                 "200 OK",
-                "text/html; charset=utf-8",
-                UI_HTML.as_bytes().to_vec(),
+                "application/json; charset=utf-8",
+                br#"{"client":"vkore-ui","renderer":"axiom","message":"Use the native vKore UI for live inspection."}"#.to_vec(),
             )
         } else {
             (
@@ -193,8 +193,6 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-const UI_HTML: &str = include_str!("ui.html");
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn serves_separate_live_views_and_json_events() {
+    fn serves_native_client_discovery_and_json_events() {
         let mut ui = LiveUi::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         ui.record_authority(json!({
             "state": "installed",
@@ -234,18 +232,15 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("workspace/docs-architecture.md"));
         assert!(response.contains("authority_state"));
-        for view in [
-            "Conversation",
-            "Raw AI output",
-            "Validation",
-            "Broker activity",
-            "Capability state",
-            "System/model prompts",
-        ] {
-            assert!(UI_HTML.contains(view), "missing UI view {view}");
-        }
-        assert!(UI_HTML.contains("selectors only · not installed authority"));
-        assert!(UI_HTML.contains("actual committed authority"));
-        assert!(UI_HTML.contains("currentAuthority(events)"));
+        let mut discovery = TcpStream::connect(ui.local_addr().unwrap()).unwrap();
+        discovery
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        ui.poll().unwrap();
+        let mut response = String::new();
+        discovery.read_to_string(&mut response).unwrap();
+        assert!(response.contains("application/json"));
+        assert!(response.contains("vkore-ui"));
+        assert!(response.contains("axiom"));
     }
 }

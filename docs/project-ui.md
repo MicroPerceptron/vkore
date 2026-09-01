@@ -1,9 +1,9 @@
 # Project and harness UI
 
-`vkore-harnessd` serves a loopback-only project wizard and
-interactive agent harness. It uses the same versioned API as the `vkore chat`
-CLI. Project configuration and transcripts are stored below the directory given
-to `--state`.
+`vkore-harnessd` serves the loopback-only API used by the native Axiom project
+and agent UI. It uses the same versioned API as the `vkore chat` CLI. Project
+configuration and transcripts are stored below the directory given to
+`--state`.
 
 ## Start with the deterministic backend
 
@@ -14,8 +14,9 @@ cargo run -p vkored --bin vkore-harnessd -- `
   --state .vkore-state
 ```
 
-Open `http://127.0.0.1:8787/` and create a project. There is no login, token,
-or browser-session step. Pick one narrow workspace directory. vKore derives
+Then launch `cargo run -p vkore-ui -- --server 127.0.0.1:8787` and create a
+project. There is no login, token, or browser-session step. Pick one narrow
+workspace directory. vKore derives
 transaction/replay state under
 `.vkore-state/workspaces`; it refuses a state directory nested inside the shared
 workspace. The bounded preflight scan reports symlinks without following them,
@@ -100,9 +101,9 @@ policy preferences; a maintenance process may enforce deletion.
 ## Security model
 
 - The server refuses non-loopback binds.
-- Browser mutations require an exact local origin and the non-simple
-  `X-vKore-Client: harness-ui-v1` header. Cross-origin requests are rejected and
-  no permissive CORS response is emitted.
+- Native requests carry no browser origin. If a browser attempts to use the
+  API, mutations still require an exact local origin and the non-simple
+  `X-vKore-Client: harness-ui-v1` header; cross-origin requests are rejected.
 - Native file and directory dialogs originate in the trusted local daemon, not
   model output.
 - Project paths are configuration. They do not enlarge a live agent's Kore

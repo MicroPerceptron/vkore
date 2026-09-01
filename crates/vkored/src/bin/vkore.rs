@@ -11,25 +11,21 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut server = "127.0.0.1:8787".to_owned();
-    let mut token = None;
     let mut project = "default".to_owned();
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() != Some("chat") {
-        return Err("usage: vkore chat [--server HOST:PORT] --token TOKEN [--project ID]".into());
+        return Err("usage: vkore chat [--server HOST:PORT] [--project ID]".into());
     }
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--server" => server = args.next().ok_or("missing --server")?,
-            "--token" => token = Some(args.next().ok_or("missing --token")?),
             "--project" => project = args.next().ok_or("missing --project")?,
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
-    let token = token.ok_or("--token is required")?;
     let session = format!("cli-{}", std::process::id());
     request(
         &server,
-        &token,
         "POST",
         "/api/v1/sessions",
         &json!({
@@ -44,7 +40,7 @@ fn run() -> Result<(), String> {
             continue;
         }
         let prompt = format!("prompt-{}", index + 1);
-        request(&server, &token, "POST", &format!("/api/v1/sessions/{session}/prompts"), &json!({
+        request(&server, "POST", &format!("/api/v1/sessions/{session}/prompts"), &json!({
             "api_version":1,"prompt_id":prompt,"idempotency_key":format!("cli-{}",index + 1),"text":text
         }).to_string())?;
         let mut cursor = 0u64;
@@ -52,7 +48,6 @@ fn run() -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(25));
             let body = request(
                 &server,
-                &token,
                 "GET",
                 &format!("/api/v1/sessions/{session}/events?after={cursor}"),
                 "",
@@ -75,7 +70,6 @@ fn run() -> Result<(), String> {
     }
     let _ = request(
         &server,
-        &token,
         "DELETE",
         &format!("/api/v1/sessions/{session}"),
         "",
@@ -83,15 +77,9 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn request(
-    server: &str,
-    token: &str,
-    method: &str,
-    path: &str,
-    body: &str,
-) -> Result<String, String> {
+fn request(server: &str, method: &str, path: &str, body: &str) -> Result<String, String> {
     let mut stream = TcpStream::connect(server).map_err(|error| error.to_string())?;
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {server}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|error| error.to_string())?;
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {server}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|error| error.to_string())?;
     let mut response = String::new();
     stream
         .read_to_string(&mut response)

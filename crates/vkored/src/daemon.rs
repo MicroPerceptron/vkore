@@ -747,6 +747,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         let kind = match observation.kind {
             ObservationKind::Input => "input",
             ObservationKind::ModelPrompt => "model_prompt",
+            ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
             ObservationKind::Validation => "validation",
@@ -2665,9 +2666,14 @@ fn accept(
             BoundListener::Unix { listener, .. } => listener
                 .accept()
                 .map(|(stream, _)| ConnectionStream::Unix(stream)),
-            BoundListener::Tcp(listener) => listener
-                .accept()
-                .map(|(stream, _)| ConnectionStream::Tcp(stream)),
+            BoundListener::Tcp(listener) => listener.accept().and_then(|(stream, _)| {
+                // HostLink's epoch, route, cancellation, and streaming
+                // records are intentionally small control frames. Do not let
+                // Nagle delay a route-open acknowledgement past the guest's
+                // bounded activation window.
+                stream.set_nodelay(true)?;
+                Ok(ConnectionStream::Tcp(stream))
+            }),
         };
         match accepted {
             Ok(stream) => {

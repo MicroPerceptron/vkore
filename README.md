@@ -23,23 +23,24 @@ Product packages added in vKore include:
 - `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
 - `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
 - `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
-- `vkored` interactive binaries: authenticated harness server and headless `vkore chat` client.
+- `vkored` interactive binaries: loopback harness server and headless `vkore chat` client.
 
 See [the add-on SDK guide](docs/addons.md) for the public extension and security model.
 See [the policy guide](docs/policy.md) for approval lifetimes and matching semantics.
 See [the package guide](docs/packages.md) for installation, signing, offline use, and recovery.
 See [the harness API guide](docs/harness-api.md) for interactive sessions, events, and CLI usage.
-See [the project UI guide](docs/project-ui.md) for the setup wizard, authenticated chat, and real inference configuration.
+See [the project UI guide](docs/project-ui.md) for the setup wizard, local chat, and real inference configuration.
 
 ## Interactive harness UI
 
 Start the deterministic end-to-end harness from this repository:
 
 ```powershell
-cargo run -p vkored --bin vkore-harnessd -- --token choose-a-local-token
+cargo run -p vkored --bin vkore-harnessd
 ```
 
-Open `http://127.0.0.1:8787/` and enter the same token. The deterministic mode
+Open `http://127.0.0.1:8787/`. There is no login, token, or browser session
+step. The deterministic mode
 exercises broker planning, prompt-scoped capability installation, guest-domain
 tool calls, validated output, cancellation, teardown, and KV retirement without
 requiring a model download.
@@ -90,7 +91,7 @@ cargo run -p vkored -- `
 ```
 
 The `vkored` page is a low-level loopback observer. `vkore-harnessd` serves the
-authenticated project wizard and interactive harness UI.
+loopback project wizard and interactive harness UI.
 
 Managed VM launch is optional. Supply the QEMU base topology required by the
 Kore image as repeated arguments; vKore adds the two HostLink devices and the
@@ -112,7 +113,7 @@ transcript, and exits. If `vkored` stops first, it terminates the child VM.
 
 ## Cross-repository gate
 
-The interactive product gate starts the authenticated harness, creates a real
+The interactive product gate starts the loopback harness, creates a real
 project through its HTTP API, submits `read X`, boots Kore, and requires the
 broker proposal, capability installation, guest `cat` execution, tool result,
 assistant response, and terminal event to return through HostLink:

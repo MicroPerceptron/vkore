@@ -118,6 +118,7 @@ pub enum ProjectError {
     UnsupportedSchema,
     RootMissing,
     RootNotDirectory,
+    InvalidWorkspaceState,
     StateInsideWorkspace,
     WorkspaceInsideState,
     MissingArtifact(String),
@@ -326,6 +327,9 @@ fn validate_config(config: &ProjectConfig) -> Result<(), ProjectError> {
     }
     if config.name.trim().is_empty() || config.name.len() > 128 {
         return Err(ProjectError::InvalidName);
+    }
+    if config.workspace.state.as_os_str().is_empty() {
+        return Err(ProjectError::InvalidWorkspaceState);
     }
     if config.workspace.access != WorkspaceAccess::ReadOnly
         && (config.workspace.max_write_bytes == 0 || config.workspace.max_write_files == 0)

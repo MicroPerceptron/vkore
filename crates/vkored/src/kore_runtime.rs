@@ -404,16 +404,8 @@ mod tests {
 
     #[test]
     fn project_resource_limits_replace_caller_qemu_values() {
-        let arguments = [
-            "-machine",
-            "q35",
-            "-m",
-            "8G",
-            "-smp=12",
-            "-display",
-            "none",
-        ]
-        .map(OsString::from);
+        let arguments =
+            ["-machine", "q35", "-m", "8G", "-smp=12", "-display", "none"].map(OsString::from);
         assert_eq!(
             without_qemu_resource_arguments(&arguments).unwrap(),
             ["-machine", "q35", "-display", "none"].map(OsString::from)

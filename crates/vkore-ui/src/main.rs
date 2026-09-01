@@ -24,7 +24,7 @@ use std::{
     rc::Rc,
     sync::mpsc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use winit::{
     application::ApplicationHandler,
@@ -35,6 +35,8 @@ use winit::{
 };
 
 type UiElement<'a> = Element<'a, Message, Theme, AxRenderer<System>>;
+
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -569,6 +571,8 @@ struct Model {
     catalog: Value,
     approvals: Value,
     selected: Option<usize>,
+    launch_project: Option<String>,
+    auto_open_pending: bool,
     session: Option<String>,
     prompt_id: Option<String>,
     prompt: text_editor::Content<AxRenderer<System>>,
@@ -585,7 +589,12 @@ struct Model {
 }
 
 impl Model {
+    #[cfg(test)]
     fn new(network: Network) -> Self {
+        Self::with_launch_project(network, None)
+    }
+
+    fn with_launch_project(network: Network, launch_project: Option<String>) -> Self {
         let model = Self {
             network,
             connected: false,
@@ -593,6 +602,8 @@ impl Model {
             catalog: Value::Null,
             approvals: Value::Null,
             selected: None,
+            launch_project,
+            auto_open_pending: true,
             session: None,
             prompt_id: None,
             prompt: text_editor::Content::new(),
@@ -981,6 +992,32 @@ impl Model {
                     .is_some_and(|index| index >= self.projects.len())
                 {
                     self.selected = None;
+                }
+                if self.auto_open_pending {
+                    self.auto_open_pending = false;
+                    let requested = self.launch_project.take();
+                    let selected = requested.as_ref().and_then(|project_id| {
+                        self.projects
+                            .iter()
+                            .position(|project| project["id"].as_str() == Some(project_id))
+                    });
+                    let only_active = (requested.is_none())
+                        .then(|| {
+                            let mut active =
+                                self.projects.iter().enumerate().filter(|(_, project)| {
+                                    !project["archived"].as_bool().unwrap_or(false)
+                                });
+                            let first = active.next().map(|(index, _)| index);
+                            first.filter(|_| active.next().is_none())
+                        })
+                        .flatten();
+                    if let Some(index) = selected.or(only_active) {
+                        self.update(Message::SelectProject(index));
+                    } else if let Some(project_id) = requested {
+                        self.status = format!(
+                            "Launch project {project_id:?} is not available from this daemon."
+                        );
+                    }
                 }
             }
             (RequestKind::Approvals, Ok(value)) => self.approvals = value,
@@ -2245,6 +2282,8 @@ struct App {
     cursor: mouse::Cursor,
     modifiers: ModifiersState,
     redraw: bool,
+    redraw_requested: bool,
+    last_frame: Option<Instant>,
 }
 
 impl App {
@@ -2286,7 +2325,6 @@ impl App {
             self.model.update(message);
         }
         self.redraw = true;
-        window.request_redraw();
     }
 
     fn draw(&mut self, window: &Rc<Window>) -> Result<(), String> {
@@ -2342,6 +2380,7 @@ impl App {
         .map_err(|error| format!("{error:?}"))?;
         buffer.present().map_err(|error| error.to_string())?;
         self.redraw = false;
+        self.last_frame = Some(Instant::now());
         Ok(())
     }
 }
@@ -2366,6 +2405,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .expect("create presentation surface"),
         );
         self.redraw = true;
+        self.redraw_requested = true;
         window.request_redraw();
     }
 
@@ -2375,9 +2415,6 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Poll(result) => self.model.poll_result(result),
         }
         self.redraw = true;
-        if let Some(window) = self.surface.as_ref().map(SoftSurface::window) {
-            window.request_redraw();
-        }
     }
 
     fn window_event(
@@ -2409,7 +2446,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(value) => self.modifiers = value.state(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.redraw = true,
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.draw(&window) {
+                self.redraw_requested = false;
+                if self.redraw
+                    && let Err(error) = self.draw(&window)
+                {
                     self.model.status = format!("Axiom render failed: {error}");
                 }
                 return;
@@ -2426,10 +2466,21 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
-        if self.redraw
-            && let Some(window) = self.surface.as_ref().map(SoftSurface::window)
-        {
-            window.request_redraw();
+        if !self.redraw || self.redraw_requested {
+            return;
+        }
+        let now = Instant::now();
+        let due = self
+            .last_frame
+            .and_then(|last| last.checked_add(FRAME_INTERVAL))
+            .unwrap_or(now);
+        if due <= now {
+            if let Some(window) = self.surface.as_ref().map(SoftSurface::window) {
+                self.redraw_requested = true;
+                window.request_redraw();
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
         }
     }
 }
@@ -2525,9 +2576,16 @@ fn now_id() -> u128 {
         .as_millis()
 }
 
-fn server_argument() -> Result<SocketAddr, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchOptions {
+    server: SocketAddr,
+    project: Option<String>,
+}
+
+fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
     let mut server = "127.0.0.1:8787".parse().unwrap();
-    let mut args = std::env::args().skip(1);
+    let mut project = None;
+    let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--server" => {
@@ -2537,25 +2595,36 @@ fn server_argument() -> Result<SocketAddr, String> {
                     .parse()
                     .map_err(|_| "invalid --server address")?;
             }
-            _ => return Err("usage: vkore-ui [--server 127.0.0.1:8787]".into()),
+            "--project" => {
+                let value = args.next().ok_or("missing --project id")?;
+                if value.trim().is_empty() {
+                    return Err("empty --project id".into());
+                }
+                project = Some(value);
+            }
+            _ => {
+                return Err(
+                    "usage: vkore-ui [--server 127.0.0.1:8787] [--project PROJECT_ID]".into(),
+                );
+            }
         }
     }
-    Ok(server)
+    Ok(LaunchOptions { server, project })
 }
 
 fn main() {
-    let server = server_argument().unwrap_or_else(|error| {
+    let options = parse_launch_options(std::env::args().skip(1)).unwrap_or_else(|error| {
         eprintln!("vkore-ui: {error}");
         std::process::exit(2);
     });
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("create event loop");
-    let network = Network::start(server, event_loop.create_proxy());
+    let network = Network::start(options.server, event_loop.create_proxy());
     let context = SoftContext::new(event_loop.owned_display_handle())
         .expect("create software presentation context");
     let mut app = App {
-        model: Model::new(network),
+        model: Model::with_launch_project(network, options.project),
         context,
         surface: None,
         renderer: AxRenderer::new_in(renderer::Settings::default(), System),
@@ -2564,6 +2633,8 @@ fn main() {
         cursor: mouse::Cursor::Unavailable,
         modifiers: ModifiersState::default(),
         redraw: true,
+        redraw_requested: false,
+        last_frame: None,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
@@ -2575,6 +2646,59 @@ mod tests {
     use hostlinkd::{
         BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer, HarnessService,
     };
+
+    #[test]
+    fn launch_options_accept_a_preloaded_project() {
+        let options = parse_launch_options([
+            "--server".into(),
+            "127.0.0.1:9876".into(),
+            "--project".into(),
+            "qwen9b-live-kore".into(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.server, "127.0.0.1:9876".parse().unwrap());
+        assert_eq!(options.project.as_deref(), Some("qwen9b-live-kore"));
+        assert!(parse_launch_options(["--project".into(), "".into()]).is_err());
+    }
+
+    #[test]
+    fn launch_project_opens_directly_and_single_project_is_the_default() {
+        for requested in [Some("qwen9b-live-kore".into()), None] {
+            let (requests, request_receiver) = mpsc::channel();
+            let (sessions, _session_receiver) = mpsc::channel();
+            let mut model = Model::with_launch_project(
+                Network {
+                    sender: requests,
+                    session: sessions,
+                },
+                requested,
+            );
+            while request_receiver.try_recv().is_ok() {}
+            let projects = json!([{
+                "id":"qwen9b-live-kore",
+                "name":"Qwen 9B live Kore",
+                "archived":false,
+                "addons":[]
+            }]);
+
+            model.response(
+                RequestKind::Projects,
+                Ok(ApiResponse {
+                    content_type: "application/json".into(),
+                    body: serde_json::to_vec(&projects).unwrap(),
+                }),
+            );
+
+            assert_eq!(model.selected, Some(0));
+            assert!(model.busy);
+            let request = request_receiver
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap();
+            assert_eq!(request.kind, RequestKind::StartSession);
+            assert_eq!(request.path, "/api/v1/sessions");
+        }
+    }
 
     #[test]
     fn working_rows_coalesce_live_model_streams_and_name_tool_activity() {

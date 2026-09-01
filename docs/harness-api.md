@@ -12,9 +12,11 @@ cargo run -p vkored --bin vkore-harnessd -- `
   --state C:\path\to\.vkore
 ```
 
-Launch `cargo run -p vkore-ui -- --server 127.0.0.1:8787`. The loopback harness
-has no login, bearer token, or browser credential session. `GET /` is a JSON
-native-client discovery response, not an HTML document.
+Launch
+`cargo run --release -p vkore-ui -- --server 127.0.0.1:8787 --project PROJECT_ID`.
+The project selector is optional when only one active project exists. The
+loopback harness has no login, bearer token, or browser credential session.
+`GET /` is a JSON native-client discovery response, not an HTML document.
 
 The default backend is the deterministic broker/worker and guest-protocol test
 oracle. To use one caller-supplied llama.cpp server executable and GGUF model

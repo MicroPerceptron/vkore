@@ -14,9 +14,13 @@ cargo run -p vkored --bin vkore-harnessd -- `
   --state .vkore-state
 ```
 
-Then launch `cargo run -p vkore-ui -- --server 127.0.0.1:8787` and create a
-project. There is no login, token, or browser-session step. Pick one narrow
-workspace directory. vKore derives
+Then launch
+`cargo run --release -p vkore-ui -- --server 127.0.0.1:8787 --project PROJECT_ID`.
+The named persisted project opens directly and its sandbox starts without the
+project modal. If the daemon has exactly one active project, `--project` may be
+omitted and that project opens automatically. There is no login, token, or
+browser-session step. Create a project only when you need a new configuration,
+and pick one narrow workspace directory. vKore derives
 transaction/replay state under
 `.vkore-state/workspaces`; it refuses a state directory nested inside the shared
 workspace. The bounded preflight scan reports symlinks without following them,

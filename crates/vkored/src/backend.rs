@@ -598,7 +598,10 @@ pub struct DeterministicBackend {
     latency_ticks: u64,
     poll_cursor: usize,
     metrics: BackendMetrics,
+    observations: VecDeque<InferenceObservation>,
 }
+
+const DETERMINISTIC_OBSERVATIONS_MAX: usize = 4096;
 
 impl DeterministicBackend {
     #[must_use]
@@ -616,7 +619,15 @@ impl DeterministicBackend {
                 incarnation: 1,
                 ..BackendMetrics::default()
             },
+            observations: VecDeque::with_capacity(DETERMINISTIC_OBSERVATIONS_MAX),
         })
+    }
+
+    fn observe(&mut self, observation: InferenceObservation) {
+        if self.observations.len() == DETERMINISTIC_OBSERVATIONS_MAX {
+            self.observations.pop_front();
+        }
+        self.observations.push_back(observation);
     }
 
     fn response(
@@ -824,6 +835,7 @@ impl InferenceBackend for DeterministicBackend {
     fn reset(&mut self) {
         self.registry.clear();
         self.poll_cursor = 0;
+        self.observations.clear();
         self.metrics.incarnation = self.metrics.incarnation.saturating_add(1);
         self.refresh_metrics();
     }
@@ -873,6 +885,7 @@ impl InferenceBackend for DeterministicBackend {
         }
         let mut next_expected_call = sequence.expected_call;
         let mut next_call = sequence.next_call;
+        let mut submitted_observation = None;
         let agent = if identity.role == BackendRole::Agent
             && input
                 .get(..4)
@@ -899,6 +912,17 @@ impl InferenceBackend for DeterministicBackend {
                     })
                 }
                 AgentRequestKind::ToolResult if next_expected_call == Some(message.call_id) => {
+                    submitted_observation = Some(InferenceObservation {
+                        role: identity.role,
+                        route: identity.route,
+                        generation: identity.generation,
+                        request,
+                        turn,
+                        kind: ObservationKind::ToolResult,
+                        payload: message.text.to_owned(),
+                        accepted: Some(true),
+                        detail: format!("guest returned tool call {}", message.call_id),
+                    });
                     if message.result == Some(ToolResultKind::Output)
                         && message.text.contains("read Y")
                     {
@@ -1113,6 +1137,9 @@ impl InferenceBackend for DeterministicBackend {
         self.metrics.submitted = self.metrics.submitted.saturating_add(1);
         self.metrics.input_bytes = self.metrics.input_bytes.saturating_add(input.len() as u64);
         self.refresh_metrics();
+        if let Some(observation) = submitted_observation {
+            self.observe(observation);
+        }
         Ok(())
     }
 
@@ -1179,14 +1206,16 @@ impl InferenceBackend for DeterministicBackend {
             }
             let slot = self.registry.entries[index].slot;
             let sequence = &mut self.registry.entries[index].state;
+            let agent = pending.agent;
+            let broker = pending.broker;
             let payload = Self::response(
                 identity,
                 slot,
                 sequence,
                 pending.digest,
                 pending.turn,
-                pending.agent,
-                pending.broker,
+                agent,
+                broker,
             );
             let output_tokens = estimate_tokens(payload.len());
             sequence.context_bytes = sequence
@@ -1248,6 +1277,37 @@ impl InferenceBackend for DeterministicBackend {
                 .generation_ticks_total
                 .saturating_add(tick.saturating_sub(pending.submitted));
             self.refresh_metrics();
+            if let Some(broker) = broker {
+                self.observe(InferenceObservation {
+                    role: identity.role,
+                    route: identity.route,
+                    generation: identity.generation,
+                    request: pending.request,
+                    turn: pending.turn,
+                    kind: ObservationKind::BrokerProposal,
+                    payload: format!("{broker:?}"),
+                    accepted: Some(true),
+                    detail: "deterministic broker proposal returned to Kore".into(),
+                });
+            }
+            if let Some(AgentPending::ToolCall { call_id, target }) = agent {
+                let path = match target {
+                    AgentTarget::Identity => "/identity",
+                    AgentTarget::PromptX => "/X",
+                    AgentTarget::PromptY => "/Y",
+                };
+                self.observe(InferenceObservation {
+                    role: identity.role,
+                    route: identity.route,
+                    generation: identity.generation,
+                    request: pending.request,
+                    turn: pending.turn,
+                    kind: ObservationKind::ToolCall,
+                    payload: format!(r#"{{"call_id":{call_id},"command":"cat","path":"{path}"}}"#),
+                    accepted: Some(true),
+                    detail: "deterministic tool call returned to Kore".into(),
+                });
+            }
             let output_bytes = payload.len() as u64;
             return Some(BackendEvent::Completed {
                 sequence: identity,
@@ -1276,6 +1336,10 @@ impl InferenceBackend for DeterministicBackend {
             .get(identity)
             .ok()
             .map(|entry| entry.state.metrics)
+    }
+
+    fn take_observation(&mut self) -> Option<InferenceObservation> {
+        self.observations.pop_front()
     }
 }
 

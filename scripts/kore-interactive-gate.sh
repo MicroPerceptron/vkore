@@ -3,7 +3,8 @@ set -euo pipefail
 
 vkore_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 kore_root=${KORE_ROOT:-"$vkore_root/../kore-722-interactive-ingress"}
-qemu=${QEMU:-/usr/bin/qemu-system-x86_64}
+make_command=${MAKE:-make}
+qemu=${QEMU:-$(command -v qemu-system-x86_64 || true)}
 
 test -f "$kore_root/Cargo.toml" || {
     echo "KORE_ROOT must name the Kore checkout with frontend ingress" >&2
@@ -11,6 +12,10 @@ test -f "$kore_root/Cargo.toml" || {
 }
 test -x "$qemu" || {
     echo "QEMU executable not found: $qemu" >&2
+    exit 2
+}
+command -v "$make_command" >/dev/null 2>&1 || {
+    echo "GNU Make executable not found: $make_command" >&2
     exit 2
 }
 command -v qemu-img >/dev/null 2>&1 || {
@@ -27,11 +32,21 @@ artifact_dir=${VKORE_GATE_ARTIFACT_DIR:-}
 gate_timeout=${VKORE_GATE_TIMEOUT_SECONDS:-600}
 harness_pid=
 passed=0
+cleanup_ran=0
 cleanup() {
+    if test "$cleanup_ran" = 1; then
+        return
+    fi
+    cleanup_ran=1
     if test -n "$harness_pid"; then
         pkill -TERM -P "$harness_pid" -x qemu-system-x86_64 2>/dev/null || true
         kill "$harness_pid" 2>/dev/null || true
         wait "$harness_pid" 2>/dev/null || true
+    fi
+    if test -n "$artifact_dir"; then
+        mkdir -p "$artifact_dir"
+        cp -a -- "$runtime"/. "$artifact_dir"/
+        echo "gate artifacts copied to $artifact_dir" >&2
     fi
     if test "$passed" = 1; then
         case "$runtime" in
@@ -40,11 +55,6 @@ cleanup() {
         esac
     else
         echo "gate artifacts retained at $runtime" >&2
-        if test -n "$artifact_dir"; then
-            mkdir -p "$artifact_dir"
-            cp -a -- "$runtime"/. "$artifact_dir"/
-            echo "gate artifacts copied to $artifact_dir" >&2
-        fi
     fi
 }
 trap cleanup EXIT INT TERM
@@ -59,14 +69,17 @@ serial_log="$runtime/kore-serial.log"
 debug_log="$runtime/kore-debug.log"
 harness_log="$runtime/harness.log"
 events_file="$runtime/events.sse"
-mkdir -p "$workspace" "$state" "$workspace_state"
-printf 'KORE_INTERACTIVE_TOOL_OUTPUT\n' >"$workspace/X"
+mkdir -p "$workspace/face-0" "$state" "$workspace_state"
+# Exec's first stable workspace face is rooted at the imported `face-0`
+# directory. Seed the exact member beneath that authority root so the broker's
+# object grant resolves the same path the prompt-scoped runner will receive.
+printf 'KORE_INTERACTIVE_TOOL_OUTPUT\n' >"$workspace/face-0/X"
 qemu-img create -f qcow2 "$nvme" 1G >/dev/null
 qemu-img create -f raw "$usb" 16M >/dev/null
 
 make_value() {
     local name=$1
-    make -C "$kore_root" --no-print-directory -s \
+    "$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         --eval '.PHONY: _print_vkore_runtime' \
@@ -89,7 +102,7 @@ test -f "$ovmf_code" && test -f "$ovmf_vars" || {
 }
 cp -- "$ovmf_vars" "$vars"
 
-qemu_arguments=$(make -C "$kore_root" --no-print-directory -s \
+qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
     PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
     MODE=release CARGO_FLAGS=--release OUT_DIR=release \
     NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \

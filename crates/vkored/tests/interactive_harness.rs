@@ -66,6 +66,12 @@ fn authenticated_prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
         .submit_prompt(TOKEN, "session-1", prompt("p1", "read X"))
         .unwrap();
     let events = wait_terminal(&handle, "session-1", "p1");
+    assert!(events.iter().all(|event| event.timestamp_unix_ms > 0));
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].timestamp_unix_ms <= pair[1].timestamp_unix_ms)
+    );
     for kind in [
         EventKind::UserPrompt,
         EventKind::BrokerProposal,

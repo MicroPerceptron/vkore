@@ -115,6 +115,22 @@ fn project_preflight_rejects_state_inside_root_missing_artifacts_and_unbounded_w
             .contains("InvalidRuntime")
     );
 
+    let runtime = temp.path().join("llama-server");
+    let model_directory = temp.path().join("model.gguf");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    std::fs::create_dir(&model_directory).unwrap();
+    let mut invalid_artifact = config(&workspace, &temp.path().join("artifact-state"));
+    invalid_artifact.inference.backend = RuntimeBackend::LlamaCpp;
+    invalid_artifact.inference.llama_server = Some(runtime);
+    invalid_artifact.inference.model = Some(model_directory);
+    assert!(
+        store
+            .save(invalid_artifact)
+            .unwrap_err()
+            .to_string()
+            .contains("MissingArtifact")
+    );
+
     let credential_root = temp.path().join(".ssh");
     std::fs::create_dir(&credential_root).unwrap();
     let risky = config(&credential_root, &temp.path().join("credential-state"));

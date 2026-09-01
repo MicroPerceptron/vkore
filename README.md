@@ -42,8 +42,15 @@ cargo run -p vkored --bin vkore-harnessd
 In a second terminal, launch the native client:
 
 ```powershell
-cargo run -p vkore-ui -- --server 127.0.0.1:8787
+cargo run --release -p vkore-ui -- `
+  --server 127.0.0.1:8787 `
+  --project my-project
 ```
+
+`--project` opens that persisted project and starts its sandbox immediately.
+When no project is specified, the client automatically opens the only active
+project; it shows the project list when there are several. Use a release launch
+for the smoothest software-rendered presentation, especially through WSLg.
 
 The window is rendered by Axiom directly into its presentation surface; no
 HTML, browser engine, WGPU, or viewport-sized staging buffer is used. There is

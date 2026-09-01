@@ -121,6 +121,10 @@ assistant response, and terminal event to return through HostLink:
 KORE_ROOT=/path/to/kore-frontend-ingress ./scripts/kore-interactive-gate.sh
 ```
 
+Set `VKORE_GATE_ARTIFACT_DIR` to retain the passing serial, debug, HostLink,
+and event-stream witness. `MAKE` and `QEMU` may select non-default GNU Make
+and QEMU executables.
+
 The earlier deterministic QEMU security gate remains available. It builds
 vKore's daemon/workspace tools, then asks Kore's guest-development Make target
 to build and boot the guest artifact:

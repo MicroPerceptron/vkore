@@ -1271,7 +1271,13 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                     request: envelope.request_id,
                     tick: self.tick,
                 });
-                self.log("submitted");
+                self.log(format!(
+                    "submitted role={:?} route={} generation={} request={}",
+                    identity.role,
+                    hex_bytes(&identity.route.0),
+                    identity.generation.get(),
+                    hex_bytes(&envelope.request_id.0),
+                ));
             }
             (SocketPlane::Control, ROUTE_CLOSE) if payload.is_empty() => {
                 if let Err(error) = self.routes[index].state.commit_received(&envelope) {
@@ -1969,7 +1975,13 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                     request,
                     ticks: self.tick.saturating_sub(submitted_tick),
                 });
-                self.log("completed");
+                self.log(format!(
+                    "completed role={:?} route={} generation={} request={}",
+                    sequence.role,
+                    hex_bytes(&sequence.route.0),
+                    sequence.generation.get(),
+                    hex_bytes(&request.0),
+                ));
             }
             BackendEvent::BulkCompleted {
                 sequence,

@@ -20,7 +20,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const HARNESS_API_VERSION: u16 = 1;
 const EVENTS_MAX: usize = 4096;
@@ -102,6 +102,8 @@ pub enum EventKind {
 pub struct HarnessEvent {
     pub api_version: u16,
     pub sequence: u64,
+    #[serde(default)]
+    pub timestamp_unix_ms: u64,
     pub project_id: String,
     pub session_id: String,
     pub prompt_id: Option<String>,
@@ -169,6 +171,12 @@ impl Shared {
         let event = HarnessEvent {
             api_version: HARNESS_API_VERSION,
             sequence: self.next_sequence,
+            timestamp_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
             project_id: session.state.project_id.clone(),
             session_id: session_id.into(),
             prompt_id: prompt_id.map(str::to_owned),

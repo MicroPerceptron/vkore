@@ -337,10 +337,13 @@ fn validate_config(config: &ProjectConfig) -> Result<(), ProjectError> {
         ("llama.cpp runtime", config.inference.llama_server.as_ref()),
         ("model", config.inference.model.as_ref()),
     ] {
-        if let Some(path) = path
-            && !path.exists()
-        {
-            return Err(ProjectError::MissingArtifact(label.into()));
+        if let Some(path) = path {
+            let Ok(metadata) = path.metadata() else {
+                return Err(ProjectError::MissingArtifact(label.into()));
+            };
+            if !metadata.is_file() {
+                return Err(ProjectError::MissingArtifact(label.into()));
+            }
         }
     }
     if config.inference.backend == RuntimeBackend::LlamaCpp

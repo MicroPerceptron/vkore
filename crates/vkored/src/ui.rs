@@ -64,6 +64,7 @@ impl LiveUi {
         let kind = match observation.kind {
             ObservationKind::Input => "input",
             ObservationKind::ModelPrompt => "model_prompt",
+            ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
             ObservationKind::Validation => "validation",

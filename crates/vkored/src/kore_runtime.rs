@@ -2,9 +2,9 @@
 
 use crate::{
     BackendLimits, DeterministicBackend, EventKind, HostLinkDaemon, InferenceBackend,
-    LlamaServerBackend, LlamaServerConfig, ObservationKind, ProjectConfig, ProjectStore,
-    PromptRequest, PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess,
-    WorkspaceBackend,
+    LlamaServerBackend, LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest,
+    PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
+    interactive::emit_inference_observation,
 };
 use kore_hostlink::{FrontendIntentId, FrontendResultKind};
 use serde_json::{Value, json};
@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vkore_vm::{QemuConfig, QemuProcess};
 
-const TICK: Duration = Duration::from_millis(1);
+const DEFAULT_TICK: Duration = Duration::from_millis(1);
+const VM_PAUSE_DRAIN: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
 pub struct KoreVmRuntimeConfig {
@@ -36,6 +37,9 @@ struct ProjectRuntime {
     qemu: QemuConfig,
     process: Option<QemuProcess>,
     hostlink_trace_cursor: usize,
+    active_model_turns: usize,
+    vm_pause_due: Option<Instant>,
+    vm_suspended: bool,
 }
 
 impl KoreVmRuntime {
@@ -155,52 +159,164 @@ impl ProjectRuntime {
             qemu,
             process: None,
             hostlink_trace_cursor: 0,
+            active_model_turns: 0,
+            vm_pause_due: None,
+            vm_suspended: false,
         })
     }
 
     fn stop(&mut self) {
+        if self.vm_suspended {
+            if let Some(process) = self.process.as_ref() {
+                let _ = process.resume();
+            }
+        }
+        self.active_model_turns = 0;
+        self.vm_pause_due = None;
+        self.vm_suspended = false;
         if let Some(mut process) = self.process.take() {
             let _ = process.terminate();
         }
         self.daemon.force_disconnect();
     }
 
-    fn drain_events(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        if std::env::var_os("VKORE_HOSTLINK_TRACE").is_some() {
-            let transcript = self
-                .daemon
-                .core()
-                .transcript()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            if self.hostlink_trace_cursor > transcript.len() {
-                self.hostlink_trace_cursor = 0;
+    fn model_turn_started(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        self.active_model_turns = self.active_model_turns.saturating_add(1);
+        if self.vm_suspended || self.vm_pause_due.is_some() {
+            return;
+        }
+        // The model worker starts in the daemon tick that accepts the guest's
+        // HostLink request. Let that acknowledgement and any paired virtio
+        // notifications drain before pausing virtual CPUs; stopping QEMU in
+        // the middle of that transaction can strand a freshly opened route.
+        self.vm_pause_due = Some(Instant::now() + VM_PAUSE_DRAIN);
+        emit(
+            EventKind::Validation,
+            false,
+            json!({"stage": "host_inference_vm_pause_scheduled", "guest": "kore"}),
+        );
+    }
+
+    fn maybe_suspend_vm(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        let Some(due) = self.vm_pause_due else {
+            return;
+        };
+        if self.active_model_turns == 0 {
+            self.vm_pause_due = None;
+            return;
+        }
+        if Instant::now() < due {
+            return;
+        }
+        let result = self
+            .process
+            .as_ref()
+            .ok_or_else(|| "QEMU process is unavailable".to_owned())
+            .and_then(|process| process.suspend().map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.vm_pause_due = None;
+                self.vm_suspended = true;
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({"stage": "host_inference_vm_suspended", "guest": "kore"}),
+                );
             }
-            for entry in transcript.iter().skip(self.hostlink_trace_cursor) {
+            Err(error) => {
+                self.vm_pause_due = None;
+                emit(
+                    EventKind::Error,
+                    false,
+                    json!({"message": format!("cannot suspend Kore during host inference: {error}")}),
+                );
+            }
+        }
+    }
+
+    fn model_turn_finished(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        self.active_model_turns = self.active_model_turns.saturating_sub(1);
+        if self.active_model_turns == 0 {
+            self.vm_pause_due = None;
+        }
+        if self.active_model_turns != 0 || !self.vm_suspended {
+            return;
+        }
+        let result = self
+            .process
+            .as_ref()
+            .ok_or_else(|| "QEMU process is unavailable".to_owned())
+            .and_then(|process| process.resume().map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.vm_suspended = false;
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({"stage": "host_inference_vm_resumed", "guest": "kore"}),
+                );
+            }
+            Err(error) => emit(
+                EventKind::Error,
+                false,
+                json!({"message": format!("cannot resume Kore after host inference: {error}")}),
+            ),
+        }
+    }
+
+    fn drain_events(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        let transcript = self
+            .daemon
+            .core()
+            .transcript()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if self.hostlink_trace_cursor > transcript.len() {
+            self.hostlink_trace_cursor = 0;
+        }
+        for entry in transcript.iter().skip(self.hostlink_trace_cursor) {
+            if std::env::var_os("VKORE_HOSTLINK_TRACE").is_some() {
                 eprintln!("hostlink: {entry}");
             }
-            self.hostlink_trace_cursor = transcript.len();
+            let message = entry
+                .split_once(' ')
+                .map_or(entry.as_str(), |(_, message)| message);
+            if entry.ends_with("frontend intent claimed by broker") {
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({
+                        "stage": "kore_broker_claimed_intent",
+                        "trusted_user_input": true,
+                        "guest": "kore",
+                        "transport": "hostlink",
+                    }),
+                );
+            } else if entry.ends_with("frontend intent claimed by agent") {
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({
+                        "stage": "kore_agent_claimed_intent",
+                        "guest": "kore",
+                        "transport": "hostlink",
+                    }),
+                );
+            }
+            if message.starts_with("completed role=Broker ")
+                || message.starts_with("completed role=Agent ")
+                || message.starts_with("backend failed ")
+                || message == "cancelled"
+            {
+                self.model_turn_finished(emit);
+            }
         }
+        self.hostlink_trace_cursor = transcript.len();
         while let Some(observation) = self.daemon.take_inference_observation() {
-            let kind = match observation.kind {
-                ObservationKind::BrokerProposal => EventKind::BrokerProposal,
-                ObservationKind::Validation => EventKind::Validation,
-                ObservationKind::ToolCall => EventKind::ToolCall,
-                ObservationKind::ToolResult => EventKind::ToolResult,
-                _ => EventKind::Inference,
-            };
-            emit(
-                kind,
-                false,
-                json!({
-                    "role": format!("{:?}", observation.role),
-                    "kind": format!("{:?}", observation.kind),
-                    "turn": observation.turn,
-                    "payload": observation.payload,
-                    "accepted": observation.accepted,
-                    "detail": observation.detail,
-                }),
-            );
+            if observation.kind == crate::ObservationKind::ModelPrompt {
+                self.model_turn_started(emit);
+            }
+            emit_inference_observation(observation, emit);
         }
         while let Some(observation) = self.daemon.take_authority_observation() {
             emit(
@@ -268,13 +384,16 @@ impl TaskRuntime for KoreVmRuntime {
             EventKind::Validation,
             false,
             json!({
-                "authenticated_intent": hex16(intent_id),
+                "intent_id": hex16(intent_id),
+                "stage": "host_intent_queued",
+                "trusted_user_input": true,
                 "transport": "hostlink",
                 "guest": "kore",
             }),
         );
         let deadline = Instant::now()
             + Duration::from_secs(u64::from(runtime.config.resources.prompt_seconds.max(1)));
+        let tick_interval = hostlink_tick_interval();
         loop {
             if cancelled() {
                 runtime.daemon.cancel_frontend_intent(intent_id);
@@ -302,6 +421,7 @@ impl TaskRuntime for KoreVmRuntime {
                 return PromptStatus::Failed;
             }
             runtime.drain_events(emit);
+            runtime.maybe_suspend_vm(emit);
             while let Some(result) = runtime.daemon.take_frontend_result() {
                 if result.intent_id != intent_id {
                     continue;
@@ -339,7 +459,7 @@ impl TaskRuntime for KoreVmRuntime {
                 );
                 return PromptStatus::Failed;
             }
-            std::thread::sleep(TICK);
+            std::thread::sleep(tick_interval);
         }
     }
 
@@ -357,6 +477,15 @@ impl TaskRuntime for KoreVmRuntime {
     fn backend_incarnation(&self) -> u64 {
         self.incarnation
     }
+}
+
+fn hostlink_tick_interval() -> Duration {
+    std::env::var("VKORE_HOSTLINK_TICK_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|milliseconds| (1..=100).contains(milliseconds))
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_TICK)
 }
 
 fn reserve_loopback_port() -> Result<u16, String> {

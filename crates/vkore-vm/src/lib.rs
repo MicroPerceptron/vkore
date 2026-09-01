@@ -6,6 +6,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+
 pub const CONTROL_PORT_NAME: &str = "org.microperceptron.hostlink.control";
 pub const BULK_PORT_NAME: &str = "org.microperceptron.hostlink.bulk";
 
@@ -104,13 +111,49 @@ impl QemuConfig {
         command.args(self.arguments);
         command.args(self.hostlink_arguments);
         command.arg("-cdrom").arg(self.kore_iso);
-        command.spawn().map(|child| QemuProcess { child })
+        #[cfg(unix)]
+        let qmp = {
+            let directory = tempfile::Builder::new().prefix("vkore-qmp.").tempdir()?;
+            let socket = directory.path().join("control.sock");
+            let socket_text = socket.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "QMP path is not UTF-8")
+            })?;
+            if socket_text.contains([',', '\n', '\r']) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "QMP path contains a QEMU separator",
+                ));
+            }
+            command
+                .arg("-qmp")
+                .arg(format!("unix:{socket_text},server=on,wait=off"));
+            QmpControl {
+                _directory: directory,
+                socket,
+            }
+        };
+        command.spawn().map(|child| QemuProcess {
+            child,
+            #[cfg(unix)]
+            qmp,
+        })
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct QmpControl {
+    // Keeping the directory alive keeps its private socket pathname reserved
+    // for exactly this QEMU process.
+    _directory: tempfile::TempDir,
+    socket: PathBuf,
 }
 
 #[derive(Debug)]
 pub struct QemuProcess {
     child: Child,
+    #[cfg(unix)]
+    qmp: QmpControl,
 }
 
 impl QemuProcess {
@@ -122,12 +165,108 @@ impl QemuProcess {
         self.child.try_wait()
     }
 
+    /// Stop virtual CPUs and virtual time without disturbing QEMU's process,
+    /// sockets, or pending HostLink bytes. Host inference can then outlive a
+    /// guest-side bounded poll without spending the Kore task's time budget.
+    #[cfg(unix)]
+    pub fn suspend(&self) -> io::Result<()> {
+        self.qmp.execute("stop")
+    }
+
+    #[cfg(not(unix))]
+    pub fn suspend(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "QEMU suspension is supported only on Unix hosts",
+        ))
+    }
+
+    /// Resume virtual CPUs previously stopped by [`Self::suspend`].
+    #[cfg(unix)]
+    pub fn resume(&self) -> io::Result<()> {
+        self.qmp.execute("cont")
+    }
+
+    #[cfg(not(unix))]
+    pub fn resume(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "QEMU resumption is supported only on Unix hosts",
+        ))
+    }
+
     pub fn terminate(&mut self) -> io::Result<ExitStatus> {
         if let Some(status) = self.child.try_wait()? {
             return Ok(status);
         }
         self.child.kill()?;
         self.child.wait()
+    }
+}
+
+#[cfg(unix)]
+impl QmpControl {
+    fn execute(&self, command: &str) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let stream = loop {
+            match UnixStream::connect(&self.socket) {
+                Ok(stream) => break stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let mut reader = BufReader::new(stream);
+        Self::read_until(&mut reader, "\"QMP\"")?;
+        Self::write_command(reader.get_mut(), "qmp_capabilities")?;
+        Self::read_return(&mut reader)?;
+        Self::write_command(reader.get_mut(), command)?;
+        Self::read_return(&mut reader)
+    }
+
+    fn write_command(stream: &mut UnixStream, command: &str) -> io::Result<()> {
+        if !command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid QMP command",
+            ));
+        }
+        writeln!(stream, "{{\"execute\":\"{command}\"}}")?;
+        stream.flush()
+    }
+
+    fn read_return(reader: &mut BufReader<UnixStream>) -> io::Result<()> {
+        Self::read_until(reader, "\"return\"")
+    }
+
+    fn read_until(reader: &mut BufReader<UnixStream>, marker: &str) -> io::Result<()> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "QMP closed before acknowledging the command",
+                ));
+            }
+            if line.contains("\"error\"") {
+                return Err(io::Error::other(format!("QMP command failed: {line}")));
+            }
+            if line.contains(marker) {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -187,5 +326,34 @@ mod tests {
             std::thread::yield_now();
         };
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qmp_control_negotiates_capabilities_before_stopping_the_vm() {
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("qmp.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            writeln!(stream, "{{\"QMP\":{{\"version\":{{}}}}}}").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("qmp_capabilities"));
+            writeln!(stream, "{{\"return\":{{}}}}").unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("\"stop\""));
+            writeln!(stream, "{{\"return\":{{}}}}").unwrap();
+        });
+        let control = QmpControl {
+            _directory: directory,
+            socket,
+        };
+        control.execute("stop").unwrap();
+        server.join().unwrap();
     }
 }

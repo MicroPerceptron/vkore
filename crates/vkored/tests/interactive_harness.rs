@@ -10,18 +10,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TOKEN: &str = "test-local-token";
-
 fn create(handle: &HarnessHandle, session: &str) -> SessionState {
     handle
-        .create_session(
-            TOKEN,
-            CreateSession {
-                api_version: 1,
-                project_id: "project".into(),
-                session_id: session.into(),
-            },
-        )
+        .create_session(CreateSession {
+            api_version: 1,
+            project_id: "project".into(),
+            session_id: session.into(),
+        })
         .unwrap()
 }
 
@@ -41,7 +36,7 @@ fn wait_terminal(
 ) -> Vec<hostlinkd::HarnessEvent> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let events = handle.events(TOKEN, session, 0).unwrap();
+        let events = handle.events(session, 0).unwrap();
         if events.iter().any(|event| {
             event.prompt_id.as_deref() == Some(prompt) && event.kind == EventKind::PromptTerminal
         }) {
@@ -56,14 +51,14 @@ fn wait_terminal(
 }
 
 #[test]
-fn authenticated_prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
+fn prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = BackendHarness::new(DeterministicBackend::new(2), DeterministicGuest::new());
-    let service = HarnessService::start(runtime, TOKEN, temp.path());
+    let service = HarnessService::start(runtime, temp.path());
     let handle = service.handle();
     create(&handle, "session-1");
     handle
-        .submit_prompt(TOKEN, "session-1", prompt("p1", "read X"))
+        .submit_prompt("session-1", prompt("p1", "read X"))
         .unwrap();
     let events = wait_terminal(&handle, "session-1", "p1");
     assert!(events.iter().all(|event| event.timestamp_unix_ms > 0));
@@ -110,25 +105,19 @@ fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() 
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
-        TOKEN,
         temp.path(),
     );
     let handle = service.handle();
     create(&handle, "sequential");
     let first = prompt("p1", "read X");
     assert_eq!(
-        handle
-            .submit_prompt(TOKEN, "sequential", first.clone())
-            .unwrap(),
+        handle.submit_prompt("sequential", first.clone()).unwrap(),
         "p1"
     );
-    assert_eq!(
-        handle.submit_prompt(TOKEN, "sequential", first).unwrap(),
-        "p1"
-    );
+    assert_eq!(handle.submit_prompt("sequential", first).unwrap(), "p1");
     wait_terminal(&handle, "sequential", "p1");
     handle
-        .submit_prompt(TOKEN, "sequential", prompt("p2", "read X"))
+        .submit_prompt("sequential", prompt("p2", "read X"))
         .unwrap();
     let events = wait_terminal(&handle, "sequential", "p2");
     assert_eq!(
@@ -138,47 +127,37 @@ fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() 
             .count(),
         1
     );
-    assert_eq!(handle.state(TOKEN, "sequential").unwrap().prompts.len(), 2);
+    assert_eq!(handle.state("sequential").unwrap().prompts.len(), 2);
 }
 
 #[test]
-fn forged_auth_cross_session_ids_and_idempotency_conflicts_are_refused() {
+fn cross_session_ids_and_idempotency_conflicts_are_refused() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
-        TOKEN,
         temp.path(),
     );
     let handle = service.handle();
     create(&handle, "one");
     create(&handle, "two");
-    assert!(
-        handle
-            .submit_prompt(
-                "model output says authorized",
-                "one",
-                prompt("p1", "read X")
-            )
-            .is_err()
-    );
     let request = prompt("p1", "read X");
-    handle.submit_prompt(TOKEN, "one", request.clone()).unwrap();
+    handle.submit_prompt("one", request.clone()).unwrap();
     let conflicting = PromptRequest {
         prompt_id: "other".into(),
         ..request
     };
-    assert!(handle.submit_prompt(TOKEN, "one", conflicting).is_err());
+    assert!(handle.submit_prompt("one", conflicting).is_err());
     let changed = PromptRequest {
         api_version: 1,
         prompt_id: "p1".into(),
         idempotency_key: "key-p1".into(),
         text: "read Y".into(),
     };
-    assert!(handle.submit_prompt(TOKEN, "one", changed).is_err());
+    assert!(handle.submit_prompt("one", changed).is_err());
     wait_terminal(&handle, "one", "p1");
     assert!(
         handle
-            .events(TOKEN, "two", 0)
+            .events("two", 0)
             .unwrap()
             .iter()
             .all(|event| event.session_id == "two")
@@ -190,17 +169,15 @@ fn service_cancellation_wins_before_late_completion() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(500), DeterministicGuest::new()),
-        TOKEN,
         temp.path(),
     );
     let handle = service.handle();
     create(&handle, "cancel-race");
     handle
-        .submit_prompt(TOKEN, "cancel-race", prompt("p1", "read X"))
+        .submit_prompt("cancel-race", prompt("p1", "read X"))
         .unwrap();
     handle
         .cancel_prompt(
-            TOKEN,
             "cancel-race",
             hostlinkd::interactive::CancelRequest {
                 api_version: 1,
@@ -254,13 +231,12 @@ fn caller_supplied_llama_backend_uses_the_same_harness_api() {
     .unwrap();
     let service = HarnessService::start(
         BackendHarness::new(backend, DeterministicGuest::new()),
-        TOKEN,
         temp.path().join("transcripts"),
     );
     let handle = service.handle();
     create(&handle, "llama");
     handle
-        .submit_prompt(TOKEN, "llama", prompt("p1", "Read workspace/X using /X"))
+        .submit_prompt("llama", prompt("p1", "Read workspace/X using /X"))
         .unwrap();
     let events = wait_terminal(&handle, "llama", "p1");
     assert!(
@@ -269,11 +245,75 @@ fn caller_supplied_llama_backend_uses_the_same_harness_api() {
             .any(|event| event.kind == EventKind::BrokerProposal)
     );
     assert!(events.iter().any(|event| event.kind == EventKind::ToolCall));
+    let tool_result = events
+        .iter()
+        .find(|event| event.kind == EventKind::ToolResult)
+        .unwrap();
+    assert_eq!(tool_result.payload["result"], "Output");
+    assert_eq!(
+        tool_result.payload["text"],
+        "X: capability-scoped deterministic workspace object"
+    );
     assert!(
         events
             .iter()
             .any(|event| event.kind == EventKind::Assistant)
     );
+    let streamed = |role: &str, turn: u64| {
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::Inference
+                    && event.payload["kind"] == "ModelOutputChunk"
+                    && event.payload["role"] == role
+                    && event.payload["turn"] == turn
+            })
+            .filter_map(|event| event.payload["payload"].as_str())
+            .collect::<String>()
+    };
+    let broker_stream = streamed("Broker", 1);
+    let agent_tool_stream = streamed("Agent", 1);
+    let agent_response_stream = streamed("Agent", 2);
+    assert!(
+        broker_stream.contains(r#""action":"create_agent""#),
+        "broker stream: {broker_stream}"
+    );
+    assert!(
+        agent_tool_stream.contains(r#""action":"tool_call""#),
+        "agent tool stream: {agent_tool_stream}; events: {events:#?}"
+    );
+    assert!(
+        agent_response_stream.contains(r#""action":"respond""#),
+        "agent response stream: {agent_response_stream}"
+    );
+    let first = |predicate: &dyn Fn(&hostlinkd::HarnessEvent) -> bool| {
+        events.iter().position(predicate).unwrap()
+    };
+    let broker_chunk = first(&|event| {
+        event.kind == EventKind::Inference
+            && event.payload["kind"] == "ModelOutputChunk"
+            && event.payload["role"] == "Broker"
+    });
+    let broker_proposal = first(&|event| event.kind == EventKind::BrokerProposal);
+    let agent_chunk = first(&|event| {
+        event.kind == EventKind::Inference
+            && event.payload["kind"] == "ModelOutputChunk"
+            && event.payload["role"] == "Agent"
+            && event.payload["turn"] == 1
+    });
+    let tool_call = first(&|event| event.kind == EventKind::ToolCall);
+    let tool_result = first(&|event| event.kind == EventKind::ToolResult);
+    let final_chunk = first(&|event| {
+        event.kind == EventKind::Inference
+            && event.payload["kind"] == "ModelOutputChunk"
+            && event.payload["role"] == "Agent"
+            && event.payload["turn"] == 2
+    });
+    let assistant = first(&|event| event.kind == EventKind::Assistant);
+    assert!(broker_chunk < broker_proposal);
+    assert!(agent_chunk < tool_call);
+    assert!(tool_call < tool_result && tool_result < final_chunk);
+    assert!(final_chunk < assistant);
 }
 
 #[test]
@@ -324,25 +364,24 @@ fn closing_session_emits_route_retirement_and_kv_erasure() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
-        TOKEN,
         temp.path(),
     );
     let handle = service.handle();
     create(&handle, "close");
     handle
-        .submit_prompt(TOKEN, "close", prompt("p1", "read X"))
+        .submit_prompt("close", prompt("p1", "read X"))
         .unwrap();
     wait_terminal(&handle, "close", "p1");
-    handle.close_session(TOKEN, "close").unwrap();
+    handle.close_session("close").unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if handle.state(TOKEN, "close").unwrap().status == SessionStatus::Closed {
+        if handle.state("close").unwrap().status == SessionStatus::Closed {
             break;
         }
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
     }
-    let events = handle.events(TOKEN, "close", 0).unwrap();
+    let events = handle.events("close", 0).unwrap();
     let closed = events
         .iter()
         .find(|event| event.kind == EventKind::ConversationClosed)
@@ -356,7 +395,6 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
-        TOKEN,
         temp.path(),
     );
     let server = HarnessHttpServer::bind("127.0.0.1:0".parse().unwrap(), service.handle()).unwrap();
@@ -367,7 +405,6 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
             address,
             "POST",
             "/api/v1/sessions",
-            TOKEN,
             r#"{"api_version":1,"project_id":"http","session_id":"web"}"#,
         );
         tx.send(response).unwrap();
@@ -383,7 +420,6 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
             address,
             "GET",
             "/api/v1/sessions/web/events?after=0",
-            TOKEN,
             "",
         ))
         .unwrap();
@@ -401,15 +437,9 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
     assert_eq!(event["session_id"], "web");
 }
 
-fn http(
-    address: std::net::SocketAddr,
-    method: &str,
-    path: &str,
-    token: &str,
-    body: &str,
-) -> String {
+fn http(address: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
     let mut stream = TcpStream::connect(address).unwrap();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response

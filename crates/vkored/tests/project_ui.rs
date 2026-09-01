@@ -11,8 +11,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-const TOKEN: &str = "project-ui-token";
-
 fn config(root: &Path, state: &Path) -> ProjectConfig {
     ProjectConfig {
         schema_version: 1,
@@ -87,6 +85,15 @@ fn project_preflight_rejects_state_inside_root_missing_artifacts_and_unbounded_w
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let store = ProjectStore::open(temp.path().join("projects")).unwrap();
+    let mut empty_state = config(&workspace, Path::new(""));
+    assert!(
+        store
+            .save(empty_state.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("InvalidWorkspaceState")
+    );
+    empty_state.workspace.state = temp.path().join("state");
     let mut value = config(&workspace, &workspace.join("state"));
     assert!(
         store
@@ -170,7 +177,6 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
     std::fs::create_dir(&workspace).unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
-        TOKEN,
         temp.path().join("transcripts"),
     );
     let server = HarnessHttpServer::bind_with_state(
@@ -181,9 +187,19 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
     .unwrap();
     let address = server.local_addr();
 
-    let shell = transact(&server, address, "GET", "/", "", "", &[]);
+    let shell = transact(&server, address, "GET", "/", "", &[]);
     assert!(shell.starts_with("HTTP/1.1 200"));
     assert!(shell.contains("Bounded agents, visible authority"));
+    assert!(!shell.contains("launchToken"));
+    assert!(!shell.contains("Authorization"));
+    assert!(!shell.contains("tokenModal"));
+    assert!(shell.contains("if(!sid){await startSession();return}"));
+    assert!(shell.contains("ModelOutputChunk"));
+    assert!(shell.contains("class=\"working\""));
+    assert!(shell.contains("responded in"));
+    assert!(shell.contains("workOpen:new Set"));
+    assert!(shell.contains("if(e.sequence<=state.cursor)continue"));
+    assert!(shell.contains("['BrokerProposal','ToolCall','ToolResult'].includes(inspectorKind)"));
 
     let body = serde_json::to_string(&config(&workspace, &temp.path().join("state"))).unwrap();
     let rejected = transact(
@@ -191,14 +207,13 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
         address,
         "POST",
         "/api/v1/projects",
-        TOKEN,
         &body,
         &[
             ("Origin", "https://attacker.invalid"),
             ("X-vKore-Client", "harness-ui-v1"),
         ],
     );
-    assert!(rejected.starts_with("HTTP/1.1 401"));
+    assert!(rejected.starts_with("HTTP/1.1 403"));
 
     let origin = format!("http://{address}");
     let saved = transact(
@@ -206,7 +221,6 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
         address,
         "POST",
         "/api/v1/projects",
-        TOKEN,
         &body,
         &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
     );
@@ -221,7 +235,6 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
         address,
         "POST",
         "/api/v1/projects/secure-project/approvals",
-        TOKEN,
         r#"{"session_id":"ui","addon_id":"reference.host","tool":"echo"}"#,
         &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
     );
@@ -233,14 +246,13 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
         address,
         "POST",
         &decision_path,
-        TOKEN,
         r#"{"allow":true,"lifetime":"once","ui_session":"ui"}"#,
         &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
     );
     let payload: Value = serde_json::from_str(approved.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(payload["commit"]["committed"], true);
     assert_eq!(payload["grant"]["committed"], false);
-    let policy = transact(&server, address, "GET", "/api/v1/approvals", TOKEN, "", &[]);
+    let policy = transact(&server, address, "GET", "/api/v1/approvals", "", &[]);
     let payload: Value = serde_json::from_str(policy.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(payload["grants"][0]["committed"], true);
     let grant_id = payload["grants"][0]["id"].as_str().unwrap();
@@ -250,13 +262,12 @@ fn ui_api_serves_shell_persists_project_and_blocks_cross_origin_mutation() {
         address,
         "POST",
         &revoke_path,
-        TOKEN,
         r#"{"ui_session":"ui"}"#,
         &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
     );
     let payload: Value = serde_json::from_str(revoked.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(payload["commit"]["committed"], true);
-    let policy = transact(&server, address, "GET", "/api/v1/approvals", TOKEN, "", &[]);
+    let policy = transact(&server, address, "GET", "/api/v1/approvals", "", &[]);
     let payload: Value = serde_json::from_str(policy.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert!(payload["grants"].as_array().unwrap().is_empty());
 }
@@ -266,14 +277,12 @@ fn transact(
     address: SocketAddr,
     method: &str,
     path: &str,
-    token: &str,
     body: &str,
     headers: &[(&'static str, &str)],
 ) -> String {
     let body = body.to_owned();
     let method = method.to_owned();
     let path = path.to_owned();
-    let token = token.to_owned();
     let headers: Vec<_> = headers
         .iter()
         .map(|(name, value)| (*name, (*value).to_owned()))
@@ -281,7 +290,11 @@ fn transact(
     let (tx, rx) = mpsc::channel();
     let client = thread::spawn(move || {
         let mut stream = TcpStream::connect(address).unwrap();
-        write!(stream, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\n").unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n"
+        )
+        .unwrap();
         for (name, value) in headers {
             write!(stream, "{name}: {value}\r\n").unwrap();
         }

@@ -27,6 +27,14 @@ fn identity(byte: u8, role: BackendRole) -> SequenceIdentity {
     }
 }
 
+fn boot_agent_identity(byte: u8) -> SequenceIdentity {
+    SequenceIdentity {
+        route: RouteId(id(byte)),
+        generation: TaskGeneration::new(1).unwrap(),
+        role: BackendRole::Agent,
+    }
+}
+
 fn limits() -> BackendLimits {
     BackendLimits {
         sequences: 3,
@@ -134,6 +142,8 @@ fn broker_planning_request_for(turn: u64, intent: &str, timeout_ticks: u32) -> V
         plan: *b"prompt-plan-0001",
         intent,
         ceiling: TaskBudget {
+            cpu_share: 1,
+            memory_bytes: 64 * 1024 * 1024,
             tool_calls: 3,
             ..TaskBudget::ZERO
         },
@@ -216,14 +226,17 @@ fn supervised_stub_uses_kbp1_and_returns_validated_kbr1() {
     while Instant::now() < deadline {
         tick += 1;
         match backend.poll(tick) {
-            Some(BackendEvent::Completed { payload, .. }) => {
+            Some(BackendEvent::Completed { payload, part, .. }) => {
+                assert_eq!(part, 0, "structured broker tokens stay off HostLink");
                 let reply = decode_broker_reply(&payload).unwrap();
                 assert_eq!(reply.action, BrokerActionKind::CreateAgent);
                 assert_eq!(
                     reply.selectors().collect::<Vec<_>>(),
                     vec![[5; 16], [2; 16]]
                 );
-                assert_eq!(reply.budget.tool_calls, 1);
+                assert_eq!(reply.budget.cpu_share, 1);
+                assert_eq!(reply.budget.memory_bytes, 64 * 1024 * 1024);
+                assert_eq!(reply.budget.tool_calls, 3);
                 return;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
@@ -232,6 +245,35 @@ fn supervised_stub_uses_kbp1_and_returns_validated_kbr1() {
         }
     }
     panic!("broker planner timed out")
+}
+
+#[test]
+fn supervised_llama_preserves_the_exact_legacy_kore_boot_probe() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let agent = boot_agent_identity(2);
+    backend.open(agent).unwrap();
+    backend
+        .submit(agent, RequestId(*b"kore-shell-probe"), b"seat-a", 0)
+        .unwrap();
+
+    let event = (1..=4)
+        .find_map(|tick| backend.poll(tick))
+        .expect("the deterministic boot probe completes without model inference");
+    let BackendEvent::Completed {
+        payload,
+        turn,
+        usage,
+        ..
+    } = event
+    else {
+        panic!("unexpected boot-probe event: {event:?}");
+    };
+    assert_eq!(turn, 0);
+    assert_eq!(payload.len(), 74);
+    assert_eq!(payload[0], 1);
+    assert_eq!(&payload[2..10], &1_u64.to_le_bytes());
+    assert_eq!(usage.prompt_tokens, 2);
+    assert_eq!(usage.completion_tokens, 19);
 }
 
 #[test]
@@ -413,7 +455,8 @@ fn supervised_stub_turns_agent_json_into_typed_tool_call_and_completion() {
         assert!(Instant::now() < deadline, "agent tool call timed out");
         tick += 1;
         match backend.poll(tick) {
-            Some(BackendEvent::Completed { payload, .. }) => {
+            Some(BackendEvent::Completed { payload, part, .. }) => {
+                assert_eq!(part, 0, "structured agent tokens stay off HostLink");
                 let event = decode_agent_event(&payload).unwrap();
                 assert_eq!(event.kind, AgentEventKind::ToolCall);
                 assert_eq!(event.command, "cat");
@@ -450,6 +493,47 @@ fn supervised_stub_turns_agent_json_into_typed_tool_call_and_completion() {
                 let event = decode_agent_event(&payload).unwrap();
                 assert_eq!(event.kind, AgentEventKind::Respond);
                 assert_eq!(event.text, "The file contains: architecture contents");
+                let observations: Vec<_> =
+                    std::iter::from_fn(|| backend.take_observation()).collect();
+                let streamed_turn = |turn| {
+                    observations
+                        .iter()
+                        .filter(|observation| {
+                            observation.kind == ObservationKind::ModelOutputChunk
+                                && observation.role == BackendRole::Agent
+                                && observation.turn == turn
+                        })
+                        .map(|observation| observation.payload.as_str())
+                        .collect::<String>()
+                };
+                assert_eq!(
+                    streamed_turn(1),
+                    r#"{"action":"tool_call","command":"cat","arguments":[{"kind":"path","value":"/workspace/docs/architecture.md"}]}"#
+                );
+                assert_eq!(
+                    streamed_turn(2),
+                    r#"{"action":"respond","text":"The file contains: architecture contents"}"#
+                );
+                for turn in [1, 2] {
+                    let chunk = observations
+                        .iter()
+                        .position(|observation| {
+                            observation.kind == ObservationKind::ModelOutputChunk
+                                && observation.turn == turn
+                        })
+                        .unwrap();
+                    let validated = observations
+                        .iter()
+                        .position(|observation| {
+                            observation.kind == ObservationKind::Validation
+                                && observation.turn == turn
+                        })
+                        .unwrap();
+                    assert!(
+                        chunk < validated,
+                        "turn {turn} was validated before it streamed"
+                    );
+                }
                 break;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("raw agent JSON escaped KAE1"),
@@ -483,6 +567,15 @@ fn supervised_stub_allows_a_bounded_response_without_a_tool_call() {
                 assert_eq!(event.text, "Hello! How can I help?");
                 let observations: Vec<_> =
                     std::iter::from_fn(|| backend.take_observation()).collect();
+                let streamed = observations
+                    .iter()
+                    .filter(|observation| observation.kind == ObservationKind::ModelOutputChunk)
+                    .map(|observation| observation.payload.as_str())
+                    .collect::<String>();
+                assert_eq!(
+                    streamed,
+                    r#"{"action":"respond","text":"Hello! How can I help?"}"#
+                );
                 assert!(observations.iter().any(|observation| {
                     observation.kind == ObservationKind::RawModelCompletion
                         && observation.payload

@@ -1,4 +1,7 @@
+mod fonts;
 mod render_backend;
+mod theme;
+mod widgets;
 
 use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
@@ -37,7 +40,10 @@ use winit::{
 
 use crate::render_backend::NativeBackend;
 
-type UiElement<'a> = Element<'a, Message, Theme, AxRenderer<System>>;
+/// The renderer every widget in this binary is generic over.
+pub(crate) type AxUi = AxRenderer<System>;
+
+type UiElement<'a> = Element<'a, Message, Theme, AxUi>;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -410,192 +416,19 @@ fn session_work_rows(events: &[Value]) -> Vec<WorkRow> {
     rows
 }
 
-fn panel_style(background: u32, border: Option<u32>, radius: f32) -> iced_widget::container::Style {
-    iced_widget::container::Style {
-        text_color: Some(rgb(0xf4f5f7)),
-        background: Some(Background::Color(rgb(background))),
-        border: Border {
-            color: border.map(rgb).unwrap_or(Color::TRANSPARENT),
-            width: border.map(|_| 1.0).unwrap_or(0.0),
-            radius: radius.into(),
-        },
-        shadow: if radius > 0.0 {
-            Shadow {
-                color: Color::from_rgba8(0, 0, 0, 0.28),
-                offset: Vector::new(0.0, 2.0),
-                blur_radius: 7.0,
-            }
-        } else {
-            Shadow::default()
-        },
-        ..Default::default()
-    }
-}
-
+/// A panel carrying a single hairline rule on one edge.
+///
+/// The display list has no per-edge border width, so the rule is drawn as a
+/// full border and the panel is clipped by its neighbours on the other three
+/// sides. This is exactly how the sidebar and header read in the design.
 fn divider_right(background: u32) -> iced_widget::container::Style {
-    let mut style = panel_style(background, None, 0.0);
-    style.border = Border {
-        color: rgb(0x272d37),
-        width: 1.0,
-        radius: 0.0.into(),
-    };
+    let mut style = theme::panel(background, None, 0.0);
+    style.border = theme::border(theme::BORDER, 0.0);
     style
 }
 
-fn button_style(
-    kind: ButtonKind,
-) -> impl Fn(&Theme, iced_widget::button::Status) -> iced_widget::button::Style + Copy {
-    move |_theme, status| {
-        use iced_widget::button::Status;
-        let hovered = matches!(status, Status::Hovered | Status::Pressed);
-        let disabled = matches!(status, Status::Disabled);
-        let (background, text_color, border_color, border_width) = match kind {
-            ButtonKind::Primary => (
-                Some(if hovered { 0xc8ff80 } else { 0xb8ef6a }),
-                0x12170a,
-                0xb8ef6a,
-                1.0,
-            ),
-            ButtonKind::Danger => (
-                Some(if hovered { 0x1d2026 } else { 0x171b21 }),
-                0xff7d83,
-                0x353c46,
-                1.0,
-            ),
-            ButtonKind::Outline => (
-                Some(if hovered { 0x1d2229 } else { 0x171b21 }),
-                0xe8ebef,
-                if hovered { 0x596573 } else { 0x353c46 },
-                1.0,
-            ),
-            ButtonKind::Nav => (
-                hovered.then_some(0x171b21),
-                if hovered { 0xf4f5f7 } else { 0x8d96a5 },
-                0x000000,
-                0.0,
-            ),
-            ButtonKind::Project(active) => (
-                (active || hovered).then_some(0x171b21),
-                if active || hovered {
-                    0xf4f5f7
-                } else {
-                    0xbbc1ca
-                },
-                if active || hovered {
-                    0x2a3039
-                } else {
-                    0x000000
-                },
-                if active || hovered { 1.0 } else { 0.0 },
-            ),
-            ButtonKind::Addon(active) => (
-                Some(if active || hovered {
-                    0x171b21
-                } else {
-                    0x11151a
-                }),
-                0xf4f5f7,
-                if active { 0x4b6233 } else { 0x272d37 },
-                1.0,
-            ),
-            ButtonKind::New => (
-                hovered.then_some(0x11151a),
-                if hovered { 0xb8ef6a } else { 0xc8ced7 },
-                if hovered { 0xb8ef6a } else { 0x3a424e },
-                1.0,
-            ),
-            ButtonKind::Tab(active) => (
-                active.then_some(0x1a1f26),
-                if active { 0xf4f5f7 } else { 0x8d96a5 },
-                0x000000,
-                0.0,
-            ),
-        };
-        let mut color = rgb(text_color);
-        if disabled {
-            color.a = 0.4;
-        }
-        iced_widget::button::Style {
-            background: background.map(|value| {
-                let mut color = rgb(value);
-                if disabled {
-                    color.a = 0.4;
-                }
-                if kind == ButtonKind::Primary {
-                    let mut highlight = rgb(0xd4ff9d);
-                    highlight.a = color.a;
-                    Background::Gradient(
-                        iced_core::gradient::Linear::new(iced_core::Radians(
-                            core::f32::consts::FRAC_PI_2,
-                        ))
-                        .add_stop(0.0, highlight)
-                        .add_stop(1.0, color)
-                        .into(),
-                    )
-                } else {
-                    Background::Color(color)
-                }
-            }),
-            text_color: color,
-            border: Border {
-                color: rgb(border_color),
-                width: border_width,
-                radius: 8.0.into(),
-            },
-            shadow: if background.is_some() {
-                Shadow {
-                    color: Color::from_rgba8(0, 0, 0, 0.22),
-                    offset: Vector::new(0.0, 1.0),
-                    blur_radius: 4.0,
-                }
-            } else {
-                Shadow::default()
-            },
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ButtonKind {
-    Primary,
-    Danger,
-    Outline,
-    Nav,
-    Project(bool),
-    Addon(bool),
-    New,
-    Tab(bool),
-}
-
-fn editor_style(
-    _theme: &Theme,
-    status: iced_widget::text_editor::Status,
-) -> iced_widget::text_editor::Style {
-    let focused = matches!(status, iced_widget::text_editor::Status::Focused { .. });
-    iced_widget::text_editor::Style {
-        background: Background::Color(rgb(0x12161b)),
-        border: Border {
-            color: rgb(if focused { 0x596573 } else { 0x353d48 }),
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        placeholder: rgb(0x8d96a5),
-        value: rgb(0xf4f5f7),
-        selection: rgb(0x334024),
-    }
-}
-
-fn selectable_style(
-    color: u32,
-) -> impl Fn(&Theme, iced_widget::text_editor::Status) -> iced_widget::text_editor::Style + Copy {
-    move |_theme, _status| iced_widget::text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: rgb(color),
-        value: rgb(color),
-        selection: rgb(0x465a2f),
-    }
+fn divider_bottom(background: u32) -> iced_widget::container::Style {
+    divider_right(background)
 }
 
 fn input_style(
@@ -604,15 +437,15 @@ fn input_style(
 ) -> iced_widget::text_input::Style {
     let focused = matches!(status, iced_widget::text_input::Status::Focused { .. });
     iced_widget::text_input::Style {
-        background: Background::Color(rgb(0x0c1014)),
+        background: Background::Color(theme::rgb(theme::BACKGROUND)),
         border: Border {
             color: rgb(if focused { 0x596573 } else { 0x343b45 }),
             width: 1.0,
             radius: 8.0.into(),
         },
-        placeholder: rgb(0x59616e),
-        value: rgb(0xeef0f3),
-        selection: rgb(0x334024),
+        placeholder: theme::rgb(theme::BORDER_DIM),
+        value: theme::rgb(theme::TEXT),
+        selection: theme::rgb(theme::MAGENTA),
     }
 }
 
@@ -1354,13 +1187,14 @@ impl Model {
             .filter(|event| event["kind"] == "user_prompt")
         {
             let prompt_id = user["prompt_id"].as_str().unwrap_or_default();
+            // The meta line is drawn above the card as its own mono label, so
+            // the selectable content is the message body alone.
             desired.insert(
                 format!("prompt:{prompt_id}:user"),
-                format!(
-                    "{}\n{}",
-                    message_meta("YOU", user, None),
-                    user["payload"]["text"].as_str().unwrap_or_default()
-                ),
+                user["payload"]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             );
             let prompt_events = self
                 .events
@@ -1368,21 +1202,19 @@ impl Model {
                 .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                 .collect::<Vec<_>>();
             for (index, row) in work_rows(&prompt_events).into_iter().enumerate() {
-                desired.insert(
-                    format!("prompt:{prompt_id}:work:{index}"),
-                    format!("{}:\n{}", row.speaker, row.body),
-                );
+                // The speaker is drawn as its own label above the body so it
+                // can carry the row's colour; only the body is selectable.
+                desired.insert(format!("prompt:{prompt_id}:work:{index}"), row.body);
             }
             if let Some(assistant) = prompt_events.iter().find(|event| {
                 event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
             }) {
                 desired.insert(
                     format!("prompt:{prompt_id}:assistant"),
-                    format!(
-                        "{}\n{}",
-                        message_meta("AGENT 1", assistant, event_timestamp(user)),
-                        assistant["payload"]["text"].as_str().unwrap_or_default()
-                    ),
+                    assistant["payload"]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
                 );
             }
         }
@@ -1415,7 +1247,18 @@ impl Model {
         }
     }
 
-    fn selectable<'a>(&'a self, key: &str, size: u32, color: u32) -> UiElement<'a> {
+    /// Read-only conversation text the reader can select and copy.
+    ///
+    /// The face is explicit rather than derived: prose carries the body face,
+    /// while machine-shaped content -- logs, tool arguments, JSON -- carries
+    /// mono so its columns line up.
+    fn selectable<'a>(
+        &'a self,
+        key: &str,
+        size: f32,
+        color: u32,
+        face: iced_core::Font,
+    ) -> UiElement<'a> {
         let key_owned = key.to_owned();
         let content = self
             .selectable_text
@@ -1425,7 +1268,8 @@ impl Model {
             .on_action(move |action| Message::SelectText(key_owned.clone(), action))
             .padding(0)
             .size(size)
-            .style(selectable_style(color))
+            .font(face)
+            .style(widgets::selectable(color))
             .into()
     }
 
@@ -1484,7 +1328,7 @@ impl Model {
         container(content)
             .center(Length::Fill)
             .style(|_| {
-                let mut overlay = panel_style(0x050608, None, 0.0);
+                let mut overlay = theme::panel(theme::BACKGROUND, None, 0.0);
                 if let Some(Background::Color(color)) = overlay.background.as_mut() {
                     color.a = 0.86;
                 }
@@ -1494,13 +1338,17 @@ impl Model {
     }
 
     fn sidebar(&self, width: f32) -> UiElement<'_> {
-        let mark = container(space::Space::new().width(18).height(18))
-            .padding(4)
-            .style(|_| panel_style(0xb8ef6a, Some(0x657348), 8.0));
-        let brand = row![mark, text("vKore").size(16).color(rgb(0xf4f5f7))]
-            .spacing(10)
-            .align_y(alignment::Vertical::Center);
-        let mut projects = column![].spacing(4);
+        // The mark is the one illustration in the system and needs an image
+        // path the display list does not yet carry, so the brand row is the
+        // wordmark alone until that lands.
+        let brand = container(
+            text("KORE AGENTS")
+                .font(fonts::DISPLAY)
+                .size(15.0)
+                .color(theme::rgb(theme::TEXT)),
+        )
+        .padding([14, 14]);
+        let mut projects = column![].spacing(theme::SPACE_1);
         for (index, project) in self
             .projects
             .iter()
@@ -1512,70 +1360,113 @@ impl Model {
                 .as_str()
                 .unwrap_or("deterministic")
                 .replace('_', " ");
-            let dot = container(space::Space::new().width(7).height(7))
-                .style(move |_| panel_style(if active { 0xb8ef6a } else { 0x59616e }, None, 3.5));
+            let access = project["workspace"]["access"]
+                .as_str()
+                .unwrap_or("read only")
+                .replace('_', " ");
+            // A 5x5 square, not a circle: the system marks state with a mark,
+            // never with a fill behind the row.
+            let dot = container(space::Space::new().width(5).height(5)).style(move |_| {
+                theme::panel(
+                    if active {
+                        theme::MAGENTA
+                    } else {
+                        theme::BORDER_DIM
+                    },
+                    None,
+                    1.0,
+                )
+            });
             let label = column![
-                text(project["name"].as_str().unwrap_or("Project")).size(14),
-                text(backend).size(11).color(rgb(0x80bfff)),
+                widgets::body(
+                    project["name"].as_str().unwrap_or("Project").to_owned(),
+                    theme::SIZE_SM,
+                    if active {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    },
+                ),
+                widgets::mono(format!("{backend} · {access}"), theme::TEXT_MUTED),
             ]
             .spacing(2);
             projects = projects.push(
                 button(
                     row![dot, label]
-                        .spacing(9)
+                        .spacing(theme::SPACE_2)
                         .align_y(alignment::Vertical::Center),
                 )
                 .width(Length::Fill)
                 .padding([9, 10])
-                .style(button_style(ButtonKind::Project(active)))
+                .style(widgets::button_style(widgets::Button::Row(active)))
                 .on_press(Message::SelectProject(index)),
             );
         }
         let project_idle = self.project().is_some() && self.session.is_none();
         let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
-            button(text(label).size(13))
-                .padding([8, 8])
+            button(widgets::label(label, theme::TEXT_MUTED))
+                .padding([7, 8])
                 .width(Length::Fill)
-                .style(button_style(ButtonKind::Nav))
+                .style(widgets::button_style(widgets::Button::Ghost))
                 .on_press_maybe(message)
         };
         let body = column![
-            container(brand).padding([6, 8]),
-            container(text("PROJECTS").size(10).color(rgb(0x8d96a5))).padding([10, 9]),
-            scrollable(projects).height(Length::Fill),
-            button(text("+  New project").size(14))
-                .width(Length::Fill)
-                .padding([9, 10])
-                .style(button_style(ButtonKind::New))
-                .on_press_maybe(self.session.is_none().then_some(Message::NewProject)),
+            brand,
+            container(widgets::label("Projects", theme::TEXT_MUTED)).padding(iced_core::Padding {
+                top: 10.0,
+                right: 14.0,
+                bottom: 6.0,
+                left: 14.0
+            }),
+            container(scrollable(projects).height(Length::Fill)).padding([0, 10]),
+            container(
+                button(widgets::label("New project", theme::TEXT_SECONDARY))
+                    .width(Length::Fill)
+                    .padding([9, 10])
+                    .style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press_maybe(self.session.is_none().then_some(Message::NewProject))
+            )
+            .padding(10),
             space::vertical(),
-            container(space::Space::new().height(1).width(Length::Fill))
-                .style(|_| panel_style(0x272d37, None, 0.0)),
-            nav(
-                "Project settings",
-                project_editable.then_some(Message::EditProject)
-            ),
-            nav(
-                "Duplicate project",
-                project_idle.then_some(Message::DuplicateProject)
-            ),
-            nav(
-                "Export configuration",
-                self.project().map(|_| Message::ExportProject)
-            ),
-            nav(
-                "Archive project",
-                project_idle.then_some(Message::ArchiveProject)
-            ),
-            nav("Transcript & audit", Some(Message::Rail(Rail::Activity))),
-        ]
-        .spacing(3);
+            container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
+                theme::BORDER,
+                None,
+                0.0
+            )),
+            container(
+                column![
+                    nav(
+                        "Project settings",
+                        project_editable.then_some(Message::EditProject)
+                    ),
+                    nav(
+                        "Duplicate project",
+                        project_idle.then_some(Message::DuplicateProject)
+                    ),
+                    nav(
+                        "Export configuration",
+                        self.project().map(|_| Message::ExportProject)
+                    ),
+                    nav(
+                        "Archive project",
+                        project_idle.then_some(Message::ArchiveProject)
+                    ),
+                    nav("Transcript & audit", Some(Message::Rail(Rail::Activity))),
+                ]
+                .spacing(1)
+            )
+            .padding(iced_core::Padding {
+                top: 6.0,
+                right: 10.0,
+                bottom: 10.0,
+                left: 10.0
+            }),
+        ];
         container(body)
-            .padding([10, 12])
             .width(width)
             .height(Length::Fill)
-            .style(|_| divider_right(0x0c0f13))
+            .style(|_| divider_right(theme::BACKGROUND))
             .into()
     }
 
@@ -1584,108 +1475,90 @@ impl Model {
             .project()
             .and_then(|p| p["name"].as_str())
             .unwrap_or("No project open");
-        let start = if self.session.is_some() {
-            "Stop"
-        } else {
-            "Start"
+        // The subtitle carries what status chips used to: backend, workspace
+        // root, and either the live session id or that the sandbox is stopped.
+        let subtitle = match self.project() {
+            None => "create a project to begin".to_owned(),
+            Some(project) => {
+                let backend = project["inference"]["backend"]
+                    .as_str()
+                    .unwrap_or("deterministic")
+                    .replace('_', " ");
+                let root = project["workspace"]["root"]
+                    .as_str()
+                    .unwrap_or("no workspace");
+                match self.session.as_deref() {
+                    Some(session) => format!("{backend} · {root} · {session}"),
+                    None => format!("{backend} · {root} · sandbox stopped"),
+                }
+            }
         };
-        let runtime = self
-            .project()
-            .and_then(|p| p["inference"]["backend"].as_str())
-            .unwrap_or("Create a project to begin")
-            .replace('_', " ");
-        let health = |label: &'static str| {
-            container(
-                row![
-                    container(space::Space::new().width(6).height(6)).style(|_| {
-                        panel_style(
-                            if self.session.is_some() {
-                                0xb8ef6a
-                            } else {
-                                0x606875
-                            },
-                            None,
-                            3.0,
-                        )
-                    }),
-                    text(label).size(11).color(rgb(0x8d96a5)),
-                ]
-                .spacing(6)
-                .align_y(alignment::Vertical::Center),
-            )
-            .padding([5, 8])
-            .style(|_| panel_style(0x0b0e12, Some(0x272d37), 99.0))
+        let view_button = |label: &'static str, rail: Rail| {
+            button(widgets::label(
+                label,
+                if self.rail == rail {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_MUTED
+                },
+            ))
+            .height(30)
+            .padding([0, 12])
+            .style(widgets::button_style(widgets::Button::Choice(
+                self.rail == rail,
+            )))
+            .on_press(Message::Rail(rail))
         };
         let top = container(
             row![
                 column![
-                    text(project_name).size(14).color(rgb(0xf4f5f7)),
-                    text(runtime).size(11).color(rgb(0x8d96a5)),
+                    widgets::body(project_name.to_owned(), theme::SIZE_SM, theme::TEXT)
+                        .wrapping(iced_core::text::Wrapping::None)
+                        .ellipsis(iced_core::text::Ellipsis::End),
+                    widgets::mono(subtitle, theme::TEXT_MUTED)
+                        .wrapping(iced_core::text::Wrapping::None)
+                        .ellipsis(iced_core::text::Ellipsis::End),
                 ]
                 .spacing(2)
-                .width(Length::Fill),
-                row![
-                    health("Sandbox"),
-                    health("HostLink"),
-                    health("Workspace"),
-                    health("Inference")
-                ]
-                .spacing(6),
-                button(text(start).size(13))
-                    .padding([8, 11])
-                    .style(button_style(ButtonKind::Outline))
-                    .on_press_maybe(
-                        (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
-                    ),
-                button(text("Clean").size(13))
-                    .padding([8, 11])
-                    .style(button_style(ButtonKind::Danger))
+                .width(Length::Fill)
+                .clip(true),
+                button(widgets::label(
+                    if self.session.is_some() {
+                        "Stop"
+                    } else {
+                        "Start"
+                    },
+                    theme::TEXT_SECONDARY
+                ))
+                .height(30)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
+                ),
+                button(widgets::label("Clean", theme::ERROR))
+                    .height(30)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Danger))
                     .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
+                view_button("Agents", Rail::Agents),
+                view_button("Authority", Rail::Authority),
+                view_button("Activity", Rail::Activity),
             ]
-            .spacing(10)
+            .spacing(theme::SPACE_2)
             .align_y(alignment::Vertical::Center),
         )
         .padding([0, 22])
         .height(64)
         .width(Length::Fill)
-        .style(|_| divider_right(0x0b0e12));
+        .style(|_| divider_bottom(theme::BACKGROUND));
 
-        let conversation: UiElement<'_> = if self.session.is_none() {
-            container(
-                column![
-                    text(if self.project().is_some() {
-                        "Sandbox stopped."
-                    } else {
-                        "Bounded agents, visible authority."
-                    })
-                    .size(25)
-                    .color(rgb(0xf4f5f7)),
-                    text(if self.project().is_some() {
-                        "Start a fresh isolated conversation when you are ready."
-                    } else {
-                        "Create or open a project, then start its Kore sandbox."
-                    })
-                    .size(13)
-                    .color(rgb(0x8d96a5))
-                ]
-                .spacing(8),
-            )
-            .center(Length::Fill)
-            .into()
-        } else if self.events.is_empty() {
-            container(
-                column![
-                    text("Sandbox ready.").size(25).color(rgb(0xf4f5f7)),
-                    text("Try “read X” to watch prompt-scoped authority.")
-                        .size(13)
-                        .color(rgb(0x8d96a5))
-                ]
-                .spacing(8),
-            )
-            .center(Length::Fill)
-            .into()
+        // An empty harness stays empty. The composer sits at the bottom with
+        // nothing above it: no headline, no helper copy, no status chip.
+        let conversation: UiElement<'_> = if self.events.is_empty() {
+            container(space::vertical()).height(Length::Fill).into()
         } else {
-            let mut items = column![].spacing(16);
+            let mut items = column![].spacing(theme::SPACE_4);
             let prompts = self
                 .events
                 .iter()
@@ -1700,17 +1573,32 @@ impl Model {
                 let started_at = event_timestamp(user);
                 let user_key = format!("prompt:{prompt_id}:user");
                 items = items.push(
-                    container(self.selectable(&user_key, 13, 0xd7dbe0))
+                    column![
+                        widgets::label(message_meta("You", user, None), theme::TEXT_MUTED),
+                        container(self.selectable(
+                            &user_key,
+                            theme::SIZE_SM,
+                            theme::TEXT,
+                            fonts::BODY
+                        ))
                         .padding([13, 15])
                         .width(Length::Fill)
-                        .style(|_| panel_style(0x1a2115, Some(0x334024), 13.0)),
+                        .style(|_| theme::panel(
+                            theme::PANEL,
+                            Some(theme::BORDER),
+                            theme::RADIUS_LG
+                        )),
+                    ]
+                    .spacing(theme::SPACE_2),
                 );
 
                 let rows = work_rows(&prompt_events);
+                let step_count = rows.len();
                 let terminal = prompt_events
                     .iter()
                     .find(|event| event["kind"] == "prompt_terminal");
                 let active = terminal.is_none() && self.prompt_id.as_deref() == Some(prompt_id);
+                let failed = terminal.is_some_and(|event| event["payload"]["status"] == "failed");
                 let ended_at = terminal
                     .and_then(|event| event_timestamp(event))
                     .or_else(|| {
@@ -1721,8 +1609,8 @@ impl Model {
                     .or(started_at);
                 let work_title = if active {
                     "Working".to_owned()
-                } else if terminal.is_some_and(|event| event["payload"]["status"] == "failed") {
-                    "Stopped with an error".to_owned()
+                } else if failed {
+                    "Stopped · failed".to_owned()
                 } else {
                     format!(
                         "Worked for {}",
@@ -1733,67 +1621,124 @@ impl Model {
                         )
                     )
                 };
+                let state_color = if active {
+                    theme::MAGENTA
+                } else if failed {
+                    theme::ERROR
+                } else {
+                    theme::SUCCESS
+                };
                 let expanded = self.expanded_work.contains(prompt_id);
                 let work_header = button(
                     row![
-                        text(if active { "•" } else { "+" })
-                            .size(11)
-                            .color(rgb(0xb8ef6a)),
-                        text(work_title).size(12).color(rgb(0xcdd2d9)),
+                        container(space::Space::new().width(5).height(5))
+                            .style(move |_| theme::panel(state_color, None, 1.0)),
+                        widgets::label(work_title, theme::TEXT),
                         space::horizontal(),
-                        text(if expanded { "^" } else { "v" })
-                            .size(15)
-                            .color(rgb(0x8d96a5)),
+                        widgets::mono(
+                            format!(
+                                "{step_count} step{}",
+                                if step_count == 1 { "" } else { "s" }
+                            ),
+                            theme::TEXT_MUTED
+                        ),
+                        widgets::mono(
+                            if expanded { "\u{25b2}" } else { "\u{25bc}" },
+                            theme::TEXT_MUTED
+                        ),
                     ]
                     .spacing(9)
                     .align_y(alignment::Vertical::Center),
                 )
                 .padding([10, 13])
                 .width(Length::Fill)
-                .style(button_style(ButtonKind::Nav))
+                .style(widgets::button_style(widgets::Button::Ghost))
                 .on_press(Message::ToggleWorking(prompt_id.to_owned()));
                 let mut timeline = column![work_header].spacing(0);
                 if expanded {
-                    let mut details = column![].spacing(8);
+                    let mut details = column![].spacing(theme::SPACE_2);
                     if rows.is_empty() {
-                        details = details.push(
-                            text("Waiting for the sandbox…")
-                                .size(10)
-                                .color(rgb(0x8d96a5)),
-                        );
+                        details = details
+                            .push(widgets::mono("waiting for the sandbox", theme::TEXT_MUTED));
                     }
                     for (index, work) in rows.into_iter().enumerate() {
+                        // The label carries the row's meaning: the accent for
+                        // authority and broker activity, error red for a
+                        // failure, off-white for ordinary progress.
+                        let label_color = match work.kind.as_str() {
+                            "error" => theme::ERROR,
+                            "authority" | "broker_proposal" | "capability" => theme::MAGENTA,
+                            _ => theme::TEXT,
+                        };
                         let body_color = if work.kind == "error" {
-                            0xffc0c4
+                            theme::ERROR
                         } else {
-                            0xd7dbe1
+                            theme::TEXT_SECONDARY
                         };
                         let work_key = format!("prompt:{prompt_id}:work:{index}");
                         details = details.push(
-                            container(self.selectable(&work_key, 10, body_color))
-                                .padding([8, 10])
-                                .width(Length::Fill)
-                                .style(|_| panel_style(0x090c10, Some(0x242a32), 7.0)),
+                            container(
+                                column![
+                                    widgets::label(&work.speaker, label_color),
+                                    self.selectable(
+                                        &work_key,
+                                        theme::SIZE_MONO,
+                                        body_color,
+                                        fonts::MONO
+                                    ),
+                                ]
+                                .spacing(theme::SPACE_1),
+                            )
+                            .padding([8, 10])
+                            .width(Length::Fill)
+                            .style(|_| {
+                                theme::panel(
+                                    theme::BACKGROUND,
+                                    Some(theme::BORDER),
+                                    theme::RADIUS_SM,
+                                )
+                            }),
                         );
                     }
-                    timeline =
-                        timeline.push(container(details).padding([12, 13]).width(Length::Fill));
+                    timeline = timeline.push(
+                        container(details)
+                            .padding([12, 13])
+                            .width(Length::Fill)
+                            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
+                    );
                 }
-                items = items.push(
-                    container(timeline)
-                        .width(Length::Fill)
-                        .style(|_| panel_style(0x0d1014, Some(0x272d37), 12.0)),
-                );
+                items =
+                    items.push(container(timeline).width(Length::Fill).style(|_| {
+                        theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG)
+                    }));
 
-                if prompt_events.iter().any(|event| {
+                if let Some(assistant) = prompt_events.iter().find(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) {
                     let assistant_key = format!("prompt:{prompt_id}:assistant");
                     items = items.push(
-                        container(self.selectable(&assistant_key, 13, 0xd7dbe0))
+                        column![
+                            widgets::label(
+                                message_meta("Validated assistant", assistant, started_at),
+                                theme::TEXT_MUTED
+                            ),
+                            // The one magenta border in the turn: a validated
+                            // answer is the only thing that earns the accent.
+                            container(self.selectable(
+                                &assistant_key,
+                                theme::SIZE_SM,
+                                theme::TEXT,
+                                fonts::BODY
+                            ))
                             .padding([13, 15])
                             .width(Length::Fill)
-                            .style(|_| panel_style(0x12161c, Some(0x4b6233), 13.0)),
+                            .style(|_| theme::panel(
+                                theme::PANEL,
+                                Some(theme::MAGENTA),
+                                theme::RADIUS_LG
+                            )),
+                        ]
+                        .spacing(theme::SPACE_2),
                     );
                 }
             }
@@ -1804,21 +1749,28 @@ impl Model {
         };
 
         let send = if self.prompt_id.is_some() {
-            button(text("Cancel"))
-                .padding([8, 11])
-                .style(button_style(ButtonKind::Danger))
+            button(widgets::label("Cancel", theme::ERROR))
+                .height(30)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Danger))
                 .on_press(Message::CancelPrompt)
         } else {
-            button(text("Send"))
-                .padding([8, 14])
-                .style(button_style(ButtonKind::Primary))
+            button(widgets::label("Send", theme::MAGENTA))
+                .height(30)
+                .padding([0, 14])
+                .style(widgets::button_style(widgets::Button::Primary))
                 .on_press_maybe(
                     (self.session.is_some() && !self.prompt.text().trim().is_empty())
                         .then_some(Message::SendPrompt),
                 )
         };
+        let access = self
+            .project()
+            .and_then(|project| project["workspace"]["access"].as_str())
+            .unwrap_or("read only")
+            .replace('_', " ");
         let prompt = text_editor(&self.prompt)
-            .placeholder("Ask the agent…")
+            .placeholder("Describe the change")
             .on_action(Message::PromptAction)
             .key_binding(|press| {
                 if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter))
@@ -1831,27 +1783,37 @@ impl Model {
                     iced_core::text::editor::Binding::from_key_press(press)
                 }
             })
-            .height(62)
-            .padding([10, 5])
-            .size(13)
-            .style(editor_style);
+            .height(72)
+            .padding([14, 16])
+            .size(theme::SIZE_SM)
+            .font(fonts::BODY)
+            .style(widgets::editor);
         let composer = container(column![
             prompt,
-            row![
-                text(if self.session.is_some() {
-                    "Enter to send · Shift+Enter for a new line"
-                } else {
-                    "No active sandbox"
-                })
-                .size(10)
-                .color(rgb(0x8d96a5)),
-                space::horizontal(),
-                send,
-            ]
-            .align_y(alignment::Vertical::Center),
+            container(
+                row![
+                    space::horizontal(),
+                    container(widgets::label(access, theme::TEXT_MUTED))
+                        .padding([3, 7])
+                        .style(|_| theme::panel(
+                            theme::BACKGROUND,
+                            Some(theme::BORDER),
+                            theme::RADIUS_SM
+                        )),
+                    send,
+                ]
+                .spacing(theme::SPACE_2)
+                .align_y(alignment::Vertical::Center)
+            )
+            .padding(iced_core::Padding {
+                top: 8.0,
+                right: 10.0,
+                bottom: 8.0,
+                left: 16.0,
+            })
+            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
         ])
-        .padding(10)
-        .style(|_| panel_style(0x12161b, Some(0x353d48), 14.0));
+        .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
         let composer_wrap = container(composer)
             .padding(iced_core::Padding {
                 top: 10.0,
@@ -1860,51 +1822,46 @@ impl Model {
                 left: 40.0,
             })
             .width(Length::Fill)
-            .style(|_| panel_style(0x080a0d, None, 0.0));
+            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0));
         container(column![top, conversation, composer_wrap])
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| panel_style(0x080a0d, None, 0.0))
+            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
             .into()
     }
 
     fn rail_panel(&self) -> UiElement<'_> {
-        let tab = |label, value| {
-            button(text(label).size(12))
-                .padding([6, 8])
-                .style(button_style(ButtonKind::Tab(self.rail == value)))
-                .on_press(Message::Rail(value))
+        let (title, subtitle) = match self.rail {
+            Rail::Agents => ("Agents", "capability inheritance and live state"),
+            Rail::Authority => ("Authority", "grants held against this workspace"),
+            Rail::Activity => ("Activity", "validated transcript for this session"),
         };
-        let tabs = row![
-            tab("Agents", Rail::Agents),
-            tab("Authority", Rail::Authority),
-            tab("Activity", Rail::Activity),
-        ]
-        .spacing(3);
         let body: UiElement<'_> = match self.rail {
             Rail::Agents => self.agents_rail(),
             Rail::Authority => self.authority_rail(),
             Rail::Activity => self.activity_rail(),
         };
-        container(
-            column![
-                container(tabs)
-                    .padding(iced_core::Padding {
-                        top: 0.0,
-                        right: 0.0,
-                        bottom: 10.0,
-                        left: 0.0,
-                    })
-                    .width(Length::Fill)
-                    .style(|_| divider_right(0x0c0f13)),
-                scrollable(body).height(Length::Fill)
-            ]
-            .spacing(14),
-        )
-        .padding(14)
-        .width(330)
+        container(column![
+            container(
+                column![
+                    widgets::mono(title, theme::TEXT),
+                    widgets::mono(subtitle, theme::TEXT_MUTED),
+                ]
+                .spacing(theme::SPACE_1)
+            )
+            .padding(iced_core::Padding {
+                top: 14.0,
+                right: 14.0,
+                bottom: 12.0,
+                left: 14.0,
+            })
+            .width(Length::Fill)
+            .style(|_| divider_bottom(theme::BACKGROUND)),
+            container(scrollable(body).height(Length::Fill)).padding(14),
+        ])
+        .width(300)
         .height(Length::Fill)
-        .style(|_| divider_right(0x0c0f13))
+        .style(|_| divider_right(theme::BACKGROUND))
         .into()
     }
 
@@ -1918,14 +1875,16 @@ impl Model {
         };
         let kv = |label: &'static str, value: String| {
             row![
-                text(label).size(11).color(rgb(0x80bfff)),
+                text(label).size(11).color(theme::rgb(theme::TEXT_MUTED)),
                 space::horizontal(),
-                text(value).size(11).color(rgb(0xd3d7dd)),
+                text(value)
+                    .size(11)
+                    .color(theme::rgb(theme::TEXT_SECONDARY)),
             ]
         };
         let worker = container(
             column![
-                text("Worker agent").size(12).color(rgb(0xf4f5f7)),
+                text("Worker agent").size(12).color(theme::rgb(theme::TEXT)),
                 kv("Status", status.into()),
                 kv(
                     "Generation",
@@ -1943,19 +1902,19 @@ impl Model {
                 ),
                 row![
                     container(space::Space::new().height(4).width(Length::FillPortion(1)))
-                        .style(|_| panel_style(0xb8ef6a, None, 99.0)),
+                        .style(|_| theme::panel(theme::MAGENTA, None, 1.0)),
                     container(space::Space::new().height(4).width(Length::FillPortion(3)))
-                        .style(|_| panel_style(0x262c34, None, 99.0)),
+                        .style(|_| theme::panel(theme::BORDER, None, 1.0)),
                 ],
                 text("Budget bounded by project limits")
                     .size(11)
-                    .color(rgb(0x80bfff)),
+                    .color(theme::rgb(theme::TEXT_MUTED)),
             ]
             .spacing(8),
         )
         .padding(14)
         .width(Length::Fill)
-        .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0));
+        .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
 
         let resources = self.project().map(|p| &p["resources"]);
         let resource = |key: &str, fallback: &str| {
@@ -1966,7 +1925,9 @@ impl Model {
         };
         let limits = container(
             column![
-                text("Project limits").size(12).color(rgb(0xf4f5f7)),
+                text("Project limits")
+                    .size(12)
+                    .color(theme::rgb(theme::TEXT)),
                 kv("Agents", resource("agent_limit", "—")),
                 kv("Timeout", format!("{}s", resource("prompt_seconds", "—"))),
                 kv("Memory", format!("{} MiB", resource("memory_mib", "—"))),
@@ -1975,7 +1936,7 @@ impl Model {
         )
         .padding(14)
         .width(Length::Fill)
-        .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0));
+        .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
         column![worker, limits].spacing(10).into()
     }
 
@@ -1986,43 +1947,60 @@ impl Model {
             .filter(|event| event["kind"] == "capability")
             .count();
         let proposal: UiElement<'_> = if self.selectable_text.contains_key("authority:latest") {
-            self.selectable("authority:latest", 11, 0xb7bec8)
+            self.selectable(
+                "authority:latest",
+                theme::SIZE_MONO,
+                theme::TEXT_SECONDARY,
+                fonts::MONO,
+            )
         } else {
             text("No prompt-scoped authority has been proposed.")
                 .size(11)
-                .color(rgb(0xb7bec8))
+                .color(theme::rgb(theme::TEXT_SECONDARY))
                 .into()
         };
         column![
             container(
                 column![
-                    text("Prompt authority").size(12).color(rgb(0xf4f5f7)),
+                    text("Prompt authority")
+                        .size(12)
+                        .color(theme::rgb(theme::TEXT)),
                     proposal,
                 ]
                 .spacing(8)
             )
             .padding(14)
             .width(Length::Fill)
-            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0)),
+            .style(|_| theme::panel(
+                theme::PANEL,
+                Some(theme::BORDER),
+                theme::RADIUS_LG
+            )),
             container(
                 column![
-                    text("Capability ledger").size(12).color(rgb(0xf4f5f7)),
+                    text("Capability ledger")
+                        .size(12)
+                        .color(theme::rgb(theme::TEXT)),
                     text(format!("{capability_count} visible capability events"))
                         .size(11)
-                        .color(rgb(0x8d96a5)),
+                        .color(theme::rgb(theme::TEXT_MUTED)),
                     text(if self.approvals.is_null() {
                         "No committed grants"
                     } else {
                         "Committed policy loaded"
                     })
                     .size(11)
-                    .color(rgb(0xb8ef6a)),
+                    .color(theme::rgb(theme::MAGENTA)),
                 ]
                 .spacing(8)
             )
             .padding(14)
             .width(Length::Fill)
-            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0)),
+            .style(|_| theme::panel(
+                theme::PANEL,
+                Some(theme::BORDER),
+                theme::RADIUS_LG
+            )),
         ]
         .spacing(10)
         .into()
@@ -2033,16 +2011,16 @@ impl Model {
         if rows.is_empty() {
             return container(
                 column![
-                    text("Activity").size(12).color(rgb(0xf4f5f7)),
+                    text("Activity").size(12).color(theme::rgb(theme::TEXT)),
                     text("Broker and agent outputs will appear here as they are validated.")
                         .size(11)
-                        .color(rgb(0x8d96a5)),
+                        .color(theme::rgb(theme::TEXT_MUTED)),
                 ]
                 .spacing(8),
             )
             .padding(14)
             .width(Length::Fill)
-            .style(|_| panel_style(0x11151a, Some(0x272d37), 10.0))
+            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG))
             .into();
         }
         let mut activity = column![].spacing(10);
@@ -2051,16 +2029,17 @@ impl Model {
             activity = activity.push(
                 container(self.selectable(
                     &key,
-                    10,
+                    theme::SIZE_MONO,
                     if row.kind == "error" {
-                        0xffc0c4
+                        theme::ERROR
                     } else {
-                        0xd7dbe0
+                        theme::TEXT_SECONDARY
                     },
+                    fonts::MONO,
                 ))
                 .padding([8, 10])
                 .width(Length::Fill)
-                .style(|_| panel_style(0x0e1116, Some(0x272d37), 8.0)),
+                .style(|_| theme::panel(theme::BACKGROUND, Some(theme::BORDER), theme::RADIUS_MD)),
             );
         }
         activity.into()
@@ -2086,7 +2065,9 @@ impl Model {
         };
         let field = |label: &'static str, pointer: &'static str, placeholder: &'static str| {
             column![
-                text(label).size(11).color(rgb(0xaab1bb)),
+                text(label)
+                    .size(11)
+                    .color(theme::rgb(theme::TEXT_SECONDARY)),
                 text_input(placeholder, value(pointer))
                     .on_input(move |value| Message::WizardField(pointer, value))
                     .padding([9, 10])
@@ -2100,7 +2081,9 @@ impl Model {
                       placeholder: &'static str,
                       kind: RequestKind| {
             column![
-                text(label).size(11).color(rgb(0xaab1bb)),
+                text(label)
+                    .size(11)
+                    .color(theme::rgb(theme::TEXT_SECONDARY)),
                 row![
                     text_input(placeholder, value(pointer))
                         .on_input(move |value| Message::WizardField(pointer, value))
@@ -2109,7 +2092,7 @@ impl Model {
                         .style(input_style),
                     button(text("Browse").size(12))
                         .padding([9, 10])
-                        .style(button_style(ButtonKind::Outline))
+                        .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press(Message::Browse(kind)),
                 ]
                 .spacing(6),
@@ -2131,14 +2114,14 @@ impl Model {
                 .spacing(8),
             )
             .padding([7, 8])
-            .style(button_style(ButtonKind::Nav))
+            .style(widgets::button_style(widgets::Button::Ghost))
             .on_press(Message::WizardToggle(pointer))
         };
         let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
             let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
             button(text(label).size(12))
                 .padding([8, 10])
-                .style(button_style(ButtonKind::Project(selected)))
+                .style(widgets::button_style(widgets::Button::Row(selected)))
                 .on_press(Message::WizardChoice(pointer, option))
         };
 
@@ -2161,7 +2144,9 @@ impl Model {
                     "Outside the workspace"
                 ),
                 column![
-                    text("Workspace access").size(11).color(rgb(0xaab1bb)),
+                    text("Workspace access")
+                        .size(11)
+                        .color(theme::rgb(theme::TEXT_SECONDARY)),
                     row![
                         choice("Read only", "/workspace/access", "read_only"),
                         choice("Review changes", "/workspace/access", "review_changes"),
@@ -2187,7 +2172,9 @@ impl Model {
                     == Some("llama_cpp");
                 let mut form = column![
                     column![
-                        text("Inference backend").size(11).color(rgb(0xaab1bb)),
+                        text("Inference backend")
+                            .size(11)
+                            .color(theme::rgb(theme::TEXT_SECONDARY)),
                         row![
                             choice(
                                 "Deterministic security oracle",
@@ -2241,18 +2228,18 @@ impl Model {
                         "llama.cpp runs behind the authenticated Kore bridge; paths remain host-side configuration."
                     } else {
                         "Deterministic mode tests the complete authenticated broker, agent, tool, and UI flow without downloading a model."
-                    }).size(11).color(rgb(0xb8ef6a)))
+                    }).size(11).color(theme::rgb(theme::MAGENTA)))
                     .padding(10)
-                    .style(|_| panel_style(0x121d0e, Some(0x36532b), 8.0)),
+                    .style(|_| theme::panel(theme::PANEL, Some(theme::SUCCESS), theme::RADIUS_MD)),
                 )
                 .into()
             }
             2 => {
                 let mut addons = column![
-                    text("Host and guest add-ons").size(13).color(rgb(0xf4f5f7)),
+                    text("Host and guest add-ons").size(13).color(theme::rgb(theme::TEXT)),
                     text("Enable only the bounded capabilities this project needs. Authority is still proposed per prompt.")
                         .size(11)
-                        .color(rgb(0x8d96a5)),
+                        .color(theme::rgb(theme::TEXT_MUTED)),
                 ]
                 .spacing(8);
                 if let Some(entries) = self.catalog["addons"].as_array() {
@@ -2276,9 +2263,13 @@ impl Model {
                                         .size(14)
                                         .color(rgb(if enabled { 0xb8ef6a } else { 0x8d96a5 })),
                                     column![
-                                        text(domain.to_uppercase()).size(9).color(rgb(0x80bfff)),
-                                        text(name.to_owned()).size(12).color(rgb(0xf4f5f7)),
-                                        text(detail).size(11).color(rgb(0x8d96a5)),
+                                        text(domain.to_uppercase())
+                                            .size(9)
+                                            .color(theme::rgb(theme::TEXT_MUTED)),
+                                        text(name.to_owned())
+                                            .size(12)
+                                            .color(theme::rgb(theme::TEXT)),
+                                        text(detail).size(11).color(theme::rgb(theme::TEXT_MUTED)),
                                     ]
                                     .spacing(4),
                                 ]
@@ -2286,7 +2277,7 @@ impl Model {
                             )
                             .padding(11)
                             .width(Length::Fill)
-                            .style(button_style(ButtonKind::Addon(enabled)))
+                            .style(widgets::button_style(widgets::Button::Choice(enabled)))
                             .on_press(Message::WizardAddon(id)),
                         );
                     }
@@ -2294,7 +2285,9 @@ impl Model {
                 addons.into()
             }
             3 => column![
-                text("Authority defaults").size(13).color(rgb(0xf4f5f7)),
+                text("Authority defaults")
+                    .size(13)
+                    .color(theme::rgb(theme::TEXT)),
                 row![
                     choice("Allow once", "/approvals/default_scope", "once"),
                     choice("For this session", "/approvals/default_scope", "session"),
@@ -2313,10 +2306,10 @@ impl Model {
                     "/approvals/standing_policy_enabled"
                 ),
                 container(space::Space::new().height(1).width(Length::Fill))
-                    .style(|_| panel_style(0x272d37, None, 0.0)),
+                    .style(|_| theme::panel(theme::BORDER, None, 0.0)),
                 text("Retention and project limits")
                     .size(13)
-                    .color(rgb(0xf4f5f7)),
+                    .color(theme::rgb(theme::TEXT)),
                 row![
                     field("Transcript days", "/retention/transcript_days", "30"),
                     field("Memory (MiB)", "/resources/memory_mib", "2048"),
@@ -2344,24 +2337,32 @@ impl Model {
                     "Run preflight to resolve paths, scan workspace bounds, and verify the selected runtime before saving.",
                 );
                 column![
-                    text("Review and preflight").size(13).color(rgb(0xf4f5f7)),
+                    text("Review and preflight")
+                        .size(13)
+                        .color(theme::rgb(theme::TEXT)),
                     container(
                         column![
-                            text(value("/name")).size(16).color(rgb(0xf4f5f7)),
+                            text(value("/name")).size(16).color(theme::rgb(theme::TEXT)),
                             text(format!(
                                 "{} · {}",
                                 value("/workspace/access"),
                                 value("/inference/backend")
                             ))
                             .size(11)
-                            .color(rgb(0x80bfff)),
-                            text(value("/workspace/root")).size(11).color(rgb(0xb7bec8)),
+                            .color(theme::rgb(theme::TEXT_MUTED)),
+                            text(value("/workspace/root"))
+                                .size(11)
+                                .color(theme::rgb(theme::TEXT_SECONDARY)),
                         ]
                         .spacing(6),
                     )
                     .padding(13)
                     .width(Length::Fill)
-                    .style(|_| panel_style(0x0d1116, Some(0x272d37), 9.0)),
+                    .style(|_| theme::panel(
+                        theme::BACKGROUND,
+                        Some(theme::BORDER),
+                        theme::RADIUS_SM
+                    )),
                     container(text(report.to_owned()).size(11).color(rgb(
                         if self.preflight.is_some() {
                             0xb8ef6a
@@ -2371,27 +2372,24 @@ impl Model {
                     )))
                     .padding(11)
                     .width(Length::Fill)
-                    .style(|_| panel_style(
-                        if self.preflight.is_some() {
-                            0x121d0e
-                        } else {
-                            0x211b0d
-                        },
+                    // Warning before a preflight has run, success after it.
+                    .style(|_| theme::panel(
+                        theme::PANEL,
                         Some(if self.preflight.is_some() {
-                            0x36532b
+                            theme::SUCCESS
                         } else {
-                            0x665326
+                            theme::WARNING
                         }),
-                        8.0
+                        theme::RADIUS_MD
                     )),
                     text("Advanced portable configuration")
                         .size(11)
-                        .color(rgb(0x8d96a5)),
+                        .color(theme::rgb(theme::TEXT_MUTED)),
                     text_editor(source)
                         .on_action(Message::ConfigAction)
                         .height(150)
                         .size(11)
-                        .style(editor_style),
+                        .style(widgets::editor),
                 ]
                 .spacing(11)
                 .into()
@@ -2402,30 +2400,30 @@ impl Model {
         for index in 0..5 {
             let done = index <= usize::from(self.wizard_page);
             steps = steps.push(
-                container(space::Space::new().height(4).width(Length::Fill)).style(move |_| {
-                    panel_style(if done { 0xb8ef6a } else { 0x2c323b }, None, 99.0)
+                container(space::Space::new().height(1).width(Length::Fill)).style(move |_| {
+                    theme::panel(if done { theme::MAGENTA } else { theme::BORDER }, None, 0.0)
                 }),
             );
         }
         let back = button(text("Back").size(12))
             .padding([8, 11])
-            .style(button_style(ButtonKind::Outline))
+            .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
         let next: UiElement<'_> = if self.wizard_page < 4 {
             button(text("Next").size(12))
                 .padding([8, 13])
-                .style(button_style(ButtonKind::Primary))
+                .style(widgets::button_style(widgets::Button::Primary))
                 .on_press(Message::WizardPage(self.wizard_page + 1))
                 .into()
         } else {
             row![
                 button(text("Run preflight").size(12))
                     .padding([8, 11])
-                    .style(button_style(ButtonKind::Outline))
+                    .style(widgets::button_style(widgets::Button::Secondary))
                     .on_press_maybe((!self.busy).then_some(Message::Preflight)),
                 button(text("Save project").size(12))
                     .padding([8, 13])
-                    .style(button_style(ButtonKind::Primary))
+                    .style(widgets::button_style(widgets::Button::Primary))
                     .on_press_maybe(
                         (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
                     ),
@@ -2434,17 +2432,19 @@ impl Model {
             .into()
         };
         let dialog = column![
-            text("Project configuration").size(22).color(rgb(0xf4f5f7)),
+            text("Project configuration")
+                .size(22)
+                .color(theme::rgb(theme::TEXT)),
             text("Portable vKore schema · credentials and capabilities are never stored here.")
                 .size(11)
-                .color(rgb(0x8d96a5)),
+                .color(theme::rgb(theme::TEXT_MUTED)),
             steps,
             scrollable(page).height(Length::Fill),
             container(
                 row![
                     button(text("Cancel").size(12))
                         .padding([8, 11])
-                        .style(button_style(ButtonKind::Danger))
+                        .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(Message::CloseEditor),
                     space::horizontal(),
                     back,
@@ -2467,7 +2467,7 @@ impl Model {
             .padding(22)
             .width(760)
             .height(Length::FillPortion(9))
-            .style(|_| panel_style(0x11151a, Some(0x343b45), 16.0))
+            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_MD))
             .into()
     }
 
@@ -2475,30 +2475,36 @@ impl Model {
         let request = self.approval.as_ref().unwrap_or(&Value::Null);
         container(
             column![
-                text("Review exact authority").size(22).color(rgb(0xf4f5f7)),
+                text("Review exact authority")
+                    .size(22)
+                    .color(theme::rgb(theme::TEXT)),
                 text(
                     request["effect_summary"]
                         .as_str()
                         .unwrap_or("The add-on requests a bounded tool ceiling.")
                 )
                 .size(12)
-                .color(rgb(0xf5c66a)),
+                .color(theme::rgb(theme::WARNING)),
                 container(
                     text(serde_json::to_string_pretty(request).unwrap_or_default())
                         .size(11)
-                        .color(rgb(0xb7bec8)),
+                        .color(theme::rgb(theme::TEXT_SECONDARY)),
                 )
                 .padding(11)
-                .style(|_| panel_style(0x0d1116, Some(0x272d37), 9.0)),
+                .style(|_| theme::panel(
+                    theme::BACKGROUND,
+                    Some(theme::BORDER),
+                    theme::RADIUS_SM
+                )),
                 row![
                     button(text("Deny").size(12))
                         .padding([8, 11])
-                        .style(button_style(ButtonKind::Danger))
+                        .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(Message::DecideApproval(false)),
                     space::horizontal(),
                     button(text("Allow once").size(12))
                         .padding([8, 13])
-                        .style(button_style(ButtonKind::Primary))
+                        .style(widgets::button_style(widgets::Button::Primary))
                         .on_press(Message::DecideApproval(true)),
                 ]
                 .spacing(8)
@@ -2507,7 +2513,7 @@ impl Model {
         )
         .padding(24)
         .width(620)
-        .style(|_| panel_style(0x11151a, Some(0x574525), 16.0))
+        .style(|_| theme::panel(theme::PANEL, Some(theme::WARNING), theme::RADIUS_MD))
         .into()
     }
 }
@@ -2590,7 +2596,7 @@ impl App {
             &mut self.renderer,
             &Theme::Dark,
             &renderer::Style {
-                text_color: rgb(0xf4f5f7),
+                text_color: theme::rgb(theme::TEXT),
             },
             self.cursor,
         );
@@ -2957,6 +2963,9 @@ mod tests {
             json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742. The read stayed inside the project workspace and used prompt-scoped authority."}}),
             json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
         ];
+        // Events set directly bypass the update path that keeps the selectable
+        // conversation editors in step, and the view expects them present.
+        model.sync_selectable_text();
         model
     }
 
@@ -3030,7 +3039,7 @@ mod tests {
                 &mut renderer,
                 &Theme::Dark,
                 &renderer::Style {
-                    text_color: rgb(0xf4f5f7),
+                    text_color: theme::rgb(theme::TEXT),
                 },
                 mouse::Cursor::Unavailable,
             );
@@ -3131,7 +3140,7 @@ mod tests {
                 &mut renderer,
                 &Theme::Dark,
                 &renderer::Style {
-                    text_color: rgb(0xf4f5f7),
+                    text_color: theme::rgb(theme::TEXT),
                 },
                 mouse::Cursor::Unavailable,
             );
@@ -3519,7 +3528,7 @@ mod tests {
                 &mut renderer,
                 &Theme::Dark,
                 &renderer::Style {
-                    text_color: rgb(0xf4f5f7),
+                    text_color: theme::rgb(theme::TEXT),
                 },
                 mouse::Cursor::Unavailable,
             );

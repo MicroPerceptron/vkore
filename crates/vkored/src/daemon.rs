@@ -3488,9 +3488,30 @@ mod tests {
             kind: kore_hostlink::BrokerOfferKind::Executable,
             permitted_ops: 4,
             max_uses: 2,
+            label: "ls",
+        });
+        offers.push(kore_hostlink::BrokerOffer {
+            reference: [3; 16],
+            kind: kore_hostlink::BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 2,
+            label: "find",
+        });
+        offers.push(kore_hostlink::BrokerOffer {
+            reference: [4; 16],
+            kind: kore_hostlink::BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 2,
+            label: "stat",
+        });
+        offers.push(kore_hostlink::BrokerOffer {
+            reference: [5; 16],
+            kind: kore_hostlink::BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 2,
             label: "cat",
         });
-        for reference in 3..=12 {
+        for reference in 6..=15 {
             offers.push(kore_hostlink::BrokerOffer {
                 reference: [reference; 16],
                 kind: kore_hostlink::BrokerOfferKind::Object,

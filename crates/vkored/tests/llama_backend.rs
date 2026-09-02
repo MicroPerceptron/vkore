@@ -520,7 +520,16 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
                 let reply = decode_broker_reply(&payload).unwrap();
                 assert_eq!(reply.action, BrokerActionKind::CreateAgent);
                 let selected = reply.selectors().collect::<Vec<_>>();
-                assert_eq!(selected, vec![references[31], references[2]]);
+                assert_eq!(
+                    selected,
+                    vec![
+                        references[29],
+                        references[39],
+                        references[30],
+                        references[31],
+                        references[2],
+                    ]
+                );
                 let prompts: Vec<_> = std::iter::from_fn(|| backend.take_observation())
                     .filter(|event| event.kind == ObservationKind::ModelPrompt)
                     .collect();
@@ -530,11 +539,13 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
                         .payload
                         .contains("workspace/docs-architecture.md")
                 );
-                assert!(prompts[0].payload.contains("\"cat\""));
+                for tool in ["ls", "find", "stat", "cat"] {
+                    assert!(prompts[0].payload.contains(&format!("\"{tool}\"")));
+                }
                 assert!(
                     prompts[0]
                         .payload
-                        .contains("\"required_selector_indices\":[31,2]")
+                        .contains("\"required_selector_indices\":[29,39,30,31,2]")
                 );
                 assert!(
                     !prompts[0]

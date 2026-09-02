@@ -529,6 +529,19 @@ enum AgentTarget {
     PromptY,
 }
 
+fn inspection_tool_index(label: &str) -> Option<usize> {
+    ["ls", "find", "stat", "cat"]
+        .iter()
+        .position(|candidate| *candidate == label)
+}
+
+fn require_inspection_tools(tools: [Option<[u8; 16]>; 4]) -> Result<[[u8; 16]; 4], BackendError> {
+    let [Some(ls), Some(find), Some(stat), Some(cat)] = tools else {
+        return Err(BackendError::InvalidEncoding);
+    };
+    Ok([ls, find, stat, cat])
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BrokerPending {
     CreateConversation {
@@ -539,7 +552,7 @@ enum BrokerPending {
     Create {
         plan: [u8; 16],
         object: [u8; 16],
-        executable: [u8; 16],
+        executables: [[u8; 16]; 4],
         budget: TaskBudget,
     },
     GrantObject {
@@ -684,10 +697,16 @@ impl DeterministicBackend {
                 BrokerPending::Create {
                     plan,
                     object,
-                    executable,
+                    executables,
                     budget,
                 } => {
-                    let selectors = [executable, object];
+                    let selectors = [
+                        executables[0],
+                        executables[1],
+                        executables[2],
+                        executables[3],
+                        object,
+                    ];
                     BrokerPlanningReply {
                         plan,
                         action: BrokerActionKind::CreateAgent,
@@ -999,9 +1018,22 @@ impl InferenceBackend for DeterministicBackend {
             let mut fallback_object = None;
             let mut executable = None;
             let mut hello_executable = None;
+            let mut inspection_executables = [None; 4];
             let mut view = None;
             let mut agent = None;
             for offer in planning.offers() {
+                if offer.kind == BrokerOfferKind::Executable
+                    && offer.permitted_ops != 0
+                    && offer.max_uses != 0
+                    && let Some(index) = inspection_tool_index(offer.label)
+                {
+                    if inspection_executables[index]
+                        .replace(offer.reference)
+                        .is_some()
+                    {
+                        return Err(BackendError::InvalidEncoding);
+                    }
+                }
                 match (planning.intent, offer.kind, offer.label) {
                     ("read X", BrokerOfferKind::Object, "workspace/X")
                         if offer.permitted_ops & 1 != 0 =>
@@ -1091,7 +1123,7 @@ impl InferenceBackend for DeterministicBackend {
                 "read X" => BrokerPending::Create {
                     plan: planning.plan,
                     object: object.ok_or(BackendError::InvalidEncoding)?,
-                    executable: executable.ok_or(BackendError::InvalidEncoding)?,
+                    executables: require_inspection_tools(inspection_executables)?,
                     budget: planning.ceiling,
                 },
                 "read Y" => BrokerPending::GrantObject {
@@ -1126,7 +1158,7 @@ impl InferenceBackend for DeterministicBackend {
                 _ => BrokerPending::Create {
                     plan: planning.plan,
                     object: fallback_object.ok_or(BackendError::InvalidEncoding)?,
-                    executable: executable.ok_or(BackendError::InvalidEncoding)?,
+                    executables: require_inspection_tools(inspection_executables)?,
                     budget: planning.ceiling,
                 },
             })

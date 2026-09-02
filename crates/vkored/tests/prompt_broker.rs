@@ -16,6 +16,9 @@ const CAT: [u8; 16] = [0x33; 16];
 const AGENT: [u8; 16] = [0x44; 16];
 const V: [u8; 16] = [0x55; 16];
 const HELLO: [u8; 16] = [0x66; 16];
+const LS: [u8; 16] = [0x77; 16];
+const FIND: [u8; 16] = [0x88; 16];
+const STAT: [u8; 16] = [0x99; 16];
 
 fn sequence(role: BackendRole, route: u8) -> SequenceIdentity {
     SequenceIdentity {
@@ -97,7 +100,7 @@ fn plan_reply(intent: &str, offers: &[BrokerOffer<'_>], ceiling: TaskBudget, rou
 }
 
 #[test]
-fn broker_planner_selects_exact_x_and_cat_and_never_y() {
+fn broker_planner_selects_x_and_the_complete_inspection_profile_but_never_y() {
     let offers = [
         BrokerOffer {
             reference: X,
@@ -112,6 +115,27 @@ fn broker_planner_selects_exact_x_and_cat_and_never_y() {
             permitted_ops: 1,
             max_uses: 0,
             label: "workspace/Y",
+        },
+        BrokerOffer {
+            reference: LS,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "ls",
+        },
+        BrokerOffer {
+            reference: FIND,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "find",
+        },
+        BrokerOffer {
+            reference: STAT,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "stat",
         },
         BrokerOffer {
             reference: CAT,
@@ -148,7 +172,10 @@ fn broker_planner_selects_exact_x_and_cat_and_never_y() {
     let payload = completed(&mut backend, 1);
     let reply = decode_broker_reply(&payload).unwrap();
     assert_eq!(reply.action, BrokerActionKind::CreateAgent);
-    assert_eq!(reply.selectors().collect::<Vec<_>>(), vec![CAT, X]);
+    assert_eq!(
+        reply.selectors().collect::<Vec<_>>(),
+        vec![LS, FIND, STAT, CAT, X]
+    );
     assert!(!reply.selectors().any(|selector| selector == Y));
 
     let bad_len = TaskIntentRequest {

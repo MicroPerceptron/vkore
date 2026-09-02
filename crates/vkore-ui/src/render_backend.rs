@@ -2,11 +2,11 @@ use axcomp::LayerScratch;
 use axgfx::{Damage, Extent2d};
 use axui_core::{
     Command, Frame, FrameLimits, ResourceFormat, ResourceGeneration, ResourceId, ResourceKind,
-    ResourceMutability, ResourceRef,
+    ResourceMutability, ResourceRef, validate_frame,
 };
 use axui_raster::{
     GlyphAtlas, GlyphKey, GlyphSource, GlyphSourceError, RasterStats, ResourceStore,
-    StructureRenderer, Target,
+    StructureExecution, StructureRenderer, Target,
 };
 use cosmic_text::{
     CacheKey, CacheKeyFlags, FontSystem, SubpixelBin, SwashCache, SwashContent, fontdb,
@@ -38,6 +38,8 @@ pub(crate) struct RenderProfile {
     pub(crate) atlas_hits: u64,
     pub(crate) atlas_misses: u64,
     pub(crate) scratch_high_water_pixels: usize,
+    pub(crate) kernel_items: u64,
+    pub(crate) scalar_items: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -64,13 +66,24 @@ pub(crate) struct NativeBackend {
 
 impl NativeBackend {
     pub(crate) fn new() -> Result<Self, RenderError> {
+        Self::with_execution(StructureExecution::SharedKernels)
+    }
+
+    fn with_execution(execution: StructureExecution) -> Result<Self, RenderError> {
         let mut resources = ResourceStore::new_in(1, axui_fonts::DM_SANS.len(), System)
             .map_err(|_| RenderError::ResourceSetup)?;
         resources
             .install(ui_font(), axui_fonts::DM_SANS)
             .map_err(|_| RenderError::ResourceSetup)?;
         Ok(Self {
-            structure: StructureRenderer::new(FrameLimits::NATIVE_CONTROL_PLANE),
+            structure: match execution {
+                StructureExecution::SharedKernels => {
+                    StructureRenderer::new(FrameLimits::NATIVE_CONTROL_PLANE)
+                }
+                StructureExecution::ScalarReference => {
+                    StructureRenderer::reference(FrameLimits::NATIVE_CONTROL_PLANE)
+                }
+            },
             glyph_atlas: GlyphAtlas::new_in(
                 ResourceId::new(0x564b_4f52_4541_544c).unwrap(),
                 GLYPH_ENTRIES,
@@ -114,6 +127,17 @@ impl NativeBackend {
         extent: Extent2d,
         stride: usize,
     ) -> Result<RenderProfile, RenderError> {
+        self.render_damaged(frame, pixels, extent, stride, Damage::Full)
+    }
+
+    fn render_damaged(
+        &mut self,
+        frame: &Frame<System>,
+        pixels: &mut [u32],
+        extent: Extent2d,
+        stride: usize,
+        damage: Damage<'_>,
+    ) -> Result<RenderProfile, RenderError> {
         if !frame.fields().is_empty()
             || frame
                 .commands()
@@ -131,6 +155,8 @@ impl NativeBackend {
         {
             return Err(RenderError::UnsupportedResource);
         }
+        validate_frame(frame.view(), FrameLimits::NATIVE_CONTROL_PLANE)
+            .map_err(|_| RenderError::Raster(axui_raster::RasterError::InvalidFrame))?;
         let target_len = stride
             .checked_mul(extent.height() as usize)
             .ok_or(RenderError::InvalidTarget)?;
@@ -145,8 +171,8 @@ impl NativeBackend {
             .layer_scratch
             .prepare(surface_pixels, layer_depth)
             .map_err(|_| RenderError::ResourceLimit)?;
-        pixels[..target_len].fill(0x0008_0a0d);
-        let mut target = Target::new(pixels, extent.width(), extent.height(), stride)
+        clear_damage(pixels, extent, stride, damage)?;
+        let mut target = Target::new_xrgb(pixels, extent.width(), extent.height(), stride)
             .map_err(|_| RenderError::InvalidTarget)?;
         let atlas_before = self.glyph_atlas.stats();
         let started = Instant::now();
@@ -155,7 +181,7 @@ impl NativeBackend {
             .render(
                 frame.view(),
                 &mut target,
-                Damage::Full,
+                damage,
                 &self.resources,
                 &mut self.glyph_source,
                 &mut self.glyph_atlas,
@@ -187,6 +213,55 @@ impl NativeBackend {
     pub(crate) fn invalidate_for_measurement(&mut self) {
         self.accepted = None;
     }
+
+    #[cfg(test)]
+    pub(crate) fn reference_for_measurement() -> Result<Self, RenderError> {
+        Self::with_execution(StructureExecution::ScalarReference)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_damage_for_measurement(
+        &mut self,
+        frame: &Frame<System>,
+        pixels: &mut [u32],
+        extent: Extent2d,
+        stride: usize,
+        damage: Damage<'_>,
+    ) -> Result<RenderProfile, RenderError> {
+        self.render_damaged(frame, pixels, extent, stride, damage)
+    }
+}
+
+fn clear_damage(
+    pixels: &mut [u32],
+    extent: Extent2d,
+    stride: usize,
+    damage: Damage<'_>,
+) -> Result<(), RenderError> {
+    let background = 0xff08_0a0d;
+    match damage {
+        Damage::Full => {
+            let length = stride
+                .checked_mul(extent.height() as usize)
+                .ok_or(RenderError::InvalidTarget)?;
+            pixels
+                .get_mut(..length)
+                .ok_or(RenderError::InvalidTarget)?
+                .fill(background);
+        }
+        Damage::Rects(rects) => {
+            if rects.is_empty() || rects.iter().any(|rect| !rect.fits(extent)) {
+                return Err(RenderError::InvalidTarget);
+            }
+            for rect in rects {
+                for y in rect.y()..rect.y() + rect.height() {
+                    let start = y as usize * stride + rect.x() as usize;
+                    pixels[start..start + rect.width() as usize].fill(background);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_profile(
@@ -205,6 +280,8 @@ fn render_profile(
         atlas_hits,
         atlas_misses,
         scratch_high_water_pixels,
+        kernel_items: stats.kernel_items,
+        scalar_items: stats.scalar_items,
     }
 }
 
@@ -372,5 +449,41 @@ mod tests {
             Err(RenderError::UnsupportedField)
         );
         assert!(pixels.iter().all(|pixel| *pixel == 0x0012_3456));
+    }
+
+    #[test]
+    fn damaged_render_clears_only_validated_xrgb_regions() {
+        let mut backend = NativeBackend::new().unwrap();
+        let frame = Frame::new_in(Rect::new(0.0, 0.0, 8.0, 8.0), 1.0, System);
+        let extent = Extent2d::new(8, 8).unwrap();
+        let damage = axgfx::PixelRect::new(2, 3, 3, 2).unwrap();
+        let mut pixels = [0xff12_3456; 64];
+        backend
+            .render_damage_for_measurement(&frame, &mut pixels, extent, 8, Damage::Rects(&[damage]))
+            .unwrap();
+        for y in 0..8 {
+            for x in 0..8 {
+                let expected = if (2..5).contains(&x) && (3..5).contains(&y) {
+                    0xff08_0a0d
+                } else {
+                    0xff12_3456
+                };
+                assert_eq!(pixels[y * 8 + x], expected);
+            }
+        }
+
+        let invalid = axgfx::PixelRect::new(7, 7, 2, 1).unwrap();
+        let before = pixels;
+        assert_eq!(
+            backend.render_damage_for_measurement(
+                &frame,
+                &mut pixels,
+                extent,
+                8,
+                Damage::Rects(&[invalid]),
+            ),
+            Err(RenderError::InvalidTarget)
+        );
+        assert_eq!(pixels, before);
     }
 }

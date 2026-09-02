@@ -94,12 +94,15 @@ still be restarted to change its active backend.
 ## Native rendering lifecycle
 
 The desktop client keeps Iced above Axiom's durable `Frame<System>` boundary.
-Ordinary UI structure is executed by the deterministic `axui-raster` CPU path
-directly into the platform's mapped XRGB surface. Cosmic Text shapes the
+Ordinary UI structure is executed by `axui-raster` through Axiom's shared
+`axnn::RasterBackend` CPU kernels directly into the platform's mapped XRGB
+surface. Its scalar implementation is retained only as the deterministic
+conformance/fallback path. Cosmic Text shapes the
 bundled DM Sans OpenType face above `Frame`; exact glyph ink bounds and phases
 cross the durable boundary, then the backend produces grayscale coverage into
-a bounded glyph atlas. Coverage8x8 softens only geometry edges, and retained
-linear gradients and shadows stay in the structure lane. The backend also owns
+a bounded glyph atlas. Analytic signed-distance coverage softens geometry
+edges; retained linear gradients and Gaussian shadows stay in the structure
+lane. The backend also owns
 an isolated-layer scratch arena, but no viewport-sized mirror of the
 presentation surface.
 

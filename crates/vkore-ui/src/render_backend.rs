@@ -1,14 +1,17 @@
 use axcomp::LayerScratch;
 use axgfx::{Damage, Extent2d};
 use axui_core::{
-    Command, Frame, FrameLimits, PORTABLE_MONOSPACE_RESOURCE, ResourceFormat, ResourceGeneration,
-    ResourceId, ResourceKind, ResourceMutability, ResourceRef,
+    Command, Frame, FrameLimits, ResourceFormat, ResourceGeneration, ResourceId, ResourceKind,
+    ResourceMutability, ResourceRef,
 };
 use axui_raster::{
     GlyphAtlas, GlyphKey, GlyphSource, GlyphSourceError, RasterStats, ResourceStore,
     StructureRenderer, Target,
 };
-use std::{alloc::System, time::Instant};
+use cosmic_text::{
+    CacheKey, CacheKeyFlags, FontSystem, SubpixelBin, SwashCache, SwashContent, fontdb,
+};
+use std::{alloc::System, sync::Arc, time::Instant};
 
 const MAX_LAYERS: usize = 4;
 const MAX_LAYER_PIXELS: usize = 4 * 4096 * 4096;
@@ -52,7 +55,7 @@ pub(crate) struct RetainedProfile {
 pub(crate) struct NativeBackend {
     structure: StructureRenderer<64>,
     glyph_atlas: GlyphAtlas<System>,
-    glyph_source: PortableGlyphSource,
+    glyph_source: OpenTypeGlyphSource,
     resources: ResourceStore<System>,
     layer_scratch: LayerScratch<System>,
     accepted: Option<Frame<System>>,
@@ -61,10 +64,10 @@ pub(crate) struct NativeBackend {
 
 impl NativeBackend {
     pub(crate) fn new() -> Result<Self, RenderError> {
-        let mut resources = ResourceStore::new_in(1, axrd::font8x16::FONT_8X16.len(), System)
+        let mut resources = ResourceStore::new_in(1, axui_fonts::DM_SANS.len(), System)
             .map_err(|_| RenderError::ResourceSetup)?;
         resources
-            .install(portable_font(), &axrd::font8x16::FONT_8X16)
+            .install(ui_font(), axui_fonts::DM_SANS)
             .map_err(|_| RenderError::ResourceSetup)?;
         Ok(Self {
             structure: StructureRenderer::new(FrameLimits::NATIVE_CONTROL_PLANE),
@@ -75,7 +78,7 @@ impl NativeBackend {
                 System,
             )
             .map_err(|_| RenderError::ResourceSetup)?,
-            glyph_source: PortableGlyphSource,
+            glyph_source: OpenTypeGlyphSource::new()?,
             resources,
             layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
                 .map_err(|_| RenderError::ResourceSetup)?,
@@ -119,7 +122,7 @@ impl NativeBackend {
         {
             return Err(RenderError::UnsupportedField);
         }
-        let builtin_font = portable_font();
+        let builtin_font = ui_font();
         if !frame.images().is_empty()
             || frame
                 .resources()
@@ -205,9 +208,9 @@ fn render_profile(
     }
 }
 
-fn portable_font() -> ResourceRef {
+fn ui_font() -> ResourceRef {
     ResourceRef {
-        id: PORTABLE_MONOSPACE_RESOURCE,
+        id: axui_iced::DEFAULT_FONT_RESOURCE,
         generation: ResourceGeneration::INITIAL,
         kind: ResourceKind::Font,
         format: ResourceFormat::Bytes,
@@ -215,7 +218,7 @@ fn portable_font() -> ResourceRef {
         width: 0,
         height: 0,
         row_stride: 0,
-        byte_len: axrd::font8x16::FONT_8X16.len() as u64,
+        byte_len: axui_fonts::DM_SANS.len() as u64,
     }
 }
 
@@ -235,40 +238,97 @@ fn maximum_opacity_depth(commands: &[Command]) -> usize {
     maximum
 }
 
-struct PortableGlyphSource;
+struct OpenTypeGlyphSource {
+    fonts: FontSystem,
+    face: fontdb::ID,
+    swash: SwashCache,
+}
 
-impl GlyphSource for PortableGlyphSource {
+impl OpenTypeGlyphSource {
+    fn new() -> Result<Self, RenderError> {
+        let mut fonts =
+            FontSystem::new_with_fonts([fontdb::Source::Binary(Arc::new(axui_fonts::DM_SANS))]);
+        fonts
+            .db_mut()
+            .set_sans_serif_family(axui_fonts::DM_SANS_FAMILY);
+        let face = fonts
+            .db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name(axui_fonts::DM_SANS_FAMILY)],
+                weight: fontdb::Weight::NORMAL,
+                stretch: fontdb::Stretch::Normal,
+                style: fontdb::Style::Normal,
+            })
+            .ok_or(RenderError::ResourceSetup)?;
+        Ok(Self {
+            fonts,
+            face,
+            swash: SwashCache::new(),
+        })
+    }
+}
+
+impl GlyphSource for OpenTypeGlyphSource {
     fn rasterize(&mut self, key: GlyphKey, output: &mut [u8]) -> Result<(), GlyphSourceError> {
-        if key.font != PORTABLE_MONOSPACE_RESOURCE || key.face_index != 0 {
+        if key.font != axui_iced::DEFAULT_FONT_RESOURCE || key.face_index != 0 {
             return Err(GlyphSourceError::MissingFont);
         }
-        let glyph = u8::try_from(key.glyph)
-            .ok()
-            .filter(|glyph| (0x20..=0x7e).contains(glyph))
-            .unwrap_or(b'?');
-        let glyph_index = usize::from(glyph - 0x20) * 16;
-        let bitmap = &axrd::font8x16::FONT_8X16[glyph_index..glyph_index + 16];
         let width = usize::from(key.width);
         let height = usize::from(key.height);
         if output.len() != width * height || width == 0 || height == 0 {
             return Err(GlyphSourceError::MalformedFont);
         }
-        let phase_x = f32::from(key.phase_x) / 64.0;
-        let phase_y = f32::from(key.phase_y) / 64.0;
-        for y in 0..height {
-            for x in 0..width {
-                let source_x = (((x as f32 + 0.5 - phase_x) * 8.0 / width as f32).floor() as i32)
-                    .clamp(0, 7) as usize;
-                let source_y = (((y as f32 + 0.5 - phase_y) * 16.0 / height as f32).floor() as i32)
-                    .clamp(0, 15) as usize;
-                output[y * width + x] = if bitmap[source_y] & (0x80 >> source_x) != 0 {
-                    255
-                } else {
-                    0
-                };
+        let glyph_id = u16::try_from(key.glyph).map_err(|_| GlyphSourceError::MissingGlyph)?;
+        let image = self
+            .swash
+            .get_image_uncached(
+                &mut self.fonts,
+                CacheKey {
+                    font_id: self.face,
+                    glyph_id,
+                    font_size_bits: key.font_size_bits,
+                    x_bin: subpixel_bin(key.phase_x),
+                    y_bin: subpixel_bin(key.phase_y),
+                    font_weight: fontdb::Weight::NORMAL,
+                    flags: CacheKeyFlags::empty(),
+                },
+            )
+            .ok_or(GlyphSourceError::MissingGlyph)?;
+        if image.placement.width as usize != width || image.placement.height as usize != height {
+            return Err(GlyphSourceError::MalformedFont);
+        }
+        match image.content {
+            SwashContent::Mask => {
+                if image.data.len() != output.len() {
+                    return Err(GlyphSourceError::MalformedFont);
+                }
+                output.copy_from_slice(&image.data);
             }
+            SwashContent::SubpixelMask => {
+                if image.data.len() != output.len() * 3 {
+                    return Err(GlyphSourceError::MalformedFont);
+                }
+                for (index, coverage) in output.iter_mut().enumerate() {
+                    let offset = index * 3;
+                    *coverage = ((u16::from(image.data[offset])
+                        + u16::from(image.data[offset + 1])
+                        + u16::from(image.data[offset + 2])
+                        + 1)
+                        / 3) as u8;
+                }
+            }
+            SwashContent::Color => return Err(GlyphSourceError::MissingGlyph),
         }
         Ok(())
+    }
+}
+
+fn subpixel_bin(phase: u8) -> SubpixelBin {
+    match phase {
+        0..=7 | 56..=u8::MAX => SubpixelBin::Zero,
+        8..=23 => SubpixelBin::One,
+        24..=39 => SubpixelBin::Two,
+        _ => SubpixelBin::Three,
     }
 }
 

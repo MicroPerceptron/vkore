@@ -95,9 +95,13 @@ still be restarted to change its active backend.
 
 The desktop client keeps Iced above Axiom's durable `Frame<System>` boundary.
 Ordinary UI structure is executed by the deterministic `axui-raster` CPU path
-directly into the platform's mapped XRGB surface. The backend owns a bounded
-portable-font resource, glyph atlas, and isolated-layer scratch arena; it does
-not own a viewport-sized mirror of the presentation surface.
+directly into the platform's mapped XRGB surface. Cosmic Text shapes the
+bundled DM Sans OpenType face above `Frame`; exact glyph ink bounds and phases
+cross the durable boundary, then the backend produces grayscale coverage into
+a bounded glyph atlas. Coverage8x8 softens only geometry edges, and retained
+linear gradients and shadows stay in the structure lane. The backend also owns
+an isolated-layer scratch arena, but no viewport-sized mirror of the
+presentation surface.
 
 Only a frame that differs from the last successfully presented frame may
 acquire and mutate a platform target. An exact stable frame bypasses structure

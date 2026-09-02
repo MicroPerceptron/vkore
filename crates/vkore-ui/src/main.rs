@@ -78,15 +78,18 @@ enum Message {
     ArchiveProject,
     DuplicateProject,
     ExportProject,
-    Rail(Rail),
+    View(View),
     DecideApproval(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Rail {
+enum View {
+    /// The transcript and composer.
+    Session,
+    /// The agent spawn tree and its inspector.
     Agents,
-    Authority,
-    Activity,
+    /// The workspace permission graph and its inspector.
+    Filesystem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +434,10 @@ fn divider_bottom(background: u32) -> iced_widget::container::Style {
     divider_right(background)
 }
 
+fn divider_left(background: u32) -> iced_widget::container::Style {
+    divider_right(background)
+}
+
 fn input_style(
     _theme: &Theme,
     status: iced_widget::text_input::Status,
@@ -582,7 +589,7 @@ struct Model {
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
     expanded_work: BTreeSet<String>,
-    rail: Rail,
+    view: View,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
     wizard_page: u8,
     preflight: Option<String>,
@@ -614,7 +621,7 @@ impl Model {
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
-            rail: Rail::Agents,
+            view: View::Session,
             editor: None,
             wizard_page: 0,
             preflight: None,
@@ -826,7 +833,7 @@ impl Model {
                     }
                 }
             }
-            Message::Rail(value) => self.rail = value,
+            Message::View(value) => self.view = value,
             Message::DecideApproval(allow) => {
                 if let Some(request) = self.approval.as_ref() {
                     let id = request["id"].as_str().unwrap_or_default();
@@ -1305,7 +1312,7 @@ impl Model {
                 .height(Length::Fill)
                 .into()
         } else {
-            row![self.sidebar(248.0), self.main_panel(), self.rail_panel()]
+            row![self.sidebar(248.0), self.main_panel()]
                 .height(Length::Fill)
                 .into()
         };
@@ -1452,7 +1459,7 @@ impl Model {
                         "Archive project",
                         project_idle.then_some(Message::ArchiveProject)
                     ),
-                    nav("Transcript & audit", Some(Message::Rail(Rail::Activity))),
+                    nav("Transcript & audit", Some(Message::View(View::Session))),
                 ]
                 .spacing(1)
             )
@@ -1493,10 +1500,10 @@ impl Model {
                 }
             }
         };
-        let view_button = |label: &'static str, rail: Rail| {
+        let view_button = |label: &'static str, target: View| {
             button(widgets::label(
                 label,
-                if self.rail == rail {
+                if self.view == target {
                     theme::TEXT
                 } else {
                     theme::TEXT_MUTED
@@ -1505,9 +1512,9 @@ impl Model {
             .height(30)
             .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Choice(
-                self.rail == rail,
+                self.view == target,
             )))
-            .on_press(Message::Rail(rail))
+            .on_press(Message::View(target))
         };
         let top = container(
             row![
@@ -1541,9 +1548,9 @@ impl Model {
                     .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Danger))
                     .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
-                view_button("Agents", Rail::Agents),
-                view_button("Authority", Rail::Authority),
-                view_button("Activity", Rail::Activity),
+                view_button("Session", View::Session),
+                view_button("Agents", View::Agents),
+                view_button("Filesystem", View::Filesystem),
             ]
             .spacing(theme::SPACE_2)
             .align_y(alignment::Vertical::Center),
@@ -1551,7 +1558,39 @@ impl Model {
         .padding([0, 22])
         .height(64)
         .width(Length::Fill)
+        .align_y(alignment::Vertical::Center)
         .style(|_| divider_bottom(theme::BACKGROUND));
+
+        if self.view != View::Session {
+            let (title, subtitle, body) = match self.view {
+                View::Agents => (
+                    "Agents",
+                    "capability inheritance and live state",
+                    self.agents_rail(),
+                ),
+                _ => (
+                    "Filesystem",
+                    "grants held against this workspace",
+                    self.authority_rail(),
+                ),
+            };
+            // The graph itself lands with the geometry backend; until then the
+            // canvas stays empty rather than showing an approximation of it.
+            return container(column![
+                top,
+                row![
+                    container(space::vertical())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    self.inspector(title, subtitle, body),
+                ]
+                .height(Length::Fill),
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
+            .into();
+        }
 
         // An empty harness stays empty. The composer sits at the bottom with
         // nothing above it: no headline, no helper copy, no status chip.
@@ -1830,17 +1869,16 @@ impl Model {
             .into()
     }
 
-    fn rail_panel(&self) -> UiElement<'_> {
-        let (title, subtitle) = match self.rail {
-            Rail::Agents => ("Agents", "capability inheritance and live state"),
-            Rail::Authority => ("Authority", "grants held against this workspace"),
-            Rail::Activity => ("Activity", "validated transcript for this session"),
-        };
-        let body: UiElement<'_> = match self.rail {
-            Rail::Agents => self.agents_rail(),
-            Rail::Authority => self.authority_rail(),
-            Rail::Activity => self.activity_rail(),
-        };
+    /// The topology inspector: what the selected node holds and can reach.
+    ///
+    /// It belongs to the topology views rather than standing beside the
+    /// session, which is why it is built here and not in the shell row.
+    fn inspector<'a>(
+        &'a self,
+        title: &'static str,
+        subtitle: &'static str,
+        body: UiElement<'a>,
+    ) -> UiElement<'a> {
         container(column![
             container(
                 column![
@@ -1861,7 +1899,7 @@ impl Model {
         ])
         .width(300)
         .height(Length::Fill)
-        .style(|_| divider_right(theme::BACKGROUND))
+        .style(|_| divider_left(theme::BACKGROUND))
         .into()
     }
 

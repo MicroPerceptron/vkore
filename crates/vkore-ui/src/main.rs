@@ -44,14 +44,7 @@ const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 fn native_renderer() -> AxRenderer<System> {
-    let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
-    // vKore is a dense control plane dominated by crisp rules and the bundled
-    // bitmap font. Pixel-center coverage avoids evaluating 64 area samples for
-    // every solid UI pixel while remaining part of the durable Frame contract.
-    renderer
-        .recorder_mut()
-        .set_antialiasing(axui_core::Antialiasing::PixelCenter);
-    renderer
+    AxRenderer::new_in(renderer::Settings::default(), System)
 }
 
 #[derive(Debug, Clone)]
@@ -426,6 +419,15 @@ fn panel_style(background: u32, border: Option<u32>, radius: f32) -> iced_widget
             width: border.map(|_| 1.0).unwrap_or(0.0),
             radius: radius.into(),
         },
+        shadow: if radius > 0.0 {
+            Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.28),
+                offset: Vector::new(0.0, 2.0),
+                blur_radius: 7.0,
+            }
+        } else {
+            Shadow::default()
+        },
         ..Default::default()
     }
 }
@@ -519,7 +521,20 @@ fn button_style(
                 if disabled {
                     color.a = 0.4;
                 }
-                Background::Color(color)
+                if kind == ButtonKind::Primary {
+                    let mut highlight = rgb(0xd4ff9d);
+                    highlight.a = color.a;
+                    Background::Gradient(
+                        iced_core::gradient::Linear::new(iced_core::Radians(
+                            core::f32::consts::FRAC_PI_2,
+                        ))
+                        .add_stop(0.0, highlight)
+                        .add_stop(1.0, color)
+                        .into(),
+                    )
+                } else {
+                    Background::Color(color)
+                }
             }),
             text_color: color,
             border: Border {
@@ -527,17 +542,21 @@ fn button_style(
                 width: border_width,
                 radius: 8.0.into(),
             },
-            shadow: Shadow {
-                color: Color::TRANSPARENT,
-                offset: Vector::ZERO,
-                blur_radius: 0.0,
+            shadow: if background.is_some() {
+                Shadow {
+                    color: Color::from_rgba8(0, 0, 0, 0.22),
+                    offset: Vector::new(0.0, 1.0),
+                    blur_radius: 4.0,
+                }
+            } else {
+                Shadow::default()
             },
             ..Default::default()
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonKind {
     Primary,
     Danger,
@@ -1493,9 +1512,8 @@ impl Model {
                 .as_str()
                 .unwrap_or("deterministic")
                 .replace('_', " ");
-            let dot = text("●")
-                .size(12)
-                .color(rgb(if active { 0xb8ef6a } else { 0x59616e }));
+            let dot = container(space::Space::new().width(7).height(7))
+                .style(move |_| panel_style(if active { 0xb8ef6a } else { 0x59616e }, None, 3.5));
             let label = column![
                 text(project["name"].as_str().unwrap_or("Project")).size(14),
                 text(backend).size(11).color(rgb(0x80bfff)),
@@ -1579,11 +1597,17 @@ impl Model {
         let health = |label: &'static str| {
             container(
                 row![
-                    text("●").size(10).color(rgb(if self.session.is_some() {
-                        0xb8ef6a
-                    } else {
-                        0x606875
-                    })),
+                    container(space::Space::new().width(6).height(6)).style(|_| {
+                        panel_style(
+                            if self.session.is_some() {
+                                0xb8ef6a
+                            } else {
+                                0x606875
+                            },
+                            None,
+                            3.0,
+                        )
+                    }),
                     text(label).size(11).color(rgb(0x8d96a5)),
                 ]
                 .spacing(6)
@@ -1621,7 +1645,7 @@ impl Model {
             .spacing(10)
             .align_y(alignment::Vertical::Center),
         )
-        .padding([8, 22])
+        .padding([0, 22])
         .height(64)
         .width(Length::Fill)
         .style(|_| divider_right(0x0b0e12));
@@ -1712,12 +1736,12 @@ impl Model {
                 let expanded = self.expanded_work.contains(prompt_id);
                 let work_header = button(
                     row![
-                        text(if active { "●" } else { "✓" })
+                        text(if active { "•" } else { "+" })
                             .size(11)
                             .color(rgb(0xb8ef6a)),
                         text(work_title).size(12).color(rgb(0xcdd2d9)),
                         space::horizontal(),
-                        text(if expanded { "⌃" } else { "⌄" })
+                        text(if expanded { "^" } else { "v" })
                             .size(15)
                             .color(rgb(0x8d96a5)),
                     ]
@@ -2099,7 +2123,7 @@ impl Model {
                 .unwrap_or(false);
             button(
                 row![
-                    text(if checked { "✓" } else { "□" })
+                    text(if checked { "[x]" } else { "[ ]" })
                         .size(13)
                         .color(rgb(if checked { 0xb8ef6a } else { 0x8d96a5 })),
                     text(label).size(12),
@@ -2248,7 +2272,7 @@ impl Model {
                         addons = addons.push(
                             button(
                                 row![
-                                    text(if enabled { "✓" } else { "□" })
+                                    text(if enabled { "[x]" } else { "[ ]" })
                                         .size(14)
                                         .color(rgb(if enabled { 0xb8ef6a } else { 0x8d96a5 })),
                                     column![
@@ -3057,7 +3081,7 @@ mod tests {
         let stable_submit_median = percentile(&mut stable_submit_ns, 1, 2);
         let stable_submit_p95 = percentile(&mut stable_submit_ns, 95, 100);
         println!(
-            "UI_BENCH {{\"implementation\":\"retained_structure_v1\",\"width\":1280,\"height\":800,\"samples\":{samples},\"record_median_ns\":{record_median},\"record_p95_ns\":{record_p95},\"full_render_median_ns\":{full_render_median},\"full_render_p95_ns\":{full_render_p95},\"stable_submit_median_ns\":{stable_submit_median},\"stable_submit_p95_ns\":{stable_submit_p95},\"pixels_written\":{pixels_written},\"full_present_bytes\":4096000,\"stable_present_bytes\":0}}"
+            "UI_BENCH {{\"implementation\":\"retained_structure_quality_v2\",\"width\":1280,\"height\":800,\"samples\":{samples},\"record_median_ns\":{record_median},\"record_p95_ns\":{record_p95},\"full_render_median_ns\":{full_render_median},\"full_render_p95_ns\":{full_render_p95},\"stable_submit_median_ns\":{stable_submit_median},\"stable_submit_p95_ns\":{stable_submit_p95},\"pixels_written\":{pixels_written},\"full_present_bytes\":4096000,\"stable_present_bytes\":0}}"
         );
     }
 

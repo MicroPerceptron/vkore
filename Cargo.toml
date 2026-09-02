@@ -46,6 +46,3 @@ unsafe_op_in_unsafe_fn = "deny"
 # Keep that hot path optimized even for `cargo run` development launches.
 [profile.dev.package.vkore-ui]
 opt-level = 2
-
-[profile.dev.package.axrd]
-opt-level = 2

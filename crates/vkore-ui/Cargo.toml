@@ -7,13 +7,14 @@ license = "MPL-2.0"
 description = "Native Axiom-rendered desktop control plane for vKore."
 
 [dependencies]
-axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
-axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
-axrd = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
-axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
-axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
-axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
+axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+cosmic-text = "0.19"
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
 iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
 iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }

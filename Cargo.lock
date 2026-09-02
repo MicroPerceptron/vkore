@@ -128,7 +128,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "axnn",
 ]
@@ -136,7 +136,7 @@ dependencies = [
 [[package]]
 name = "axcomp"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "ax",
  "axgfx",
@@ -148,7 +148,7 @@ dependencies = [
 [[package]]
 name = "axgfx"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "axinput",
  "axui-core",
@@ -157,12 +157,12 @@ dependencies = [
 [[package]]
 name = "axinput"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 
 [[package]]
 name = "axmath"
 version = "0.1.7"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "libm",
 ]
@@ -170,37 +170,34 @@ dependencies = [
 [[package]]
 name = "axnn"
 version = "0.3.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
-
-[[package]]
-name = "axrd"
-version = "0.1.2"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
-dependencies = [
- "axinput",
- "axnn",
- "pkg-config",
-]
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 
 [[package]]
 name = "axui-core"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
+
+[[package]]
+name = "axui-fonts"
+version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 
 [[package]]
 name = "axui-iced"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "axinput",
  "axui-core",
+ "axui-fonts",
  "iced_core",
+ "iced_graphics",
 ]
 
 [[package]]
 name = "axui-raster"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=57e20727f9886d95b8f65121b46de79b02c56484#57e20727f9886d95b8f65121b46de79b02c56484"
 dependencies = [
  "axgfx",
  "axui-core",
@@ -3507,11 +3504,12 @@ version = "0.0.0"
 dependencies = [
  "axcomp",
  "axgfx",
- "axrd",
  "axui-core",
+ "axui-fonts",
  "axui-iced",
  "axui-raster",
  "chrono",
+ "cosmic-text",
  "iced_core",
  "iced_runtime",
  "iced_widget",

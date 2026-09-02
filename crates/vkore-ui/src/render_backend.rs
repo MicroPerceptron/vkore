@@ -1,0 +1,316 @@
+use axcomp::LayerScratch;
+use axgfx::{Damage, Extent2d};
+use axui_core::{
+    Command, Frame, FrameLimits, PORTABLE_MONOSPACE_RESOURCE, ResourceFormat, ResourceGeneration,
+    ResourceId, ResourceKind, ResourceMutability, ResourceRef,
+};
+use axui_raster::{
+    GlyphAtlas, GlyphKey, GlyphSource, GlyphSourceError, RasterStats, ResourceStore,
+    StructureRenderer, Target,
+};
+use std::{alloc::System, time::Instant};
+
+const MAX_LAYERS: usize = 4;
+const MAX_LAYER_PIXELS: usize = 4 * 4096 * 4096;
+const GLYPH_ENTRIES: usize = 512;
+const GLYPH_CELL_PIXELS: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderError {
+    InvalidTarget,
+    ResourceSetup,
+    ResourceLimit,
+    UnsupportedField,
+    UnsupportedResource,
+    Raster(axui_raster::RasterError),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RenderProfile {
+    pub(crate) structure_ns: u128,
+    pub(crate) commands: u64,
+    pub(crate) pixels_written: u64,
+    pub(crate) coverage_samples: u64,
+    pub(crate) glyphs: u64,
+    pub(crate) atlas_hits: u64,
+    pub(crate) atlas_misses: u64,
+    pub(crate) scratch_high_water_pixels: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetainedProfile {
+    pub(crate) submitted_frames: u64,
+    pub(crate) rendered_frames: u64,
+    pub(crate) unchanged_frames: u64,
+}
+
+/// vKore's CPU-linear Axiom backend.
+///
+/// The Iced frontend remains above `Frame<System>`. This owner keeps only
+/// bounded backend state and the last accepted display list; the platform's
+/// mapped XRGB buffer remains the render target and is never mirrored here.
+pub(crate) struct NativeBackend {
+    structure: StructureRenderer<64>,
+    glyph_atlas: GlyphAtlas<System>,
+    glyph_source: PortableGlyphSource,
+    resources: ResourceStore<System>,
+    layer_scratch: LayerScratch<System>,
+    accepted: Option<Frame<System>>,
+    profile: RetainedProfile,
+}
+
+impl NativeBackend {
+    pub(crate) fn new() -> Result<Self, RenderError> {
+        let mut resources = ResourceStore::new_in(1, axrd::font8x16::FONT_8X16.len(), System)
+            .map_err(|_| RenderError::ResourceSetup)?;
+        resources
+            .install(portable_font(), &axrd::font8x16::FONT_8X16)
+            .map_err(|_| RenderError::ResourceSetup)?;
+        Ok(Self {
+            structure: StructureRenderer::new(FrameLimits::NATIVE_CONTROL_PLANE),
+            glyph_atlas: GlyphAtlas::new_in(
+                ResourceId::new(0x564b_4f52_4541_544c).unwrap(),
+                GLYPH_ENTRIES,
+                GLYPH_CELL_PIXELS,
+                System,
+            )
+            .map_err(|_| RenderError::ResourceSetup)?,
+            glyph_source: PortableGlyphSource,
+            resources,
+            layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
+                .map_err(|_| RenderError::ResourceSetup)?,
+            accepted: None,
+            profile: RetainedProfile::default(),
+        })
+    }
+
+    /// Returns `false` only for an exact display list already made visible.
+    pub(crate) fn begin_frame(&mut self, frame: &Frame<System>) -> bool {
+        self.profile.submitted_frames += 1;
+        if self
+            .accepted
+            .as_ref()
+            .is_some_and(|accepted| accepted == frame)
+        {
+            self.profile.unchanged_frames += 1;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Renders a changed structure frame into the exact platform target.
+    ///
+    /// Fields are preflighted and refused before the target is cleared. vKore
+    /// does not currently emit field materials, so admitting one without a
+    /// provider would be a silent and unsafe approximation.
+    pub(crate) fn render_changed(
+        &mut self,
+        frame: &Frame<System>,
+        pixels: &mut [u32],
+        extent: Extent2d,
+        stride: usize,
+    ) -> Result<RenderProfile, RenderError> {
+        if !frame.fields().is_empty()
+            || frame
+                .commands()
+                .iter()
+                .any(|command| matches!(command, Command::DrawField(_)))
+        {
+            return Err(RenderError::UnsupportedField);
+        }
+        let builtin_font = portable_font();
+        if !frame.images().is_empty()
+            || frame
+                .resources()
+                .iter()
+                .any(|resource| *resource != builtin_font)
+        {
+            return Err(RenderError::UnsupportedResource);
+        }
+        let target_len = stride
+            .checked_mul(extent.height() as usize)
+            .ok_or(RenderError::InvalidTarget)?;
+        if stride < extent.width() as usize || pixels.len() < target_len {
+            return Err(RenderError::InvalidTarget);
+        }
+        let layer_depth = maximum_opacity_depth(frame.commands());
+        let surface_pixels = (extent.width() as usize)
+            .checked_mul(extent.height() as usize)
+            .ok_or(RenderError::ResourceLimit)?;
+        let scratch = self
+            .layer_scratch
+            .prepare(surface_pixels, layer_depth)
+            .map_err(|_| RenderError::ResourceLimit)?;
+        pixels[..target_len].fill(0x0008_0a0d);
+        let mut target = Target::new(pixels, extent.width(), extent.height(), stride)
+            .map_err(|_| RenderError::InvalidTarget)?;
+        let atlas_before = self.glyph_atlas.stats();
+        let started = Instant::now();
+        let stats = self
+            .structure
+            .render(
+                frame.view(),
+                &mut target,
+                Damage::Full,
+                &self.resources,
+                &mut self.glyph_source,
+                &mut self.glyph_atlas,
+                scratch,
+            )
+            .map_err(RenderError::Raster)?;
+        let atlas_after = self.glyph_atlas.stats();
+        self.profile.rendered_frames += 1;
+        Ok(render_profile(
+            started.elapsed().as_nanos(),
+            stats,
+            atlas_after.hits.saturating_sub(atlas_before.hits),
+            atlas_after.misses.saturating_sub(atlas_before.misses),
+            self.layer_scratch.stats().high_water_pixels,
+        ))
+    }
+
+    /// Commits the exact frame only after platform presentation succeeds.
+    pub(crate) fn mark_visible(&mut self, frame: Frame<System>) {
+        self.accepted = Some(frame);
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn retained_profile(&self) -> RetainedProfile {
+        self.profile
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_for_measurement(&mut self) {
+        self.accepted = None;
+    }
+}
+
+fn render_profile(
+    structure_ns: u128,
+    stats: RasterStats,
+    atlas_hits: u64,
+    atlas_misses: u64,
+    scratch_high_water_pixels: usize,
+) -> RenderProfile {
+    RenderProfile {
+        structure_ns,
+        commands: stats.commands,
+        pixels_written: stats.pixels_written,
+        coverage_samples: stats.coverage_samples,
+        glyphs: stats.glyphs,
+        atlas_hits,
+        atlas_misses,
+        scratch_high_water_pixels,
+    }
+}
+
+fn portable_font() -> ResourceRef {
+    ResourceRef {
+        id: PORTABLE_MONOSPACE_RESOURCE,
+        generation: ResourceGeneration::INITIAL,
+        kind: ResourceKind::Font,
+        format: ResourceFormat::Bytes,
+        mutability: ResourceMutability::Immutable,
+        width: 0,
+        height: 0,
+        row_stride: 0,
+        byte_len: axrd::font8x16::FONT_8X16.len() as u64,
+    }
+}
+
+fn maximum_opacity_depth(commands: &[Command]) -> usize {
+    let mut depth = 0usize;
+    let mut maximum = 0usize;
+    for command in commands {
+        match command {
+            Command::PushOpacity { .. } => {
+                depth += 1;
+                maximum = maximum.max(depth);
+            }
+            Command::PopOpacity => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    maximum
+}
+
+struct PortableGlyphSource;
+
+impl GlyphSource for PortableGlyphSource {
+    fn rasterize(&mut self, key: GlyphKey, output: &mut [u8]) -> Result<(), GlyphSourceError> {
+        if key.font != PORTABLE_MONOSPACE_RESOURCE || key.face_index != 0 {
+            return Err(GlyphSourceError::MissingFont);
+        }
+        let glyph = u8::try_from(key.glyph)
+            .ok()
+            .filter(|glyph| (0x20..=0x7e).contains(glyph))
+            .unwrap_or(b'?');
+        let glyph_index = usize::from(glyph - 0x20) * 16;
+        let bitmap = &axrd::font8x16::FONT_8X16[glyph_index..glyph_index + 16];
+        let width = usize::from(key.width);
+        let height = usize::from(key.height);
+        if output.len() != width * height || width == 0 || height == 0 {
+            return Err(GlyphSourceError::MalformedFont);
+        }
+        let phase_x = f32::from(key.phase_x) / 64.0;
+        let phase_y = f32::from(key.phase_y) / 64.0;
+        for y in 0..height {
+            for x in 0..width {
+                let source_x = (((x as f32 + 0.5 - phase_x) * 8.0 / width as f32).floor() as i32)
+                    .clamp(0, 7) as usize;
+                let source_y = (((y as f32 + 0.5 - phase_y) * 16.0 / height as f32).floor() as i32)
+                    .clamp(0, 15) as usize;
+                output[y * width + x] = if bitmap[source_y] & (0x80 >> source_x) != 0 {
+                    255
+                } else {
+                    0
+                };
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axui_core::{Field, Rect};
+
+    #[test]
+    fn exact_visible_frame_is_retained_without_render_work() {
+        let mut backend = NativeBackend::new().unwrap();
+        let frame = Frame::new_in(Rect::new(0.0, 0.0, 8.0, 8.0), 1.0, System);
+        assert!(backend.begin_frame(&frame));
+        let mut pixels = [0u32; 64];
+        backend
+            .render_changed(&frame, &mut pixels, Extent2d::new(8, 8).unwrap(), 8)
+            .unwrap();
+        backend.mark_visible(frame.clone());
+        assert!(!backend.begin_frame(&frame));
+        assert_eq!(backend.retained_profile().rendered_frames, 1);
+        assert_eq!(backend.retained_profile().unchanged_frames, 1);
+    }
+
+    #[test]
+    fn field_is_refused_before_target_changes() {
+        let mut backend = NativeBackend::new().unwrap();
+        let mut recorder = axui_core::Recorder::new_in(Rect::new(0.0, 0.0, 8.0, 8.0), 1.0, System);
+        recorder.draw_field(
+            Field {
+                material: ResourceId::new(77).unwrap(),
+                bounds: Rect::new(0.0, 0.0, 8.0, 8.0),
+                input_start: 0,
+                input_len: 0,
+            },
+            &[],
+        );
+        let frame = recorder.take_frame().unwrap();
+        let mut pixels = [0x0012_3456; 64];
+        assert_eq!(
+            backend.render_changed(&frame, &mut pixels, Extent2d::new(8, 8).unwrap(), 8,),
+            Err(RenderError::UnsupportedField)
+        );
+        assert!(pixels.iter().all(|pixel| *pixel == 0x0012_3456));
+    }
+}

@@ -1,5 +1,6 @@
-use axgfx::{Damage, Extent2d};
-use axrd::axui_direct::render_xrgb;
+mod render_backend;
+
+use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
@@ -34,11 +35,24 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::render_backend::NativeBackend;
+
 type UiElement<'a> = Element<'a, Message, Theme, AxRenderer<System>>;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
+
+fn native_renderer() -> AxRenderer<System> {
+    let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+    // vKore is a dense control plane dominated by crisp rules and the bundled
+    // bitmap font. Pixel-center coverage avoids evaluating 64 area samples for
+    // every solid UI pixel while remaining part of the durable Frame contract.
+    renderer
+        .recorder_mut()
+        .set_antialiasing(axui_core::Antialiasing::PixelCenter);
+    renderer
+}
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -1607,7 +1621,7 @@ impl Model {
             .spacing(10)
             .align_y(alignment::Vertical::Center),
         )
-        .padding([0, 22])
+        .padding([8, 22])
         .height(64)
         .width(Length::Fill)
         .style(|_| divider_right(0x0b0e12));
@@ -2479,6 +2493,7 @@ struct App {
     context: SoftContext<OwnedDisplayHandle>,
     surface: Option<SoftSurface<OwnedDisplayHandle, Rc<Window>>>,
     renderer: AxRenderer<System>,
+    backend: NativeBackend,
     cache: user_interface::Cache,
     events: Vec<iced_core::Event>,
     cursor: mouse::Cursor,
@@ -2486,6 +2501,7 @@ struct App {
     redraw: bool,
     redraw_requested: bool,
     last_frame: Option<Instant>,
+    profile: bool,
 }
 
 impl App {
@@ -2534,6 +2550,7 @@ impl App {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        let record_started = Instant::now();
         let scale = window.scale_factor() as f32;
         self.renderer.hint(Scale {
             window: scale,
@@ -2558,8 +2575,27 @@ impl App {
             .renderer
             .take_frame()
             .map_err(|error| format!("{error:?}"))?;
+        let text_errors = self.renderer.take_text_errors();
+        if !text_errors.is_empty() {
+            return Err(format!("unsupported text request: {text_errors:?}"));
+        }
+        let text_stats = self.renderer.take_text_stats();
+        let record_ns = record_started.elapsed().as_nanos();
         axgfx::frame_requirements(frame.view())
             .map_err(|error| format!("axgfx rejected the display list: {error:?}"))?;
+        if !self.backend.begin_frame(&frame) {
+            if self.profile {
+                eprintln!(
+                    "vkore-ui frame: record {:.3} ms ({} runs, {} glyphs); exact retained hit, 0 raster/present bytes",
+                    record_ns as f64 / 1_000_000.0,
+                    text_stats.glyph_runs,
+                    text_stats.glyphs,
+                );
+            }
+            self.redraw = false;
+            self.last_frame = Some(Instant::now());
+            return Ok(());
+        }
         let surface = self.surface.as_mut().ok_or("surface unavailable")?;
         surface
             .resize(
@@ -2567,20 +2603,33 @@ impl App {
                 NonZeroU32::new(physical.height).unwrap(),
             )
             .map_err(|error| error.to_string())?;
-        window.pre_present_notify();
         let mut buffer = surface.buffer_mut().map_err(|error| error.to_string())?;
         let extent =
             Extent2d::new(physical.width, physical.height).map_err(|error| format!("{error:?}"))?;
-        render_xrgb(
-            frame.view(),
-            &mut buffer,
-            extent,
-            physical.width as usize,
-            Damage::Full,
-            0x0008_0a0d,
-        )
-        .map_err(|error| format!("{error:?}"))?;
+        let render = self
+            .backend
+            .render_changed(&frame, &mut buffer, extent, physical.width as usize)
+            .map_err(|error| format!("{error:?}"))?;
+        window.pre_present_notify();
         buffer.present().map_err(|error| error.to_string())?;
+        self.backend.mark_visible(frame);
+        if self.profile {
+            eprintln!(
+                "vkore-ui frame: record {:.3} ms ({} runs, {} glyphs); structure {:.3} ms ({} commands, {} glyphs, {} atlas hits/{} misses, {} pixel writes, {} coverage samples); direct present {} bytes; scratch high-water {} pixels",
+                record_ns as f64 / 1_000_000.0,
+                text_stats.glyph_runs,
+                text_stats.glyphs,
+                render.structure_ns as f64 / 1_000_000.0,
+                render.commands,
+                render.glyphs,
+                render.atlas_hits,
+                render.atlas_misses,
+                render.pixels_written,
+                render.coverage_samples,
+                u64::from(physical.width) * u64::from(physical.height) * 4,
+                render.scratch_high_water_pixels,
+            );
+        }
         self.redraw = false;
         self.last_frame = Some(Instant::now());
         Ok(())
@@ -2829,7 +2878,11 @@ fn main() {
         model: Model::with_launch_project(network, options.project),
         context,
         surface: None,
-        renderer: AxRenderer::new_in(renderer::Settings::default(), System),
+        renderer: native_renderer(),
+        backend: NativeBackend::new().unwrap_or_else(|error| {
+            eprintln!("vkore-ui: failed to initialize the Axiom backend: {error:?}");
+            std::process::exit(2);
+        }),
         cache: user_interface::Cache::new(),
         events: Vec::new(),
         cursor: mouse::Cursor::Unavailable,
@@ -2837,6 +2890,7 @@ fn main() {
         redraw: true,
         redraw_requested: false,
         last_frame: None,
+        profile: std::env::var_os("VKORE_UI_PROFILE").is_some(),
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
@@ -2848,6 +2902,164 @@ mod tests {
     use hostlinkd::{
         BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer, HarnessService,
     };
+
+    fn populated_fixture_model() -> Model {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.connected = true;
+        model.status = "Kore sandbox ready".into();
+        model.projects = vec![json!({
+            "id":"axiom-control-plane",
+            "name":"Axiom control plane",
+            "archived":false,
+            "inference":{"backend":"deterministic"},
+            "resources":{"memory_mib":4096,"virtual_cpus":4,"prompt_seconds":300,"agent_limit":4},
+            "addons":[]
+        })];
+        model.selected = Some(0);
+        model.session = Some("native-session".into());
+        model.expanded_work.insert("native-prompt".into());
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_000_000_u64,"payload":{"text":"Read the verification file and explain the result."}}),
+            json!({"kind":"inference","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_001_000_u64,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"Granting the exact read capability."}}),
+            json!({"kind":"tool_call","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_002_000_u64,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
+            json!({"kind":"tool_result","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_003_000_u64,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
+            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742. The read stayed inside the project workspace and used prompt-scoped authority."}}),
+            json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
+        ];
+        model
+    }
+
+    fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
+        samples.sort_unstable();
+        let index = (samples.len().saturating_sub(1) * numerator) / denominator;
+        samples[index]
+    }
+
+    fn write_ppm(path: &str, width: usize, height: usize, pixels: &[u32]) {
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        bytes.reserve(width * height * 3);
+        for pixel in pixels {
+            bytes.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn render_test_frame(
+        frame: &axui_core::Frame<System>,
+        target: &mut [u32],
+        width: u32,
+        height: u32,
+    ) -> render_backend::RenderProfile {
+        let mut backend = NativeBackend::new().unwrap();
+        assert!(backend.begin_frame(frame));
+        backend
+            .render_changed(
+                frame,
+                target,
+                Extent2d::new(width, height).unwrap(),
+                width as usize,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "manual reproducible UI capture and timing probe"]
+    fn capture_and_benchmark_ui() {
+        let model = populated_fixture_model();
+        let size = Size::new(1280.0, 800.0);
+        let extent = Extent2d::new(1280, 800).unwrap();
+        let mut renderer = native_renderer();
+        renderer.hint(Scale {
+            window: 1.0,
+            application: 1.0,
+        });
+        let mut cache = user_interface::Cache::new();
+        let mut target = vec![0u32; 1280 * 800];
+        let mut record_ns = Vec::new();
+        let mut full_render_ns = Vec::new();
+        let mut stable_submit_ns = Vec::new();
+        let mut pixels_written = 0u64;
+        let mut backend = NativeBackend::new().unwrap();
+
+        for iteration in 0..70 {
+            let started = Instant::now();
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style {
+                    text_color: rgb(0xf4f5f7),
+                },
+                mouse::Cursor::Unavailable,
+            );
+            cache = interface.into_cache();
+            let frame = renderer.take_frame().unwrap();
+            axgfx::frame_requirements(frame.view()).unwrap();
+            let recorded = Instant::now();
+            backend.invalidate_for_measurement();
+            assert!(backend.begin_frame(&frame));
+            let stats = backend
+                .render_changed(&frame, &mut target, extent, 1280)
+                .unwrap();
+            backend.mark_visible(frame);
+            let finished = Instant::now();
+            std::hint::black_box(&target);
+            if iteration >= 10 {
+                record_ns.push(recorded.duration_since(started).as_nanos());
+                full_render_ns.push(finished.duration_since(recorded).as_nanos());
+            }
+            pixels_written = stats.pixels_written;
+        }
+
+        for iteration in 0..70 {
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style {
+                    text_color: rgb(0xf4f5f7),
+                },
+                mouse::Cursor::Unavailable,
+            );
+            cache = interface.into_cache();
+            let frame = renderer.take_frame().unwrap();
+            let started = Instant::now();
+            assert!(!backend.begin_frame(&frame));
+            let finished = Instant::now();
+            if iteration >= 10 {
+                stable_submit_ns.push(finished.duration_since(started).as_nanos());
+            }
+        }
+
+        if let Ok(path) = std::env::var("VKORE_UI_CAPTURE") {
+            write_ppm(&path, 1280, 800, &target);
+        }
+        let samples = record_ns.len();
+        let record_median = percentile(&mut record_ns, 1, 2);
+        let record_p95 = percentile(&mut record_ns, 95, 100);
+        let full_render_median = percentile(&mut full_render_ns, 1, 2);
+        let full_render_p95 = percentile(&mut full_render_ns, 95, 100);
+        let stable_submit_median = percentile(&mut stable_submit_ns, 1, 2);
+        let stable_submit_p95 = percentile(&mut stable_submit_ns, 95, 100);
+        println!(
+            "UI_BENCH {{\"implementation\":\"retained_structure_v1\",\"width\":1280,\"height\":800,\"samples\":{samples},\"record_median_ns\":{record_median},\"record_p95_ns\":{record_p95},\"full_render_median_ns\":{full_render_median},\"full_render_p95_ns\":{full_render_p95},\"stable_submit_median_ns\":{stable_submit_median},\"stable_submit_p95_ns\":{stable_submit_p95},\"pixels_written\":{pixels_written},\"full_present_bytes\":4096000,\"stable_present_bytes\":0}}"
+        );
+    }
 
     #[test]
     fn launch_options_accept_a_preloaded_project() {
@@ -3074,7 +3286,7 @@ mod tests {
         })];
         model.selected = Some(0);
 
-        let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+        let mut renderer = native_renderer();
         renderer.hint(Scale {
             window: 1.0,
             application: 1.0,
@@ -3098,24 +3310,12 @@ mod tests {
             "the native shell must retain text"
         );
         let requirements = axgfx::frame_requirements(frame.view()).unwrap();
-        assert!(
-            requirements
-                .features()
-                .contains(axgfx::Features::GLYPH_RASTER)
-        );
+        assert!(requirements.features().contains(axgfx::Features::GLYPH_RUN));
 
         let mut target = vec![0u32; 900 * 600];
-        let stats = render_xrgb(
-            frame.view(),
-            &mut target,
-            Extent2d::new(900, 600).unwrap(),
-            900,
-            Damage::Full,
-            0x0008_0a0d,
-        )
-        .unwrap();
-        assert_eq!(stats.scratch_high_water, 0);
-        assert!(stats.changed_pixels > 900 * 600 / 8);
+        let stats = render_test_frame(&frame, &mut target, 900, 600);
+        assert_eq!(stats.scratch_high_water_pixels, 0);
+        assert!(stats.pixels_written > 900 * 600 / 8);
         assert!(target.iter().any(|pixel| *pixel != 0x0008_0a0d));
     }
 
@@ -3143,7 +3343,7 @@ mod tests {
             if expanded != model.expanded_work.contains("native-prompt") {
                 model.update(Message::ToggleWorking("native-prompt".into()));
             }
-            let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+            let mut renderer = native_renderer();
             renderer.hint(Scale {
                 window: 1.0,
                 application: 1.0,
@@ -3166,16 +3366,8 @@ mod tests {
             assert!(frame.glyphs().len() > 30);
 
             let mut target = vec![0u32; 1100 * 760];
-            let stats = render_xrgb(
-                frame.view(),
-                &mut target,
-                Extent2d::new(1100, 760).unwrap(),
-                1100,
-                Damage::Full,
-                0x0008_0a0d,
-            )
-            .unwrap();
-            assert!(stats.changed_pixels > 1100 * 760 / 8);
+            let stats = render_test_frame(&frame, &mut target, 1100, 760);
+            assert!(stats.pixels_written > 1100 * 760 / 8);
         }
     }
 
@@ -3197,7 +3389,7 @@ mod tests {
 
         for page in 0..5 {
             model.wizard_page = page;
-            let mut renderer = AxRenderer::new_in(renderer::Settings::default(), System);
+            let mut renderer = native_renderer();
             renderer.hint(Scale {
                 window: 1.25,
                 application: 1.0,
@@ -3222,16 +3414,8 @@ mod tests {
             assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
 
             let mut target = vec![0u32; 1280 * 800];
-            let stats = render_xrgb(
-                frame.view(),
-                &mut target,
-                Extent2d::new(1280, 800).unwrap(),
-                1280,
-                Damage::Full,
-                0x0008_0a0d,
-            )
-            .unwrap();
-            assert!(stats.changed_pixels > 1280 * 800 / 5);
+            let stats = render_test_frame(&frame, &mut target, 1280, 800);
+            assert!(stats.pixels_written > 1280 * 800 / 5);
         }
     }
 

@@ -59,6 +59,7 @@ pub(crate) struct NativeBackend {
     glyph_atlas: GlyphAtlas<System>,
     glyph_source: OpenTypeGlyphSource,
     resources: ResourceStore<System>,
+    installed_fonts: Vec<ResourceRef>,
     layer_scratch: LayerScratch<System>,
     accepted: Option<Frame<System>>,
     profile: RetainedProfile,
@@ -70,11 +71,25 @@ impl NativeBackend {
     }
 
     fn with_execution(execution: StructureExecution) -> Result<Self, RenderError> {
-        let mut resources = ResourceStore::new_in(1, axui_fonts::DM_SANS.len(), System)
+        // The MONOLITH faces must be registered before their resources are
+        // installed; registration is what assigns each face its identity.
+        crate::fonts::register().map_err(|_| RenderError::ResourceSetup)?;
+        let faces = axui_iced::registered_fonts();
+        let capacity =
+            axui_fonts::DM_SANS.len() + faces.iter().map(|face| face.bytes.len()).sum::<usize>();
+        let mut resources = ResourceStore::new_in(1 + faces.len(), capacity, System)
             .map_err(|_| RenderError::ResourceSetup)?;
+        let mut installed_fonts = vec![ui_font()];
         resources
             .install(ui_font(), axui_fonts::DM_SANS)
             .map_err(|_| RenderError::ResourceSetup)?;
+        for face in &faces {
+            let reference = font_reference(face.resource, face.bytes.len() as u64);
+            resources
+                .install(reference, face.bytes)
+                .map_err(|_| RenderError::ResourceSetup)?;
+            installed_fonts.push(reference);
+        }
         Ok(Self {
             structure: match execution {
                 StructureExecution::SharedKernels => {
@@ -93,6 +108,7 @@ impl NativeBackend {
             .map_err(|_| RenderError::ResourceSetup)?,
             glyph_source: OpenTypeGlyphSource::new()?,
             resources,
+            installed_fonts,
             layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
                 .map_err(|_| RenderError::ResourceSetup)?,
             accepted: None,
@@ -146,12 +162,13 @@ impl NativeBackend {
         {
             return Err(RenderError::UnsupportedField);
         }
-        let builtin_font = ui_font();
+        // Every declared resource must be a face this backend installed. The
+        // first structure profile has no image path, so any image refuses.
         if !frame.images().is_empty()
             || frame
                 .resources()
                 .iter()
-                .any(|resource| *resource != builtin_font)
+                .any(|resource| !self.installed_fonts.contains(resource))
         {
             return Err(RenderError::UnsupportedResource);
         }
@@ -286,8 +303,15 @@ fn render_profile(
 }
 
 fn ui_font() -> ResourceRef {
+    font_reference(
+        axui_iced::DEFAULT_FONT_RESOURCE,
+        axui_fonts::DM_SANS.len() as u64,
+    )
+}
+
+fn font_reference(id: ResourceId, byte_len: u64) -> ResourceRef {
     ResourceRef {
-        id: axui_iced::DEFAULT_FONT_RESOURCE,
+        id,
         generation: ResourceGeneration::INITIAL,
         kind: ResourceKind::Font,
         format: ResourceFormat::Bytes,
@@ -295,7 +319,7 @@ fn ui_font() -> ResourceRef {
         width: 0,
         height: 0,
         row_stride: 0,
-        byte_len: axui_fonts::DM_SANS.len() as u64,
+        byte_len,
     }
 }
 
@@ -317,18 +341,27 @@ fn maximum_opacity_depth(commands: &[Command]) -> usize {
 
 struct OpenTypeGlyphSource {
     fonts: FontSystem,
-    face: fontdb::ID,
+    faces: Vec<(ResourceId, fontdb::ID)>,
     swash: SwashCache,
 }
 
 impl OpenTypeGlyphSource {
     fn new() -> Result<Self, RenderError> {
-        let mut fonts =
-            FontSystem::new_with_fonts([fontdb::Source::Binary(Arc::new(axui_fonts::DM_SANS))]);
+        // This font system is the backend's own; it rasterizes coverage for
+        // identities the frontend already resolved. Load the same faces so a
+        // resource recorded above the boundary can be resolved below it.
+        let registered = axui_iced::registered_fonts();
+        let sources = core::iter::once(fontdb::Source::Binary(Arc::new(axui_fonts::DM_SANS)))
+            .chain(
+                registered
+                    .iter()
+                    .map(|face| fontdb::Source::Binary(Arc::new(face.bytes))),
+            );
+        let mut fonts = FontSystem::new_with_fonts(sources);
         fonts
             .db_mut()
             .set_sans_serif_family(axui_fonts::DM_SANS_FAMILY);
-        let face = fonts
+        let default = fonts
             .db()
             .query(&fontdb::Query {
                 families: &[fontdb::Family::Name(axui_fonts::DM_SANS_FAMILY)],
@@ -337,19 +370,45 @@ impl OpenTypeGlyphSource {
                 style: fontdb::Style::Normal,
             })
             .ok_or(RenderError::ResourceSetup)?;
+        let mut faces = vec![(axui_iced::DEFAULT_FONT_RESOURCE, default)];
+        for face in &registered {
+            // The frontend registry holds Cosmic Text ids from the shared font
+            // system, so match on the face bytes this store actually loaded.
+            let local = fonts
+                .db()
+                .faces()
+                .find(|candidate| match fonts.db().face_source(candidate.id) {
+                    Some((fontdb::Source::Binary(loaded), _)) => {
+                        let loaded: &[u8] = loaded.as_ref().as_ref();
+                        loaded.len() == face.bytes.len() && loaded == face.bytes
+                    }
+                    _ => false,
+                })
+                .map(|candidate| candidate.id)
+                .ok_or(RenderError::ResourceSetup)?;
+            faces.push((face.resource, local));
+        }
         Ok(Self {
             fonts,
-            face,
+            faces,
             swash: SwashCache::new(),
         })
+    }
+
+    fn face(&self, resource: ResourceId) -> Option<fontdb::ID> {
+        self.faces
+            .iter()
+            .find(|(id, _)| *id == resource)
+            .map(|(_, face)| *face)
     }
 }
 
 impl GlyphSource for OpenTypeGlyphSource {
     fn rasterize(&mut self, key: GlyphKey, output: &mut [u8]) -> Result<(), GlyphSourceError> {
-        if key.font != axui_iced::DEFAULT_FONT_RESOURCE || key.face_index != 0 {
+        if key.face_index != 0 {
             return Err(GlyphSourceError::MissingFont);
         }
+        let face = self.face(key.font).ok_or(GlyphSourceError::MissingFont)?;
         let width = usize::from(key.width);
         let height = usize::from(key.height);
         if output.len() != width * height || width == 0 || height == 0 {
@@ -361,7 +420,7 @@ impl GlyphSource for OpenTypeGlyphSource {
             .get_image_uncached(
                 &mut self.fonts,
                 CacheKey {
-                    font_id: self.face,
+                    font_id: face,
                     glyph_id,
                     font_size_bits: key.font_size_bits,
                     x_bin: subpixel_bin(key.phase_x),

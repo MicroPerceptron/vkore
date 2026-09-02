@@ -100,7 +100,7 @@ fn broker_planning_request_with_timeout(turn: u64, timeout_ticks: u32) -> Vec<u8
 }
 
 fn broker_planning_request_for(turn: u64, intent: &str, timeout_ticks: u32) -> Vec<u8> {
-    let offers = [
+    let mut offers = [
         BrokerOffer {
             reference: [1; 16],
             kind: BrokerOfferKind::Object,
@@ -137,6 +137,15 @@ fn broker_planning_request_for(turn: u64, intent: &str, timeout_ticks: u32) -> V
             label: "cat",
         },
     ];
+    if intent.eq_ignore_ascii_case("hello") {
+        offers[3] = BrokerOffer {
+            reference: [6; 16],
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 1,
+            label: "hello",
+        };
+    }
     let mut inner = [0; INFERENCE_PART_MAX];
     let inner_len = TaskIntentRequest {
         plan: *b"prompt-plan-0001",
@@ -248,6 +257,105 @@ fn supervised_stub_uses_kbp1_and_returns_validated_kbr1() {
 }
 
 #[test]
+fn resident_broker_starts_each_frontend_intent_with_fresh_model_context() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    backend
+        .submit(broker, RequestId(id(91)), &broker_planning_request(1), 0)
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 0;
+    let first = loop {
+        assert!(Instant::now() < deadline, "first broker intent timed out");
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, .. }) => break payload,
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    assert_eq!(
+        decode_broker_reply(&first)
+            .unwrap()
+            .selectors()
+            .collect::<Vec<_>>(),
+        vec![[5; 16], [2; 16]]
+    );
+
+    // Kore intentionally begins the next prompt-scoped authority transaction
+    // at turn one while retaining the same trusted broker route.
+    backend
+        .submit(
+            broker,
+            RequestId(id(92)),
+            &broker_planning_request_for(1, "hello", 500),
+            tick,
+        )
+        .unwrap();
+    let second = loop {
+        assert!(Instant::now() < deadline, "second broker intent timed out");
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, turn, .. }) => {
+                assert_eq!(turn, 1);
+                break payload;
+            }
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    assert_eq!(
+        decode_broker_reply(&second)
+            .unwrap()
+            .selectors()
+            .collect::<Vec<_>>(),
+        vec![[6; 16]],
+        "the prior prompt's object/tool context crossed the chat boundary"
+    );
+    assert_eq!(backend.metrics().incarnation, 1);
+    assert_eq!(backend.metrics().restarts, 0);
+}
+
+#[test]
+fn supervised_stub_broker_creates_a_tool_inert_conversational_agent() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    backend
+        .submit(
+            broker,
+            RequestId(id(10)),
+            &broker_planning_request_for(1, "hello", 500),
+            0,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 0;
+    while Instant::now() < deadline {
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, .. }) => {
+                let reply = decode_broker_reply(&payload).unwrap();
+                assert_eq!(reply.action, BrokerActionKind::CreateAgent);
+                assert_eq!(reply.selectors().collect::<Vec<_>>(), vec![[6; 16]]);
+                assert_eq!(reply.budget.cpu_share, 1);
+                assert_eq!(reply.budget.memory_bytes, 64 * 1024 * 1024);
+                assert_eq!(reply.budget.tool_calls, 0);
+                return;
+            }
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    panic!("conversational broker plan timed out")
+}
+
+#[test]
 fn supervised_llama_preserves_the_exact_legacy_kore_boot_probe() {
     let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
     let agent = boot_agent_identity(2);
@@ -277,7 +385,7 @@ fn supervised_llama_preserves_the_exact_legacy_kore_boot_probe() {
 }
 
 #[test]
-fn full_production_catalog_is_bounded_and_visible_to_the_broker_model() {
+fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
     const OBJECTS: [&str; 21] = [
         "workspace/identity",
         "workspace/README.md",
@@ -417,9 +525,24 @@ fn full_production_catalog_is_bounded_and_visible_to_the_broker_model() {
                     .filter(|event| event.kind == ObservationKind::ModelPrompt)
                     .collect();
                 assert_eq!(prompts.len(), 1);
-                for label in OBJECTS.into_iter().chain(EXECUTABLES) {
-                    assert!(prompts[0].payload.contains(label), "missing {label}");
-                }
+                assert!(
+                    prompts[0]
+                        .payload
+                        .contains("workspace/docs-architecture.md")
+                );
+                assert!(prompts[0].payload.contains("\"cat\""));
+                assert!(
+                    prompts[0]
+                        .payload
+                        .contains("\"required_selector_indices\":[31,2]")
+                );
+                assert!(
+                    !prompts[0]
+                        .payload
+                        .contains("workspace/secrets-credentials.txt")
+                );
+                assert!(!prompts[0].payload.contains("workspace/identity"));
+                assert!(!prompts[0].payload.contains("\"write\""));
                 return;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("raw broker JSON escaped KBR1"),

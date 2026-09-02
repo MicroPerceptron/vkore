@@ -6,17 +6,24 @@ use crate::{
     PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
     interactive::emit_inference_observation,
 };
-use kore_hostlink::{FrontendIntentId, FrontendResultKind};
+use kore_hostlink::{AuthorityKind, AuthorityState, FrontendIntentId, FrontendResultKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use vkore_vm::{QemuConfig, QemuProcess};
 
 const DEFAULT_TICK: Duration = Duration::from_millis(1);
-const VM_PAUSE_DRAIN: Duration = Duration::from_millis(50);
+const VM_PAUSE_DRAIN: Duration = Duration::from_millis(500);
+const BOOT_LOG_GRACE: Duration = Duration::from_secs(1);
+const BOOT_LOG_POLL: Duration = Duration::from_millis(250);
+const PROMPT_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_BOOT_ATTEMPTS: u8 = 3;
+const BOOT_LOG_TAIL_BYTES: u64 = 128 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct KoreVmRuntimeConfig {
@@ -36,10 +43,17 @@ struct ProjectRuntime {
     daemon: HostLinkDaemon<Box<dyn InferenceBackend + Send>>,
     qemu: QemuConfig,
     process: Option<QemuProcess>,
+    session_id: Option<String>,
+    serial_log: Option<PathBuf>,
+    boot_attempt: u8,
+    next_boot_log_check: Option<Instant>,
     hostlink_trace_cursor: usize,
     active_model_turns: usize,
     vm_pause_due: Option<Instant>,
     vm_suspended: bool,
+    backend_failure: Option<String>,
+    completed_frontend_teardowns: u64,
+    completed_frontend_idle_barriers: u64,
 }
 
 impl KoreVmRuntime {
@@ -117,7 +131,7 @@ impl ProjectRuntime {
                         startup_timeout: Duration::from_secs(600),
                         io_timeout: Duration::from_millis(25),
                         limits,
-                        trace: false,
+                        trace: std::env::var_os("VKORE_LLAMA_TRACE").is_some(),
                     })
                     .map_err(|error| format!("llama.cpp startup failed: {error:?}"))?,
                 )
@@ -139,6 +153,7 @@ impl ProjectRuntime {
             .kore_image
             .clone()
             .ok_or("project has no Kore image")?;
+        let serial_log = qemu_serial_log(&runtime.qemu_arguments);
         let mut arguments = without_qemu_resource_arguments(&runtime.qemu_arguments)?;
         arguments.extend([
             OsString::from("-m"),
@@ -158,14 +173,21 @@ impl ProjectRuntime {
             daemon,
             qemu,
             process: None,
+            session_id: None,
+            serial_log,
+            boot_attempt: 0,
+            next_boot_log_check: None,
             hostlink_trace_cursor: 0,
             active_model_turns: 0,
             vm_pause_due: None,
             vm_suspended: false,
+            backend_failure: None,
+            completed_frontend_teardowns: 0,
+            completed_frontend_idle_barriers: 0,
         })
     }
 
-    fn stop(&mut self) {
+    fn stop_process(&mut self) {
         if self.vm_suspended {
             if let Some(process) = self.process.as_ref() {
                 let _ = process.resume();
@@ -174,10 +196,93 @@ impl ProjectRuntime {
         self.active_model_turns = 0;
         self.vm_pause_due = None;
         self.vm_suspended = false;
+        self.next_boot_log_check = None;
         if let Some(mut process) = self.process.take() {
             let _ = process.terminate();
         }
         self.daemon.force_disconnect();
+    }
+
+    fn stop(&mut self) {
+        self.stop_process();
+        self.session_id = None;
+        self.boot_attempt = 0;
+    }
+
+    fn spawn_vm(&mut self) -> Result<(), String> {
+        if let Some(path) = self.serial_log.as_deref() {
+            let _ = OpenOptions::new().write(true).truncate(true).open(path);
+        }
+        self.process = Some(
+            self.qemu
+                .clone()
+                .spawn()
+                .map_err(|error| format!("Kore VM startup failed: {error}"))?,
+        );
+        self.boot_attempt = self.boot_attempt.saturating_add(1);
+        self.next_boot_log_check = Some(Instant::now() + BOOT_LOG_GRACE);
+        Ok(())
+    }
+
+    fn suspend_vm_between_prompts(
+        &mut self,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<(), String> {
+        if self.vm_suspended {
+            return Ok(());
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| "QEMU process is unavailable".to_owned())?
+            .suspend()
+            .map_err(|error| format!("cannot park Kore between prompts: {error}"))?;
+        self.vm_suspended = true;
+        emit(
+            EventKind::Validation,
+            false,
+            json!({"stage": "kore_vm_parked_between_prompts", "guest": "kore"}),
+        );
+        Ok(())
+    }
+
+    fn resume_vm_for_prompt(
+        &mut self,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<(), String> {
+        if !self.vm_suspended {
+            return Ok(());
+        }
+        self.process
+            .as_ref()
+            .ok_or_else(|| "QEMU process is unavailable".to_owned())?
+            .resume()
+            .map_err(|error| format!("cannot resume Kore for the next prompt: {error}"))?;
+        self.vm_suspended = false;
+        emit(
+            EventKind::Validation,
+            false,
+            json!({"stage": "kore_vm_resumed_for_prompt", "guest": "kore"}),
+        );
+        Ok(())
+    }
+
+    fn boot_failure(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let due = self.next_boot_log_check?;
+        if now < due {
+            return None;
+        }
+        self.next_boot_log_check = Some(now + BOOT_LOG_POLL);
+        let path = self.serial_log.as_deref()?;
+        let tail = read_tail(path, BOOT_LOG_TAIL_BYTES).ok()?;
+        [
+            "kore: BOOT DEGRADED",
+            "first-shell: FAIL",
+            "first-userland-boot: FAIL",
+        ]
+        .into_iter()
+        .find(|marker| tail.contains(marker))
+        .map(str::to_owned)
     }
 
     fn model_turn_started(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
@@ -185,10 +290,9 @@ impl ProjectRuntime {
         if self.vm_suspended || self.vm_pause_due.is_some() {
             return;
         }
-        // The model worker starts in the daemon tick that accepts the guest's
-        // HostLink request. Let that acknowledgement and any paired virtio
-        // notifications drain before pausing virtual CPUs; stopping QEMU in
-        // the middle of that transaction can strand a freshly opened route.
+        // Keep Kore running long enough to consume the inference admission
+        // acknowledgement and park its route. TCG can need substantially more
+        // host time than the deterministic backend before that edge drains.
         self.vm_pause_due = Some(Instant::now() + VM_PAUSE_DRAIN);
         emit(
             EventKind::Validation,
@@ -292,6 +396,18 @@ impl ProjectRuntime {
                         "transport": "hostlink",
                     }),
                 );
+            } else if entry.ends_with("frontend broker poll parked") {
+                self.completed_frontend_idle_barriers =
+                    self.completed_frontend_idle_barriers.saturating_add(1);
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({
+                        "stage": "kore_broker_waiting_for_intent",
+                        "guest": "kore",
+                        "transport": "hostlink",
+                    }),
+                );
             } else if entry.ends_with("frontend intent claimed by agent") {
                 emit(
                     EventKind::Validation,
@@ -310,6 +426,9 @@ impl ProjectRuntime {
             {
                 self.model_turn_finished(emit);
             }
+            if let Some(failure) = message.strip_prefix("backend failed ") {
+                self.backend_failure = Some(failure.to_owned());
+            }
         }
         self.hostlink_trace_cursor = transcript.len();
         while let Some(observation) = self.daemon.take_inference_observation() {
@@ -319,6 +438,13 @@ impl ProjectRuntime {
             emit_inference_observation(observation, emit);
         }
         while let Some(observation) = self.daemon.take_authority_observation() {
+            if observation.state == AuthorityState::Teardown
+                && observation.kind == AuthorityKind::Agent
+                && observation.label == "agent/frontend"
+            {
+                self.completed_frontend_teardowns =
+                    self.completed_frontend_teardowns.saturating_add(1);
+            }
             emit(
                 EventKind::Capability,
                 false,
@@ -356,7 +482,10 @@ impl TaskRuntime for KoreVmRuntime {
                 return PromptStatus::Failed;
             }
         };
-        runtime.stop();
+        if runtime.session_id.as_deref() != Some(&session.session_id) {
+            runtime.stop();
+            runtime.session_id = Some(session.session_id.clone());
+        }
         let intent_id = match runtime.daemon.queue_frontend_intent(prompt.text.clone()) {
             Ok(intent_id) => intent_id,
             Err(error) => {
@@ -368,18 +497,20 @@ impl TaskRuntime for KoreVmRuntime {
                 return PromptStatus::Failed;
             }
         };
-        runtime.process = match runtime.qemu.clone().spawn() {
-            Ok(process) => Some(process),
-            Err(error) => {
+        runtime.backend_failure = None;
+        if runtime.process.is_none() {
+            runtime.boot_attempt = 0;
+            if let Err(error) = runtime.spawn_vm() {
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                emit(
-                    EventKind::Error,
-                    true,
-                    json!({"message": format!("Kore VM startup failed: {error}")}),
-                );
+                emit(EventKind::Error, true, json!({"message": error}));
                 return PromptStatus::Failed;
             }
-        };
+        } else if let Err(error) = runtime.resume_vm_for_prompt(emit) {
+            runtime.daemon.cancel_frontend_intent(intent_id);
+            runtime.stop();
+            emit(EventKind::Error, true, json!({"message": error}));
+            return PromptStatus::Failed;
+        }
         emit(
             EventKind::Validation,
             false,
@@ -393,7 +524,12 @@ impl TaskRuntime for KoreVmRuntime {
         );
         let deadline = Instant::now()
             + Duration::from_secs(u64::from(runtime.config.resources.prompt_seconds.max(1)));
+        let started = Instant::now();
+        let mut next_progress = started;
         let tick_interval = hostlink_tick_interval();
+        let teardown_target = runtime.completed_frontend_teardowns.saturating_add(1);
+        let idle_barrier_target = runtime.completed_frontend_idle_barriers.saturating_add(1);
+        let mut pending_terminal = None;
         loop {
             if cancelled() {
                 runtime.daemon.cancel_frontend_intent(intent_id);
@@ -410,7 +546,12 @@ impl TaskRuntime for KoreVmRuntime {
                 );
                 return PromptStatus::Failed;
             }
-            if let Err(error) = runtime.daemon.tick() {
+            let tick_result = if runtime.vm_suspended {
+                runtime.daemon.tick_frozen()
+            } else {
+                runtime.daemon.tick()
+            };
+            if let Err(error) = tick_result {
                 runtime.daemon.cancel_frontend_intent(intent_id);
                 runtime.stop();
                 emit(
@@ -422,7 +563,83 @@ impl TaskRuntime for KoreVmRuntime {
             }
             runtime.drain_events(emit);
             runtime.maybe_suspend_vm(emit);
-            while let Some(result) = runtime.daemon.take_frontend_result() {
+            let now = Instant::now();
+            if now >= next_progress {
+                let last_hostlink = runtime
+                    .daemon
+                    .core()
+                    .transcript()
+                    .last()
+                    .unwrap_or("no HostLink event yet")
+                    .to_owned();
+                let last_hostlink = bounded_progress_text(&last_hostlink, 512);
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({
+                        "stage": "prompt_progress",
+                        "elapsed_ms": started.elapsed().as_millis(),
+                        "qemu_pid": runtime.process.as_ref().map(QemuProcess::id),
+                        "boot_attempt": runtime.boot_attempt,
+                        "active_model_turns": runtime.active_model_turns,
+                        "vm_suspended": runtime.vm_suspended,
+                        "last_hostlink": last_hostlink,
+                    }),
+                );
+                next_progress = now + PROMPT_PROGRESS_INTERVAL;
+            }
+            if let Some(failure) = runtime.backend_failure.take() {
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop();
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"message": format!("host inference failed: {failure}")}),
+                );
+                return PromptStatus::Failed;
+            }
+            if let Some(marker) = runtime.boot_failure() {
+                if runtime.boot_attempt < MAX_BOOT_ATTEMPTS {
+                    let failed_attempt = runtime.boot_attempt;
+                    runtime.stop_process();
+                    emit(
+                        EventKind::Validation,
+                        false,
+                        json!({
+                            "stage": "kore_boot_retry",
+                            "attempt": failed_attempt,
+                            "reason": marker,
+                        }),
+                    );
+                    if let Err(error) = runtime.spawn_vm() {
+                        runtime.daemon.cancel_frontend_intent(intent_id);
+                        emit(EventKind::Error, true, json!({"message": error}));
+                        return PromptStatus::Failed;
+                    }
+                    continue;
+                }
+                let attempts = runtime.boot_attempt;
+                let serial_log = runtime.serial_log.clone();
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop_process();
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({
+                        "message": format!(
+                            "Kore boot failed after {attempts} attempts ({marker}){}",
+                            serial_log.as_deref().map_or_else(String::new, |path| format!(
+                                "; serial log: {}",
+                                path.display()
+                            ))
+                        )
+                    }),
+                );
+                return PromptStatus::Failed;
+            }
+            while pending_terminal.is_none()
+                && let Some(result) = runtime.daemon.take_frontend_result()
+            {
                 if result.intent_id != intent_id {
                     continue;
                 }
@@ -441,7 +658,20 @@ impl TaskRuntime for KoreVmRuntime {
                         PromptStatus::Failed
                     }
                 };
-                runtime.stop();
+                pending_terminal = Some(status);
+            }
+            if let Some(status) = terminal_after_reclaim_and_idle(
+                pending_terminal,
+                runtime.completed_frontend_teardowns,
+                teardown_target,
+                runtime.completed_frontend_idle_barriers,
+                idle_barrier_target,
+            ) {
+                if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
+                    runtime.stop();
+                    emit(EventKind::Error, true, json!({"message": error}));
+                    return PromptStatus::Failed;
+                }
                 return status;
             }
             let exited = runtime
@@ -464,7 +694,9 @@ impl TaskRuntime for KoreVmRuntime {
     }
 
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        if let Some(runtime) = self.runtimes.get_mut(&session.project_id) {
+        if let Some(runtime) = self.runtimes.get_mut(&session.project_id)
+            && runtime.session_id.as_deref() == Some(&session.session_id)
+        {
             runtime.stop();
         }
         emit(
@@ -486,6 +718,31 @@ fn hostlink_tick_interval() -> Duration {
         .filter(|milliseconds| (1..=100).contains(milliseconds))
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_TICK)
+}
+
+fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let boundary = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", &value[..boundary])
+}
+
+fn terminal_after_reclaim_and_idle(
+    pending: Option<PromptStatus>,
+    observed_teardowns: u64,
+    teardown_target: u64,
+    observed_idle_barriers: u64,
+    idle_barrier_target: u64,
+) -> Option<PromptStatus> {
+    (observed_teardowns >= teardown_target && observed_idle_barriers >= idle_barrier_target)
+        .then_some(pending)
+        .flatten()
 }
 
 fn reserve_loopback_port() -> Result<u16, String> {
@@ -526,9 +783,43 @@ fn without_qemu_resource_arguments(arguments: &[OsString]) -> Result<Vec<OsStrin
     Ok(filtered)
 }
 
+fn qemu_serial_log(arguments: &[OsString]) -> Option<PathBuf> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].to_string_lossy();
+        let value = if argument == "-serial" {
+            index += 1;
+            arguments.get(index)?.to_string_lossy()
+        } else if let Some(value) = argument.strip_prefix("-serial=") {
+            value.into()
+        } else {
+            index += 1;
+            continue;
+        };
+        return value.strip_prefix("file:").map(PathBuf::from);
+    }
+    None
+}
+
+fn read_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length > max_bytes {
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(length - max_bytes))?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::without_qemu_resource_arguments;
+    use super::{
+        qemu_serial_log, read_tail, terminal_after_reclaim_and_idle,
+        without_qemu_resource_arguments,
+    };
+    use crate::PromptStatus;
     use std::ffi::OsString;
 
     #[test]
@@ -540,5 +831,52 @@ mod tests {
             ["-machine", "q35", "-display", "none"].map(OsString::from)
         );
         assert!(without_qemu_resource_arguments(&[OsString::from("-m")]).is_err());
+    }
+
+    #[test]
+    fn qemu_serial_file_is_discovered_for_boot_failure_diagnostics() {
+        let split =
+            ["-display", "none", "-serial", "file:/tmp/kore-serial.log"].map(OsString::from);
+        assert_eq!(
+            qemu_serial_log(&split).unwrap(),
+            std::path::Path::new("/tmp/kore-serial.log")
+        );
+        let joined = ["-serial=file:/tmp/joined.log"].map(OsString::from);
+        assert_eq!(
+            qemu_serial_log(&joined).unwrap(),
+            std::path::Path::new("/tmp/joined.log")
+        );
+        assert!(qemu_serial_log(&[OsString::from("-serial"), OsString::from("stdio")]).is_none());
+    }
+
+    #[test]
+    fn serial_tail_keeps_the_terminal_boot_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("serial.log");
+        std::fs::write(
+            &path,
+            format!("{}\nfirst-shell: FAIL (init rung 110)\n", "x".repeat(4096)),
+        )
+        .unwrap();
+        let tail = read_tail(&path, 512).unwrap();
+        assert!(!tail.contains(&"x".repeat(4096)));
+        assert!(tail.contains("first-shell: FAIL"));
+    }
+
+    #[test]
+    fn frontend_result_is_not_terminal_until_kore_is_ready_for_the_next_chat() {
+        assert_eq!(terminal_after_reclaim_and_idle(None, 4, 5, 7, 8), None);
+        assert_eq!(
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 4, 5, 7, 8),
+            None
+        );
+        assert_eq!(
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 5, 5, 7, 8),
+            None
+        );
+        assert_eq!(
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 5, 5, 8, 8),
+            Some(PromptStatus::Completed)
+        );
     }
 }

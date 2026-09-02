@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
 use std::{
     alloc::System,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     num::NonZeroU32,
@@ -37,6 +37,8 @@ use winit::{
 type UiElement<'a> = Element<'a, Message, Theme, AxRenderer<System>>;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -56,6 +58,7 @@ enum Message {
     ToggleSession,
     CleanSession,
     PromptAction(iced_core::text::editor::Action),
+    SelectText(String, iced_core::text::editor::Action),
     SendPrompt,
     CancelPrompt,
     ToggleWorking(String),
@@ -106,10 +109,15 @@ fn rgb(hex: u32) -> Color {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkRow {
-    label: String,
-    detail: String,
+    speaker: String,
     body: String,
     kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogEntry {
+    kind: String,
+    label: String,
 }
 
 fn event_timestamp(event: &Value) -> Option<u64> {
@@ -148,8 +156,7 @@ fn message_meta(label: &str, event: &Value, started_at: Option<u64>) -> String {
     if let Some(time) = timestamp.and_then(format_event_time) {
         parts.push(time);
     }
-    if label == "VALIDATED ASSISTANT"
-        && let (Some(started), Some(finished)) = (started_at, timestamp)
+    if let (Some(started), Some(finished)) = (started_at, timestamp)
         && finished >= started
     {
         parts.push(format!(
@@ -160,136 +167,238 @@ fn message_meta(label: &str, event: &Value, started_at: Option<u64>) -> String {
     parts.join(" · ")
 }
 
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
+fn embedded_json(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(value) => serde_json::from_str(value).ok(),
+        Value::Object(_) | Value::Array(_) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn broker_catalog(events: &[&Value]) -> BTreeMap<u64, CatalogEntry> {
+    let mut entries = BTreeMap::new();
+    for event in events {
+        if event["kind"] != "inference"
+            || event["payload"]["kind"] != "Input"
+            || event["payload"]["role"] != "Broker"
+        {
+            continue;
+        }
+        let Some(input) = embedded_json(&event["payload"]["payload"]) else {
+            continue;
+        };
+        for tuple in input["offer_catalog"].as_array().into_iter().flatten() {
+            let Some(tuple) = tuple.as_array() else {
+                continue;
+            };
+            if let (Some(index), Some(kind), Some(label)) = (
+                tuple.first().and_then(Value::as_u64),
+                tuple.get(1).and_then(Value::as_str),
+                tuple.get(2).and_then(Value::as_str),
+            ) {
+                entries.insert(
+                    index,
+                    CatalogEntry {
+                        kind: kind.into(),
+                        label: label.into(),
+                    },
+                );
+            }
+        }
+    }
+    entries
+}
+
+fn display_resource(label: &str) -> String {
+    label
+        .strip_prefix("workspace/")
+        .unwrap_or(label)
+        .trim_start_matches('/')
+        .to_owned()
+}
+
+fn scalar(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> String {
+    let action_name = action["action"].as_str().unwrap_or("decision");
+    if action_name == "create_agent" {
+        let selected = action["selectors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .filter_map(|index| catalog.get(&index).map(|entry| (index, entry)))
+            .collect::<Vec<_>>();
+        let tools = selected
+            .iter()
+            .filter(|(_, entry)| entry.kind == "x")
+            .map(|(_, entry)| display_resource(&entry.label))
+            .collect::<Vec<_>>();
+        let resources = selected
+            .iter()
+            .filter(|(_, entry)| matches!(entry.kind.as_str(), "o" | "v"))
+            .map(|(_, entry)| display_resource(&entry.label))
+            .collect::<Vec<_>>();
+        let unresolved = action["selectors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .filter(|index| !catalog.contains_key(index))
+            .map(|index| format!("#{index}"))
+            .collect::<Vec<_>>();
+        let mut visible_resources = resources;
+        visible_resources.extend(unresolved);
+        return format!(
+            "Tool_use: create_agent(Agent 1, [{}], [{}])",
+            tools.join(", "),
+            visible_resources.join(", ")
+        );
+    }
+    if action_name == "refused" {
+        let reason = action["reason"]
+            .as_str()
+            .or_else(|| action["detail"].as_str())
+            .unwrap_or("the requested authority was not available");
+        return format!("Refused: {reason}");
+    }
+
+    let arguments = action
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(|(key, _)| key.as_str() != "action")
+        .filter_map(|(key, value)| scalar(value).map(|value| format!("{key}: {value}")))
+        .collect::<Vec<_>>();
+    format!("Tool_use: {action_name}({})", arguments.join(", "))
+}
+
+fn clean_tool_argument(argument: &str) -> String {
+    let argument = argument.trim();
+    for prefix in ["Path(\"", "Object(\"", "Text(\""] {
+        if let Some(value) = argument
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix("\")"))
+        {
+            return display_resource(value);
+        }
+    }
+    display_resource(argument.trim_matches('"'))
+}
+
+fn tool_arguments(value: &Value) -> Vec<String> {
+    if let Some(arguments) = value.as_array() {
+        return arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Value::String(argument) => Some(clean_tool_argument(argument)),
+                Value::Object(argument) => argument
+                    .get("value")
+                    .or_else(|| argument.get("path"))
+                    .and_then(Value::as_str)
+                    .map(clean_tool_argument),
+                _ => scalar(argument),
+            })
+            .collect();
+    }
+    let Some(arguments) = value.as_str() else {
+        return Vec::new();
+    };
+    arguments
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(", ")
+        .filter(|argument| !argument.is_empty())
+        .map(clean_tool_argument)
+        .collect()
+}
+
+fn decision_payload(event: &Value) -> Option<Value> {
+    let payload = &event["payload"];
+    if let Some(inner) = embedded_json(&payload["payload"]) {
+        Some(inner)
+    } else if payload.is_object() {
+        Some(payload.clone())
+    } else {
+        None
+    }
+}
+
+fn meaningful_error(event: &Value) -> String {
+    let payload = &event["payload"];
+    payload["message"]
+        .as_str()
+        .or_else(|| payload["detail"].as_str())
+        .or_else(|| payload.as_str())
+        .unwrap_or("The request could not be completed.")
+        .to_owned()
 }
 
 fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
-    let mut rows: Vec<WorkRow> = Vec::new();
-    let has_chunks = |role: Option<&str>, turn: Option<u64>| {
-        events.iter().any(|event| {
-            event["kind"] == "inference"
-                && event["payload"]["kind"] == "ModelOutputChunk"
-                && event["payload"]["role"].as_str() == role
-                && event["payload"]["turn"].as_u64() == turn
-        })
-    };
+    let catalog = broker_catalog(events);
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
 
     for event in events {
         let event_kind = event["kind"].as_str().unwrap_or("event");
-        if matches!(event_kind, "user_prompt" | "prompt_terminal")
-            || (event_kind == "assistant" && event["public"].as_bool().unwrap_or(false))
+        let row = match event_kind {
+            "broker_proposal" => decision_payload(event).map(|action| WorkRow {
+                speaker: "Broker".into(),
+                body: format_broker_action(&action, &catalog),
+                kind: "decision".into(),
+            }),
+            "tool_call" => decision_payload(event).map(|call| {
+                let command = call["command"]
+                    .as_str()
+                    .or_else(|| call["tool"].as_str())
+                    .unwrap_or("tool");
+                let arguments = tool_arguments(&call["arguments"]);
+                WorkRow {
+                    speaker: "Agent 1".into(),
+                    body: format!(
+                        "Tool_use: {command}{}",
+                        if arguments.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", arguments.join(" "))
+                        }
+                    ),
+                    kind: "decision".into(),
+                }
+            }),
+            "error" => Some(WorkRow {
+                speaker: "Error".into(),
+                body: meaningful_error(event),
+                kind: "error".into(),
+            }),
+            _ => None,
+        };
+        if let Some(row) = row
+            && seen.insert((row.speaker.clone(), row.body.clone()))
         {
-            continue;
+            rows.push(row);
         }
+    }
+    rows
+}
 
-        let model_kind = (event_kind == "inference")
-            .then(|| event["payload"]["kind"].as_str())
-            .flatten();
-        let inspector_kind = event["payload"]["kind"].as_str();
-        if matches!(
-            inspector_kind,
-            Some("BrokerProposal" | "ToolCall" | "ToolResult")
-        ) && events
+fn session_work_rows(events: &[Value]) -> Vec<WorkRow> {
+    let mut rows = Vec::new();
+    for user in events.iter().filter(|event| event["kind"] == "user_prompt") {
+        let prompt_id = user["prompt_id"].as_str().unwrap_or_default();
+        let prompt_events = events
             .iter()
-            .any(|other| other["kind"] == event["kind"] && other["payload"]["kind"].is_null())
-        {
-            continue;
-        }
-        if model_kind == Some("RawModelCompletion")
-            && has_chunks(
-                event["payload"]["role"].as_str(),
-                event["payload"]["turn"].as_u64(),
-            )
-        {
-            continue;
-        }
-        if model_kind == Some("AssistantMessage") {
-            continue;
-        }
-
-        if model_kind == Some("ModelOutputChunk") {
-            let role = event["payload"]["role"].as_str().unwrap_or("agent");
-            let turn = event["payload"]["turn"].as_u64().unwrap_or_default();
-            let label = if role.eq_ignore_ascii_case("broker") {
-                "Broker output"
-            } else {
-                "Agent output"
-            };
-            let detail = format!("llama.cpp · turn {turn}");
-            if let Some(existing) = rows
-                .iter_mut()
-                .find(|row| row.kind == "stream" && row.label == label && row.detail == detail)
-            {
-                existing
-                    .body
-                    .push_str(event["payload"]["payload"].as_str().unwrap_or_default());
-            } else {
-                rows.push(WorkRow {
-                    label: label.into(),
-                    detail,
-                    body: event["payload"]["payload"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .into(),
-                    kind: "stream".into(),
-                });
-            }
-            continue;
-        }
-
-        let generation = event["generation"].as_u64().unwrap_or_default();
-        if event_kind == "inference" && model_kind.is_none() {
-            rows.push(WorkRow {
-                label: "Agent submitted".into(),
-                detail: format!("generation {generation}"),
-                body: pretty(&event["payload"]),
-                kind: "inference".into(),
-            });
-            continue;
-        }
-
-        let label = match event_kind {
-            "broker_proposal" => "Broker proposal",
-            "capability" => "Authority",
-            "validation" => "Validation",
-            "tool_call" => "Tool request",
-            "tool_result" => "Tool result",
-            "error" => "Error",
-            _ => match model_kind {
-                Some("Input") => "Inference input",
-                Some("ModelPrompt") => "Prompt to llama.cpp",
-                Some("ReturnedModelFields") => "llama.cpp fields",
-                Some("Validation") => "Validation",
-                Some("RawModelCompletion") => "Model completion",
-                _ => event_kind,
-            },
-        };
-        let detail = if event_kind == "inference" {
-            let role = event["payload"]["role"].as_str().unwrap_or("model");
-            let turn = event["payload"]["turn"].as_u64().unwrap_or_default();
-            let suffix = event["payload"]["detail"]
-                .as_str()
-                .map(|detail| format!(" · {detail}"))
-                .unwrap_or_default();
-            format!("{role} · turn {turn}{suffix}")
-        } else {
-            format!("generation {generation}")
-        };
-        let body = if event_kind == "inference" {
-            event["payload"]["payload"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| pretty(&event["payload"]["payload"]))
-        } else {
-            pretty(&event["payload"])
-        };
-        rows.push(WorkRow {
-            label: label.replace('_', " "),
-            detail,
-            body,
-            kind: event_kind.into(),
-        });
+            .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
+            .collect::<Vec<_>>();
+        rows.extend(work_rows(&prompt_events));
     }
     rows
 }
@@ -444,6 +553,18 @@ fn editor_style(
     }
 }
 
+fn selectable_style(
+    color: u32,
+) -> impl Fn(&Theme, iced_widget::text_editor::Status) -> iced_widget::text_editor::Style + Copy {
+    move |_theme, _status| iced_widget::text_editor::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        placeholder: rgb(color),
+        value: rgb(color),
+        selection: rgb(0x465a2f),
+    }
+}
+
 fn input_style(
     _theme: &Theme,
     status: iced_widget::text_input::Status,
@@ -489,7 +610,12 @@ impl ApiResponse {
 
 struct Network {
     sender: mpsc::Sender<Request>,
-    session: mpsc::Sender<Option<String>>,
+    session: mpsc::Sender<PollTarget>,
+}
+
+struct PollTarget {
+    session: Option<String>,
+    active: bool,
 }
 
 impl Network {
@@ -503,20 +629,27 @@ impl Network {
             }
         });
 
-        let (session_sender, session_receiver) = mpsc::channel::<Option<String>>();
+        let (session_sender, session_receiver) = mpsc::channel::<PollTarget>();
         thread::spawn(move || {
             let mut session = None;
+            let mut active = false;
             let mut cursor = 0u64;
             loop {
                 while let Ok(next) = session_receiver.try_recv() {
-                    session = next;
-                    cursor = 0;
+                    if session != next.session {
+                        session = next.session;
+                        cursor = 0;
+                    }
+                    active = next.active;
                 }
                 let Some(id) = session.as_deref() else {
                     match session_receiver.recv() {
                         Ok(next) => {
-                            session = next;
-                            cursor = 0;
+                            if session != next.session {
+                                session = next.session;
+                                cursor = 0;
+                            }
+                            active = next.active;
                             continue;
                         }
                         Err(_) => break,
@@ -546,7 +679,11 @@ impl Network {
                         let _ = proxy.send_event(UserEvent::Poll(Err(error)));
                     }
                 }
-                thread::sleep(Duration::from_millis(180));
+                thread::sleep(if active {
+                    ACTIVE_POLL_INTERVAL
+                } else {
+                    IDLE_POLL_INTERVAL
+                });
             }
         });
         Self {
@@ -559,8 +696,8 @@ impl Network {
         let _ = self.sender.send(request);
     }
 
-    fn poll(&self, session: Option<String>) {
-        let _ = self.session.send(session);
+    fn poll(&self, session: Option<String>, active: bool) {
+        let _ = self.session.send(PollTarget { session, active });
     }
 }
 
@@ -577,6 +714,7 @@ struct Model {
     prompt_id: Option<String>,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
+    selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
     expanded_work: BTreeSet<String>,
     rail: Rail,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
@@ -608,6 +746,7 @@ impl Model {
             prompt_id: None,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
+            selectable_text: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
             rail: Rail::Agents,
             editor: None,
@@ -648,6 +787,7 @@ impl Model {
                 if self.session.is_none() {
                     self.selected = Some(index);
                     self.events.clear();
+                    self.selectable_text.clear();
                     self.status = "Opening a fresh isolated Kore sandbox…".into();
                     self.update(Message::ToggleSession);
                 }
@@ -758,6 +898,13 @@ impl Model {
                 }
             }
             Message::PromptAction(action) => self.prompt.perform(action),
+            Message::SelectText(key, action) => {
+                if !action.is_edit()
+                    && let Some(content) = self.selectable_text.get_mut(&key)
+                {
+                    content.perform(action);
+                }
+            }
             Message::SendPrompt => self.send_prompt(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
@@ -963,6 +1110,7 @@ impl Model {
         self.expanded_work.insert(prompt_id.clone());
         self.prompt_id = Some(prompt_id.clone());
         self.busy = true;
+        self.network.poll(Some(session.clone()), true);
         self.network.request(Request {
             kind: RequestKind::SendPrompt,
             method: "POST",
@@ -1039,6 +1187,9 @@ impl Model {
                 self.editor = None;
                 self.preflight = None;
                 self.status = "Project saved after daemon preflight. Starting sandbox…".into();
+                if self.session.is_some() {
+                    self.restart_after_stop = true;
+                }
                 self.update(Message::ToggleSession);
             }
             (RequestKind::StartSession, Ok(value)) => {
@@ -1048,17 +1199,19 @@ impl Model {
                     .map(str::to_owned)
                     .or_else(|| value["id"].as_str().map(str::to_owned));
                 self.events.clear();
+                self.selectable_text.clear();
                 self.expanded_work.clear();
                 self.prompt_id = None;
-                self.network.poll(self.session.clone());
-                self.status = "Fresh isolated sandbox started.".into();
+                self.network.poll(self.session.clone(), false);
+                self.status = "Chat session ready. Kore starts with the first message.".into();
             }
             (RequestKind::StopSession, Ok(_)) => {
                 self.busy = false;
-                self.network.poll(None);
+                self.network.poll(None, false);
                 self.session = None;
                 self.prompt_id = None;
                 self.expanded_work.clear();
+                self.selectable_text.clear();
                 self.status = "Routes retired and session KV erased.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
@@ -1128,6 +1281,10 @@ impl Model {
                 if kind == RequestKind::Preflight {
                     self.preflight = Some(self.status.clone());
                 }
+                if kind == RequestKind::SendPrompt {
+                    self.prompt_id = None;
+                    self.network.poll(self.session.clone(), false);
+                }
             }
             _ => {}
         }
@@ -1136,18 +1293,107 @@ impl Model {
     fn poll_result(&mut self, result: Result<Vec<Value>, String>) {
         match result {
             Ok(events) => {
+                let mut prompt_finished = false;
                 for event in events {
                     if event["kind"] == "prompt_terminal"
                         && event["prompt_id"].as_str() == self.prompt_id.as_deref()
                     {
                         self.prompt_id = None;
                         self.busy = false;
+                        prompt_finished = true;
                     }
                     self.events.push(event);
                 }
+                if prompt_finished {
+                    self.network.poll(self.session.clone(), false);
+                }
+                self.sync_selectable_text();
             }
             Err(error) => self.status = format!("Event stream interrupted: {error}"),
         }
+    }
+
+    fn sync_selectable_text(&mut self) {
+        let mut desired = BTreeMap::new();
+        for user in self
+            .events
+            .iter()
+            .filter(|event| event["kind"] == "user_prompt")
+        {
+            let prompt_id = user["prompt_id"].as_str().unwrap_or_default();
+            desired.insert(
+                format!("prompt:{prompt_id}:user"),
+                format!(
+                    "{}\n{}",
+                    message_meta("YOU", user, None),
+                    user["payload"]["text"].as_str().unwrap_or_default()
+                ),
+            );
+            let prompt_events = self
+                .events
+                .iter()
+                .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
+                .collect::<Vec<_>>();
+            for (index, row) in work_rows(&prompt_events).into_iter().enumerate() {
+                desired.insert(
+                    format!("prompt:{prompt_id}:work:{index}"),
+                    format!("{}:\n{}", row.speaker, row.body),
+                );
+            }
+            if let Some(assistant) = prompt_events.iter().find(|event| {
+                event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
+            }) {
+                desired.insert(
+                    format!("prompt:{prompt_id}:assistant"),
+                    format!(
+                        "{}\n{}",
+                        message_meta("AGENT 1", assistant, event_timestamp(user)),
+                        assistant["payload"]["text"].as_str().unwrap_or_default()
+                    ),
+                );
+            }
+        }
+
+        let activity = session_work_rows(&self.events);
+        for (index, row) in activity.iter().enumerate() {
+            desired.insert(
+                format!("activity:{index}"),
+                format!("{}:\n{}", row.speaker, row.body),
+            );
+        }
+        if let Some(row) = activity.iter().rev().find(|row| row.speaker == "Broker") {
+            desired.insert(
+                "authority:latest".into(),
+                format!("{}:\n{}", row.speaker, row.body),
+            );
+        }
+
+        self.selectable_text
+            .retain(|key, _| desired.contains_key(key));
+        for (key, value) in desired {
+            let unchanged = self
+                .selectable_text
+                .get(&key)
+                .is_some_and(|content| content.text() == value);
+            if !unchanged {
+                self.selectable_text
+                    .insert(key, text_editor::Content::with_text(&value));
+            }
+        }
+    }
+
+    fn selectable<'a>(&'a self, key: &str, size: u32, color: u32) -> UiElement<'a> {
+        let key_owned = key.to_owned();
+        let content = self
+            .selectable_text
+            .get(key)
+            .expect("selectable conversation text must be synchronized");
+        text_editor(content)
+            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+            .padding(0)
+            .size(size)
+            .style(selectable_style(color))
+            .into()
     }
 
     fn apply_picker(&mut self, kind: RequestKind, path: &str) {
@@ -1254,6 +1500,7 @@ impl Model {
             );
         }
         let project_idle = self.project().is_some() && self.session.is_none();
+        let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
             button(text(label).size(13))
                 .padding([8, 8])
@@ -1275,7 +1522,7 @@ impl Model {
                 .style(|_| panel_style(0x272d37, None, 0.0)),
             nav(
                 "Project settings",
-                project_idle.then_some(Message::EditProject)
+                project_editable.then_some(Message::EditProject)
             ),
             nav(
                 "Duplicate project",
@@ -1413,30 +1660,12 @@ impl Model {
                     .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                     .collect::<Vec<_>>();
                 let started_at = event_timestamp(user);
+                let user_key = format!("prompt:{prompt_id}:user");
                 items = items.push(
-                    column![
-                        text(message_meta("YOU", user, None))
-                            .size(10)
-                            .color(rgb(0x8d96a5)),
-                        container(
-                            text(
-                                user["payload"]["text"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_owned()
-                            )
-                            .size(13)
-                            .color(rgb(0xd7dbe0)),
-                        )
+                    container(self.selectable(&user_key, 13, 0xd7dbe0))
                         .padding([13, 15])
                         .width(Length::Fill)
-                        .style(|_| panel_style(
-                            0x1a2115,
-                            Some(0x334024),
-                            13.0
-                        )),
-                    ]
-                    .spacing(7),
+                        .style(|_| panel_style(0x1a2115, Some(0x334024), 13.0)),
                 );
 
                 let rows = work_rows(&prompt_events);
@@ -1495,29 +1724,18 @@ impl Model {
                                 .color(rgb(0x8d96a5)),
                         );
                     }
-                    for work in rows {
-                        let body_color = if work.kind == "stream" {
-                            0xd8cffd
-                        } else if work.kind == "error" {
+                    for (index, work) in rows.into_iter().enumerate() {
+                        let body_color = if work.kind == "error" {
                             0xffc0c4
                         } else {
-                            0xaeb6c1
+                            0xd7dbe1
                         };
+                        let work_key = format!("prompt:{prompt_id}:work:{index}");
                         details = details.push(
-                            container(
-                                column![
-                                    row![
-                                        text(work.label).size(10).color(rgb(0xd7dbe1)),
-                                        text(work.detail).size(9).color(rgb(0x8d96a5)),
-                                    ]
-                                    .spacing(8),
-                                    text(work.body).size(10).color(rgb(body_color)),
-                                ]
-                                .spacing(4),
-                            )
-                            .padding([8, 10])
-                            .width(Length::Fill)
-                            .style(|_| panel_style(0x090c10, Some(0x242a32), 7.0)),
+                            container(self.selectable(&work_key, 10, body_color))
+                                .padding([8, 10])
+                                .width(Length::Fill)
+                                .style(|_| panel_style(0x090c10, Some(0x242a32), 7.0)),
                         );
                     }
                     timeline =
@@ -1529,33 +1747,15 @@ impl Model {
                         .style(|_| panel_style(0x0d1014, Some(0x272d37), 12.0)),
                 );
 
-                if let Some(assistant) = prompt_events.iter().find(|event| {
+                if prompt_events.iter().any(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) {
+                    let assistant_key = format!("prompt:{prompt_id}:assistant");
                     items = items.push(
-                        column![
-                            text(message_meta("VALIDATED ASSISTANT", assistant, started_at))
-                                .size(10)
-                                .color(rgb(0x8d96a5)),
-                            container(
-                                text(
-                                    assistant["payload"]["text"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned()
-                                )
-                                .size(13)
-                                .color(rgb(0xd7dbe0)),
-                            )
+                        container(self.selectable(&assistant_key, 13, 0xd7dbe0))
                             .padding([13, 15])
                             .width(Length::Fill)
-                            .style(|_| panel_style(
-                                0x12161c,
-                                Some(0x4b6233),
-                                13.0
-                            )),
-                        ]
-                        .spacing(7),
+                            .style(|_| panel_style(0x12161c, Some(0x4b6233), 13.0)),
                     );
                 }
             }
@@ -1742,24 +1942,24 @@ impl Model {
     }
 
     fn authority_rail(&self) -> UiElement<'_> {
-        let proposal = self
-            .events
-            .iter()
-            .rev()
-            .find(|event| event["kind"] == "broker_proposal");
         let capability_count = self
             .events
             .iter()
             .filter(|event| event["kind"] == "capability")
             .count();
-        let proposal_text = proposal
-            .map(|event| serde_json::to_string_pretty(&event["payload"]).unwrap_or_default())
-            .unwrap_or_else(|| "No prompt-scoped authority has been proposed.".into());
+        let proposal: UiElement<'_> = if self.selectable_text.contains_key("authority:latest") {
+            self.selectable("authority:latest", 11, 0xb7bec8)
+        } else {
+            text("No prompt-scoped authority has been proposed.")
+                .size(11)
+                .color(rgb(0xb7bec8))
+                .into()
+        };
         column![
             container(
                 column![
                     text("Prompt authority").size(12).color(rgb(0xf4f5f7)),
-                    text(proposal_text).size(11).color(rgb(0xb7bec8)),
+                    proposal,
                 ]
                 .spacing(8)
             )
@@ -1791,11 +1991,12 @@ impl Model {
     }
 
     fn activity_rail(&self) -> UiElement<'_> {
-        if self.events.is_empty() {
+        let rows = session_work_rows(&self.events);
+        if rows.is_empty() {
             return container(
                 column![
                     text("Activity").size(12).color(rgb(0xf4f5f7)),
-                    text("Session events will appear here as they are validated by the broker.")
+                    text("Broker and agent outputs will appear here as they are validated.")
                         .size(11)
                         .color(rgb(0x8d96a5)),
                 ]
@@ -1807,17 +2008,18 @@ impl Model {
             .into();
         }
         let mut activity = column![].spacing(10);
-        for event in self.events.iter().rev().take(30) {
-            let kind = event["kind"].as_str().unwrap_or("event");
-            let detail = serde_json::to_string(&event["payload"]).unwrap_or_default();
+        for (index, row) in rows.iter().enumerate().rev().take(30) {
+            let key = format!("activity:{index}");
             activity = activity.push(
-                container(
-                    column![
-                        text(kind).size(11).color(rgb(0xd7dbe0)),
-                        text(detail).size(10).color(rgb(0x8d96a5)),
-                    ]
-                    .spacing(3),
-                )
+                container(self.selectable(
+                    &key,
+                    10,
+                    if row.kind == "error" {
+                        0xffc0c4
+                    } else {
+                        0xd7dbe0
+                    },
+                ))
                 .padding([8, 10])
                 .width(Length::Fill)
                 .style(|_| panel_style(0x0e1116, Some(0x272d37), 8.0)),
@@ -2701,13 +2903,16 @@ mod tests {
     }
 
     #[test]
-    fn working_rows_coalesce_live_model_streams_and_name_tool_activity() {
+    fn working_rows_show_only_readable_validated_ai_activity() {
         let events = vec![
             json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"read X"}}),
-            json!({"kind":"inference","generation":1,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"grant "}}),
-            json!({"kind":"inference","generation":1,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"read"}}),
-            json!({"kind":"inference","generation":1,"payload":{"kind":"RawModelCompletion","role":"broker","turn":1,"payload":"grant read"}}),
-            json!({"kind":"tool_call","generation":1,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read X\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",[],1,null],[31,\"x\",\"cat\",[],2,null]]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelPrompt","role":"Broker","payload":"SECRET SYSTEM PROMPT"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelOutputChunk","role":"Broker","payload":"{\"action\":"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"selectors\":[31,18]}"}}),
+            json!({"kind":"broker_proposal","prompt_id":"p","payload":{"kind":"BrokerProposal","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":2},\"label\":\"agent/prompt\",\"selectors\":[31,18]}"}}),
+            json!({"kind":"tool_call","prompt_id":"p","payload":{"kind":"ToolCall","role":"Agent","payload":"{\"arguments\":[\"Path(\\\"/X\\\")\"],\"call_id\":1,\"command\":\"cat\"}"}}),
+            json!({"kind":"tool_call","prompt_id":"p","payload":{"command":"cat","arguments":"[Path(\"/X\")]"}}),
             json!({"kind":"tool_result","generation":1,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
             json!({"kind":"assistant","public":true,"payload":{"text":"The code is MANIFOLD-ORANGE-742"}}),
         ];
@@ -2716,15 +2921,22 @@ mod tests {
         let rows = work_rows(&refs);
 
         assert_eq!(
-            rows.iter()
-                .filter(|row| row.label == "Broker output")
-                .count(),
-            1
+            rows.len(),
+            2,
+            "duplicate calls and hidden records stay hidden"
         );
-        assert_eq!(rows[0].body, "grant read");
-        assert!(!rows.iter().any(|row| row.label == "Model completion"));
-        assert!(rows.iter().any(|row| row.label == "Tool request"));
-        assert!(rows.iter().any(|row| row.label == "Tool result"));
+        assert_eq!(rows[0].speaker, "Broker");
+        assert_eq!(rows[0].body, "Tool_use: create_agent(Agent 1, [cat], [X])");
+        assert_eq!(rows[1].speaker, "Agent 1");
+        assert_eq!(rows[1].body, "Tool_use: cat X");
+        let visible = rows
+            .iter()
+            .map(|row| format!("{}: {}", row.speaker, row.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!visible.contains("SECRET SYSTEM PROMPT"));
+        assert!(!visible.contains("MANIFOLD-ORANGE-742"));
+        assert!(!visible.contains('{'));
     }
 
     #[test]
@@ -2734,9 +2946,9 @@ mod tests {
             "prompt_id": "p"
         });
 
-        let metadata = message_meta("VALIDATED ASSISTANT", &assistant, Some(1_750_000_000_000));
+        let metadata = message_meta("AGENT 1", &assistant, Some(1_750_000_000_000));
 
-        assert!(metadata.starts_with("VALIDATED ASSISTANT · "));
+        assert!(metadata.starts_with("AGENT 1 · "));
         assert!(metadata.contains("responded in 2.5 s"));
     }
 
@@ -2755,6 +2967,92 @@ mod tests {
 
         model.update(Message::ToggleWorking("p".into()));
         assert!(model.expanded_work.contains("p"));
+    }
+
+    #[test]
+    fn conversation_text_is_selectable_but_read_only() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.events = vec![json!({
+            "kind":"user_prompt",
+            "prompt_id":"p",
+            "timestamp_unix_ms":1_750_000_000_000_u64,
+            "payload":{"text":"select this request"}
+        })];
+        model.sync_selectable_text();
+        let key = "prompt:p:user";
+        let original = model.selectable_text[key].text();
+
+        model.update(Message::SelectText(
+            key.into(),
+            iced_core::text::editor::Action::SelectAll,
+        ));
+        assert_eq!(
+            model.selectable_text[key].selection(),
+            Some(original.clone())
+        );
+
+        model.update(Message::SelectText(
+            key.into(),
+            iced_core::text::editor::Action::Edit(iced_core::text::editor::Edit::Insert('!')),
+        ));
+        assert_eq!(model.selectable_text[key].text(), original);
+    }
+
+    #[test]
+    fn saving_an_open_project_restarts_its_chat_session() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({
+            "id":"saved-project",
+            "name":"Saved project",
+            "archived":false,
+            "addons":[],
+            "inference":{"backend":"deterministic"},
+        })];
+        model.selected = Some(0);
+        model.session = Some("old-session".into());
+
+        let saved = model.projects[0].clone();
+        model.response(
+            RequestKind::SaveProject,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&saved).unwrap(),
+            }),
+        );
+
+        assert!(model.restart_after_stop);
+        let stop = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(stop.kind, RequestKind::StopSession);
+        assert_eq!(stop.path, "/api/v1/sessions/old-session");
+
+        model.response(
+            RequestKind::StopSession,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: br#"{"closed":true}"#.to_vec(),
+            }),
+        );
+
+        assert!(!model.restart_after_stop);
+        let start = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(start.kind, RequestKind::StartSession);
+        assert_eq!(start.path, "/api/v1/sessions");
+        assert_eq!(start.body.unwrap()["project_id"], "saved-project");
     }
 
     #[test]
@@ -2839,6 +3137,7 @@ mod tests {
             json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742."}}),
             json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
         ];
+        model.sync_selectable_text();
 
         for expanded in [true, false] {
             if expanded != model.expanded_work.contains("native-prompt") {

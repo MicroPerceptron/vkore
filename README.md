@@ -33,6 +33,38 @@ See [the project UI guide](docs/project-ui.md) for the setup wizard, local chat,
 
 ## Native Axiom UI
 
+On the supported Windows + WSL development setup, one command verifies the
+pinned Kore commit and ISO digest, starts or reuses the loopback harness, and
+opens the preloaded project in a native Windows Axiom window:
+
+```powershell
+.\vkore-axiom.cmd
+```
+
+From a WSL terminal, use `./vkore-axiom`. The default project is
+`qwen9b-live-kore`; select another persisted project with
+`./vkore-axiom --project PROJECT_ID`. The launcher does not rebuild Kore or its
+ISO. `./vkore-axiom --check` performs only the provenance and environment
+checks. When it starts a harness itself, closing the Axiom window also stops
+that harness, QEMU, and llama.cpp process group. An already-running healthy
+harness is reused and left running.
+
+For a timestamped, terminal-only end-to-end diagnostic run, close any existing
+vKore launcher and run:
+
+```powershell
+.\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
+```
+
+Debug mode retains a self-contained run directory under
+`~/.local/state/vkore-chat/diagnostics`. It records the launcher and terminal
+timeline, full harness and llama.cpp output, raw API events, one-second process
+CPU/memory samples, QEMU serial/debugcon output with timestamped mirrors, the
+resolved project, and a launch manifest. The launcher prints the exact path and
+stops every process that it started when the prompt completes or times out.
+
+The manual two-terminal form remains available:
+
 Start the deterministic end-to-end harness from this repository:
 
 ```powershell

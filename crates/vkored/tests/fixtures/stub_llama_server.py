@@ -84,13 +84,31 @@ class Handler(BaseHTTPRequestHandler):
                     for offer in catalog
                     if offer[1] == "x" and offer[2] == "cat"
                 ]
+                hello_executables = [
+                    offer
+                    for offer in catalog
+                    if offer[1] == "x" and offer[2] == "hello"
+                ]
                 ceiling = {"tool_calls": 2}
+                selectors = planning.get("trusted_resolution", {}).get(
+                    "required_selector_indices"
+                )
+                if selectors is None:
+                    selectors = (
+                        [executables[0][0], objects[0][0]]
+                        if objects
+                        else [hello_executables[0][0]]
+                    )
                 text = json.dumps(
                     {
                         "action": "create_agent",
                         "label": "agent/catalog-selection",
-                        "selectors": [executables[0][0], objects[0][0]],
-                        "budget": {"tool_calls": min(2, ceiling["tool_calls"])},
+                        "selectors": selectors,
+                        "budget": {
+                            "tool_calls": min(2, ceiling["tool_calls"])
+                            if objects
+                            else 0
+                        },
                     },
                     separators=(",", ":"),
                 )

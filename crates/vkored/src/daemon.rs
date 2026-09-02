@@ -447,15 +447,16 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 &completed.bytes,
                 self.tick,
             );
-            if submitted.is_err() {
+            if let Err(error) = submitted {
                 let _ = self.routes[index]
                     .state
                     .close_request(envelope_in.request_id);
+                let (code, retry) = backend_refusal(error);
                 self.refuse(
                     &envelope_in,
-                    RefusalCode::Backpressure,
-                    RetryClass::AfterReconnect,
-                    b"typed bulk backend",
+                    code,
+                    retry,
+                    format!("typed bulk backend {error:?}").as_bytes(),
                 );
             } else {
                 if matches!(
@@ -477,6 +478,14 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
     }
 
     fn refuse(&mut self, source: &EnvelopeV1, code: RefusalCode, retry: RetryClass, detail: &[u8]) {
+        self.log(format!(
+            "refused kind={} route={} generation={} request={} code={code:?} retry={retry:?} detail={}",
+            source.kind.get(),
+            hex_bytes(&source.route_id.0),
+            source.task_generation.get(),
+            hex_bytes(&source.request_id.0),
+            String::from_utf8_lossy(detail),
+        ));
         let refusal = RefusalView {
             for_family: FAMILY_LINK,
             for_kind: source.kind.get(),
@@ -941,6 +950,13 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         if let Some(pending) = accepted {
             self.frontend_polls.push_back(pending);
             self.service_frontend_polls();
+            if pending.poll.phase == FrontendPollPhase::BrokerNext
+                && self.frontend_polls.iter().any(|candidate| {
+                    candidate.identity == pending.identity && candidate.request == pending.request
+                })
+            {
+                self.log("frontend broker poll parked");
+            }
         } else {
             let result = decode_frontend_result(request.input)
                 .expect("frontend result was validated before request admission");
@@ -2135,6 +2151,16 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
     }
     pub fn advance(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        self.poll_backend();
+    }
+
+    /// Poll host inference without consuming a guest-visible logical tick.
+    ///
+    /// The real Kore runtime uses this while QEMU virtual time is stopped for
+    /// a slow host model turn. Transport and model progress continue, but the
+    /// bounded timeout carried by Kore does not expire while Kore itself
+    /// cannot run.
+    pub fn poll_backend(&mut self) {
         if self.reconnect_required() {
             // Only advance the bounded flush deadline. No backend completion
             // may append another same-epoch frame after a routed refusal.
@@ -2497,6 +2523,10 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
         &mut self.core
     }
     pub fn tick(&mut self) -> Result<(), DaemonError> {
+        self.service(true)
+    }
+
+    fn service(&mut self, advance_clock: bool) -> Result<(), DaemonError> {
         let control_new = accept(
             &self.control_listener,
             &mut self.control,
@@ -2516,7 +2546,11 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
         if self.core.reconnect_deadline_tick == 0 {
             disconnected |= service_read(&mut self.bulk, SocketPlane::Bulk, &mut self.core)?;
         }
-        self.core.advance();
+        if advance_clock {
+            self.core.advance();
+        } else {
+            self.core.poll_backend();
+        }
         if !self.core.reconnect_required() || self.core.reconnect_requires_control_flush() {
             disconnected |= service_write(
                 &mut self.control,
@@ -2540,6 +2574,12 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
             self.core.disconnect();
         }
         Ok(())
+    }
+
+    /// Service HostLink and host inference while leaving Kore's logical tick
+    /// frozen. This is valid only while the paired VM is suspended.
+    pub fn tick_frozen(&mut self) -> Result<(), DaemonError> {
+        self.service(false)
     }
     /// Deliberately sever both transport planes for the measurement fault
     /// phase. QEMU's reconnecting chardevs must establish a fresh epoch.
@@ -2850,6 +2890,19 @@ mod tests {
     }
 
     #[test]
+    fn frozen_backend_poll_does_not_consume_kore_timeout_ticks() {
+        let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
+        core.advance();
+        let running_tick = core.tick;
+        for _ in 0..100_000 {
+            core.poll_backend();
+        }
+        assert_eq!(core.tick, running_tick);
+        core.advance();
+        assert_eq!(core.tick, running_tick + 1);
+    }
+
+    #[test]
     fn repeated_frontend_text_gets_distinct_opaque_ids() {
         let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
         let first = core.queue_frontend_intent("read X").unwrap();
@@ -2858,7 +2911,52 @@ mod tests {
     }
 
     #[test]
-    fn frontend_intent_requires_broker_then_exact_agent_route_before_result() {
+    fn idle_broker_poll_records_the_ready_for_next_chat_barrier() {
+        let epoch = LinkEpoch([41; 16]);
+        let broker_route = RouteId([42; 16]);
+        let broker_generation = TaskGeneration::new(2).unwrap();
+        let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
+        core.epoch = Some(epoch);
+        install_frontend_route(
+            &mut core,
+            epoch,
+            broker_route,
+            broker_generation,
+            RouteRole::Broker,
+            BackendRole::Broker,
+        );
+
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let length = FrontendPoll {
+            phase: FrontendPollPhase::BrokerNext,
+            intent_id: FrontendIntentId::ZERO,
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker_route,
+                broker_generation.get(),
+                0,
+                RequestId([43; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+
+        assert_eq!(core.frontend_polls.len(), 1);
+        assert!(
+            core.transcript()
+                .any(|entry| entry.ends_with("frontend broker poll parked"))
+        );
+    }
+
+    #[test]
+    fn consecutive_frontend_intents_use_fresh_agent_generations() {
         let epoch = LinkEpoch([51; 16]);
         let broker_route = RouteId([52; 16]);
         let agent_route = RouteId([53; 16]);
@@ -2967,6 +3065,108 @@ mod tests {
                 intent_id,
                 kind: FrontendResultKind::Completed,
                 text: "ordinary X content".into(),
+            })
+        );
+
+        // Kore tears the prompt-scoped runner down after returning its
+        // HostLink pair, then opens the same logical agent route at the next
+        // generation. A later chat must still reach the resident broker and
+        // may only be claimed by that new exact generation.
+        core.routes
+            .retain(|route| route.identity.role != BackendRole::Agent);
+        let next_agent_generation = TaskGeneration::new(4).unwrap();
+        install_frontend_route(
+            &mut core,
+            epoch,
+            agent_route,
+            next_agent_generation,
+            RouteRole::Agent,
+            BackendRole::Agent,
+        );
+        let next_intent_id = core.queue_frontend_intent("hello").unwrap();
+
+        let length = FrontendPoll {
+            phase: FrontendPollPhase::BrokerNext,
+            intent_id: FrontendIntentId::ZERO,
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker_route,
+                broker_generation.get(),
+                1,
+                RequestId([57; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert_eq!(
+            core.frontend_intents[0].state,
+            FrontendIntentState::BrokerClaimed
+        );
+
+        let length = FrontendPoll {
+            phase: FrontendPollPhase::AgentClaim,
+            intent_id: next_intent_id,
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                agent_route,
+                next_agent_generation.get(),
+                0,
+                RequestId([58; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert_eq!(
+            core.frontend_intents[0].state,
+            FrontendIntentState::AgentClaimed(SequenceIdentity {
+                route: agent_route,
+                generation: next_agent_generation,
+                role: BackendRole::Agent,
+            })
+        );
+
+        let length = kore_hostlink::FrontendResult {
+            intent_id: next_intent_id,
+            kind: FrontendResultKind::Completed,
+            text: "hello".into(),
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendResult, 2, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                agent_route,
+                next_agent_generation.get(),
+                1,
+                RequestId([59; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert!(core.frontend_intents.is_empty());
+        assert_eq!(
+            core.pop_frontend_result(),
+            Some(FrontendResultOwned {
+                intent_id: next_intent_id,
+                kind: FrontendResultKind::Completed,
+                text: "hello".into(),
             })
         );
     }

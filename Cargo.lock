@@ -128,15 +128,27 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 dependencies = [
  "axnn",
 ]
 
 [[package]]
+name = "axcomp"
+version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+dependencies = [
+ "ax",
+ "axgfx",
+ "axinput",
+ "axmath",
+ "axui-core",
+]
+
+[[package]]
 name = "axgfx"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 dependencies = [
  "axinput",
  "axui-core",
@@ -145,41 +157,54 @@ dependencies = [
 [[package]]
 name = "axinput"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+
+[[package]]
+name = "axmath"
+version = "0.1.7"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "axnn"
 version = "0.3.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 
 [[package]]
 name = "axrd"
 version = "0.1.2"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 dependencies = [
- "ax",
- "axgfx",
  "axinput",
  "axnn",
- "axui-core",
- "core_maths",
  "pkg-config",
 ]
 
 [[package]]
 name = "axui-core"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 
 [[package]]
 name = "axui-iced"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=a36410f6fb5fd6767bf4b0e92ae08cb03108b226#a36410f6fb5fd6767bf4b0e92ae08cb03108b226"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
 dependencies = [
  "axinput",
  "axui-core",
  "iced_core",
- "iced_graphics",
+]
+
+[[package]]
+name = "axui-raster"
+version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=dca586fa402661669a7fcb71f1d7491e96ee7097#dca586fa402661669a7fcb71f1d7491e96ee7097"
+dependencies = [
+ "axgfx",
+ "axui-core",
+ "libm",
 ]
 
 [[package]]
@@ -275,6 +300,12 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
@@ -759,6 +790,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
+name = "euclid"
+version = "0.22.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1229,7 +1269,10 @@ dependencies = [
  "half",
  "iced_core",
  "iced_futures",
+ "image",
+ "kamadak-exif",
  "log",
+ "lyon_path",
  "raw-window-handle",
  "rustc-hash",
  "thiserror 2.0.20",
@@ -1247,12 +1290,10 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
 dependencies = [
+ "axui-iced",
+ "iced_core",
  "iced_graphics",
- "iced_tiny_skia",
- "log",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1264,22 +1305,6 @@ dependencies = [
  "iced_core",
  "iced_futures",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "iced_tiny_skia"
-version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
-dependencies = [
- "bytemuck",
- "cosmic-text",
- "iced_debug",
- "iced_graphics",
- "kurbo",
- "log",
- "rustc-hash",
- "softbuffer",
- "tiny-skia",
 ]
 
 [[package]]
@@ -1417,6 +1442,18 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "image"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
+dependencies = [
+ "bytemuck",
+ "byteorder-lite",
+ "moxcms",
+ "num-traits",
 ]
 
 [[package]]
@@ -1559,6 +1596,15 @@ checksum = "8c942ebf8e95485ca0d52d97da7c5a2c387d0e7f0ba4c35e93bfcaee045955b3"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kamadak-exif"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1130d80c7374efad55a117d715a3af9368f0fa7a2c54573afc15a188cd984837"
+dependencies = [
+ "mutate_once",
 ]
 
 [[package]]
@@ -1768,16 +1814,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kurbo"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1618d4ebd923e97d67e7cd363d80aef35fe961005cbbbb3d2dad8bdd1bc63440"
-dependencies = [
- "arrayvec",
- "smallvec",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1866,6 +1902,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lyon_geom"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4336502e29e32af93cf2dad2214ed6003c17ceb5bd499df77b1de663b9042b92"
+dependencies = [
+ "arrayvec",
+ "euclid",
+ "num-traits",
+]
+
+[[package]]
+name = "lyon_path"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c463f9c428b7fc5ec885dcd39ce4aa61e29111d0e33483f6f98c74e89d8621e"
+dependencies = [
+ "lyon_geom",
+ "num-traits",
+]
+
+[[package]]
 name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1897,6 +1954,22 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
+name = "mutate_once"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 
 [[package]]
 name = "native-tls"
@@ -1988,6 +2061,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -2506,6 +2580,12 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quick-xml"
@@ -3425,12 +3505,14 @@ dependencies = [
 name = "vkore-ui"
 version = "0.0.0"
 dependencies = [
+ "axcomp",
  "axgfx",
  "axrd",
+ "axui-core",
  "axui-iced",
+ "axui-raster",
  "chrono",
  "iced_core",
- "iced_renderer",
  "iced_runtime",
  "iced_widget",
  "iced_winit",

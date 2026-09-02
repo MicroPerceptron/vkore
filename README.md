@@ -86,10 +86,12 @@ for the smoothest software-rendered presentation, especially through WSLg.
 
 The window is rendered by Axiom directly into its presentation surface; no
 HTML, browser engine, WGPU, or viewport-sized staging buffer is used. There is
-no login, token, or browser session step. The deterministic mode
-exercises broker planning, prompt-scoped capability installation, guest-domain
-tool calls, validated output, cancellation, teardown, and KV retirement without
-requiring a model download.
+no login, token, or browser session step. The bounded `axui-raster` structure
+path retains the exact last visible display list, so unchanged daemon polls
+perform no raster or presentation work. Deterministic mode exercises broker
+planning, prompt-scoped capability installation, guest-domain tool calls,
+validated output, cancellation, teardown, and KV retirement without requiring a
+model download.
 
 ## Build and test
 

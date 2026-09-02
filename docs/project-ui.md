@@ -91,6 +91,26 @@ Verified import, signature/hash checks, compatibility selection, activation,
 and rollback are provided by `vkore-packages`; the current harness process must
 still be restarted to change its active backend.
 
+## Native rendering lifecycle
+
+The desktop client keeps Iced above Axiom's durable `Frame<System>` boundary.
+Ordinary UI structure is executed by the deterministic `axui-raster` CPU path
+directly into the platform's mapped XRGB surface. The backend owns a bounded
+portable-font resource, glyph atlas, and isolated-layer scratch arena; it does
+not own a viewport-sized mirror of the presentation surface.
+
+Only a frame that differs from the last successfully presented frame may
+acquire and mutate a platform target. An exact stable frame bypasses structure
+rasterization and presentation. Failed rendering or presentation never replaces
+the retained visible-frame identity. vKore currently emits no per-pixel fields;
+a field command is refused before any target pixel changes until a live field
+provider is connected.
+
+Set `VKORE_UI_PROFILE=1` to print per-frame display-list, glyph-atlas, structure,
+scratch, and presentation-byte counters. The reproducible before/after capture
+and release-mode timing method is recorded in
+`artifacts/ui-upgrade/README.md`.
+
 ## Real Kore VM
 
 Start `vkore-harnessd` with `--qemu PATH` and the repeated base QEMU arguments

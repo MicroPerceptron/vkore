@@ -1,0 +1,27 @@
+[package]
+name = "iced_renderer"
+version = "0.15.0-dev"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Type-only Iced widget compatibility for caller-owned renderers."
+
+[features]
+default = []
+canvas = ["geometry"]
+geometry = ["iced_graphics/geometry"]
+image = ["iced_graphics/image"]
+svg = ["iced_graphics/svg"]
+svg-text = ["svg"]
+svg-raster-images = ["svg"]
+web-colors = ["iced_graphics/web-colors"]
+wgpu = []
+wgpu-bare = []
+tiny-skia = []
+x11 = []
+wayland = []
+
+[dependencies]
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "dca586fa402661669a7fcb71f1d7491e96ee7097" }
+iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
+iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }

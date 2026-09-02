@@ -5,6 +5,37 @@ and agent UI. It uses the same versioned API as the `vkore chat` CLI. Project
 configuration and transcripts are stored below the directory given to
 `--state`.
 
+## One-command launch
+
+On Windows with WSL, run `.\vkore-axiom.cmd` from the repository root. From
+WSL, run `./vkore-axiom`. The launcher uses the native Windows Axiom client for
+responsiveness, while the harness, QEMU, Kore, and llama.cpp stay in WSL. It
+opens `qwen9b-live-kore` by default; pass `--project PROJECT_ID` to select a
+different persisted project.
+
+Before opening the app, the launcher checks the pinned Kore source commit and
+ISO SHA-256. It fails immediately for a missing, stale, or unreviewed image and
+never rebuilds Kore or the ISO. Use `./vkore-axiom --check` for a read-only
+preflight. A healthy harness already listening on the requested loopback port is
+reused; otherwise the launcher owns and cleans up the harness process group.
+
+## End-to-end diagnostics
+
+Use the same launcher without the UI to reproduce one prompt and retain every
+layer's timing evidence:
+
+```powershell
+.\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
+```
+
+The command refuses to attach to an already-running harness so the captured
+binary and process tree are unambiguous. Every terminal line is UTC-stamped.
+The printed diagnostics directory contains `launcher.log`, `harness.log`, raw
+`events.jsonl`, one-second `processes.log`, QEMU `kore-serial.log` and
+`kore-debug.log` plus timestamped timeline copies, `project.json`, and
+`manifest.txt`. All artifacts are retained after the launcher stops its
+harness, llama.cpp, QEMU, and helper processes.
+
 ## Start with the deterministic backend
 
 From the vKore repository:
@@ -65,14 +96,27 @@ still be restarted to change its active backend.
 Start `vkore-harnessd` with `--qemu PATH` and the repeated base QEMU arguments
 needed by the selected Kore image. In this mode the project supplies the Kore
 image, workspace, backend, llama.cpp runtime, model, and resource limits. vKore
-adds loopback HostLink devices and starts one supervised VM for each submitted
-prompt. The inference backend remains resident between prompts.
+adds loopback HostLink devices and starts one supervised VM for the open
+project. The trusted broker, its revocation face, HostLink epoch, and inference
+backend remain resident between prompts. Every prompt gets a fresh agent task,
+route generation, model context, budget, mappings, and capability grants. Kore
+revokes and reclaims that prompt authority before admitting the next intent, so
+conversation continuity does not silently preserve an earlier prompt's file or
+tool access.
 
 A submitted prompt is not reported as successful until the resident broker
 claims that exact intent, founds a scoped agent, the agent claims
 the same intent on its generation-bound route, and its terminal result returns
-to the harness. Capability, tool-call, and tool-result observations stream into
-the existing UI while the prompt runs.
+to the harness. After the result, the resident broker closes the route, stops
+the agent, and revokes its grants while retaining only the project-level
+revocation pivot needed to create the next isolated agent. vKore continues
+driving the VM and does not emit terminal completion until Kore's agent-teardown
+observation arrives and the resident broker parks its next-intent poll. These
+two barriers let vKore freeze QEMU between prompts before the guest-side poll
+deadline advances. The next intent is queued before vKore resumes QEMU, so an
+idle UI cannot strand cleanup or leave a stale cancellation between chats.
+Capability, tool-call, and tool-result observations stream into the existing UI
+while the prompt runs.
 
 ## Add-ons and approvals
 
@@ -93,10 +137,18 @@ account credential, or serialized Kore capability.
 
 Opening a project creates its isolated harness session and inference route
 automatically, so the chat composer is ready without a separate start step.
-Prompts stream validated public assistant text into the conversation. Tool calls,
-tool results, validation, raw proposals, and capability state remain visibly
-separate. **Cancel** requests generation-bound cancellation. **Clean** closes the
-old session, retires its route, erases its KV slot, and starts a new generation.
+Prompts stream validated public assistant text into the conversation. The
+reversible **Working** panel shows readable Broker and Agent decisions such as
+agent creation and tool use. Model prompts, token chunks, tool-result envelopes,
+validation records, and raw JSON remain out of the chat UI; they stay available
+in the append-only audit transcript. Conversation and activity text is
+selectable and copyable but read-only. **Cancel** requests generation-bound
+cancellation. **Clean** closes the old session, retires its route, erases its KV
+slot, and starts a new generation.
+
+The native client polls at 50 ms while a prompt is active for responsive
+streaming, then backs off to 750 ms while idle to avoid constant loopback and
+render churn.
 
 Transcripts are append-only JSONL below `--state/transcripts`. Closing a session
 flushes terminal and teardown events. Project retention values are portable

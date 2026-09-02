@@ -518,6 +518,7 @@ struct Pending {
 #[derive(Clone, Copy, Debug)]
 enum AgentPending {
     ToolCall { call_id: u64, target: AgentTarget },
+    RespondHello,
     Completed,
 }
 
@@ -530,6 +531,11 @@ enum AgentTarget {
 
 #[derive(Clone, Copy, Debug)]
 enum BrokerPending {
+    CreateConversation {
+        plan: [u8; 16],
+        executable: [u8; 16],
+        budget: TaskBudget,
+    },
     Create {
         plan: [u8; 16],
         object: [u8; 16],
@@ -655,6 +661,26 @@ impl DeterministicBackend {
         if let Some(broker) = broker {
             let mut wire = [0; kore_hostlink::INFERENCE_PART_MAX];
             let len = match broker {
+                BrokerPending::CreateConversation {
+                    plan,
+                    executable,
+                    budget,
+                } => {
+                    let selectors = [executable];
+                    BrokerPlanningReply {
+                        plan,
+                        action: BrokerActionKind::CreateAgent,
+                        target: [0; 16],
+                        subject: [0; 16],
+                        budget,
+                        rights: 0,
+                        limit: 0,
+                        reason: 0,
+                        label: "agent/prompt",
+                        selectors: &selectors,
+                    }
+                    .encode(&mut wire)
+                }
                 BrokerPending::Create {
                     plan,
                     object,
@@ -795,6 +821,15 @@ impl DeterministicBackend {
                         .expect("deterministic agent tool call respects shared bounds");
                     return wire[..len].to_vec();
                 }
+                AgentPending::RespondHello => AgentEventView {
+                    kind: AgentEventKind::Respond,
+                    turn,
+                    part: 0,
+                    call_id: 0,
+                    command: "",
+                    arguments: &[],
+                    text: "Hello! How can I help?",
+                },
                 AgentPending::Completed => AgentEventView {
                     kind: AgentEventKind::Completed,
                     turn,
@@ -901,19 +936,23 @@ impl InferenceBackend for DeterministicBackend {
             }
             match message.kind {
                 AgentRequestKind::UserText if next_expected_call.is_none() => {
-                    next_call = next_call.checked_add(1).ok_or(BackendError::Full)?;
-                    next_expected_call = Some(next_call);
-                    let target = if message.text == "read X" {
-                        AgentTarget::PromptX
-                    } else if message.text == "read Y" {
-                        AgentTarget::PromptY
+                    if message.text.eq_ignore_ascii_case("hello") {
+                        Some(AgentPending::RespondHello)
                     } else {
-                        AgentTarget::Identity
-                    };
-                    Some(AgentPending::ToolCall {
-                        call_id: next_call,
-                        target,
-                    })
+                        next_call = next_call.checked_add(1).ok_or(BackendError::Full)?;
+                        next_expected_call = Some(next_call);
+                        let target = if message.text == "read X" {
+                            AgentTarget::PromptX
+                        } else if message.text == "read Y" {
+                            AgentTarget::PromptY
+                        } else {
+                            AgentTarget::Identity
+                        };
+                        Some(AgentPending::ToolCall {
+                            call_id: next_call,
+                            target,
+                        })
+                    }
                 }
                 AgentRequestKind::ToolResult if next_expected_call == Some(message.call_id) => {
                     submitted_observation = Some(InferenceObservation {
@@ -959,6 +998,7 @@ impl InferenceBackend for DeterministicBackend {
             let mut object = None;
             let mut fallback_object = None;
             let mut executable = None;
+            let mut hello_executable = None;
             let mut view = None;
             let mut agent = None;
             for offer in planning.offers() {
@@ -988,6 +1028,11 @@ impl InferenceBackend for DeterministicBackend {
                         if offer.permitted_ops != 0 && offer.max_uses != 0 =>
                     {
                         if executable.replace(offer.reference).is_some() {
+                            return Err(BackendError::InvalidEncoding);
+                        }
+                    }
+                    ("hello", BrokerOfferKind::Executable, "hello") => {
+                        if hello_executable.replace(offer.reference).is_some() {
                             return Err(BackendError::InvalidEncoding);
                         }
                     }
@@ -1035,6 +1080,14 @@ impl InferenceBackend for DeterministicBackend {
                 }
             }
             Some(match planning.intent {
+                "hello" => BrokerPending::CreateConversation {
+                    plan: planning.plan,
+                    executable: hello_executable.ok_or(BackendError::InvalidEncoding)?,
+                    budget: TaskBudget {
+                        tool_calls: 0,
+                        ..planning.ceiling
+                    },
+                },
                 "read X" => BrokerPending::Create {
                     plan: planning.plan,
                     object: object.ok_or(BackendError::InvalidEncoding)?,

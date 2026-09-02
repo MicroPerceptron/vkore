@@ -19,11 +19,9 @@ vkore-addon-sdk = { path = "../vkore-addon-sdk" }
 vkore-policy = { path = "../vkore-policy" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3.23.0"
 tiny_http = "0.12"
 zerocopy = { version = "0.8", default-features = false }
-
-[dev-dependencies]
-tempfile = "3.23.0"
 
 [lib]
 name = "hostlinkd"

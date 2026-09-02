@@ -7,12 +7,12 @@ license = "MPL-2.0"
 description = "Native Axiom-rendered desktop control plane for vKore."
 
 [dependencies]
-axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
-axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
-axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
-axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
-axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
-axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "57e20727f9886d95b8f65121b46de79b02c56484" }
+axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
+axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
+axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
+axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
+axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "fa30004c1275865a657894bc6c91fa664e515ecc" }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }

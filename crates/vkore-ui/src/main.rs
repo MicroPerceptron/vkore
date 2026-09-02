@@ -2639,12 +2639,14 @@ impl App {
         self.backend.mark_visible(frame);
         if self.profile {
             eprintln!(
-                "vkore-ui frame: record {:.3} ms ({} runs, {} glyphs); structure {:.3} ms ({} commands, {} glyphs, {} atlas hits/{} misses, {} pixel writes, {} coverage samples); direct present {} bytes; scratch high-water {} pixels",
+                "vkore-ui frame: record {:.3} ms ({} runs, {} glyphs); structure {:.3} ms ({} commands, {} kernel/{} reference items, {} glyphs, {} atlas hits/{} misses, {} pixel candidates, {} coverage samples); direct present {} bytes; scratch high-water {} pixels",
                 record_ns as f64 / 1_000_000.0,
                 text_stats.glyph_runs,
                 text_stats.glyphs,
                 render.structure_ns as f64 / 1_000_000.0,
                 render.commands,
+                render.kernel_items,
+                render.scalar_items,
                 render.glyphs,
                 render.atlas_hits,
                 render.atlas_misses,
@@ -3005,10 +3007,16 @@ mod tests {
         let mut cache = user_interface::Cache::new();
         let mut target = vec![0u32; 1280 * 800];
         let mut record_ns = Vec::new();
-        let mut full_render_ns = Vec::new();
+        let mut kernel_full_ns = Vec::new();
+        let mut reference_full_ns = Vec::new();
+        let mut kernel_damage_ns = Vec::new();
+        let mut reference_damage_ns = Vec::new();
         let mut stable_submit_ns = Vec::new();
-        let mut pixels_written = 0u64;
+        let mut kernel_stats = render_backend::RenderProfile::default();
+        let mut damage_stats = render_backend::RenderProfile::default();
+        let mut reference_damage_stats = render_backend::RenderProfile::default();
         let mut backend = NativeBackend::new().unwrap();
+        let mut benchmark_frame = None;
 
         for iteration in 0..70 {
             let started = Instant::now();
@@ -3035,15 +3043,82 @@ mod tests {
             let stats = backend
                 .render_changed(&frame, &mut target, extent, 1280)
                 .unwrap();
+            benchmark_frame = Some(frame.clone());
             backend.mark_visible(frame);
             let finished = Instant::now();
             std::hint::black_box(&target);
             if iteration >= 10 {
                 record_ns.push(recorded.duration_since(started).as_nanos());
-                full_render_ns.push(finished.duration_since(recorded).as_nanos());
+                kernel_full_ns.push(finished.duration_since(recorded).as_nanos());
             }
-            pixels_written = stats.pixels_written;
+            kernel_stats = stats;
         }
+
+        let benchmark_frame = benchmark_frame.unwrap();
+        let mut reference_target = vec![0u32; 1280 * 800];
+        let mut reference = NativeBackend::reference_for_measurement().unwrap();
+        let mut reference_stats = render_backend::RenderProfile::default();
+        for iteration in 0..70 {
+            let started = Instant::now();
+            reference_stats = reference
+                .render_changed(&benchmark_frame, &mut reference_target, extent, 1280)
+                .unwrap();
+            let finished = Instant::now();
+            std::hint::black_box(&reference_target);
+            if iteration >= 10 {
+                reference_full_ns.push(finished.duration_since(started).as_nanos());
+            }
+        }
+
+        let damage_rect = axgfx::PixelRect::new(416, 608, 448, 128).unwrap();
+        for iteration in 0..70 {
+            let started = Instant::now();
+            damage_stats = backend
+                .render_damage_for_measurement(
+                    &benchmark_frame,
+                    &mut target,
+                    extent,
+                    1280,
+                    axgfx::Damage::Rects(&[damage_rect]),
+                )
+                .unwrap();
+            let finished = Instant::now();
+            std::hint::black_box(&target);
+            if iteration >= 10 {
+                kernel_damage_ns.push(finished.duration_since(started).as_nanos());
+            }
+        }
+        for iteration in 0..70 {
+            let started = Instant::now();
+            reference_damage_stats = reference
+                .render_damage_for_measurement(
+                    &benchmark_frame,
+                    &mut reference_target,
+                    extent,
+                    1280,
+                    axgfx::Damage::Rects(&[damage_rect]),
+                )
+                .unwrap();
+            let finished = Instant::now();
+            std::hint::black_box(&reference_target);
+            if iteration >= 10 {
+                reference_damage_ns.push(finished.duration_since(started).as_nanos());
+            }
+        }
+
+        let mut differing_pixels = 0u64;
+        let mut max_channel_delta = 0u32;
+        for (kernel, reference) in target.iter().zip(&reference_target) {
+            if kernel != reference {
+                differing_pixels += 1;
+            }
+            for shift in [24, 16, 8, 0] {
+                max_channel_delta = max_channel_delta
+                    .max(((kernel >> shift) & 0xff).abs_diff((reference >> shift) & 0xff));
+            }
+        }
+        assert_eq!(differing_pixels, 0, "kernel and reference pixels drifted");
+        assert_eq!(max_channel_delta, 0, "kernel and reference colors drifted");
 
         for iteration in 0..70 {
             let mut interface = UserInterface::build(
@@ -3076,12 +3151,27 @@ mod tests {
         let samples = record_ns.len();
         let record_median = percentile(&mut record_ns, 1, 2);
         let record_p95 = percentile(&mut record_ns, 95, 100);
-        let full_render_median = percentile(&mut full_render_ns, 1, 2);
-        let full_render_p95 = percentile(&mut full_render_ns, 95, 100);
+        let kernel_full_median = percentile(&mut kernel_full_ns, 1, 2);
+        let kernel_full_p95 = percentile(&mut kernel_full_ns, 95, 100);
+        let reference_full_median = percentile(&mut reference_full_ns, 1, 2);
+        let reference_full_p95 = percentile(&mut reference_full_ns, 95, 100);
+        let kernel_damage_median = percentile(&mut kernel_damage_ns, 1, 2);
+        let kernel_damage_p95 = percentile(&mut kernel_damage_ns, 95, 100);
+        let reference_damage_median = percentile(&mut reference_damage_ns, 1, 2);
+        let reference_damage_p95 = percentile(&mut reference_damage_ns, 95, 100);
         let stable_submit_median = percentile(&mut stable_submit_ns, 1, 2);
         let stable_submit_p95 = percentile(&mut stable_submit_ns, 95, 100);
         println!(
-            "UI_BENCH {{\"implementation\":\"retained_structure_quality_v2\",\"width\":1280,\"height\":800,\"samples\":{samples},\"record_median_ns\":{record_median},\"record_p95_ns\":{record_p95},\"full_render_median_ns\":{full_render_median},\"full_render_p95_ns\":{full_render_p95},\"stable_submit_median_ns\":{stable_submit_median},\"stable_submit_p95_ns\":{stable_submit_p95},\"pixels_written\":{pixels_written},\"full_present_bytes\":4096000,\"stable_present_bytes\":0}}"
+            "UI_BENCH {{\"implementation\":\"shared_axiom_kernels\",\"width\":1280,\"height\":800,\"samples\":{samples},\"record_median_ns\":{record_median},\"record_p95_ns\":{record_p95},\"kernel_full_median_ns\":{kernel_full_median},\"kernel_full_p95_ns\":{kernel_full_p95},\"reference_full_median_ns\":{reference_full_median},\"reference_full_p95_ns\":{reference_full_p95},\"kernel_damage_median_ns\":{kernel_damage_median},\"kernel_damage_p95_ns\":{kernel_damage_p95},\"reference_damage_median_ns\":{reference_damage_median},\"reference_damage_p95_ns\":{reference_damage_p95},\"stable_submit_median_ns\":{stable_submit_median},\"stable_submit_p95_ns\":{stable_submit_p95},\"kernel_items\":{},\"kernel_scalar_fallback_items\":{},\"reference_scalar_items\":{},\"damage_kernel_items\":{},\"damage_scalar_fallback_items\":{},\"reference_damage_scalar_items\":{},\"full_pixel_candidates\":{},\"damage_pixel_candidates\":{},\"reference_damage_pixel_candidates\":{},\"damage_width\":448,\"damage_height\":128,\"differing_pixels\":{differing_pixels},\"max_channel_delta\":{max_channel_delta},\"full_present_bytes\":4096000,\"damage_present_bytes\":229376,\"stable_present_bytes\":0}}",
+            kernel_stats.kernel_items,
+            kernel_stats.scalar_items,
+            reference_stats.scalar_items,
+            damage_stats.kernel_items,
+            damage_stats.scalar_items,
+            reference_damage_stats.scalar_items,
+            kernel_stats.pixels_written,
+            damage_stats.pixels_written,
+            reference_damage_stats.pixels_written,
         );
     }
 

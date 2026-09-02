@@ -5,13 +5,20 @@ on an Apple M1. The release-mode probe performs 10 warm-up frames followed by
 60 measured frames. It lives in `crates/vkore-ui/src/main.rs` as the ignored
 `tests::capture_and_benchmark_ui` test.
 
-| Metric (median; p95) | Before: direct quality path | After: retained quality v2 | Change |
+| Metric (median; p95) | Scalar reference before review | Shared Axiom kernels | Change |
 | --- | ---: | ---: | ---: |
-| Display-list record | 0.244 ms; 0.310 ms | 0.133 ms; 0.193 ms | 45.7% lower median |
-| Changed-frame CPU raster | 32.508 ms; 32.745 ms | 34.051 ms; 34.376 ms | 4.7% higher median |
-| Exact stable-frame submit | 32.508 ms full repaint | 0.003 ms retained comparison | 10,134× faster |
-| Approximate stable record + submit | 32.753 ms | 0.136 ms | 241× faster |
-| Presentation bytes | 4,096,000 | 4,096,000 changed; 0 stable | Stable copy eliminated |
+| Full 1280×800 raster | 33.929 ms; 34.083 ms | 19.711 ms; 20.134 ms | 41.9% lower median |
+| 448×128 damaged-region raster | 7.853 ms; 7.904 ms | 5.165 ms; 5.207 ms | 34.2% lower median |
+| Exact stable-frame submit | — | 0.0032 ms; 0.0033 ms | No raster or present |
+| Executed items | 866 scalar | 836 kernel; 30 fallback | 96.5% kernel-dispatched |
+| Pixel equivalence | Reference | 0 differing pixels; max channel delta 0 | Exact |
+
+For continuity with the original UI upgrade measurement, the legacy direct
+quality renderer took 32.508 ms median (32.745 ms p95) for a full frame. The
+new shared-kernel path is 39.4% faster than that legacy renderer as well as
+41.9% faster than the scalar retained implementation it replaces. Display-list
+recording is 0.125 ms median (0.183 ms p95). Approximate stable record plus
+admission is therefore 0.128 ms, about 255× faster than the legacy full repaint.
 
 The raster measurement excludes the platform present call. Presentation byte
 counts are explicit backend counters. A changed frame still renders directly
@@ -19,23 +26,24 @@ into the mapped XRGB surface. An exact stable `Frame<System>` bypasses target
 acquisition, rasterization, and presentation entirely.
 
 The after path deliberately measures comparable visual quality: bundled DM
-Sans OpenType shaping and grayscale masks, Coverage8x8 geometry edges, soft
-retained shadows, and a retained linear gradient are all enabled. Opaque
-interior spans bypass supersampling, keeping changed-frame raster time near the
-legacy quality renderer while preserving the stable-frame win. This capture
-supersedes the earlier pixel-center/bitmap-font prototype.
+Sans OpenType shaping and grayscale masks, analytic signed-distance geometry
+edges, Gaussian retained shadows, and a retained linear gradient are all
+enabled. Solid rounded quads, borders, shadows, and glyph masks dispatch
+through the shared `axnn::RasterBackend`/`axnn-cpu` operations. The scalar path
+is retained only as the deterministic conformance/fallback implementation.
+The probe renders both paths and requires exact output equality.
 
 - [Before](before.png): legacy `axrd::axui_direct::render_xrgb` at vKore commit
   `a781d5d6ffbd2c36c4c2462b12a37abe092acf84`.
-- [After](after.png): quality-equivalent `axui-raster` structure path with
-  retained frame admission and bounded resources, pinned to Axiom
-  `57e20727f9886d95b8f65121b46de79b02c56484`.
+- [After](after.png): shared-kernel `axui-raster` structure path with retained
+  frame admission and bounded resources, pinned to Axiom
+  `fa30004c1275865a657894bc6c91fa664e515ecc`.
 
 Reproduce the after measurement from the repository root:
 
 ```sh
 VKORE_UI_CAPTURE=/tmp/vkore-after.ppm \
-  cargo test -p vkore-ui --release \
+  cargo +nightly-2026-07-13 test -p vkore-ui --release \
   tests::capture_and_benchmark_ui -- --ignored --exact --nocapture
 ```
 

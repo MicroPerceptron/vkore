@@ -7,21 +7,21 @@ license = "MPL-2.0"
 description = "Native Axiom-rendered desktop control plane for vKore."
 
 [dependencies]
-axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
-axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
-axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
-axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
-axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
-axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ee61c7585a451a6e9b54d69ae966c8049fb09b1e" }
+axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
+axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
+axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
+axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
+axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "4cef09932133c23e86ec3c7c423af2de137e5adb" }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
 # Parses the mark's SVG path data; already reached through the geometry lane.
 zeno = "0.3.3"
-iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
-iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["geometry"] }
-iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false }
-iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["canvas"] }
-iced_winit = { git = "https://github.com/MicroPerceptron/iced", rev = "3de451447bd28217bb535632867550908e29d5d0", default-features = false, features = ["x11", "wayland"] }
+iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false }
+iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["geometry"] }
+iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false }
+iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["canvas"] }
+iced_winit = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["x11", "wayland"] }
 serde_json.workspace = true
 softbuffer = "0.4.8"
 

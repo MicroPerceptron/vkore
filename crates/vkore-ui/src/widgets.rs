@@ -11,9 +11,8 @@
 //!   ghost row. It never fades opacity, never scales, and never floods a fill.
 //! - Disabled is 40% opacity, applied to whatever the kind already resolved.
 //!
-//! Letter spacing is not expressible in the text renderer, so the design's
-//! `0.06em` tracking on uppercase mono labels is not reproduced. Labels are
-//! uppercased at the call site instead, which carries the same intent.
+//! Labels are uppercased here rather than by the caller, and carry the
+//! system's tracking through the face they are set in.
 
 use crate::{fonts, theme};
 use iced_core::{Background, Border, Color, Theme};
@@ -214,6 +213,14 @@ pub fn selectable(color: u32) -> impl Fn(&Theme, text_editor::Status) -> text_ed
 pub fn label<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.as_ref().to_uppercase())
         .font(fonts::MONO_LABEL)
+        .size(theme::SIZE_MONO)
+        .color(theme::rgb(color))
+}
+
+/// A navigation item, which the system sets slightly tighter than a label.
+pub fn nav<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content.as_ref().to_uppercase())
+        .font(fonts::MONO_NAV)
         .size(theme::SIZE_MONO)
         .color(theme::rgb(color))
 }

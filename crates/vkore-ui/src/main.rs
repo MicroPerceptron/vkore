@@ -1597,7 +1597,7 @@ impl Model {
         let project_idle = self.project().is_some() && self.session.is_none();
         let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
-            button(widgets::label(label, theme::TEXT_MUTED))
+            button(widgets::nav(label, theme::TEXT_MUTED))
                 .padding([7, 8])
                 .width(Length::Fill)
                 .style(widgets::button_style(widgets::Button::Ghost))

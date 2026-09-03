@@ -17,7 +17,7 @@ chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
 # Parses the mark's SVG path data; already reached through the geometry lane.
 zeno = "0.3.3"
-iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false }
+iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["crisp"] }
 iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["geometry"] }
 iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false }
 iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "ef15c381bae13130daf682a124819e26f94c5efe", default-features = false, features = ["canvas"] }

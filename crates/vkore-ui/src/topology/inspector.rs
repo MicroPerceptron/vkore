@@ -5,6 +5,7 @@
 //! label is a capability the agent was not granted, a red one is a call that
 //! failed, and magenta counts a path the agent reaches.
 
+use crate::topology::filesystem::{self as fs, Filesystem};
 use crate::topology::model::{Agent, Graph};
 use crate::{Message, UiElement, theme, widgets};
 use iced_core::{Length, alignment};
@@ -198,6 +199,81 @@ fn title_for(agent: &Agent) -> &'static str {
     }
 }
 
+/// The inspector body for a selected path.
+pub fn path<'a>(
+    graph: &'a Graph,
+    filesystem: &'a Filesystem,
+    selected: usize,
+) -> (&'static str, String, UiElement<'a>) {
+    let Some(node) = filesystem.paths.get(selected) else {
+        return (
+            EMPTY_TITLE,
+            "Click a node to inspect its authority.".into(),
+            column![].into(),
+        );
+    };
+    let external = node.kind == fs::Kind::External;
+    let direct = filesystem
+        .grants
+        .iter()
+        .filter(|grant| grant.path == selected)
+        .count();
+
+    let mut body = column![
+        meta(
+            "location",
+            if external {
+                "outside workspace"
+            } else {
+                "workspace"
+            }
+            .into(),
+            if external {
+                theme::WARNING
+            } else {
+                theme::TEXT_SECONDARY
+            },
+        ),
+        meta("direct grants", direct.to_string(), theme::MAGENTA),
+    ]
+    .spacing(theme::SPACE_2);
+
+    let holders = filesystem.holders(selected);
+    let rows: Vec<UiElement<'a>> = if holders.is_empty() {
+        vec![entry(
+            "no agent holds authority over this path".into(),
+            theme::TEXT_MUTED,
+            false,
+            None,
+            None,
+            false,
+        )]
+    } else {
+        holders
+            .into_iter()
+            .filter_map(|(index, direct)| {
+                let agent = graph.agents.get(index)?;
+                let rights = filesystem
+                    .grants
+                    .iter()
+                    .find(|grant| grant.agent == index && grant.path == selected)
+                    .map(|grant| grant.rights.clone());
+                Some(entry(
+                    agent.name.clone(),
+                    theme::TEXT,
+                    false,
+                    Some(if direct { "direct" } else { "inherited" }.into()),
+                    rights,
+                    true,
+                ))
+            })
+            .collect()
+    };
+    body = body.push(section("Agents with access", rows));
+
+    ("Path", node.path.clone(), body.into())
+}
+
 /// The inspector's empty message, so the caller need not repeat it.
 pub const EMPTY_TITLE: &str = "Nothing selected";
 
@@ -249,6 +325,35 @@ mod tests {
         let (title, subtitle, _) = agents(&graph, Some("broker"));
         assert_eq!(title, "Resident broker");
         assert_eq!(subtitle, "resident · gen 0");
+    }
+
+    #[test]
+    fn a_path_reports_where_it_lives_and_who_reaches_it() {
+        let events = [
+            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
+            json!({"kind": "tool_call", "generation": 2, "payload": {"tool": "read", "path": "src/main.rs"}}),
+        ];
+        let graph = Graph::from_events(&events, false);
+        let filesystem = Filesystem::from_events(&events, &graph);
+        let main = filesystem
+            .paths
+            .iter()
+            .position(|p| p.path == "src/main.rs")
+            .unwrap();
+
+        let (title, subtitle, _) = path(&graph, &filesystem, main);
+        assert_eq!(title, "Path");
+        assert_eq!(subtitle, "src/main.rs");
+        // One agent was handed it, another reaches it through the directory.
+        assert_eq!(filesystem.holders(main).len(), 2);
+    }
+
+    #[test]
+    fn a_path_index_that_does_not_exist_falls_back_to_empty() {
+        let graph = graph();
+        let filesystem = Filesystem::default();
+        let (title, _, _) = path(&graph, &filesystem, 42);
+        assert_eq!(title, EMPTY_TITLE);
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub struct State {
     pub scale: f32,
     /// Selected agent identity.
     pub selected: Option<String>,
+    /// Selected path, for the filesystem view.
+    pub path: Option<usize>,
     /// Whether the inspector is open.
     pub inspector: bool,
     /// Set once a viewport has been fitted, so a fit happens exactly once.
@@ -49,6 +51,7 @@ impl Default for State {
             ty: 0.0,
             scale: 1.0,
             selected: None,
+            path: None,
             inspector: true,
             fitted: false,
         }
@@ -664,7 +667,12 @@ impl canvas::Program<Message, Theme, AxUi> for Permissions<'_> {
 }
 
 /// One path node, drawn by what it is.
-fn path_node<'a>(node: &'a fs::PathNode, lit: bool) -> crate::UiElement<'a> {
+fn path_node<'a>(
+    index: usize,
+    node: &'a fs::PathNode,
+    lit: bool,
+    chosen: bool,
+) -> crate::UiElement<'a> {
     let (fill, edge, name_color, radius) = match node.kind {
         fs::Kind::Directory => (
             theme::PANEL_DIR,
@@ -685,7 +693,7 @@ fn path_node<'a>(node: &'a fs::PathNode, lit: bool) -> crate::UiElement<'a> {
             theme::RADIUS_SM,
         ),
     };
-    container(
+    button(
         row![
             widgets::mono(node.name.clone(), name_color)
                 .wrapping(iced_core::text::Wrapping::None)
@@ -699,22 +707,32 @@ fn path_node<'a>(node: &'a fs::PathNode, lit: bool) -> crate::UiElement<'a> {
     .padding([9, 11])
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(move |_| {
-        let mut style = theme::panel(fill, None, radius);
-        style.border.width = 1.0;
-        style.border.color = if lit {
-            theme::rgb(theme::MAGENTA)
-        } else {
-            edge
-        };
-        if lit {
-            style.background = Some(iced_core::Background::Color(theme::rgba(
-                theme::MAGENTA,
-                0.05,
-            )));
+    .style(move |_theme, status| {
+        let hovered = matches!(
+            status,
+            iced_widget::button::Status::Hovered | iced_widget::button::Status::Pressed
+        );
+        iced_widget::button::Style {
+            background: Some(iced_core::Background::Color(if lit || chosen {
+                theme::rgba(theme::MAGENTA, 0.05)
+            } else {
+                theme::rgb(fill)
+            })),
+            text_color: theme::rgb(theme::TEXT),
+            border: iced_core::Border {
+                color: if chosen || lit || hovered {
+                    theme::rgb(theme::MAGENTA)
+                } else {
+                    edge
+                },
+                width: 1.0,
+                radius: radius.into(),
+            },
+            shadow: theme::no_shadow(),
+            ..Default::default()
         }
-        style
     })
+    .on_press(Message::TopologySelectPath(index))
     .into()
 }
 
@@ -811,7 +829,7 @@ pub fn filesystem_layer<'a>(
         let lit = chosen.is_some_and(|agent| filesystem.covers(agent, index));
         layers = layers.push(
             iced_widget::pin(
-                container(path_node(node, lit))
+                container(path_node(index, node, lit, state.path == Some(index)))
                     .width(placement.width * state.scale)
                     .height(placement.height * state.scale),
             )

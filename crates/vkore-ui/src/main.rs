@@ -85,6 +85,7 @@ enum Message {
     View(View),
     DecideApproval(bool),
     TopologySelect(String),
+    TopologySelectPath(usize),
     TopologyPan(f32, f32),
     TopologyZoom(iced_core::Point, f32),
     TopologyFit,
@@ -986,7 +987,12 @@ impl Model {
                 }
                 self.view = value;
             }
+            Message::TopologySelectPath(index) => {
+                self.topology.selected = None;
+                self.topology.path = (self.topology.path != Some(index)).then_some(index);
+            }
             Message::TopologySelect(id) => {
+                self.topology.path = None;
                 self.topology.selected =
                     (self.topology.selected.as_deref() != Some(id.as_str())).then_some(id);
             }
@@ -1743,8 +1749,12 @@ impl Model {
         if self.view != View::Session {
             let graph = &self.topology_graph;
             let placements = &self.topology_placements;
-            let (title, subtitle, body) =
-                inspector::agents(graph, self.topology.selected.as_deref());
+            let (title, subtitle, body) = match (self.view, self.topology.path) {
+                (View::Filesystem, Some(path)) => {
+                    inspector::path(graph, &self.topology_filesystem, path)
+                }
+                _ => inspector::agents(graph, self.topology.selected.as_deref()),
+            };
             let canvas: UiElement<'_> = if self.view == View::Agents {
                 view::canvas_layer(graph, placements, &self.topology)
             } else {

@@ -1,6 +1,7 @@
 mod fonts;
 mod render_backend;
 mod theme;
+mod topology;
 mod widgets;
 
 use axgfx::Extent2d;

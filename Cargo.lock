@@ -193,6 +193,7 @@ dependencies = [
  "axui-fonts",
  "iced_core",
  "iced_graphics",
+ "zeno",
 ]
 
 [[package]]
@@ -3521,6 +3522,7 @@ dependencies = [
  "chrono",
  "cosmic-text",
  "iced_core",
+ "iced_graphics",
  "iced_runtime",
  "iced_widget",
  "iced_winit",

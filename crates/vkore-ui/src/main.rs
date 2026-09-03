@@ -2,14 +2,15 @@ mod fonts;
 mod render_backend;
 mod theme;
 mod topology;
+
+use crate::topology::{layout, model, view};
 mod widgets;
 
 use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Background, Border, Color, Element, Length, Shadow, Size, Theme, Vector, alignment, keyboard,
-    mouse,
+    Background, Border, Color, Element, Length, Size, Theme, alignment, keyboard, mouse,
     renderer::{self, Scale},
     shell,
 };
@@ -81,6 +82,12 @@ enum Message {
     ExportProject,
     View(View),
     DecideApproval(bool),
+    TopologySelect(String),
+    TopologyPan(f32, f32),
+    TopologyZoom(iced_core::Point, f32),
+    TopologyFit,
+    TopologyReset,
+    TopologyInspector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,6 +598,9 @@ struct Model {
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
     expanded_work: BTreeSet<String>,
     view: View,
+    topology: view::State,
+    topology_graph: model::Graph,
+    topology_placements: Vec<layout::Placement>,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
     wizard_page: u8,
     preflight: Option<String>,
@@ -623,6 +633,9 @@ impl Model {
             selectable_text: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
             view: View::Session,
+            topology: view::State::default(),
+            topology_graph: model::Graph::default(),
+            topology_placements: Vec::new(),
             editor: None,
             wizard_page: 0,
             preflight: None,
@@ -649,6 +662,56 @@ impl Model {
                 body: None,
             });
         }
+    }
+
+    /// Refreshes everything derived from the event stream.
+    ///
+    /// The selectable transcript and the topology graph are both projections
+    /// of the same events. Refreshing them together is what keeps a view from
+    /// showing one and not the other.
+    fn events_changed(&mut self) {
+        self.sync_selectable_text();
+        self.refresh_topology();
+    }
+
+    /// Rebuilds the derived graph and its placement.
+    ///
+    /// Derivation walks the whole stream, so it happens when the stream
+    /// changes rather than once per frame.
+    fn refresh_topology(&mut self) {
+        self.topology_graph = model::Graph::from_events(&self.events, self.session.is_some());
+        self.topology_placements =
+            layout::tidy(&self.topology_graph.parents(), layout::Metrics::AGENTS);
+        // A changed lineage invalidates a fit taken against the old one.
+        self.topology.fitted = false;
+        if let Some(selected) = self.topology.selected.clone()
+            && self.topology_graph.index_of(&selected).is_none()
+        {
+            self.topology.selected = None;
+        }
+    }
+
+    /// The area a topology canvas gets, once the shell has taken its share.
+    fn canvas_area(&self, viewport: Size) -> Size {
+        let sidebar = if viewport.width <= 720.0 { 0.0 } else { 248.0 };
+        let inspector = if self.topology.inspector { 300.0 } else { 0.0 };
+        Size::new(
+            (viewport.width - sidebar - inspector).max(1.0),
+            (viewport.height - 64.0).max(1.0),
+        )
+    }
+
+    /// Fits a topology view the first time it is shown at a given size.
+    ///
+    /// Fitting needs the viewport, which only the shell knows, so it happens
+    /// here rather than while building the view.
+    fn fit_topology(&mut self, viewport: Size) {
+        if self.view == View::Session || self.topology.fitted {
+            return;
+        }
+        let area = self.canvas_area(viewport);
+        let placements = self.topology_placements.clone();
+        self.topology.fit(&placements, area);
     }
 
     fn project(&self) -> Option<&Value> {
@@ -834,7 +897,34 @@ impl Model {
                     }
                 }
             }
-            Message::View(value) => self.view = value,
+            Message::View(value) => {
+                // Entering a topology view fits it once; returning keeps the
+                // reader's own pan and zoom.
+                if value != View::Session && self.view == View::Session {
+                    self.topology.fitted = false;
+                }
+                self.view = value;
+            }
+            Message::TopologySelect(id) => {
+                self.topology.selected =
+                    (self.topology.selected.as_deref() != Some(id.as_str())).then_some(id);
+            }
+            Message::TopologyPan(dx, dy) => {
+                self.topology.tx += dx;
+                self.topology.ty += dy;
+            }
+            Message::TopologyZoom(pointer, factor) => {
+                self.topology.zoom_about(pointer, factor);
+            }
+            Message::TopologyFit => self.topology.fitted = false,
+            Message::TopologyReset => {
+                let selected = self.topology.selected.take();
+                self.topology = view::State::default();
+                self.topology.selected = selected;
+            }
+            Message::TopologyInspector => {
+                self.topology.inspector = !self.topology.inspector;
+            }
             Message::DecideApproval(allow) => {
                 if let Some(request) = self.approval.as_ref() {
                     let id = request["id"].as_str().unwrap_or_default();
@@ -1181,7 +1271,7 @@ impl Model {
                 if prompt_finished {
                     self.network.poll(self.session.clone(), false);
                 }
-                self.sync_selectable_text();
+                self.events_changed();
             }
             Err(error) => self.status = format!("Event stream interrupted: {error}"),
         }
@@ -1563,6 +1653,8 @@ impl Model {
         .style(|_| divider_bottom(theme::BACKGROUND));
 
         if self.view != View::Session {
+            let graph = &self.topology_graph;
+            let placements = &self.topology_placements;
             let (title, subtitle, body) = match self.view {
                 View::Agents => (
                     "Agents",
@@ -1575,17 +1667,18 @@ impl Model {
                     self.authority_rail(),
                 ),
             };
-            // The graph itself lands with the geometry backend; until then the
-            // canvas stays empty rather than showing an approximation of it.
+            let mut layers = row![
+                container(view::canvas_layer(graph, placements, &self.topology))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+            ];
+            if self.topology.inspector {
+                layers = layers.push(self.inspector(title, subtitle, body));
+            }
             return container(column![
                 top,
-                row![
-                    container(space::vertical())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                    self.inspector(title, subtitle, body),
-                ]
-                .height(Length::Fill),
+                self.topology_controls(),
+                layers.height(Length::Fill)
             ])
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1868,6 +1961,62 @@ impl Model {
             .height(Length::Fill)
             .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
             .into()
+    }
+
+    /// The legend and view controls that sit above a topology canvas.
+    fn topology_controls(&self) -> UiElement<'_> {
+        let rule = |color: u32, dashed: bool| {
+            container(space::Space::new().width(16).height(1)).style(move |_| {
+                theme::panel(if dashed { theme::MAGENTA } else { color }, None, 0.0)
+            })
+        };
+        let legend = row![
+            rule(theme::MAGENTA, false),
+            widgets::mono("spawn lineage", theme::TEXT_MUTED),
+            rule(theme::BORDER_DIM, false),
+            widgets::mono("withheld capability", theme::TEXT_MUTED),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center);
+
+        let control = |label: &'static str, message: Message| {
+            button(widgets::label(label, theme::TEXT_SECONDARY))
+                .height(28)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(message)
+        };
+        container(
+            row![
+                legend,
+                space::horizontal(),
+                button(widgets::label(
+                    "Inspector",
+                    if self.topology.inspector {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_MUTED
+                    }
+                ))
+                .height(28)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Choice(
+                    self.topology.inspector
+                )))
+                .on_press(Message::TopologyInspector),
+                control("Fit", Message::TopologyFit),
+                control("Reset", Message::TopologyReset),
+                container(widgets::mono(self.topology.readout(), theme::TEXT_MUTED))
+                    .width(44)
+                    .align_x(alignment::Horizontal::Right),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center),
+        )
+        .padding([12, 18])
+        .width(Length::Fill)
+        .style(|_| divider_bottom(theme::BACKGROUND))
+        .into()
     }
 
     /// The topology inspector: what the selected node holds and can reach.
@@ -2579,6 +2728,7 @@ impl App {
             return;
         }
         let size = logical_size(window);
+        self.model.fit_topology(size);
         let mut interface = UserInterface::build(
             self.model.view(size),
             size,
@@ -2625,6 +2775,7 @@ impl App {
             window: scale,
             application: 1.0,
         });
+        self.model.fit_topology(logical_size(window));
         let mut interface = UserInterface::build(
             self.model.view(logical_size(window)),
             logical_size(window),
@@ -3011,7 +3162,7 @@ mod tests {
         ];
         // Events set directly bypass the update path that keeps the selectable
         // conversation editors in step, and the view expects them present.
-        model.sync_selectable_text();
+        model.events_changed();
         model
     }
 
@@ -3051,8 +3202,16 @@ mod tests {
     #[test]
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
-        let model = populated_fixture_model();
+        let mut model = populated_fixture_model();
+        if let Ok(view) = std::env::var("VKORE_UI_VIEW") {
+            model.view = match view.as_str() {
+                "agents" => View::Agents,
+                "filesystem" => View::Filesystem,
+                _ => View::Session,
+            };
+        }
         let size = Size::new(1280.0, 800.0);
+        model.fit_topology(size);
         let extent = Extent2d::new(1280, 800).unwrap();
         let mut renderer = native_renderer();
         renderer.hint(Scale {
@@ -3072,6 +3231,7 @@ mod tests {
         let mut reference_damage_stats = render_backend::RenderProfile::default();
         let mut backend = NativeBackend::new().unwrap();
         let mut benchmark_frame = None;
+        let mut benchmark_masks = Vec::new();
 
         for iteration in 0..70 {
             let started = Instant::now();
@@ -3091,14 +3251,17 @@ mod tests {
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();
+            let masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
             let recorded = Instant::now();
+            backend.set_masks(masks.clone());
             backend.invalidate_for_measurement();
             assert!(backend.begin_frame(&frame));
             let stats = backend
                 .render_changed(&frame, &mut target, extent, 1280)
                 .unwrap();
             benchmark_frame = Some(frame.clone());
+            benchmark_masks = masks.clone();
             backend.mark_visible(frame);
             let finished = Instant::now();
             std::hint::black_box(&target);
@@ -3112,6 +3275,7 @@ mod tests {
         let benchmark_frame = benchmark_frame.unwrap();
         let mut reference_target = vec![0u32; 1280 * 800];
         let mut reference = NativeBackend::reference_for_measurement().unwrap();
+        reference.set_masks(benchmark_masks.clone());
         let mut reference_stats = render_backend::RenderProfile::default();
         for iteration in 0..70 {
             let started = Instant::now();
@@ -3192,6 +3356,7 @@ mod tests {
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();
+            let _masks = renderer.take_images();
             let started = Instant::now();
             assert!(!backend.begin_frame(&frame));
             let finished = Instant::now();
@@ -3364,7 +3529,7 @@ mod tests {
             "timestamp_unix_ms":1_750_000_000_000_u64,
             "payload":{"text":"select this request"}
         })];
-        model.sync_selectable_text();
+        model.events_changed();
         let key = "prompt:p:user";
         let original = model.selectable_text[key].text();
 
@@ -3473,6 +3638,7 @@ mod tests {
             mouse::Cursor::Unavailable,
         );
         let frame = renderer.take_frame().unwrap();
+        let _masks = renderer.take_images();
         assert!(frame.commands().len() > 10);
         assert!(
             !frame.glyphs().is_empty(),
@@ -3506,7 +3672,7 @@ mod tests {
             json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742."}}),
             json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
         ];
-        model.sync_selectable_text();
+        model.events_changed();
 
         for expanded in [true, false] {
             if expanded != model.expanded_work.contains("native-prompt") {
@@ -3531,6 +3697,7 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().unwrap();
+            let _masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
             assert!(frame.glyphs().len() > 30);
 
@@ -3579,6 +3746,7 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().unwrap();
+            let _masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
             assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
 

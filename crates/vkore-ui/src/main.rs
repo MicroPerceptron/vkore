@@ -73,6 +73,7 @@ enum Message {
     Browse(RequestKind),
     CloseEditor,
     ToggleSession,
+    #[allow(dead_code)]
     CleanSession,
     PromptAction(iced_core::text::editor::Action),
     SelectText(String, iced_core::text::editor::Action),
@@ -88,6 +89,7 @@ enum Message {
     TopologySelectPath(usize),
     TopologyPan(f32, f32),
     TopologyZoom(iced_core::Point, f32),
+    TopologyZoomStep(f32),
     TopologyFit,
     TopologyReset,
     TopologyInspector,
@@ -431,10 +433,6 @@ fn session_work_rows(events: &[Value]) -> Vec<WorkRow> {
 }
 
 /// The surface a dialog sits on.
-///
-/// The system specifies a backdrop blur behind this fill. The display list
-/// carries no blur, so the surface composites flat at the same opacity;
-/// against the near-black page the difference is not visible.
 fn glass_surface() -> iced_widget::container::Style {
     iced_widget::container::Style {
         background: Some(Background::Color(theme::glass())),
@@ -446,6 +444,133 @@ fn glass_surface() -> iced_widget::container::Style {
         shadow: theme::no_shadow(),
         ..Default::default()
     }
+}
+
+/// Records Axiom's painter-ordered backdrop filter before drawing `content`.
+fn backdrop_filter<'a>(content: UiElement<'a>, radius: f32, corner_radius: f32) -> UiElement<'a> {
+    use iced_core::layout::{self, Layout};
+    use iced_core::mouse;
+    use iced_core::widget::tree::{self, Tree};
+    use iced_core::widget::{Operation, Widget};
+    use iced_core::{Event, Rectangle, Shell, Vector};
+
+    struct Backdrop<'a> {
+        content: UiElement<'a>,
+        radius: f32,
+        corner_radius: f32,
+    }
+
+    impl Widget<Message, Theme, AxUi> for Backdrop<'_> {
+        fn tag(&self) -> tree::Tag {
+            self.content.as_widget().tag()
+        }
+
+        fn state(&self) -> tree::State {
+            self.content.as_widget().state()
+        }
+
+        fn diff(&mut self, tree: &mut Tree) {
+            self.content.as_widget_mut().diff(tree);
+        }
+
+        fn size(&self) -> Size<Length> {
+            self.content.as_widget().size()
+        }
+
+        fn layout(
+            &mut self,
+            tree: &mut Tree,
+            renderer: &AxUi,
+            limits: &layout::Limits,
+        ) -> layout::Node {
+            self.content.as_widget_mut().layout(tree, renderer, limits)
+        }
+
+        fn draw(
+            &self,
+            tree: &Tree,
+            renderer: &mut AxUi,
+            theme: &Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+        ) {
+            let bounds = layout.bounds();
+            renderer.recorder_mut().backdrop_blur(
+                axui_core::Rect::new(bounds.x, bounds.y, bounds.width, bounds.height),
+                axui_core::CornerRadii {
+                    top_left: self.corner_radius,
+                    top_right: self.corner_radius,
+                    bottom_right: self.corner_radius,
+                    bottom_left: self.corner_radius,
+                },
+                self.radius,
+            );
+            self.content
+                .as_widget()
+                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        }
+
+        fn operate(
+            &mut self,
+            tree: &mut Tree,
+            layout: Layout<'_>,
+            renderer: &AxUi,
+            operation: &mut dyn Operation,
+        ) {
+            self.content
+                .as_widget_mut()
+                .operate(tree, layout, renderer, operation);
+        }
+
+        fn update(
+            &mut self,
+            tree: &mut Tree,
+            event: &Event,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            renderer: &AxUi,
+            shell: &mut Shell<'_, Message>,
+            viewport: &Rectangle,
+        ) {
+            self.content
+                .as_widget_mut()
+                .update(tree, event, layout, cursor, renderer, shell, viewport);
+        }
+
+        fn mouse_interaction(
+            &self,
+            tree: &Tree,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+            renderer: &AxUi,
+        ) -> mouse::Interaction {
+            self.content
+                .as_widget()
+                .mouse_interaction(tree, layout, cursor, viewport, renderer)
+        }
+
+        fn overlay<'b>(
+            &'b mut self,
+            tree: &'b mut Tree,
+            layout: Layout<'b>,
+            renderer: &AxUi,
+            viewport: &Rectangle,
+            translation: Vector,
+        ) -> Option<iced_core::overlay::Element<'b, Message, Theme, AxUi>> {
+            self.content
+                .as_widget_mut()
+                .overlay(tree, layout, renderer, viewport, translation)
+        }
+    }
+
+    Element::new(Backdrop {
+        content,
+        radius,
+        corner_radius,
+    })
 }
 
 /// A rule in the glass border colour, for a dialog's header and footer.
@@ -473,7 +598,7 @@ fn glass_header<'a>(
     .align_y(alignment::Vertical::Center);
     if let Some(close) = close {
         heading = heading.push(
-            button(widgets::label("x", theme::TEXT_MUTED))
+            button(widgets::control("x"))
                 .height(26)
                 .padding([0, 9])
                 .style(widgets::button_style(widgets::Button::Ghost))
@@ -666,6 +791,7 @@ struct Model {
     topology_filesystem: filesystem::Filesystem,
     topology_agent_bands: Vec<layout::Placement>,
     topology_path_bands: Vec<layout::Placement>,
+    viewport: Size,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
     wizard_page: u8,
     preflight: Option<String>,
@@ -705,6 +831,7 @@ impl Model {
             topology_filesystem: filesystem::Filesystem::default(),
             topology_agent_bands: Vec::new(),
             topology_path_bands: Vec::new(),
+            viewport: Size::new(1280.0, 800.0),
             editor: None,
             wizard_page: 0,
             preflight: None,
@@ -763,6 +890,11 @@ impl Model {
         {
             self.topology.selected = None;
         }
+        if self.topology.selected.is_none()
+            && let Some(root) = self.topology_graph.agents.first()
+        {
+            self.topology.selected = Some(root.id.clone());
+        }
     }
 
     /// The area a topology canvas gets, once the shell has taken its share.
@@ -771,7 +903,9 @@ impl Model {
         let inspector = if self.topology.inspector { 300.0 } else { 0.0 };
         Size::new(
             (viewport.width - sidebar - inspector).max(1.0),
-            (viewport.height - 64.0).max(1.0),
+            // The graph sits below both the 64px harness header and the 52px
+            // embedded topology toolbar.
+            (viewport.height - 116.0).max(1.0),
         )
     }
 
@@ -780,12 +914,21 @@ impl Model {
     /// Fitting needs the viewport, which only the shell knows, so it happens
     /// here rather than while building the view.
     fn fit_topology(&mut self, viewport: Size) {
+        self.viewport = viewport;
         if self.view == View::Session || self.topology.fitted {
             return;
         }
         let area = self.canvas_area(viewport);
         let placements: Vec<layout::Placement> = if self.view == View::Agents {
-            self.topology_placements.clone()
+            // The handoff's fit routine reserves 132px per chip-bearing node
+            // even though the visible card metric is 124px.
+            self.topology_placements
+                .iter()
+                .map(|placement| layout::Placement {
+                    height: 132.0,
+                    ..*placement
+                })
+                .collect()
         } else {
             self.topology_agent_bands
                 .iter()
@@ -812,6 +955,11 @@ impl Model {
                 }
             }
             Message::NewProject => {
+                // The published control stays visually available while a
+                // session is active, but its handler is intentionally a no-op.
+                if self.session.is_some() {
+                    return;
+                }
                 let root = std::env::current_dir()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -1002,6 +1150,14 @@ impl Model {
             }
             Message::TopologyZoom(pointer, factor) => {
                 self.topology.zoom_about(pointer, factor);
+            }
+            Message::TopologyZoomStep(factor) => {
+                let area = self.canvas_area(self.viewport);
+                self.topology.zoom_about(
+                    iced_core::Point::new(area.width / 2.0, area.height / 2.0),
+                    factor,
+                );
+                self.topology.fitted = true;
             }
             Message::TopologyFit => self.topology.fitted = false,
             Message::TopologyReset => {
@@ -1516,15 +1672,19 @@ impl Model {
     }
 
     fn modal_layer<'a>(&self, content: UiElement<'a>) -> UiElement<'a> {
-        container(content)
-            .center(Length::Fill)
-            .padding(32)
-            .style(|_| {
-                let mut overlay = theme::panel(theme::BACKGROUND, None, 0.0);
-                overlay.background = Some(Background::Color(theme::scrim()));
-                overlay
-            })
-            .into()
+        backdrop_filter(
+            container(content)
+                .center(Length::Fill)
+                .padding(32)
+                .style(|_| {
+                    let mut overlay = theme::panel(theme::BACKGROUND, None, 0.0);
+                    overlay.background = Some(Background::Color(theme::scrim()));
+                    overlay
+                })
+                .into(),
+            2.0,
+            0.0,
+        )
     }
 
     fn sidebar(&self, width: f32) -> UiElement<'_> {
@@ -1539,7 +1699,12 @@ impl Model {
             .spacing(theme::SPACE_2)
             .align_y(alignment::Vertical::Center),
         )
-        .padding([14, 14]);
+        .padding(iced_core::Padding {
+            top: 14.0,
+            right: 14.0,
+            bottom: 10.0,
+            left: 14.0,
+        });
         let mut projects = column![].spacing(theme::SPACE_1);
         for (index, project) in self
             .projects
@@ -1597,8 +1762,8 @@ impl Model {
         let project_idle = self.project().is_some() && self.session.is_none();
         let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
-            button(widgets::nav(label, theme::TEXT_MUTED))
-                .padding([7, 8])
+            button(widgets::nav(label))
+                .padding([8, 10])
                 .width(Length::Fill)
                 .style(widgets::button_style(widgets::Button::Ghost))
                 .on_press_maybe(message)
@@ -1611,16 +1776,29 @@ impl Model {
                 bottom: 6.0,
                 left: 14.0
             }),
-            container(scrollable(projects).height(Length::Fill)).padding([0, 10]),
             container(
-                button(widgets::label("New project", theme::TEXT_SECONDARY))
-                    .width(Length::Fill)
-                    .padding([9, 10])
-                    .style(widgets::button_style(widgets::Button::Secondary))
-                    .on_press_maybe(self.session.is_none().then_some(Message::NewProject))
+                scrollable(projects)
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::hidden()
+                    ))
+                    .style(widgets::hidden_scrollbar)
+                    .height(Length::Fill),
+            )
+            .height(Length::Fill)
+            .padding([0, 10]),
+            container(
+                button(
+                    container(widgets::control("New project"))
+                        .width(Length::Fill)
+                        .align_x(alignment::Horizontal::Center),
+                )
+                .width(Length::Fill)
+                .height(theme::CONTROL_SM)
+                .padding([0, 10])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(Message::NewProject)
             )
             .padding(10),
-            space::vertical(),
             container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
                 theme::BORDER,
                 None,
@@ -1646,7 +1824,7 @@ impl Model {
                     ),
                     nav("Transcript & audit", Some(Message::View(View::Session))),
                 ]
-                .spacing(1)
+                .spacing(3)
             )
             .padding(iced_core::Padding {
                 top: 6.0,
@@ -1686,20 +1864,13 @@ impl Model {
             }
         };
         let view_button = |label: &'static str, target: View| {
-            button(widgets::label(
-                label,
-                if self.view == target {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_MUTED
-                },
-            ))
-            .height(theme::CONTROL_SM)
-            .padding([0, 12])
-            .style(widgets::button_style(widgets::Button::Choice(
-                self.view == target,
-            )))
-            .on_press(Message::View(target))
+            button(widgets::control_upper(label))
+                .height(30)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Choice(
+                    self.view == target,
+                )))
+                .on_press(Message::View(target))
         };
         let top = container(
             row![
@@ -1714,30 +1885,11 @@ impl Model {
                 .spacing(2)
                 .width(Length::Fill)
                 .clip(true),
-                button(widgets::label(
-                    if self.session.is_some() {
-                        "Stop"
-                    } else {
-                        "Start"
-                    },
-                    theme::TEXT_SECONDARY
-                ))
-                .height(theme::CONTROL_SM)
-                .padding([0, 12])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press_maybe(
-                    (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
-                ),
-                button(widgets::label("Clean", theme::ERROR))
-                    .height(theme::CONTROL_SM)
-                    .padding([0, 12])
-                    .style(widgets::button_style(widgets::Button::Danger))
-                    .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
                 view_button("Session", View::Session),
                 view_button("Agents", View::Agents),
                 view_button("Filesystem", View::Filesystem),
             ]
-            .spacing(theme::SPACE_2)
+            .spacing(6)
             .align_y(alignment::Vertical::Center),
         )
         .padding([0, 22])
@@ -1753,7 +1905,11 @@ impl Model {
                 (View::Filesystem, Some(path)) => {
                     inspector::path(graph, &self.topology_filesystem, path)
                 }
-                _ => inspector::agents(graph, self.topology.selected.as_deref()),
+                _ => inspector::agents(
+                    graph,
+                    &self.topology_filesystem,
+                    self.topology.selected.as_deref(),
+                ),
             };
             let canvas: UiElement<'_> = if self.view == View::Agents {
                 view::canvas_layer(graph, placements, &self.topology)
@@ -1766,7 +1922,12 @@ impl Model {
                     &self.topology,
                 )
             };
-            let mut layers = row![container(canvas).width(Length::Fill).height(Length::Fill)];
+            let mut layers = row![
+                container(canvas)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .clip(true)
+            ];
             if self.topology.inspector {
                 layers = layers.push(self.inspector(title, subtitle, body));
             }
@@ -1970,20 +2131,27 @@ impl Model {
                     );
                 }
             }
-            container(scrollable(items).height(Length::Fill))
-                .padding([28, 40])
-                .height(Length::Fill)
-                .into()
+            container(
+                scrollable(items)
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::hidden(),
+                    ))
+                    .style(widgets::hidden_scrollbar)
+                    .height(Length::Fill),
+            )
+            .padding([28, 40])
+            .height(Length::Fill)
+            .into()
         };
 
         let send = if self.prompt_id.is_some() {
-            button(widgets::label("Cancel", theme::ERROR))
+            button(widgets::control("Cancel"))
                 .height(theme::CONTROL_SM)
                 .padding([0, 12])
                 .style(widgets::button_style(widgets::Button::Danger))
                 .on_press(Message::CancelPrompt)
         } else {
-            button(widgets::label("Send", theme::MAGENTA))
+            button(widgets::control("Send"))
                 .height(theme::CONTROL_SM)
                 .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Primary))
@@ -2011,18 +2179,19 @@ impl Model {
                     iced_core::text::editor::Binding::from_key_press(press)
                 }
             })
-            .height(72)
+            .height(96)
             .padding([14, 16])
             .size(theme::SIZE_SM)
             .font(fonts::BODY)
-            .style(widgets::editor);
+            .line_height(iced_core::text::LineHeight::Relative(1.55))
+            .style(widgets::composer_editor);
         let composer = container(column![
             prompt,
             container(
                 row![
                     space::horizontal(),
-                    container(widgets::label(access, theme::TEXT_MUTED))
-                        .padding([3, 7])
+                    container(widgets::mono(access, theme::TEXT_MUTED))
+                        .padding([3, 8])
                         .style(|_| theme::panel(
                             theme::BACKGROUND,
                             Some(theme::BORDER),
@@ -2060,62 +2229,84 @@ impl Model {
 
     /// The legend and view controls that sit above a topology canvas.
     fn topology_controls(&self) -> UiElement<'_> {
-        let rule = |color: u32, dashed: bool| {
-            container(space::Space::new().width(16).height(1)).style(move |_| {
-                theme::panel(if dashed { theme::MAGENTA } else { color }, None, 0.0)
-            })
+        let rule = |color: u32| {
+            container(space::Space::new().width(16).height(2))
+                .style(move |_: &Theme| theme::panel(color, None, 0.0))
         };
-        let legend = if self.view == View::Agents {
+        let dashed_rule = || {
+            let dash = || {
+                container(space::Space::new().width(4).height(2))
+                    .style(|_: &Theme| theme::panel(theme::MAGENTA, None, 0.0))
+            };
+            row![dash(), dash(), dash()].spacing(2).width(16)
+        };
+        let legend: UiElement<'_> = if self.view == View::Agents {
             row![
-                rule(theme::MAGENTA, false),
-                widgets::mono("spawn lineage", theme::TEXT_MUTED),
-                rule(theme::BORDER_DIM, false),
-                widgets::mono("withheld capability", theme::TEXT_MUTED),
+                row![
+                    rule(theme::MAGENTA),
+                    widgets::mono("spawn lineage", theme::TEXT_MUTED)
+                ]
+                .spacing(7)
+                .align_y(alignment::Vertical::Center),
+                row![
+                    rule(theme::BORDER_DIM),
+                    widgets::mono("withheld capability", theme::TEXT_MUTED)
+                ]
+                .spacing(7)
+                .align_y(alignment::Vertical::Center),
             ]
+            .spacing(14)
+            .align_y(alignment::Vertical::Center)
+            .into()
         } else {
             row![
-                rule(theme::TEXT_SECONDARY, false),
-                widgets::mono("containment", theme::TEXT_MUTED),
-                rule(theme::MAGENTA, true),
-                widgets::mono("permission", theme::TEXT_MUTED),
+                row![
+                    rule(theme::TEXT_SECONDARY),
+                    widgets::mono("containment", theme::TEXT_MUTED)
+                ]
+                .spacing(7)
+                .align_y(alignment::Vertical::Center),
+                row![
+                    dashed_rule(),
+                    widgets::mono("permission", theme::TEXT_MUTED)
+                ]
+                .spacing(7)
+                .align_y(alignment::Vertical::Center),
             ]
-        }
-        .spacing(theme::SPACE_2)
-        .align_y(alignment::Vertical::Center);
+            .spacing(14)
+            .align_y(alignment::Vertical::Center)
+            .into()
+        };
 
         let control = |label: &'static str, message: Message| {
-            button(widgets::label(label, theme::TEXT_SECONDARY))
+            button(widgets::control(label))
                 .height(28)
                 .padding([0, 9])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press(message)
         };
-        container(
-            row![
-                legend,
-                space::horizontal(),
-                button(widgets::label(
-                    "Inspector",
-                    if self.topology.inspector {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_MUTED
-                    }
-                ))
+        let controls = row![
+            button(widgets::control_upper("Inspector"))
                 .height(28)
                 .padding([0, 9])
                 .style(widgets::button_style(widgets::Button::Choice(
                     self.topology.inspector
                 )))
                 .on_press(Message::TopologyInspector),
-                control("Fit", Message::TopologyFit),
-                control("Reset", Message::TopologyReset),
-                container(widgets::mono(self.topology.readout(), theme::TEXT_MUTED))
-                    .width(44)
-                    .align_x(alignment::Horizontal::Right),
-            ]
-            .spacing(theme::SPACE_2)
-            .align_y(alignment::Vertical::Center),
+            control("−", Message::TopologyZoomStep(1.0 / 1.15)),
+            control("+", Message::TopologyZoomStep(1.15)),
+            control("fit", Message::TopologyFit),
+            control("reset", Message::TopologyReset),
+            container(widgets::mono(self.topology.readout(), theme::TEXT_MUTED))
+                .width(44)
+                .align_x(alignment::Horizontal::Right),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center);
+        container(
+            row![space::horizontal(), legend, controls,]
+                .spacing(16)
+                .align_y(alignment::Vertical::Center),
         )
         .padding([12, 18])
         .width(Length::Fill)
@@ -2129,7 +2320,7 @@ impl Model {
     /// session, which is why it is built here and not in the shell row.
     fn inspector<'a>(
         &'a self,
-        title: &'static str,
+        title: String,
         subtitle: String,
         body: UiElement<'a>,
     ) -> UiElement<'a> {
@@ -2149,7 +2340,15 @@ impl Model {
             })
             .width(Length::Fill)
             .style(|_| divider_bottom(theme::BACKGROUND)),
-            container(scrollable(body).height(Length::Fill)).padding(14),
+            container(
+                scrollable(body)
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::hidden()
+                    ))
+                    .style(widgets::hidden_scrollbar)
+                    .height(Length::Fill)
+            )
+            .padding(14),
         ])
         .width(300)
         .height(Length::Fill)
@@ -2255,18 +2454,11 @@ impl Model {
         };
         let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
             let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
-            button(widgets::label(
-                label,
-                if selected {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_MUTED
-                },
-            ))
-            .height(theme::CONTROL_SM)
-            .padding([0, 12])
-            .style(widgets::button_style(widgets::Button::Choice(selected)))
-            .on_press(Message::WizardChoice(pointer, option))
+            button(widgets::control(label))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Choice(selected)))
+                .on_press(Message::WizardChoice(pointer, option))
         };
 
         let page: UiElement<'_> = match self.wizard_page {
@@ -2396,16 +2588,61 @@ impl Model {
                             .into_iter()
                             .flatten()
                             .any(|selected| selected["id"] == id && selected["enabled"] == true);
-                        let detail = addon["tools"]
+                        let mut detail = addon["tools"]
                             .as_array()
-                            .map(|tools| format!("{} declared tool(s)", tools.len()))
+                            .map(|tools| {
+                                tools
+                                    .iter()
+                                    .map(|tool| {
+                                        format!(
+                                            "{} ({})",
+                                            tool["name"].as_str().unwrap_or("tool"),
+                                            tool["risk"]
+                                                .as_str()
+                                                .unwrap_or("bounded")
+                                                .replace('_', " ")
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .filter(|tools| !tools.is_empty())
                             .unwrap_or_else(|| "No declared tools".into());
+                        let destinations = addon["network_destinations"]
+                            .as_array()
+                            .map(|entries| {
+                                entries
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .filter(|entries| !entries.is_empty())
+                            .unwrap_or_else(|| "no network destinations".into());
+                        detail.push_str(" · ");
+                        detail.push_str(&destinations);
                         addons = addons.push(
                             button(
                                 row![
-                                    text(if enabled { "[x]" } else { "[ ]" })
-                                        .size(14)
-                                        .color(rgb(if enabled { 0xb8ef6a } else { 0x8d96a5 })),
+                                    container(widgets::mono(
+                                        if enabled { "✓" } else { "" },
+                                        theme::MAGENTA,
+                                    ))
+                                    .width(16)
+                                    .height(16)
+                                    .align_x(alignment::Horizontal::Center)
+                                    .align_y(alignment::Vertical::Center)
+                                    .style(move |_| {
+                                        theme::panel(
+                                            theme::BACKGROUND,
+                                            Some(if enabled {
+                                                theme::MAGENTA
+                                            } else {
+                                                theme::BORDER
+                                            }),
+                                            3.0,
+                                        )
+                                    }),
                                     column![
                                         text(domain.to_uppercase())
                                             .size(9)
@@ -2417,9 +2654,10 @@ impl Model {
                                     ]
                                     .spacing(4),
                                 ]
-                                .spacing(10),
+                                .spacing(12)
+                                .align_y(alignment::Vertical::Top),
                             )
-                            .padding(11)
+                            .padding(12)
                             .width(Length::Fill)
                             .style(widgets::button_style(widgets::Button::Choice(enabled)))
                             .on_press(Message::WizardAddon(id)),
@@ -2557,27 +2795,20 @@ impl Model {
                 core::cmp::Ordering::Greater => widgets::Step::Upcoming,
             };
             steps = steps.push(
-                button(widgets::label(
-                    label,
-                    match position {
-                        widgets::Step::Current => theme::TEXT,
-                        widgets::Step::Complete => theme::TEXT_SECONDARY,
-                        widgets::Step::Upcoming => theme::TEXT_MUTED,
-                    },
-                ))
-                .padding([6, 8])
-                .width(Length::Fill)
-                .style(widgets::button_style(widgets::Button::Step(position)))
-                .on_press(Message::WizardPage(index as u8)),
+                button(widgets::control_upper(label))
+                    .padding([6, 8])
+                    .width(Length::Fill)
+                    .style(widgets::button_style(widgets::Button::Step(position)))
+                    .on_press(Message::WizardPage(index as u8)),
             );
         }
-        let back = button(widgets::label("Back", theme::TEXT_SECONDARY))
+        let back = button(widgets::control("Back"))
             .height(theme::CONTROL_SM)
             .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
         let next: UiElement<'_> = if self.wizard_page < 4 {
-            button(widgets::label("Next", theme::MAGENTA))
+            button(widgets::control("Next"))
                 .height(theme::CONTROL_SM)
                 .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Primary))
@@ -2585,13 +2816,13 @@ impl Model {
                 .into()
         } else {
             row![
-                button(widgets::label("Run preflight", theme::TEXT_SECONDARY))
+                button(widgets::control("Run preflight"))
                     .height(theme::CONTROL_SM)
                     .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Secondary))
                     .on_press_maybe((!self.busy).then_some(Message::Preflight)),
                 // Saving stays closed until a preflight has actually run.
-                button(widgets::label("Save project", theme::MAGENTA))
+                button(widgets::control("Save project"))
                     .height(theme::CONTROL_SM)
                     .padding([0, 14])
                     .style(widgets::button_style(widgets::Button::Primary))
@@ -2614,10 +2845,18 @@ impl Model {
                 bottom: 0.0,
                 left: 20.0,
             }),
-            container(scrollable(page).height(Length::Fill)).padding(20),
+            container(
+                scrollable(page)
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::hidden()
+                    ))
+                    .style(widgets::hidden_scrollbar)
+                    .height(Length::Fill)
+            )
+            .padding(20),
             container(
                 row![
-                    button(widgets::label("Cancel", theme::TEXT_MUTED))
+                    button(widgets::control("Cancel"))
                         .height(theme::CONTROL_SM)
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Ghost))
@@ -2633,16 +2872,20 @@ impl Model {
             .width(Length::Fill)
             .style(|_| glass_edge()),
         ];
-        container(dialog)
-            .width(760)
-            .height(Length::FillPortion(9))
-            .style(|_| glass_surface())
-            .into()
+        backdrop_filter(
+            container(dialog)
+                .width(760)
+                .height(Length::FillPortion(9))
+                .style(|_| glass_surface())
+                .into(),
+            14.0,
+            theme::RADIUS_GLASS,
+        )
     }
 
     fn approval_panel(&self) -> UiElement<'_> {
         let request = self.approval.as_ref().unwrap_or(&Value::Null);
-        container(column![
+        backdrop_filter(container(column![
             glass_header("Review exact authority", "", None),
             container(
                 column![
@@ -2677,13 +2920,13 @@ impl Model {
             .padding(20),
             container(
                 row![
-                    button(widgets::label("Deny", theme::ERROR))
+                    button(widgets::control("Deny"))
                         .height(theme::CONTROL_SM)
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(Message::DecideApproval(false)),
                     space::horizontal(),
-                    button(widgets::label("Allow once", theme::MAGENTA))
+                    button(widgets::control("Allow once"))
                         .height(theme::CONTROL_SM)
                         .padding([0, 14])
                         .style(widgets::button_style(widgets::Button::Primary))
@@ -2698,7 +2941,7 @@ impl Model {
         ])
         .width(620)
         .style(|_| glass_surface())
-        .into()
+        .into(), 14.0, theme::RADIUS_GLASS)
     }
 }
 
@@ -3153,16 +3396,46 @@ mod tests {
         model.connected = true;
         model.booted_at = None;
         model.status = "Kore sandbox ready".into();
-        model.projects = vec![json!({
-            "id":"axiom-control-plane",
-            "name":"Axiom control plane",
-            "archived":false,
-            "inference":{"backend":"deterministic"},
-            "resources":{"memory_mib":4096,"virtual_cpus":4,"prompt_seconds":300,"agent_limit":4},
-            "addons":[]
-        })];
+        model.catalog = json!({
+            "addons": [
+                {
+                    "id":"reference.host",
+                    "name":"Reference host add-on · 0.1.0",
+                    "domain":"host domain · MicroPerceptron",
+                    "tools":[{"name":"echo","risk":"read_only"}],
+                    "network_destinations":[]
+                },
+                {
+                    "id":"reference.guest",
+                    "name":"Reference guest add-on · 0.1.0",
+                    "domain":"guest domain · MicroPerceptron",
+                    "tools":[{"name":"list_workspace","risk":"read_only"}],
+                    "network_destinations":[]
+                }
+            ]
+        });
+        model.projects = vec![
+            json!({
+                "id":"vkore-bridge",
+                "name":"vkore bridge",
+                "archived":false,
+                "workspace":{"root":"/home/dev/src/vkore","access":"read_only"},
+                "inference":{"backend":"deterministic"},
+                "resources":{"memory_mib":4096,"virtual_cpus":4,"prompt_seconds":300,"agent_limit":6},
+                "addons":[]
+            }),
+            json!({
+                "id":"kore-frontend-ingress",
+                "name":"kore frontend ingress",
+                "archived":false,
+                "workspace":{"root":"/home/dev/src/kore","access":"review_changes"},
+                "inference":{"backend":"llama_cpp"},
+                "resources":{"memory_mib":2048,"virtual_cpus":2,"prompt_seconds":180,"agent_limit":4},
+                "addons":[]
+            }),
+        ];
         model.selected = Some(0);
-        model.session = Some("native-session".into());
+        model.session = Some("session-5f37cccc".into());
         model.expanded_work.insert("native-prompt".into());
         model.events = vec![
             json!({"kind":"user_prompt","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_000_000_u64,"payload":{"text":"Read the verification file and explain the result."}}),
@@ -3175,7 +3448,316 @@ mod tests {
         // Events set directly bypass the update path that keeps the selectable
         // conversation editors in step, and the view expects them present.
         model.events_changed();
+        install_design_topology_fixture(&mut model);
         model
+    }
+
+    fn capabilities(held: &[&str]) -> Vec<model::Capability> {
+        const ALL: [&str; 12] = [
+            "fs.read",
+            "fs.list",
+            "fs.write",
+            "proc.exec",
+            "net.fetch",
+            "kv.read",
+            "kv.write",
+            "spawn.agent",
+            "tool.cat",
+            "tool.grep",
+            "tool.patch",
+            "tool.test",
+        ];
+        ALL.into_iter()
+            .map(|label| model::Capability {
+                label: label.into(),
+                held: held.contains(&label),
+            })
+            .collect()
+    }
+
+    fn tool_calls(calls: &[(&str, &str, bool)]) -> Vec<model::ToolCall> {
+        calls
+            .iter()
+            .map(|(name, detail, failed)| model::ToolCall {
+                name: (*name).into(),
+                detail: (*detail).into(),
+                failed: *failed,
+            })
+            .collect()
+    }
+
+    /// Exact sample content from the design handoff. This is intentionally
+    /// capture-only: the live application continues to derive topology from
+    /// the daemon's event stream and never invents agents or authority.
+    fn install_design_topology_fixture(model: &mut Model) {
+        let all = [
+            "fs.read",
+            "fs.list",
+            "fs.write",
+            "proc.exec",
+            "net.fetch",
+            "kv.read",
+            "kv.write",
+            "spawn.agent",
+            "tool.cat",
+            "tool.grep",
+            "tool.patch",
+            "tool.test",
+        ];
+        model.topology_graph = model::Graph {
+            agents: vec![
+                model::Agent {
+                    id: "broker".into(),
+                    name: "ai-broker".into(),
+                    role: model::Role::Broker,
+                    generation: 0,
+                    live: true,
+                    capabilities: capabilities(&all),
+                    tools: tool_calls(&[
+                        (
+                            "spawn.agent",
+                            "reader-4e91 · rights read,list · 14ms",
+                            false,
+                        ),
+                        (
+                            "spawn.agent",
+                            "indexer-bc07 · rights read,list,kv · 11ms",
+                            false,
+                        ),
+                        (
+                            "spawn.agent",
+                            "patcher-2f6a · rights read,write,exec · 12ms",
+                            false,
+                        ),
+                    ]),
+                    parent: None,
+                },
+                model::Agent {
+                    id: "reader".into(),
+                    name: "reader-4e91".into(),
+                    role: model::Role::Worker,
+                    generation: 1,
+                    live: true,
+                    capabilities: capabilities(&["fs.read", "fs.list", "tool.cat", "tool.grep"]),
+                    tools: tool_calls(&[
+                        ("cat", "workspace/src/main.rs · 38ms", false),
+                        ("grep", "\"verification code\" · 2 hits · 121ms", false),
+                        ("cat", "workspace/Cargo.toml · 22ms", false),
+                    ]),
+                    parent: Some(0),
+                },
+                model::Agent {
+                    id: "indexer".into(),
+                    name: "indexer-bc07".into(),
+                    role: model::Role::Worker,
+                    generation: 1,
+                    live: true,
+                    capabilities: capabilities(&[
+                        "fs.read",
+                        "fs.list",
+                        "kv.read",
+                        "kv.write",
+                        "spawn.agent",
+                        "tool.grep",
+                    ]),
+                    tools: tool_calls(&[
+                        ("spawn.agent", "symbols-9f2a · rights read · 9ms", false),
+                        ("spawn.agent", "embed-31d5 · rights read,kv · 10ms", false),
+                        ("kv.write", "index/manifest · 1 412 keys · 64ms", false),
+                    ]),
+                    parent: Some(0),
+                },
+                model::Agent {
+                    id: "symbols".into(),
+                    name: "symbols-9f2a".into(),
+                    role: model::Role::SubAgent,
+                    generation: 2,
+                    live: true,
+                    capabilities: capabilities(&["fs.read", "tool.grep"]),
+                    tools: tool_calls(&[
+                        ("grep", "\"pub fn\" · crates/vkore-core · 208ms", false),
+                        ("grep", "\"impl Policy\" · 6 hits · 96ms", false),
+                    ]),
+                    parent: Some(2),
+                },
+                model::Agent {
+                    id: "embed".into(),
+                    name: "embed-31d5".into(),
+                    role: model::Role::SubAgent,
+                    generation: 2,
+                    live: true,
+                    capabilities: capabilities(&["fs.read", "kv.read", "kv.write"]),
+                    tools: tool_calls(&[
+                        ("kv.write", "embed/shard-00 · 512 vectors · 143ms", false),
+                        ("kv.write", "embed/shard-01 · 512 vectors · 138ms", false),
+                        ("fs.read", "tests/integration.rs · 27ms", false),
+                    ]),
+                    parent: Some(2),
+                },
+                model::Agent {
+                    id: "patcher".into(),
+                    name: "patcher-2f6a".into(),
+                    role: model::Role::Worker,
+                    generation: 1,
+                    live: true,
+                    capabilities: capabilities(&[
+                        "fs.read",
+                        "fs.write",
+                        "proc.exec",
+                        "tool.patch",
+                        "tool.test",
+                    ]),
+                    tools: tool_calls(&[
+                        ("tool.patch", "src/ui/theme.rs · +18 −4 · 71ms", false),
+                        ("proc.exec", "cargo test -p vkore-ui · 8420ms", false),
+                        (
+                            "tool.patch",
+                            "src/ui/view.rs · denied by ceiling · 3ms",
+                            true,
+                        ),
+                    ]),
+                    parent: Some(0),
+                },
+            ],
+        };
+        model.topology_placements =
+            layout::tidy(&model.topology_graph.parents(), layout::Metrics::AGENTS);
+
+        use filesystem::{Grant, Kind, PathNode};
+        let path = |path: &str, name: &str, kind, parent| PathNode {
+            path: path.into(),
+            name: name.into(),
+            kind,
+            parent,
+        };
+        model.topology_filesystem = filesystem::Filesystem {
+            paths: vec![
+                path(
+                    "Codebase_directory",
+                    "Codebase_directory",
+                    Kind::Directory,
+                    None,
+                ),
+                path("Codebase_directory/src", "src", Kind::Directory, Some(0)),
+                path(
+                    "Codebase_directory/src/main.rs",
+                    "main.rs",
+                    Kind::File,
+                    Some(1),
+                ),
+                path(
+                    "Codebase_directory/src/policy.rs",
+                    "policy.rs",
+                    Kind::File,
+                    Some(1),
+                ),
+                path("Codebase_directory/src/ui", "ui", Kind::Directory, Some(1)),
+                path(
+                    "Codebase_directory/src/ui/view.rs",
+                    "view.rs",
+                    Kind::File,
+                    Some(4),
+                ),
+                path(
+                    "Codebase_directory/src/ui/theme.rs",
+                    "theme.rs",
+                    Kind::File,
+                    Some(4),
+                ),
+                path(
+                    "Codebase_directory/crates",
+                    "crates",
+                    Kind::Directory,
+                    Some(0),
+                ),
+                path(
+                    "Codebase_directory/crates/vkore-core",
+                    "vkore-core",
+                    Kind::Directory,
+                    Some(7),
+                ),
+                path(
+                    "Codebase_directory/crates/vkore-core/lib.rs",
+                    "lib.rs",
+                    Kind::File,
+                    Some(8),
+                ),
+                path(
+                    "Codebase_directory/crates/vkore-policy",
+                    "vkore-policy",
+                    Kind::Directory,
+                    Some(7),
+                ),
+                path(
+                    "Codebase_directory/tests",
+                    "tests",
+                    Kind::Directory,
+                    Some(0),
+                ),
+                path(
+                    "Codebase_directory/tests/integration.rs",
+                    "integration.rs",
+                    Kind::File,
+                    Some(11),
+                ),
+                path(
+                    "Codebase_directory/Cargo.toml",
+                    "Cargo.toml",
+                    Kind::File,
+                    Some(0),
+                ),
+                path(
+                    "Codebase_directory/README.md",
+                    "README.md",
+                    Kind::File,
+                    Some(0),
+                ),
+                path(
+                    "~/.cache/vkore/embed.idx",
+                    "embed.idx",
+                    Kind::External,
+                    None,
+                ),
+                path(
+                    "/etc/vkore/policy.toml",
+                    "policy.toml",
+                    Kind::External,
+                    None,
+                ),
+                path("~/.cargo/registry", "registry", Kind::External, None),
+            ],
+            grants: [
+                (0, 0, "read,list,write*"),
+                (0, 15, "read"),
+                (0, 16, "read"),
+                (0, 17, "read"),
+                (1, 2, "read"),
+                (1, 3, "read"),
+                (1, 13, "read"),
+                (2, 9, "read,list"),
+                (2, 10, "read,list"),
+                (2, 17, "read"),
+                (3, 9, "read"),
+                (3, 5, "read"),
+                (4, 12, "read"),
+                (4, 15, "read,write"),
+                (5, 6, "read,write"),
+                (5, 5, "read"),
+                (5, 16, "read"),
+            ]
+            .into_iter()
+            .map(|(agent, path, rights)| Grant {
+                agent,
+                path,
+                rights: rights.into(),
+            })
+            .collect(),
+        };
+        (model.topology_agent_bands, model.topology_path_bands) =
+            model.topology_filesystem.place(&model.topology_graph);
+        model.topology.selected = Some("broker".into());
+        model.topology.path = None;
+        model.topology.fitted = false;
     }
 
     fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
@@ -3218,6 +3800,10 @@ mod tests {
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
+        if std::env::var_os("VKORE_UI_EMPTY").is_some() {
+            model.events.clear();
+            model.selectable_text.clear();
+        }
         if let Ok(view) = std::env::var("VKORE_UI_VIEW") {
             model.view = match view.as_str() {
                 "agents" => View::Agents,
@@ -3234,6 +3820,18 @@ mod tests {
             if let Ok(page) = std::env::var("VKORE_UI_WIZARD_PAGE") {
                 model.wizard_page = page.parse().unwrap_or(0);
             }
+        }
+        if std::env::var_os("VKORE_UI_APPROVAL").is_some() {
+            model.approval = Some(json!({
+                "id":"apr-5f37cccc",
+                "addon_id":"reference.guest",
+                "tool":"list_workspace",
+                "session_id":"session-5f37cccc",
+                "risk":"read_only",
+                "execution_domain":"guest",
+                "effect_summary":"Allow reference.guest.list_workspace once for this agent",
+                "requested_by":"harness-ui-v1"
+            }));
         }
         if let Ok(selected) = std::env::var("VKORE_UI_SELECT") {
             model.topology.selected = Some(selected);
@@ -3268,6 +3866,23 @@ mod tests {
                 size,
                 std::mem::take(&mut cache),
                 &mut renderer,
+            );
+            // Iced resolves a button's Active/Disabled status during event
+            // traversal. Prime the headless capture exactly as the window
+            // loop does; drawing a freshly built tree without an event makes
+            // every enabled control look disabled on its first frame.
+            let waker = shell::Waker::noop();
+            let mut messages = shell::Bus::new();
+            let events = [iced_core::Event::Window(
+                iced_core::window::Event::RedrawRequested(Instant::now()),
+            )];
+            let _ = interface.update(
+                &iced_core::window::Headless,
+                &waker,
+                &events,
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut messages,
             );
             interface.draw(
                 &mut renderer,
@@ -3374,6 +3989,19 @@ mod tests {
                 std::mem::take(&mut cache),
                 &mut renderer,
             );
+            let waker = shell::Waker::noop();
+            let mut messages = shell::Bus::new();
+            let events = [iced_core::Event::Window(
+                iced_core::window::Event::RedrawRequested(Instant::now()),
+            )];
+            let _ = interface.update(
+                &iced_core::window::Headless,
+                &waker,
+                &events,
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut messages,
+            );
             interface.draw(
                 &mut renderer,
                 &Theme::Dark,
@@ -3384,7 +4012,7 @@ mod tests {
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();
-            let masks = renderer.take_images();
+            let _masks = renderer.take_images();
             let started = Instant::now();
             // A running splash animates, so its frames differ by design and
             // retention has nothing to recognize.
@@ -3786,6 +4414,21 @@ mod tests {
             let stats = render_test_frame(&frame, masks, &mut target, 1280, 800);
             assert!(stats.pixels_written > 1280 * 800 / 5);
         }
+    }
+
+    #[test]
+    fn new_project_control_is_a_no_op_during_a_live_session() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.session = Some("session-live".into());
+
+        model.update(Message::NewProject);
+
+        assert!(model.editor.is_none());
     }
 
     #[test]

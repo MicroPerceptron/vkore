@@ -138,13 +138,9 @@ pub fn scrim() -> Color {
 
 /// The glass surface a dialog sits on.
 ///
-/// The system specifies `rgba(10,10,12,0.86)` over a backdrop blur. The
-/// display list carries no blur, and at that opacity the page behind stays
-/// legible through the dialog rather than smearing into a wash -- a window,
-/// not a surface. The fill is raised until the dialog reads as the system
-/// intends, which is the part that carries meaning.
+/// The system's translucent fill over its Axiom backdrop filter.
 pub fn glass() -> Color {
-    rgba(BACKGROUND, 0.97)
+    rgba(BACKGROUND, 0.86)
 }
 
 /// The border around a glass surface.

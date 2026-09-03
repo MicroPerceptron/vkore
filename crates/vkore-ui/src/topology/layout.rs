@@ -141,11 +141,11 @@ pub fn bounds(placements: &[Placement]) -> Option<(f32, f32, f32, f32)> {
 
 /// The transform that fits `placements` into a viewport of `width` x `height`.
 ///
-/// Returns a translation and a scale clamped to `[0.7, 1.0]`, matching the
-/// design: a graph is never magnified past its drawn size, and never shrunk
-/// so far that its labels stop reading. When the clamped scene still
-/// overflows, the first node is centred horizontally and pinned near the top
-/// rather than centring a box taller than the viewport.
+/// Returns a translation and a scale clamped to the topology's interactive
+/// zoom range. A graph is never magnified past its drawn size. It may shrink
+/// below the mock's 70% preferred floor when that is the only way to keep
+/// complete cards inside a smaller viewport; clipping a node's identity or
+/// authority is worse than rendering it slightly smaller.
 pub fn fit(placements: &[Placement], width: f32, height: f32, padding: f32) -> (f32, f32, f32) {
     let Some((left, top, right, bottom)) = bounds(placements) else {
         return (0.0, 0.0, 1.0);
@@ -156,7 +156,7 @@ pub fn fit(placements: &[Placement], width: f32, height: f32, padding: f32) -> (
     let available_height = (height - padding * 2.0).max(1.0);
     let scale = (available_width / scene_width)
         .min(available_height / scene_height)
-        .clamp(0.7, 1.0);
+        .clamp(0.32, 1.0);
 
     if scene_height * scale > available_height {
         let root = &placements[0];
@@ -243,10 +243,10 @@ mod tests {
     }
 
     #[test]
-    fn fit_never_magnifies_and_never_shrinks_past_the_floor() {
+    fn fit_never_magnifies_and_never_shrinks_past_the_interaction_floor() {
         let wide = tidy(&[None, Some(0), Some(0), Some(0), Some(0), Some(0)], M);
         let (_, _, small) = fit(&wide, 400.0, 400.0, 36.0);
-        assert_eq!(small, 0.7, "a large scene clamps at the floor");
+        assert_eq!(small, 0.32, "a large scene clamps at the floor");
 
         let tiny = tidy(&[None], M);
         let (_, _, large) = fit(&tiny, 4000.0, 4000.0, 36.0);
@@ -261,6 +261,17 @@ mod tests {
         let centre_y = ty + placed[0].center_y() * scale;
         assert!((centre_x - 500.0).abs() < 0.001);
         assert!((centre_y - 300.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fit_keeps_a_wide_scene_inside_the_viewport_when_the_zoom_range_allows_it() {
+        let wide = tidy(&[None, Some(0), Some(0), Some(0), Some(0)], M);
+        let width = 760.0;
+        let padding = 36.0;
+        let (tx, _, scale) = fit(&wide, width, 560.0, padding);
+        let (left, _, right, _) = bounds(&wide).expect("a non-empty scene");
+        assert!(tx + left * scale >= padding - 0.001);
+        assert!(tx + right * scale <= width - padding + 0.001);
     }
 
     #[test]

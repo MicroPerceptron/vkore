@@ -11,12 +11,14 @@
 //!   ghost row. It never fades opacity, never scales, and never floods a fill.
 //! - Disabled is 40% opacity, applied to whatever the kind already resolved.
 //!
-//! Labels are uppercased here rather than by the caller, and carry the
-//! system's tracking through the face they are set in.
+//! Section labels are uppercased here. Component-button and navigation labels
+//! preserve the case supplied by the screen, exactly like the published
+//! MONOLITH components, and inherit their colour from the control style so a
+//! disabled control dims its label too.
 
 use crate::{fonts, theme};
 use iced_core::{Background, Border, Color, Theme};
-use iced_widget::{button, text, text_editor};
+use iced_widget::{button, scrollable, text, text_editor};
 
 /// A wizard step's position relative to the one being edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +85,7 @@ impl Button {
             Self::Danger => Face {
                 fill: None,
                 text: theme::ERROR,
-                edge: Some(if hovered { theme::ERROR } else { theme::BORDER }),
+                edge: Some(theme::ERROR),
             },
             Self::Ghost => Face {
                 fill: hovered.then_some(theme::HOVER),
@@ -202,6 +204,31 @@ pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style
     }
 }
 
+/// Browser-equivalent overlay scrollbars: scrolling works, but idle chrome
+/// does not reserve or paint a rail over the content.
+pub fn hidden_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = scrollable::default(theme, status);
+    for rail in [&mut style.vertical_rail, &mut style.horizontal_rail] {
+        rail.background = None;
+        rail.border = Border::default();
+        rail.scroller.background = Background::Color(Color::TRANSPARENT);
+        rail.scroller.border = Border::default();
+    }
+    style.gap = None;
+    style
+}
+
+/// The composer is a transparent editor inside its own bordered panel.
+pub fn composer_editor(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        placeholder: theme::rgb(theme::TEXT_MUTED),
+        value: theme::rgb(theme::TEXT),
+        selection: theme::rgba(theme::MAGENTA, 0.28),
+    }
+}
+
 /// Read-only conversation text, which carries no chrome of its own.
 pub fn selectable(color: u32) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + Copy {
     move |_theme, _status| text_editor::Style {
@@ -218,15 +245,33 @@ pub fn label<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, 
     text(content.as_ref().to_uppercase())
         .font(fonts::MONO_LABEL)
         .size(theme::SIZE_MONO)
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
         .color(theme::rgb(color))
 }
 
-/// A navigation item, which the system sets slightly tighter than a label.
-pub fn nav<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, crate::AxUi> {
+/// A component-button label. Buttons preserve case and own the text colour.
+pub fn control<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content.into())
+        .font(fonts::MONO_LABEL)
+        .size(theme::SIZE_MONO)
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
+}
+
+/// An explicitly uppercase component-button label, used by view tabs and
+/// inspector controls.
+pub fn control_upper<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.as_ref().to_uppercase())
+        .font(fonts::MONO_LABEL)
+        .size(theme::SIZE_MONO)
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
+}
+
+/// A navigation item, which the system sets slightly tighter than a label.
+pub fn nav<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content.into())
         .font(fonts::MONO_NAV)
         .size(theme::SIZE_MONO)
-        .color(theme::rgb(color))
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
 }
 
 /// Machine-shaped text: paths, agent and tool names, JSON, log bodies.
@@ -234,6 +279,7 @@ pub fn mono<'a>(content: impl Into<String>, color: u32) -> text::Text<'a, Theme,
     text(content.into())
         .font(fonts::MONO)
         .size(theme::SIZE_MONO)
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
         .color(theme::rgb(color))
 }
 
@@ -246,6 +292,7 @@ pub fn body<'a>(
     text(content.into())
         .font(fonts::BODY)
         .size(size)
+        .line_height(iced_core::text::LineHeight::Relative(1.35))
         .color(theme::rgb(color))
 }
 
@@ -254,6 +301,7 @@ pub fn display<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxU
     text(content.as_ref().to_uppercase())
         .font(fonts::DISPLAY)
         .size(theme::SIZE_DISPLAY)
+        .line_height(iced_core::text::LineHeight::Relative(1.25))
         .color(theme::rgb(theme::TEXT))
 }
 
@@ -377,6 +425,15 @@ mod tests {
         assert_eq!(sh.text_color, theme::rgb(theme::TEXT));
         assert_eq!(s.border.color, theme::rgb(theme::BORDER));
         assert_eq!(sh.border.color, theme::rgb(theme::MAGENTA));
+
+        // danger: the error border is present in both states.
+        let d = rest(Button::Danger);
+        let dh = hover(Button::Danger);
+        assert_eq!(d.background, None);
+        assert_eq!(dh.background, None);
+        assert_eq!(d.text_color, theme::rgb(theme::ERROR));
+        assert_eq!(d.border.color, theme::rgb(theme::ERROR));
+        assert_eq!(dh.border.color, theme::rgb(theme::ERROR));
 
         // ghost: transparent until hover, then the surface-hover fill.
         let g = rest(Button::Ghost);

@@ -369,6 +369,11 @@ fn maximum_opacity_depth(commands: &[Command]) -> usize {
         }
     }
     maximum
+        + usize::from(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::BackdropBlur { .. })),
+        )
 }
 
 struct OpenTypeGlyphSource {

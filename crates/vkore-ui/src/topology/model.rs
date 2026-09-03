@@ -19,6 +19,8 @@ pub enum Role {
     Broker,
     /// A prompt-scoped worker, one per generation.
     Worker,
+    /// A worker spawned by another prompt-scoped worker.
+    SubAgent,
 }
 
 impl Role {
@@ -27,6 +29,7 @@ impl Role {
         match self {
             Self::Broker => "resident",
             Self::Worker => "worker",
+            Self::SubAgent => "sub-agent",
         }
     }
 }

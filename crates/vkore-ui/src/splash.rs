@@ -132,8 +132,6 @@ impl canvas::Program<Message, Theme, AxUi> for Mark {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry<AxUi>> {
-        use iced_graphics::geometry::frame::Backend as _;
-
         let signature = self.signature(bounds);
         if state.signature.replace(signature) != signature {
             state.cache.clear();

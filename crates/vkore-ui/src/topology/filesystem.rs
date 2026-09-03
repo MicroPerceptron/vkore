@@ -205,26 +205,6 @@ impl Filesystem {
     /// Returns agent placements first, then path placements, so a caller can
     /// index each with the same indices it already holds.
     pub fn place(&self, graph: &Graph) -> (Vec<Placement>, Vec<Placement>) {
-        let mut agents = Vec::new();
-        let mut cursor = 0.0;
-        for (index, _) in graph.agents.iter().enumerate() {
-            let broker = index == 0;
-            agents.push(Placement {
-                x: if broker { 0.0 } else { cursor },
-                y: if broker { 0.0 } else { BAND_WORKERS },
-                width: AGENT_WIDTH,
-                height: AGENT_HEIGHT,
-            });
-            if !broker {
-                cursor += AGENT_WIDTH + AGENT_GAP;
-            }
-        }
-        // The broker sits centred over the workers it spawned.
-        if agents.len() > 1 {
-            let span = cursor - AGENT_GAP - AGENT_WIDTH;
-            agents[0].x = span / 2.0;
-        }
-
         let mut paths = vec![
             Placement {
                 x: 0.0,
@@ -234,36 +214,113 @@ impl Filesystem {
             };
             self.paths.len()
         ];
-        let mut external_cursor = 0.0;
-        let mut depth_cursor: Vec<f32> = Vec::new();
+
+        // The handoff lays the workspace out as a tidy variable-width tree:
+        // leaves advance one shared cursor and parents centre over their
+        // outermost children. This keeps containment readable at every depth.
+        let mut children = vec![Vec::new(); self.paths.len()];
+        let mut roots = Vec::new();
         for (index, node) in self.paths.iter().enumerate() {
-            let width = node_width(&node.name);
-            paths[index].width = width;
             if node.kind == Kind::External {
-                paths[index].x = external_cursor;
-                paths[index].y = BAND_EXTERNAL;
-                external_cursor += width + PATH_GAP;
                 continue;
             }
-            let depth = self.depth(index);
-            if depth_cursor.len() <= depth {
-                depth_cursor.resize(depth + 1, 0.0);
+            match node.parent {
+                Some(parent) if parent < index => children[parent].push(index),
+                _ => roots.push(index),
             }
-            paths[index].x = depth_cursor[depth];
-            paths[index].y = BAND_WORKSPACE + depth as f32 * (PATH_HEIGHT + ROW_GAP);
-            depth_cursor[depth] += width + PATH_GAP;
+        }
+        fn place_tree(
+            index: usize,
+            depth: usize,
+            cursor: &mut f32,
+            nodes: &[PathNode],
+            children: &[Vec<usize>],
+            placements: &mut [Placement],
+        ) -> f32 {
+            let width = node_width(&nodes[index].name);
+            placements[index].width = width;
+            placements[index].y = BAND_WORKSPACE + depth as f32 * (PATH_HEIGHT + ROW_GAP);
+            let center = if children[index].is_empty() {
+                let center = *cursor + width / 2.0;
+                *cursor += width + PATH_GAP;
+                center
+            } else {
+                let first = place_tree(
+                    children[index][0],
+                    depth + 1,
+                    cursor,
+                    nodes,
+                    children,
+                    placements,
+                );
+                let mut last = first;
+                for child in children[index].iter().skip(1) {
+                    last = place_tree(*child, depth + 1, cursor, nodes, children, placements);
+                }
+                (first + last) / 2.0
+            };
+            placements[index].x = center - width / 2.0;
+            center
+        }
+        let mut tree_cursor = 0.0;
+        for root in roots {
+            place_tree(
+                root,
+                0,
+                &mut tree_cursor,
+                &self.paths,
+                &children,
+                &mut paths,
+            );
+        }
+        let tree_width = (tree_cursor - PATH_GAP).max(0.0);
+        let worker_count = graph.agents.len().saturating_sub(1);
+        let worker_width =
+            worker_count as f32 * AGENT_WIDTH + worker_count.saturating_sub(1) as f32 * AGENT_GAP;
+        let external_count = self
+            .paths
+            .iter()
+            .filter(|node| node.kind == Kind::External)
+            .count();
+        let external_width = external_count as f32 * AGENT_WIDTH
+            + external_count.saturating_sub(1) as f32 * AGENT_GAP;
+        let content_width = tree_width.max(worker_width).max(external_width);
+        let tree_offset = (content_width - tree_width) / 2.0;
+        for (index, node) in self.paths.iter().enumerate() {
+            if node.kind != Kind::External {
+                paths[index].x += tree_offset;
+            }
+        }
+
+        let mut external_index = 0;
+        for (index, node) in self.paths.iter().enumerate() {
+            if node.kind == Kind::External {
+                paths[index] = Placement {
+                    x: (content_width - external_width) / 2.0
+                        + external_index as f32 * (AGENT_WIDTH + AGENT_GAP),
+                    y: BAND_EXTERNAL,
+                    width: AGENT_WIDTH,
+                    height: PATH_HEIGHT,
+                };
+                external_index += 1;
+            }
+        }
+
+        let mut agents = Vec::with_capacity(graph.agents.len());
+        let worker_offset = (content_width - worker_width) / 2.0;
+        for (index, _) in graph.agents.iter().enumerate() {
+            agents.push(Placement {
+                x: if index == 0 {
+                    (content_width - AGENT_WIDTH) / 2.0
+                } else {
+                    worker_offset + (index - 1) as f32 * (AGENT_WIDTH + AGENT_GAP)
+                },
+                y: if index == 0 { 0.0 } else { BAND_WORKERS },
+                width: AGENT_WIDTH,
+                height: AGENT_HEIGHT,
+            });
         }
         (agents, paths)
-    }
-
-    fn depth(&self, index: usize) -> usize {
-        let mut depth = 0;
-        let mut current = self.paths.get(index).and_then(|node| node.parent);
-        while let Some(parent) = current {
-            depth += 1;
-            current = self.paths.get(parent).and_then(|node| node.parent);
-        }
-        depth
     }
 }
 

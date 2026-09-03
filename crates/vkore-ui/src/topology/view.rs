@@ -12,10 +12,10 @@
 use crate::topology::filesystem::{self as fs, Filesystem};
 use crate::topology::layout::{self, Placement};
 use crate::topology::model::{Agent, Graph};
-use crate::{AxUi, Message, theme, widgets};
+use crate::{AxUi, Message, fonts, theme};
 use iced_core::{Length, Point, Rectangle, Size, Theme, alignment, mouse};
 use iced_widget::canvas::{self, Geometry, Path, Stroke};
-use iced_widget::{button, column, container, row, space, stack};
+use iced_widget::{button, column, container, row, space, stack, text};
 
 /// Spacing of the canvas dot grid.
 const GRID: f32 = 32.0;
@@ -244,49 +244,50 @@ impl canvas::Program<Message, Theme, AxUi> for Edges<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry<AxUi>> {
-        use iced_graphics::geometry::frame::Backend as _;
-
         let signature = self.signature(bounds);
         if state.signature.replace(signature) != signature {
             state.cache.clear();
         }
-        vec![state.cache.draw_with_bounds(renderer, bounds, |frame| {
-            frame.fill(&dot_grid(bounds, self.state), theme::rgb(theme::HOVER));
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            frame.with_clip(Rectangle::with_size(bounds.size()), |frame| {
+                frame.fill(&dot_grid(bounds, self.state), theme::rgb(theme::HOVER));
 
-            let selected = self
-                .state
-                .selected
-                .as_deref()
-                .and_then(|id| self.graph.index_of(id));
-            for (index, agent) in self.graph.agents.iter().enumerate() {
-                let Some(parent) = agent.parent else { continue };
-                let (Some(from), Some(to)) =
-                    (self.placements.get(parent), self.placements.get(index))
-                else {
-                    continue;
-                };
-                let touched = selected.is_some_and(|chosen| chosen == index || chosen == parent);
-                let start = self.point(from.center_x(), from.y + from.height);
-                let end = self.point(to.center_x(), to.y);
-                let curve = Path::new(|builder| {
-                    builder.move_to(start);
-                    builder.bezier_curve_to(
-                        Point::new(start.x, start.y + CONTROL * self.state.scale),
-                        Point::new(end.x, end.y - CONTROL * self.state.scale),
-                        end,
+                let selected = self
+                    .state
+                    .selected
+                    .as_deref()
+                    .and_then(|id| self.graph.index_of(id));
+                for (index, agent) in self.graph.agents.iter().enumerate() {
+                    let Some(parent) = agent.parent else { continue };
+                    let (Some(from), Some(to)) =
+                        (self.placements.get(parent), self.placements.get(index))
+                    else {
+                        continue;
+                    };
+                    let touched =
+                        selected.is_some_and(|chosen| chosen == index || chosen == parent);
+                    let start = self.point(from.center_x(), from.y + from.height);
+                    let end = self.point(to.center_x(), to.y);
+                    let curve = Path::new(|builder| {
+                        builder.move_to(start);
+                        builder.bezier_curve_to(
+                            Point::new(start.x, start.y + CONTROL * self.state.scale),
+                            Point::new(end.x, end.y - CONTROL * self.state.scale),
+                            end,
+                        );
+                    });
+                    frame.stroke(
+                        &curve,
+                        Stroke::default()
+                            .with_width(if touched { 1.6 } else { 1.1 })
+                            .with_color(theme::rgba(
+                                theme::MAGENTA,
+                                if touched { 1.0 } else { 0.45 },
+                            ))
+                            .with_line_cap(iced_graphics::geometry::LineCap::Round),
                     );
-                });
-                frame.stroke(
-                    &curve,
-                    Stroke::default()
-                        .with_width(if touched { 1.6 } else { 1.1 })
-                        .with_color(theme::rgba(
-                            theme::MAGENTA,
-                            if touched { 1.0 } else { 0.45 },
-                        ))
-                        .with_line_cap(iced_graphics::geometry::LineCap::Round),
-                );
-            }
+                }
+            });
         })]
     }
 
@@ -314,49 +315,86 @@ impl Edges<'_> {
 ///
 /// Chips cap at the design's counts so a broker holding a large catalog stays
 /// the same height as its children rather than growing without bound.
-fn node<'a>(agent: &'a Agent, selected: bool) -> crate::UiElement<'a> {
+fn scaled_mono<'a>(
+    content: impl Into<String>,
+    color: u32,
+    size: f32,
+) -> iced_widget::Text<'a, Theme, AxUi> {
+    text(content.into())
+        .font(fonts::MONO)
+        .size(size)
+        .line_height(iced_core::text::LineHeight::Relative(1.3))
+        .color(theme::rgb(color))
+}
+
+fn scaled_label<'a>(
+    content: impl AsRef<str>,
+    color: u32,
+    size: f32,
+) -> iced_widget::Text<'a, Theme, AxUi> {
+    text(content.as_ref().to_uppercase())
+        .font(fonts::MONO_LABEL)
+        .size(size)
+        .line_height(iced_core::text::LineHeight::Relative(1.3))
+        .color(theme::rgb(color))
+}
+
+fn node<'a>(agent: &'a Agent, selected: bool, scale: f32) -> crate::UiElement<'a> {
     let dot_color = if agent.live {
         theme::SUCCESS
     } else {
         theme::BORDER_DIM
     };
     let title = row![
-        container(space::Space::new().width(5).height(5))
+        container(space::Space::new().width(5.0 * scale).height(5.0 * scale))
             .style(move |_| theme::panel(dot_color, None, 1.0)),
-        widgets::mono(agent.name.clone(), theme::TEXT)
+        scaled_mono(agent.name.clone(), theme::TEXT, 13.0 * scale)
             .wrapping(iced_core::text::Wrapping::None)
             .ellipsis(iced_core::text::Ellipsis::End),
         space::horizontal(),
-        widgets::label(agent.role.label(), theme::TEXT_MUTED),
+        scaled_label(agent.role.label(), theme::TEXT_MUTED, 12.0 * scale),
     ]
-    .spacing(theme::SPACE_2)
+    .spacing(theme::SPACE_2 * scale)
     .align_y(alignment::Vertical::Center);
 
     let chip = |label: String, held: bool| {
-        container(widgets::mono(
+        let label = scaled_mono(
             label,
             if held {
                 theme::MAGENTA
             } else {
                 theme::BORDER_DIM
             },
-        ))
-        .padding([2, 6])
-        .style(move |_| {
-            let mut style = theme::panel(
-                theme::PANEL,
-                Some(if held { theme::MAGENTA } else { theme::BORDER }),
-                2.0,
-            );
-            style.background = None;
-            if held {
-                style.border.color = theme::chip_border();
-            }
-            style
-        })
+            12.0 * scale,
+        );
+        let content = if held {
+            stack![label]
+        } else {
+            stack![
+                label,
+                container(space::Space::new().height(1.0 * scale))
+                    .height(Length::Fill)
+                    .align_y(alignment::Vertical::Center)
+                    .style(|_| theme::panel(theme::BORDER_DIM, None, 0.0)),
+            ]
+        };
+        container(content)
+            .padding([2.0 * scale, 6.0 * scale])
+            .style(move |_| {
+                let mut style = theme::panel(
+                    theme::PANEL,
+                    Some(if held { theme::MAGENTA } else { theme::BORDER }),
+                    2.0,
+                );
+                style.background = None;
+                if held {
+                    style.border.color = theme::chip_border();
+                }
+                style
+            })
     };
 
-    let mut chips = row![].spacing(theme::SPACE_1);
+    let mut chips = row![].spacing(theme::SPACE_1 * scale);
     let held: Vec<&str> = agent.held().map(|c| c.label.as_str()).collect();
     for label in held.iter().take(7) {
         chips = chips.push(chip((*label).to_owned(), true));
@@ -378,13 +416,13 @@ fn node<'a>(agent: &'a Agent, selected: bool) -> crate::UiElement<'a> {
             chips.wrap(),
             // The footer wraps rather than truncating: which capabilities an
             // agent holds and how many it ran is the point of the node.
-            widgets::mono(agent.footer(), theme::TEXT_MUTED),
+            scaled_mono(agent.footer(), theme::TEXT_MUTED, 12.0 * scale),
         ]
-        .spacing(9),
+        .spacing(9.0 * scale),
     )
-    .padding([12, 13])
+    .padding([12.0 * scale, 13.0 * scale])
     .width(Length::Fill)
-    .height(Length::Fill)
+    .height(Length::Shrink)
     .style(move |_theme, status| {
         let hovered = matches!(
             status,
@@ -431,15 +469,17 @@ pub fn canvas_layer<'a>(
         let selected = state.selected.as_deref() == Some(agent.id.as_str());
         layers = layers.push(
             iced_widget::pin(
-                container(node(agent, selected))
-                    .width(placement.width * state.scale)
-                    .height(placement.height * state.scale),
+                container(node(agent, selected, state.scale)).width(placement.width * state.scale),
             )
             .x(placement.x * state.scale + state.tx)
             .y(placement.y * state.scale + state.ty),
         );
     }
-    layers.width(Length::Fill).height(Length::Fill).into()
+    container(layers.width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true)
+        .into()
 }
 
 #[cfg(test)]
@@ -502,7 +542,7 @@ mod tests {
         assert!(!state.fitted);
         state.fit(&placements, Size::new(900.0, 600.0));
         assert!(state.fitted);
-        assert!(state.scale <= 1.0 && state.scale >= 0.7);
+        assert!(state.scale <= 1.0 && state.scale >= MIN_SCALE);
     }
 }
 
@@ -579,80 +619,81 @@ impl canvas::Program<Message, Theme, AxUi> for Permissions<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry<AxUi>> {
-        use iced_graphics::geometry::frame::Backend as _;
-
         let signature = self.signature(bounds);
         if state.signature.replace(signature) != signature {
             state.cache.clear();
         }
-        vec![state.cache.draw_with_bounds(renderer, bounds, |frame| {
-            frame.fill(&dot_grid(bounds, self.state), theme::rgb(theme::HOVER));
+        vec![state.cache.draw(renderer, bounds.size(), |frame| {
+            frame.with_clip(Rectangle::with_size(bounds.size()), |frame| {
+                frame.fill(&dot_grid(bounds, self.state), theme::rgb(theme::HOVER));
 
-            // Containment first, so a grant is never hidden behind it.
-            for (index, node) in self.filesystem.paths.iter().enumerate() {
-                let Some(parent) = node.parent else { continue };
-                let (Some(from), Some(to)) = (self.paths.get(parent), self.paths.get(index)) else {
-                    continue;
-                };
-                let start = self.point(from.center_x(), from.y + from.height);
-                let end = self.point(to.center_x(), to.y);
-                let offset = 26.0 * self.state.scale;
-                let curve = Path::new(|builder| {
-                    builder.move_to(start);
-                    builder.bezier_curve_to(
-                        Point::new(start.x, start.y + offset),
-                        Point::new(end.x, end.y - offset),
-                        end,
+                // Containment first, so a grant is never hidden behind it.
+                for (index, node) in self.filesystem.paths.iter().enumerate() {
+                    let Some(parent) = node.parent else { continue };
+                    let (Some(from), Some(to)) = (self.paths.get(parent), self.paths.get(index))
+                    else {
+                        continue;
+                    };
+                    let start = self.point(from.center_x(), from.y + from.height);
+                    let end = self.point(to.center_x(), to.y);
+                    let offset = 26.0 * self.state.scale;
+                    let curve = Path::new(|builder| {
+                        builder.move_to(start);
+                        builder.bezier_curve_to(
+                            Point::new(start.x, start.y + offset),
+                            Point::new(end.x, end.y - offset),
+                            end,
+                        );
+                    });
+                    frame.stroke(
+                        &curve,
+                        Stroke::default()
+                            .with_width(1.0)
+                            .with_color(theme::rgba(theme::TEXT, 0.30)),
                     );
-                });
-                frame.stroke(
-                    &curve,
-                    Stroke::default()
-                        .with_width(1.0)
-                        .with_color(theme::rgba(theme::TEXT, 0.30)),
-                );
-            }
+                }
 
-            let chosen = self
-                .state
-                .selected
-                .as_deref()
-                .and_then(|id| self.graph.index_of(id));
-            for grant in &self.filesystem.grants {
-                let (Some(from), Some(to)) =
-                    (self.agents.get(grant.agent), self.paths.get(grant.path))
-                else {
-                    continue;
-                };
-                // A selection makes its own grants the only legible ones.
-                let opacity = match chosen {
-                    Some(agent) if agent == grant.agent => 1.0,
-                    Some(_) => 0.14,
-                    None => 0.4,
-                };
-                let start = self.point(from.center_x(), from.y + from.height);
-                let end = self.point(to.center_x(), to.y);
-                let midpoint = (start.y + end.y) / 2.0;
-                let curve = Path::new(|builder| {
-                    builder.move_to(start);
-                    builder.bezier_curve_to(
-                        Point::new(start.x, midpoint),
-                        Point::new(end.x, midpoint),
-                        end,
-                    );
-                });
-                frame.stroke(
-                    &curve,
-                    Stroke {
-                        width: 1.0,
-                        line_dash: iced_graphics::geometry::LineDash {
-                            segments: &[6.0, 5.0],
-                            offset: 0,
+                let chosen = self
+                    .state
+                    .selected
+                    .as_deref()
+                    .and_then(|id| self.graph.index_of(id));
+                for grant in &self.filesystem.grants {
+                    let (Some(from), Some(to)) =
+                        (self.agents.get(grant.agent), self.paths.get(grant.path))
+                    else {
+                        continue;
+                    };
+                    // A selection makes its own grants the only legible ones.
+                    let opacity = match chosen {
+                        Some(agent) if agent == grant.agent => 1.0,
+                        Some(_) => 0.14,
+                        None => 0.4,
+                    };
+                    let start = self.point(from.center_x(), from.y + from.height);
+                    let end = self.point(to.center_x(), to.y);
+                    let midpoint = (start.y + end.y) / 2.0;
+                    let curve = Path::new(|builder| {
+                        builder.move_to(start);
+                        builder.bezier_curve_to(
+                            Point::new(start.x, midpoint),
+                            Point::new(end.x, midpoint),
+                            end,
+                        );
+                    });
+                    frame.stroke(
+                        &curve,
+                        Stroke {
+                            width: 1.0,
+                            line_dash: iced_graphics::geometry::LineDash {
+                                segments: &[6.0, 5.0],
+                                offset: 0,
+                            },
+                            ..Stroke::default().with_color(theme::rgba(theme::MAGENTA, opacity))
                         },
-                        ..Stroke::default().with_color(theme::rgba(theme::MAGENTA, opacity))
-                    },
-                );
-            }
+                    );
+                }
+            });
         })]
     }
 
@@ -672,6 +713,7 @@ fn path_node<'a>(
     node: &'a fs::PathNode,
     lit: bool,
     chosen: bool,
+    scale: f32,
 ) -> crate::UiElement<'a> {
     let (fill, edge, name_color, radius) = match node.kind {
         fs::Kind::Directory => (
@@ -695,16 +737,16 @@ fn path_node<'a>(
     };
     button(
         row![
-            widgets::mono(node.name.clone(), name_color)
+            scaled_mono(node.name.clone(), name_color, 13.0 * scale)
                 .wrapping(iced_core::text::Wrapping::None)
                 .ellipsis(iced_core::text::Ellipsis::End),
             space::horizontal(),
-            widgets::label(node.kind.label(), theme::TEXT_MUTED),
+            scaled_label(node.kind.label(), theme::TEXT_MUTED, 12.0 * scale),
         ]
-        .spacing(theme::SPACE_2)
+        .spacing(theme::SPACE_2 * scale)
         .align_y(alignment::Vertical::Center),
     )
-    .padding([9, 11])
+    .padding([9.0 * scale, 11.0 * scale])
     .width(Length::Fill)
     .height(Length::Fill)
     .style(move |_theme, status| {
@@ -737,30 +779,40 @@ fn path_node<'a>(
 }
 
 /// One agent node in the permission graph.
-fn permission_agent<'a>(agent: &'a Agent, grants: usize, selected: bool) -> crate::UiElement<'a> {
+fn permission_agent<'a>(
+    agent: &'a Agent,
+    grants: usize,
+    selected: bool,
+    scale: f32,
+) -> crate::UiElement<'a> {
     button(
         column![
             row![
-                container(space::Space::new().width(5).height(5)).style(|_| theme::panel(
-                    theme::MAGENTA,
-                    None,
-                    1.0
-                )),
-                widgets::mono(agent.name.clone(), theme::MAGENTA)
+                container(space::Space::new().width(5.0 * scale).height(5.0 * scale))
+                    .style(|_| theme::panel(theme::MAGENTA, None, 1.0)),
+                scaled_mono(agent.name.clone(), theme::MAGENTA, 13.0 * scale)
                     .wrapping(iced_core::text::Wrapping::None)
                     .ellipsis(iced_core::text::Ellipsis::End),
                 space::horizontal(),
-                widgets::label(agent.role.label(), theme::TEXT_MUTED),
+                scaled_label(
+                    if agent.parent.is_none() {
+                        "broker"
+                    } else {
+                        "agent"
+                    },
+                    theme::TEXT_MUTED,
+                    12.0 * scale,
+                ),
             ]
-            .spacing(theme::SPACE_2)
+            .spacing(theme::SPACE_2 * scale)
             .align_y(alignment::Vertical::Center),
-            widgets::mono(format!("{grants} grants"), theme::TEXT_MUTED),
+            scaled_mono(format!("{grants} grants"), theme::TEXT_MUTED, 12.0 * scale,),
         ]
-        .spacing(2),
+        .spacing(9.0 * scale),
     )
-    .padding([6, 10])
+    .padding([9.0 * scale, 11.0 * scale])
     .width(Length::Fill)
-    .height(Length::Fill)
+    .height(Length::Shrink)
     .style(move |_theme, status| {
         let hovered = matches!(
             status,
@@ -814,9 +866,13 @@ pub fn filesystem_layer<'a>(
             .count();
         layers = layers.push(
             iced_widget::pin(
-                container(permission_agent(agent, grants, chosen == Some(index)))
-                    .width(placement.width * state.scale)
-                    .height(placement.height * state.scale),
+                container(permission_agent(
+                    agent,
+                    grants,
+                    chosen == Some(index),
+                    state.scale,
+                ))
+                .width(placement.width * state.scale),
             )
             .x(placement.x * state.scale + state.tx)
             .y(placement.y * state.scale + state.ty),
@@ -829,13 +885,23 @@ pub fn filesystem_layer<'a>(
         let lit = chosen.is_some_and(|agent| filesystem.covers(agent, index));
         layers = layers.push(
             iced_widget::pin(
-                container(path_node(index, node, lit, state.path == Some(index)))
-                    .width(placement.width * state.scale)
-                    .height(placement.height * state.scale),
+                container(path_node(
+                    index,
+                    node,
+                    lit,
+                    state.path == Some(index),
+                    state.scale,
+                ))
+                .width(placement.width * state.scale)
+                .height(placement.height * state.scale),
             )
             .x(placement.x * state.scale + state.tx)
             .y(placement.y * state.scale + state.ty),
         );
     }
-    layers.width(Length::Fill).height(Length::Fill).into()
+    container(layers.width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true)
+        .into()
 }

@@ -1752,9 +1752,9 @@ fn validate_browser_request(
     origin: Option<&str>,
     ui_client: Option<&str>,
 ) -> Result<(), HarnessError> {
-    let local_host = host.starts_with("127.0.0.1:")
-        || host.starts_with("localhost:")
-        || host.starts_with("[::1]:");
+    let local_host = browser_host_name(host).is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
+    });
     if !local_host {
         return Err(HarnessError::UntrustedBrowserRequest);
     }
@@ -1772,6 +1772,31 @@ fn validate_browser_request(
         }
     }
     Ok(())
+}
+
+fn browser_host_name(host: &str) -> Option<&str> {
+    let host = host.trim();
+    if let Some(bracketed) = host.strip_prefix('[') {
+        let (name, suffix) = bracketed.split_once(']')?;
+        return valid_optional_port(suffix).then_some(name);
+    }
+
+    match host.split_once(':') {
+        Some((name, port)) if !name.is_empty() && valid_port(port) => Some(name),
+        Some(_) => None,
+        None if !host.is_empty() => Some(host),
+        None => None,
+    }
+}
+
+fn valid_optional_port(suffix: &str) -> bool {
+    suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 fn http_json(error: serde_json::Error) -> HarnessError {

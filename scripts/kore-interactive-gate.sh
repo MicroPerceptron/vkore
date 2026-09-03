@@ -207,8 +207,9 @@ curl -fsS "${json[@]}" -X POST "$api/sessions/gate/prompts" --data-binary \
 
 deadline=$((SECONDS + gate_timeout))
 while test "$SECONDS" -lt "$deadline"; do
-    curl -fsS "$api/sessions/gate/events?after=0" >"$events_file"
-    if grep -q '"kind":"prompt_terminal"' "$events_file"; then
+    if curl --connect-timeout 1 --max-time 2 -fsS \
+        "$api/sessions/gate/events?after=0" >"$events_file" \
+        && grep -q '"kind":"prompt_terminal"' "$events_file"; then
         break
     fi
     kill -0 "$harness_pid" 2>/dev/null || {

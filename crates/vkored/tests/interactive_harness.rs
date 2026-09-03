@@ -437,9 +437,46 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
     assert_eq!(event["session_id"], "web");
 }
 
+#[test]
+fn loopback_http_api_accepts_host_headers_without_ports() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = HarnessService::start(
+        BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
+        temp.path(),
+    );
+    let server = HarnessHttpServer::bind("127.0.0.1:0".parse().unwrap(), service.handle()).unwrap();
+    let address = server.local_addr();
+
+    for host in ["127.0.0.1", "localhost", "LOCALHOST", "[::1]"] {
+        let (tx, rx) = mpsc::channel();
+        let request_host = host.to_owned();
+        let client = thread::spawn(move || {
+            tx.send(http_with_host(address, "GET", "/", "", &request_host))
+                .unwrap();
+        });
+        server.poll(Duration::from_secs(1)).unwrap();
+        let response = rx.recv().unwrap();
+        client.join().unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "host {host:?} was rejected: {response}"
+        );
+    }
+}
+
 fn http(address: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
+    http_with_host(address, method, path, body, &address.to_string())
+}
+
+fn http_with_host(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    body: &str,
+    host: &str,
+) -> String {
     let mut stream = TcpStream::connect(address).unwrap();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response

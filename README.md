@@ -1,103 +1,188 @@
 # vKore
 
-vKore is the open-source host control plane for running [Kore](https://github.com/MicroPerceptron/kore) in guest mode.
+vKore is the open-source host control plane for running
+[Kore](https://github.com/MicroPerceptron/kore) as a local, project-oriented
+agent system.
 
-The repository owns host resources and product integration: VM launch and supervision, the host side of HostLink, capability-rooted workspace access, llama.cpp inference supervision, the live inspection UI, transcripts, and host diagnostics. Kore remains the authority-bearing guest. vKore cannot mint guest capabilities or turn a host path, model string, tool name, or UI event into authority.
+It owns the desktop experience and the host-side runtime: projects, VM and
+llama.cpp supervision, HostLink transport, capability-rooted workspace access,
+approvals, add-ons, packages, transcripts, and diagnostics. Kore remains the
+authority-bearing guest. A host path, model response, tool name, or UI event is
+never authority by itself.
 
-## Current extraction
+![The native vKore chat harness showing a scoped workspace read and validated assistant response](artifacts/readme/chat-harness.png)
 
-The initial implementation is extracted from Kore PR [#722](https://github.com/MicroPerceptron/kore/pull/722) at commit `da97303982d1e75200b0e521539c43921b842bc0`. That commit already contains PR [#668](https://github.com/MicroPerceptron/kore/pull/668), including the bounded inference registry and llama.cpp supervisor.
+_The native Iced + Axiom harness. The expandable Working timeline keeps broker,
+agent, and tool activity separate from validated assistant output._
 
-Shared HostLink, workspace, block, and guest-filesystem contracts remain Kore-owned dependencies pinned to that exact revision. vKore does not maintain a second copy of their wire definitions.
+## What is here
 
-The migrated packages are:
+- **Native project UI.** Create and persist projects, select a workspace and
+  access mode, configure inference and resource ceilings, chat with an agent,
+  inspect the agent/filesystem topology, review approvals, and open the
+  append-only transcript.
+- **Interactive runtime.** `vkore-harnessd` exposes the same loopback-only,
+  versioned API to the desktop UI, the headless client, integration tests, and
+  other local clients.
+- **Kore guest bridge.** A supervised QEMU guest receives prompt-scoped intent
+  through HostLink. vKore waits for guest-side agent teardown before completing
+  a prompt and retires its inference state when the route closes.
+- **Local inference.** One caller-supplied llama.cpp server can continuously
+  batch bounded broker and worker slots. A deterministic backend exercises the
+  protocol without downloading a model or starting a VM.
+- **Scoped workspaces.** Host directories are opened as capabilities, imported
+  into Kore, and optionally written back through exact, bounded change sets.
+- **Product security services.** The workspace contains authenticated approval
+  and revocation policy, capability-scoped host/guest/split add-ons, signed
+  content-addressed package management, rollback, and audit records.
 
-- `vkored`: HostLink host endpoint, QEMU argument construction, deterministic and llama.cpp inference backends, workspace composition, live observer, transcript, and daemon lifecycle.
-- `vkore-vm`: caller-supplied QEMU/Kore-image launch, exact HostLink device topology, exit observation, and teardown.
-- `vkore-workspace`: root-confined host workspace snapshot, live range service, writeback journal, and image import tooling.
-- `vkore-hostlink-ab`: bounded HostLink transport measurement adapter.
+The repository is under active development. The deterministic backend is a
+security and UI test oracle; it is not a substitute for a booted Kore guest.
 
-Product packages added in vKore include:
+## Runtime shape
 
-- `vkore-addon-sdk`: capability-scoped host, guest, and split tool contracts and runtime.
-- `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
-- `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
-- `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
-- `vkored` interactive binaries: loopback harness server and headless `vkore chat` client.
+```text
+native vkore-ui / headless `vkore chat`
+                    |
+          loopback harness API
+                    |
+             vkore-harnessd
+              /     |      \
+     QEMU + Kore  llama.cpp  host services
+          |                     |
+       HostLink          workspace / policy /
+                         add-ons / packages
+```
 
-See [the add-on SDK guide](docs/addons.md) for the public extension and security model.
-See [the policy guide](docs/policy.md) for approval lifetimes and matching semantics.
-See [the package guide](docs/packages.md) for installation, signing, offline use, and recovery.
-See [the harness API guide](docs/harness-api.md) for interactive sessions, events, and CLI usage.
-See [the project UI guide](docs/project-ui.md) for the setup wizard, local chat, and real inference configuration.
+The native UI is rendered directly with Iced and Axiom. It does not embed a
+browser or require a login, token, or browser session. Only validated public
+assistant text appears as chat output; model fragments, validation envelopes,
+and raw protocol records remain in the audit transcript.
 
-## Native Axiom UI
+## Try the harness locally
 
-On the supported Windows + WSL development setup, one command verifies the
-pinned Kore commit and ISO digest, starts or reuses the loopback harness, and
-opens the preloaded project in a native Windows Axiom window:
+The deterministic runtime is the shortest contributor path. It needs no Kore
+image, QEMU installation, llama.cpp binary, or model.
+
+Start the harness:
 
 ```powershell
+cargo run -p vkored --bin vkore-harnessd -- `
+  --state C:\path\outside\your\workspace\vkore-state
+```
+
+In another terminal, start the native client:
+
+```powershell
+cargo run --release -p vkore-ui -- --server 127.0.0.1:8787
+```
+
+Keep the state directory outside any workspace you plan to open. Create a
+project in the setup wizard and choose a narrow workspace directory. For an
+existing project, open it directly with `--project PROJECT_ID`.
+
+You can also use the terminal client against the same harness:
+
+```powershell
+cargo run -p vkored --bin vkore -- chat `
+  --server 127.0.0.1:8787 `
+  --project PROJECT_ID
+```
+
+## Run the full Windows + WSL stack
+
+The paved development workflow runs the native Windows UI while the harness,
+QEMU, Kore, and llama.cpp stay in WSL:
+
+```powershell
+.\vkore-axiom.cmd --check
 .\vkore-axiom.cmd
 ```
 
-From a WSL terminal, use `./vkore-axiom`. The default project is
-`qwen9b-live-kore`; select another persisted project with
-`./vkore-axiom --project PROJECT_ID`. The launcher does not rebuild Kore or its
-ISO. `./vkore-axiom --check` performs only the provenance and environment
-checks. When it starts a harness itself, closing the Axiom window also stops
-that harness, QEMU, and llama.cpp process group. An already-running healthy
-harness is reused and left running.
+From WSL, use `./vkore-axiom`. The launcher expects the matching Kore checkout
+and prebuilt ISO, verifies their pinned commit and SHA-256, builds vKore, starts
+or reuses the loopback harness, and opens the requested persisted project. It
+never rebuilds Kore or silently substitutes an image. Override the conventional
+paths and project with `--kore-root`, `--state`, and `--project`.
 
-For a timestamped, terminal-only end-to-end diagnostic run, close any existing
-vKore launcher and run:
+For a terminal-only end-to-end run with timestamped evidence:
 
 ```powershell
 .\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
 ```
 
-Debug mode retains a self-contained run directory under
-`~/.local/state/vkore-chat/diagnostics`. It records the launcher and terminal
-timeline, full harness and llama.cpp output, raw API events, one-second process
-CPU/memory samples, QEMU serial/debugcon output with timestamped mirrors, the
-resolved project, and a launch manifest. The launcher prints the exact path and
-stops every process that it started when the prompt completes or times out.
+Debug runs retain the launcher and harness logs, raw API events, process
+samples, project and launch manifests, and QEMU serial/debug output below
+`~/.local/state/vkore-chat/diagnostics`. Processes started by the launcher are
+stopped when the run finishes.
 
-The manual two-terminal form remains available:
+See [the project UI guide](docs/project-ui.md) for launcher prerequisites,
+project settings, real inference, VM lifecycle, and diagnostics.
 
-Start the deterministic end-to-end harness from this repository:
+## Bring your own llama.cpp runtime
 
-```powershell
-cargo run -p vkored --bin vkore-harnessd
-```
-
-In a second terminal, launch the native client:
+The harness never downloads or guesses a model. Supply both artifacts:
 
 ```powershell
-cargo run --release -p vkore-ui -- `
-  --server 127.0.0.1:8787 `
-  --project my-project
+cargo run -p vkored --bin vkore-harnessd -- `
+  --state C:\path\to\vkore-state `
+  --llama-server C:\path\to\llama-server.exe `
+  --llama-model C:\path\to\model.gguf
 ```
 
-`--project` opens that persisted project and starts its sandbox immediately.
-When no project is specified, the client automatically opens the only active
-project; it shows the project list when there are several. Use a release launch
-for the smoothest software-rendered presentation, especially through WSLg.
+Repeated `--llama-arg` values pass backend-specific options. Project
+configuration records the selected Kore image, runtime, model, context/output
+limits, threads, slots, VM resources, workspace mode, add-ons, approvals, and
+retention preferences.
 
-The window is rendered by Axiom directly into its presentation surface; no
-HTML, browser engine, WGPU, or viewport-sized staging buffer is used. There is
-no login, token, or browser session step. The bounded `axui-raster` structure
-path retains the exact last visible display list, so unchanged daemon polls
-perform no raster or presentation work. Deterministic mode exercises broker
-planning, prompt-scoped capability installation, guest-domain tool calls,
-validated output, cancellation, teardown, and KV retirement without requiring a
-model download.
+## Security boundary
+
+vKore deliberately separates convenient host configuration from authority:
+
+- Project paths and enabled add-ons are ceilings, not live agent grants.
+- Every prompt is bound to its project, session, generation, prompt ID,
+  idempotency key, and exact text.
+- The server refuses non-loopback binds. Browser-originated mutations also
+  require the exact local origin and native-client header.
+- A real Kore session creates generation-bound agent routes and capability
+  grants, then revokes them before the next prompt is admitted.
+- Workspace scans are bounded, do not follow symlinks, and warn about broad or
+  credential-bearing roots. Writeback requires explicit byte and file limits.
+- Add-on installation does not grant invocation authority. Tool calls are
+  checked against the exact package, generation, prompt, arguments, resource
+  scope, mediation, expiration, call budget, replay state, and revocation state.
+- llama.cpp receives model inputs and bounded sequence state, never guest
+  capabilities, host descriptors, or ambient tool execution.
+
+The division of responsibility is intentional: Kore owns capability lineage,
+guest routes, agent founding, budgets, executable/filesystem grants, and guest
+security gates; vKore owns host lifecycle, selected resource adapters, product
+UX, supervision, and auditability.
+
+## Workspace layout
+
+| Package | Responsibility |
+| --- | --- |
+| `vkored` | HostLink endpoint, bounded inference registry, daemon, interactive harness, transcripts, and CLI |
+| `vkore-ui` | Native Iced + Axiom project, chat, approval, agent, and filesystem UI |
+| `vkore-vm` | QEMU process lifecycle, QMP pause/resume, and exact HostLink device topology |
+| `vkore-workspace` | Root-confined snapshots, live ranges, image import, diff, and bounded writeback |
+| `vkore-addon-sdk` | Typed host, guest, and split tool manifests plus capability validation/runtime |
+| `vkore-reference-addon` | Reference out-of-process host tool and Kore guest-tool descriptor |
+| `vkore-policy` | Authenticated approvals, standing policy, revocation, and tamper-evident audit state |
+| `vkore-packages` | Signed artifact install, compatibility checks, activation, offline bundles, and rollback |
+| `vkore-hostlink-ab` | Reproducible serial-versus-ivshmem HostLink measurement runner |
+| `iced-renderer-compat` | Internal type bridge that keeps the native client off unused renderer backends |
+
+Shared HostLink, workspace, block, and guest-filesystem contracts remain
+Kore-owned dependencies. This workspace pins them to the exact Kore revision in
+[Cargo.toml](Cargo.toml) instead of maintaining duplicate wire definitions.
 
 ## Build and test
 
-Kore is currently private, so Cargo is configured to use the authenticated Git CLI for the pinned shared dependencies.
-The workspace temporarily uses Kore's pinned nightly because the migrated
-workspace image importer links Kore's host-testable filesystem service.
+The repository pins `nightly-2026-07-13` in
+[rust-toolchain.toml](rust-toolchain.toml). Kore is currently private, so Cargo
+uses the authenticated Git CLI to fetch the pinned shared-contract crates.
 
 ```powershell
 cargo test --workspace
@@ -105,103 +190,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Run the host daemon
-
-Deterministic backend:
-
-```powershell
-cargo run -p vkored -- `
-  --control-tcp 127.0.0.1:7070 `
-  --bulk-tcp 127.0.0.1:7071 `
-  --ui-listen 127.0.0.1:8787
-```
-
-Caller-supplied llama.cpp and model:
-
-```powershell
-cargo run -p vkored -- `
-  --control-tcp 127.0.0.1:7070 `
-  --bulk-tcp 127.0.0.1:7071 `
-  --llama-server C:\path\to\llama-server.exe `
-  --llama-model C:\path\to\model.gguf `
-  --ui-listen 127.0.0.1:8787
-```
-
-Selected live workspace with bounded writeback:
-
-```powershell
-cargo run -p vkored -- `
-  --control-tcp 127.0.0.1:7070 `
-  --bulk-tcp 127.0.0.1:7071 `
-  --workspace-root C:\path\to\project `
-  --workspace-state C:\path\to\vkore-state `
-  --workspace-write
-```
-
-The `vkored` page is a low-level loopback observer. `vkore-harnessd` serves the
-loopback project wizard and interactive harness UI.
-
-Managed VM launch is optional. Supply the QEMU base topology required by the
-Kore image as repeated arguments; vKore adds the two HostLink devices and the
-caller-selected ISO without invoking a shell:
-
-```powershell
-cargo run -p vkored -- `
-  --control-tcp 127.0.0.1:7070 `
-  --bulk-tcp 127.0.0.1:7071 `
-  --qemu C:\path\to\qemu-system-x86_64.exe `
-  --kore-iso C:\path\to\kore.iso `
-  --qemu-arg -machine --qemu-arg q35 `
-  --qemu-arg -m --qemu-arg 4G `
-  --ui-listen 127.0.0.1:8787
-```
-
-When the managed VM exits, `vkored` observes its status, flushes the requested
-transcript, and exits. If `vkored` stops first, it terminates the child VM.
-
-## Cross-repository gate
-
-The interactive product gate starts the loopback harness, creates a real
-project through its HTTP API, submits `read X`, boots Kore, and requires the
-broker proposal, capability installation, guest `cat` execution, tool result,
-assistant response, and terminal event to return through HostLink:
-
-```sh
-KORE_ROOT=/path/to/kore-frontend-ingress ./scripts/kore-interactive-gate.sh
-```
-
-Set `VKORE_GATE_ARTIFACT_DIR` to retain the passing serial, debug, HostLink,
-and event-stream witness. `MAKE` and `QEMU` may select non-default GNU Make
-and QEMU executables.
-
-The earlier deterministic QEMU security gate remains available. It builds
-vKore's daemon/workspace tools, then asks Kore's guest-development Make target
-to build and boot the guest artifact:
-
-```sh
-KORE_ROOT=/path/to/kore-pr722 ./scripts/kore-qemu-gate.sh
-```
-
-That gate proves the HostLink handshake, workspace import, two isolated agent
-tool loops, prompt-scoped authority lifecycle, stale-generation protection,
-and pre-expansion denial of the sibling secret.
-
-Use a dedicated Kore worktree: if a local source rebuild changes the committed
-service ELFs, the gate refreshes that worktree's measured-boot digests before
-building the ISO. Native x86_64 or hardware-assisted x86 virtualization is
-recommended. On this ARM64 Windows/WSL host, QEMU TCG reached both shells and
-passed the HostLink isolation/versioned-reply checks, but PR #722's durable
-app-store seed stalled at 1/23 and timed out before the final tool-loop oracle.
-
-## Host support
-
-| Host | Status | Transport and limitations |
-| --- | --- | --- |
-| Windows | tested | Loopback TCP HostLink; unit/conformance suites pass. Managed QEMU requires a caller-supplied Windows QEMU and compatible firmware arguments. |
-| Linux | tested | Unix sockets and loopback TCP; full unit/conformance suites pass. The deterministic QEMU product gate is provided for x86_64 emulation or acceleration. |
-| macOS | source-supported | Unix sockets and portable serial HostLink topology; run the same Cargo suites locally. Hardware acceleration and firmware paths are caller-specific and are not tested in this checkout. |
-
-The real llama.cpp smoke remains opt-in and requires caller-owned paths:
+The real llama.cpp smoke test is opt-in and uses caller-owned artifacts:
 
 ```sh
 KORE_LLAMA_SERVER=/path/to/llama-server \
@@ -211,23 +200,25 @@ cargo test -p vkored --test llama_backend \
   -- --ignored --exact --nocapture
 ```
 
-## Repository boundary
+Two cross-repository gates are available under `scripts/`:
 
-Remain in Kore:
+- `kore-interactive-gate.sh` creates a project through the harness API, boots
+  Kore, submits a prompt, and requires the capability-scoped guest tool result
+  and teardown events to return through HostLink.
+- `kore-qemu-gate.sh` preserves the earlier deterministic PR #722 isolation and
+  stale-generation witness against its original pinned Kore revision.
 
-- kernel capability lineage, tasks, mappings, and generations;
-- guest HostLink routes and inference mailboxes;
-- exact filesystem and executable grants;
-- resident broker validation and atomic authority transactions;
-- agent founding, budgets, cancellation, and teardown;
-- ring-3 agent/tool runner and guest security gates.
+Use a dedicated matching Kore worktree for either gate. The interactive path is
+the current end-to-end product gate.
 
-Belong in vKore:
+## Documentation
 
-- VM and host transport lifecycle;
-- selected host workspace access and writeback adapter;
-- model/runtime supervision and KV-slot cleanup;
-- UI, transcript, package management, approval UX, and add-ons;
-- product-level host integration and compatibility tests.
+- [Project and native harness UI](docs/project-ui.md)
+- [Interactive harness API](docs/harness-api.md)
+- [Approval and standing-policy model](docs/policy.md)
+- [Add-on SDK and execution domains](docs/addons.md)
+- [Package installation, updates, and rollback](docs/packages.md)
+- [Extraction inventory and compatibility contract](MIGRATION.md)
 
-See [MIGRATION.md](MIGRATION.md) for the extracted source inventory and compatibility contract.
+vKore is licensed under the [Mozilla Public License 2.0](LICENSE). See
+[NOTICE.md](NOTICE.md) for attribution and repository-boundary notes.

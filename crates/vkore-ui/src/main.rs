@@ -1,5 +1,7 @@
 mod fonts;
+mod logo;
 mod render_backend;
+mod splash;
 mod theme;
 mod topology;
 
@@ -656,6 +658,8 @@ struct Model {
     expanded_work: BTreeSet<String>,
     view: View,
     topology: view::State,
+    /// When the process started, so the splash knows how far along it is.
+    booted_at: Option<Instant>,
     topology_graph: model::Graph,
     topology_placements: Vec<layout::Placement>,
     topology_filesystem: filesystem::Filesystem,
@@ -694,6 +698,7 @@ impl Model {
             expanded_work: BTreeSet::new(),
             view: View::Session,
             topology: view::State::default(),
+            booted_at: Some(Instant::now()),
             topology_graph: model::Graph::default(),
             topology_placements: Vec::new(),
             topology_filesystem: filesystem::Filesystem::default(),
@@ -1483,6 +1488,12 @@ impl Model {
                 .height(Length::Fill)
                 .into()
         };
+        if let Some(phase) = self.booted_at.and_then(|at| splash::progress(at.elapsed())) {
+            return stack![base, splash::overlay(phase)]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
         if self.editor.is_some() {
             stack![base, self.modal_layer(self.editor_panel())]
                 .width(Length::Fill)
@@ -1511,14 +1522,16 @@ impl Model {
     }
 
     fn sidebar(&self, width: f32) -> UiElement<'_> {
-        // The mark is the one illustration in the system and needs an image
-        // path the display list does not yet carry, so the brand row is the
-        // wordmark alone until that lands.
         let brand = container(
-            text("KORE AGENTS")
-                .font(fonts::DISPLAY)
-                .size(15.0)
-                .color(theme::rgb(theme::TEXT)),
+            row![
+                splash::mark(20.0),
+                text("KORE AGENTS")
+                    .font(fonts::DISPLAY)
+                    .size(15.0)
+                    .color(theme::rgb(theme::TEXT)),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center),
         )
         .padding([14, 14]);
         let mut projects = column![].spacing(theme::SPACE_1);
@@ -3089,6 +3102,7 @@ mod tests {
             session: sessions,
         });
         model.connected = true;
+        model.booted_at = None;
         model.status = "Kore sandbox ready".into();
         model.projects = vec![json!({
             "id":"axiom-control-plane",
@@ -3130,13 +3144,16 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    /// Renders one frame the way the shell does, masks included.
     fn render_test_frame(
         frame: &axui_core::Frame<System>,
+        masks: Vec<axui_iced::PublishedImage>,
         target: &mut [u32],
         width: u32,
         height: u32,
     ) -> render_backend::RenderProfile {
         let mut backend = NativeBackend::new().unwrap();
+        backend.set_masks(masks);
         assert!(backend.begin_frame(frame));
         backend
             .render_changed(
@@ -3158,6 +3175,10 @@ mod tests {
                 "filesystem" => View::Filesystem,
                 _ => View::Session,
             };
+        }
+        if let Ok(ms) = std::env::var("VKORE_UI_SPLASH") {
+            let elapsed = std::time::Duration::from_millis(ms.parse().unwrap_or(0));
+            model.booted_at = Instant::now().checked_sub(elapsed);
         }
         if std::env::var("VKORE_UI_WIZARD").is_ok() {
             model.update(Message::EditProject);
@@ -3314,9 +3335,13 @@ mod tests {
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();
-            let _masks = renderer.take_images();
+            let masks = renderer.take_images();
             let started = Instant::now();
-            assert!(!backend.begin_frame(&frame));
+            // A running splash animates, so its frames differ by design and
+            // retention has nothing to recognize.
+            if model.booted_at.is_none() {
+                assert!(!backend.begin_frame(&frame));
+            }
             let finished = Instant::now();
             if iteration >= 10 {
                 stable_submit_ns.push(finished.duration_since(started).as_nanos());
@@ -3596,7 +3621,7 @@ mod tests {
             mouse::Cursor::Unavailable,
         );
         let frame = renderer.take_frame().unwrap();
-        let _masks = renderer.take_images();
+        let masks = renderer.take_images();
         assert!(frame.commands().len() > 10);
         assert!(
             !frame.glyphs().is_empty(),
@@ -3606,7 +3631,7 @@ mod tests {
         assert!(requirements.features().contains(axgfx::Features::GLYPH_RUN));
 
         let mut target = vec![0u32; 900 * 600];
-        let stats = render_test_frame(&frame, &mut target, 900, 600);
+        let stats = render_test_frame(&frame, masks, &mut target, 900, 600);
         assert_eq!(stats.scratch_high_water_pixels, 0);
         assert!(stats.pixels_written > 900 * 600 / 8);
         assert!(target.iter().any(|pixel| *pixel != 0x0008_0a0d));
@@ -3655,12 +3680,12 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().unwrap();
-            let _masks = renderer.take_images();
+            let masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
             assert!(frame.glyphs().len() > 30);
 
             let mut target = vec![0u32; 1100 * 760];
-            let stats = render_test_frame(&frame, &mut target, 1100, 760);
+            let stats = render_test_frame(&frame, masks, &mut target, 1100, 760);
             assert!(stats.pixels_written > 1100 * 760 / 8);
         }
     }
@@ -3704,12 +3729,12 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().unwrap();
-            let _masks = renderer.take_images();
+            let masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
             assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
 
             let mut target = vec![0u32; 1280 * 800];
-            let stats = render_test_frame(&frame, &mut target, 1280, 800);
+            let stats = render_test_frame(&frame, masks, &mut target, 1280, 800);
             assert!(stats.pixels_written > 1280 * 800 / 5);
         }
     }

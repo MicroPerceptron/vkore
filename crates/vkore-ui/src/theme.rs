@@ -91,6 +91,15 @@ pub const MONO_WEIGHT: u16 = 400;
 /// Mono label weight, used for uppercase labels and navigation.
 pub const MONO_LABEL_WEIGHT: u16 = 500;
 
+/// Tracking on uppercase mono labels and metadata.
+pub const TRACK_LABEL: f32 = 0.06;
+/// Tracking on navigation, which the system sets slightly tighter.
+pub const TRACK_NAV: f32 = 0.04;
+/// Tracking on the sidebar and dialog wordmarks.
+pub const TRACK_WORDMARK: f32 = 0.01;
+/// Tracking on the splash wordmark, which is set widest.
+pub const TRACK_SPLASH: f32 = 0.06;
+
 /// Face bytes shipped with the binary, under the OFL alongside them.
 pub const DISPLAY_BYTES: &[u8] = include_bytes!("../assets/fonts/Archivo-SemiBold.ttf");
 /// Body face bytes.

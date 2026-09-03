@@ -217,7 +217,7 @@ pub fn overlay<'a>(phase: Phase) -> crate::UiElement<'a> {
             .width(MARK)
             .height(MARK),
             iced_widget::text("KORE AGENTS")
-                .font(crate::fonts::DISPLAY)
+                .font(crate::fonts::SPLASH)
                 .size(theme::SIZE_DISPLAY)
                 .color({
                     let mut color = theme::rgb(theme::TEXT);

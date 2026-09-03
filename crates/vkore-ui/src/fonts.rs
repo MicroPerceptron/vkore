@@ -35,22 +35,37 @@ pub fn register() -> Result<Faces, axui_iced::TextError> {
     })
 }
 
-const fn face(family: &'static str, weight: font::Weight) -> Font {
+const fn face(family: &'static str, weight: font::Weight, tracking: f32) -> Font {
     Font {
         family: font::Family::Name(family),
         weight,
+        tracking: font::Tracking(tracking),
         ..Font::DEFAULT
     }
 }
 
 /// Archivo 600. Dialog titles and section heads, uppercase.
-pub const DISPLAY: Font = face(theme::DISPLAY_FAMILY, font::Weight::Semibold);
+pub const DISPLAY: Font = face(
+    theme::DISPLAY_FAMILY,
+    font::Weight::Semibold,
+    theme::TRACK_WORDMARK,
+);
 /// Space Grotesk 400. Prose, prompts, answers, field values.
-pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal);
+pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
-pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal);
+pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 500. Uppercase labels, metadata, navigation.
-pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium);
+pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_LABEL);
+
+/// JetBrains Mono 500, tracked for navigation.
+pub const MONO_NAV: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_NAV);
+
+/// Archivo 600, tracked for the splash wordmark.
+pub const SPLASH: Font = face(
+    theme::DISPLAY_FAMILY,
+    font::Weight::Semibold,
+    theme::TRACK_SPLASH,
+);
 
 #[cfg(test)]
 mod tests {
@@ -70,6 +85,26 @@ mod tests {
             );
             assert!(axui_iced::font_face(*identity).is_some());
         }
+    }
+
+    #[test]
+    fn the_published_tracking_reaches_the_faces_that_carry_it() {
+        // Prose is set solid; labels and wordmarks are tracked out.
+        assert_eq!(BODY.tracking, font::Tracking::NONE);
+        assert_eq!(MONO.tracking, font::Tracking::NONE);
+        assert_eq!(MONO_LABEL.tracking, font::Tracking(theme::TRACK_LABEL));
+        assert_eq!(MONO_NAV.tracking, font::Tracking(theme::TRACK_NAV));
+        assert_eq!(DISPLAY.tracking, font::Tracking(theme::TRACK_WORDMARK));
+        assert_eq!(SPLASH.tracking, font::Tracking(theme::TRACK_SPLASH));
+        // Navigation is set tighter than a label, as the system has it.
+        assert!(MONO_NAV.tracking.0 < MONO_LABEL.tracking.0);
+    }
+
+    #[test]
+    fn a_tracked_face_shares_the_registered_family() {
+        // Tracking is a request about setting, not a different typeface.
+        assert_eq!(MONO_LABEL.family, MONO_NAV.family);
+        assert_eq!(SPLASH.family, DISPLAY.family);
     }
 
     #[test]

@@ -128,7 +128,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "axnn",
 ]
@@ -136,7 +136,7 @@ dependencies = [
 [[package]]
 name = "axcomp"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "ax",
  "axgfx",
@@ -149,7 +149,7 @@ dependencies = [
 [[package]]
 name = "axgfx"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "axinput",
  "axui-core",
@@ -158,12 +158,12 @@ dependencies = [
 [[package]]
 name = "axinput"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 
 [[package]]
 name = "axmath"
 version = "0.1.7"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "libm",
 ]
@@ -171,12 +171,12 @@ dependencies = [
 [[package]]
 name = "axnn"
 version = "0.3.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 
 [[package]]
 name = "axnn-cpu"
 version = "0.2.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "axmath",
  "axnn",
@@ -186,17 +186,17 @@ dependencies = [
 [[package]]
 name = "axui-core"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 
 [[package]]
 name = "axui-fonts"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 
 [[package]]
 name = "axui-iced"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "axinput",
  "axui-core",
@@ -209,7 +209,7 @@ dependencies = [
 [[package]]
 name = "axui-raster"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=ee61c7585a451a6e9b54d69ae966c8049fb09b1e#ee61c7585a451a6e9b54d69ae966c8049fb09b1e"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=4cef09932133c23e86ec3c7c423af2de137e5adb#4cef09932133c23e86ec3c7c423af2de137e5adb"
 dependencies = [
  "axgfx",
  "axnn",
@@ -1232,7 +1232,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -1251,7 +1251,7 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -1261,7 +1261,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "futures",
  "iced_core",
@@ -1274,7 +1274,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -1294,7 +1294,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -1312,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "bytes",
  "iced_core",
@@ -1323,7 +1323,7 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "iced_renderer",
  "iced_runtime",
@@ -1337,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
-source = "git+https://github.com/MicroPerceptron/iced?rev=3de451447bd28217bb535632867550908e29d5d0#3de451447bd28217bb535632867550908e29d5d0"
+source = "git+https://github.com/MicroPerceptron/iced?rev=ef15c381bae13130daf682a124819e26f94c5efe#ef15c381bae13130daf682a124819e26f94c5efe"
 dependencies = [
  "arboard",
  "iced_debug",

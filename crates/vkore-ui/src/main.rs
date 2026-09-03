@@ -3,7 +3,7 @@ mod render_backend;
 mod theme;
 mod topology;
 
-use crate::topology::{layout, model, view};
+use crate::topology::{inspector, layout, model, view};
 mod widgets;
 
 use axgfx::Extent2d;
@@ -1655,18 +1655,8 @@ impl Model {
         if self.view != View::Session {
             let graph = &self.topology_graph;
             let placements = &self.topology_placements;
-            let (title, subtitle, body) = match self.view {
-                View::Agents => (
-                    "Agents",
-                    "capability inheritance and live state",
-                    self.agents_rail(),
-                ),
-                _ => (
-                    "Filesystem",
-                    "grants held against this workspace",
-                    self.authority_rail(),
-                ),
-            };
+            let (title, subtitle, body) =
+                inspector::agents(graph, self.topology.selected.as_deref());
             let mut layers = row![
                 container(view::canvas_layer(graph, placements, &self.topology))
                     .width(Length::Fill)
@@ -2026,7 +2016,7 @@ impl Model {
     fn inspector<'a>(
         &'a self,
         title: &'static str,
-        subtitle: &'static str,
+        subtitle: String,
         body: UiElement<'a>,
     ) -> UiElement<'a> {
         container(column![
@@ -2051,186 +2041,6 @@ impl Model {
         .height(Length::Fill)
         .style(|_| divider_left(theme::BACKGROUND))
         .into()
-    }
-
-    fn agents_rail(&self) -> UiElement<'_> {
-        let status = if self.session.is_none() {
-            "offline"
-        } else if self.prompt_id.is_some() {
-            "running"
-        } else {
-            "ready"
-        };
-        let kv = |label: &'static str, value: String| {
-            row![
-                text(label).size(11).color(theme::rgb(theme::TEXT_MUTED)),
-                space::horizontal(),
-                text(value)
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_SECONDARY)),
-            ]
-        };
-        let worker = container(
-            column![
-                text("Worker agent").size(12).color(theme::rgb(theme::TEXT)),
-                kv("Status", status.into()),
-                kv(
-                    "Generation",
-                    if self.session.is_some() { "1" } else { "—" }.into()
-                ),
-                kv("Parent", "resident broker".into()),
-                kv(
-                    "Inference route",
-                    if self.session.is_some() {
-                        "isolated"
-                    } else {
-                        "retired"
-                    }
-                    .into()
-                ),
-                row![
-                    container(space::Space::new().height(4).width(Length::FillPortion(1)))
-                        .style(|_| theme::panel(theme::MAGENTA, None, 1.0)),
-                    container(space::Space::new().height(4).width(Length::FillPortion(3)))
-                        .style(|_| theme::panel(theme::BORDER, None, 1.0)),
-                ],
-                text("Budget bounded by project limits")
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_MUTED)),
-            ]
-            .spacing(8),
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
-
-        let resources = self.project().map(|p| &p["resources"]);
-        let resource = |key: &str, fallback: &str| {
-            resources
-                .and_then(|r| r[key].as_u64())
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| fallback.into())
-        };
-        let limits = container(
-            column![
-                text("Project limits")
-                    .size(12)
-                    .color(theme::rgb(theme::TEXT)),
-                kv("Agents", resource("agent_limit", "—")),
-                kv("Timeout", format!("{}s", resource("prompt_seconds", "—"))),
-                kv("Memory", format!("{} MiB", resource("memory_mib", "—"))),
-            ]
-            .spacing(9),
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
-        column![worker, limits].spacing(10).into()
-    }
-
-    fn authority_rail(&self) -> UiElement<'_> {
-        let capability_count = self
-            .events
-            .iter()
-            .filter(|event| event["kind"] == "capability")
-            .count();
-        let proposal: UiElement<'_> = if self.selectable_text.contains_key("authority:latest") {
-            self.selectable(
-                "authority:latest",
-                theme::SIZE_MONO,
-                theme::TEXT_SECONDARY,
-                fonts::MONO,
-            )
-        } else {
-            text("No prompt-scoped authority has been proposed.")
-                .size(11)
-                .color(theme::rgb(theme::TEXT_SECONDARY))
-                .into()
-        };
-        column![
-            container(
-                column![
-                    text("Prompt authority")
-                        .size(12)
-                        .color(theme::rgb(theme::TEXT)),
-                    proposal,
-                ]
-                .spacing(8)
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(|_| theme::panel(
-                theme::PANEL,
-                Some(theme::BORDER),
-                theme::RADIUS_LG
-            )),
-            container(
-                column![
-                    text("Capability ledger")
-                        .size(12)
-                        .color(theme::rgb(theme::TEXT)),
-                    text(format!("{capability_count} visible capability events"))
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                    text(if self.approvals.is_null() {
-                        "No committed grants"
-                    } else {
-                        "Committed policy loaded"
-                    })
-                    .size(11)
-                    .color(theme::rgb(theme::MAGENTA)),
-                ]
-                .spacing(8)
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(|_| theme::panel(
-                theme::PANEL,
-                Some(theme::BORDER),
-                theme::RADIUS_LG
-            )),
-        ]
-        .spacing(10)
-        .into()
-    }
-
-    fn activity_rail(&self) -> UiElement<'_> {
-        let rows = session_work_rows(&self.events);
-        if rows.is_empty() {
-            return container(
-                column![
-                    text("Activity").size(12).color(theme::rgb(theme::TEXT)),
-                    text("Broker and agent outputs will appear here as they are validated.")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                ]
-                .spacing(8),
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG))
-            .into();
-        }
-        let mut activity = column![].spacing(10);
-        for (index, row) in rows.iter().enumerate().rev().take(30) {
-            let key = format!("activity:{index}");
-            activity = activity.push(
-                container(self.selectable(
-                    &key,
-                    theme::SIZE_MONO,
-                    if row.kind == "error" {
-                        theme::ERROR
-                    } else {
-                        theme::TEXT_SECONDARY
-                    },
-                    fonts::MONO,
-                ))
-                .padding([8, 10])
-                .width(Length::Fill)
-                .style(|_| theme::panel(theme::BACKGROUND, Some(theme::BORDER), theme::RADIUS_MD)),
-            );
-        }
-        activity.into()
     }
 
     fn editor_panel(&self) -> UiElement<'_> {
@@ -3209,6 +3019,9 @@ mod tests {
                 "filesystem" => View::Filesystem,
                 _ => View::Session,
             };
+        }
+        if let Ok(selected) = std::env::var("VKORE_UI_SELECT") {
+            model.topology.selected = Some(selected);
         }
         let size = Size::new(1280.0, 800.0);
         model.fit_topology(size);

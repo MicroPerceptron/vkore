@@ -355,9 +355,9 @@ fn node<'a>(agent: &'a Agent, selected: bool) -> crate::UiElement<'a> {
         column![
             title,
             chips.wrap(),
-            widgets::mono(agent.footer(), theme::TEXT_MUTED)
-                .wrapping(iced_core::text::Wrapping::None)
-                .ellipsis(iced_core::text::Ellipsis::End),
+            // The footer wraps rather than truncating: which capabilities an
+            // agent holds and how many it ran is the point of the node.
+            widgets::mono(agent.footer(), theme::TEXT_MUTED),
         ]
         .spacing(9),
     )

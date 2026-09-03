@@ -3,6 +3,7 @@ members = [
     "crates/vkore-addon-sdk",
     "crates/vkore-reference-addon",
     "crates/vkore-policy",
+    "crates/vkore-packages",
     "crates/vkored",
     "crates/vkore-hostlink-ab",
     "crates/vkore-vm",

@@ -22,9 +22,11 @@ Product packages added in vKore include:
 - `vkore-addon-sdk`: capability-scoped host, guest, and split tool contracts and runtime.
 - `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
 - `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
+- `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
 
 See [the add-on SDK guide](docs/addons.md) for the public extension and security model.
 See [the policy guide](docs/policy.md) for approval lifetimes and matching semantics.
+See [the package guide](docs/packages.md) for installation, signing, offline use, and recovery.
 
 ## Build and test
 

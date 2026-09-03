@@ -94,58 +94,88 @@ pub struct Mark {
     pub power: Option<f32>,
 }
 
+/// The rasterized mark, kept until something it depends on moves.
+#[derive(Default)]
+pub struct MarkState {
+    cache: canvas::Cache<AxUi>,
+    signature: std::cell::Cell<u64>,
+}
+
+impl Mark {
+    /// Everything the drawn mark depends on, folded into one value.
+    ///
+    /// Eighteen paths is real work. A mark at rest never changes, so it must
+    /// not be rasterized again -- and a display list that differs every frame
+    /// would defeat the retained backend for the whole window, not just here.
+    fn signature(&self, bounds: Rectangle) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut mix = |value: u64| {
+            hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        mix(self.size.to_bits().into());
+        mix(self.opacity.to_bits().into());
+        mix(self.power.unwrap_or(-1.0).to_bits().into());
+        mix(bounds.width.to_bits().into());
+        mix(bounds.height.to_bits().into());
+        hash
+    }
+}
+
 impl canvas::Program<Message, Theme, AxUi> for Mark {
-    type State = ();
+    type State = MarkState;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &AxUi,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry<AxUi>> {
-        use iced_graphics::geometry::Renderer as _;
         use iced_graphics::geometry::frame::Backend as _;
 
-        let mut frame = renderer.new_frame(bounds);
-        let scale = self.size / logo::VIEWBOX;
-        let inset_x = (bounds.width - self.size).max(0.0) / 2.0;
-        let inset_y = (bounds.height - self.size).max(0.0) / 2.0;
-        frame.translate(iced_core::Vector::new(inset_x, inset_y));
-        frame.scale(scale);
-
-        for shape in logo::SHAPES {
-            let animated = logo::SCREEN_BARS.contains(&shape.id);
-            let alpha = match (self.power, animated) {
-                (Some(power), true) => bar_opacity(power),
-                _ => 1.0,
-            } * self.opacity;
-            if alpha <= 0.0 {
-                continue;
-            }
-            // zeno parses the published path data as it stands.
-            frame.fill(&Path::new(|builder| svg_into(builder, shape.data)), {
-                let mut color = theme::rgb(shape.fill);
-                color.a = alpha;
-                color
-            });
+        let signature = self.signature(bounds);
+        if state.signature.replace(signature) != signature {
+            state.cache.clear();
         }
+        vec![state.cache.draw_with_bounds(renderer, bounds, |frame| {
+            let scale = self.size / logo::VIEWBOX;
+            let inset_x = (bounds.width - self.size).max(0.0) / 2.0;
+            let inset_y = (bounds.height - self.size).max(0.0) / 2.0;
+            frame.translate(iced_core::Vector::new(inset_x, inset_y));
+            frame.scale(scale);
 
-        // The plate flashes over the screen while it powers on.
-        if let Some(power) = self.power {
-            let alpha = plate_opacity(power) * self.opacity;
-            if alpha > 0.0
-                && let Some(screen) = logo::SHAPES.iter().find(|shape| shape.id == "screen")
-            {
-                frame.fill(&Path::new(|builder| svg_into(builder, screen.data)), {
-                    let mut color = theme::rgb(theme::TEXT);
+            for shape in logo::SHAPES {
+                let animated = logo::SCREEN_BARS.contains(&shape.id);
+                let alpha = match (self.power, animated) {
+                    (Some(power), true) => bar_opacity(power),
+                    _ => 1.0,
+                } * self.opacity;
+                if alpha <= 0.0 {
+                    continue;
+                }
+                // zeno parses the published path data as it stands.
+                frame.fill(&Path::new(|builder| svg_into(builder, shape.data)), {
+                    let mut color = theme::rgb(shape.fill);
                     color.a = alpha;
                     color
                 });
             }
-        }
-        vec![frame.into_geometry()]
+
+            // The plate flashes over the screen while it powers on.
+            if let Some(power) = self.power {
+                let alpha = plate_opacity(power) * self.opacity;
+                if alpha > 0.0
+                    && let Some(screen) = logo::SHAPES.iter().find(|shape| shape.id == "screen")
+                {
+                    frame.fill(&Path::new(|builder| svg_into(builder, screen.data)), {
+                        let mut color = theme::rgb(theme::TEXT);
+                        color.a = alpha;
+                        color
+                    });
+                }
+            }
+        })]
     }
 }
 

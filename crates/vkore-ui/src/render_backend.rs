@@ -5,8 +5,8 @@ use axui_core::{
     ResourceMutability, ResourceRef, validate_frame,
 };
 use axui_raster::{
-    GlyphAtlas, GlyphKey, GlyphSource, GlyphSourceError, RasterStats, ResourceStore,
-    StructureExecution, StructureRenderer, Target,
+    GlyphAtlas, GlyphKey, GlyphSource, GlyphSourceError, RasterStats, ResourceData,
+    ResourceProvider, ResourceStore, StructureExecution, StructureRenderer, Target,
 };
 use cosmic_text::{
     CacheKey, CacheKeyFlags, FontSystem, SubpixelBin, SwashCache, SwashContent, fontdb,
@@ -60,6 +60,7 @@ pub(crate) struct NativeBackend {
     glyph_source: OpenTypeGlyphSource,
     resources: ResourceStore<System>,
     installed_fonts: Vec<ResourceRef>,
+    masks: Vec<axui_iced::PublishedImage>,
     layer_scratch: LayerScratch<System>,
     accepted: Option<Frame<System>>,
     profile: RetainedProfile,
@@ -109,11 +110,20 @@ impl NativeBackend {
             glyph_source: OpenTypeGlyphSource::new()?,
             resources,
             installed_fonts,
+            masks: Vec::new(),
             layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
                 .map_err(|_| RenderError::ResourceSetup)?,
             accepted: None,
             profile: RetainedProfile::default(),
         })
+    }
+
+    /// Accepts the coverage masks the next frame's geometry refers to.
+    ///
+    /// Each carries an identity of its own and lives exactly as long as the
+    /// frame that names it, so these replace rather than accumulate.
+    pub(crate) fn set_masks(&mut self, masks: Vec<axui_iced::PublishedImage>) {
+        self.masks = masks;
     }
 
     /// Returns `false` only for an exact display list already made visible.
@@ -164,12 +174,10 @@ impl NativeBackend {
         }
         // Every declared resource must be a face this backend installed. The
         // first structure profile has no image path, so any image refuses.
-        if !frame.images().is_empty()
-            || frame
-                .resources()
-                .iter()
-                .any(|resource| !self.installed_fonts.contains(resource))
-        {
+        if frame.resources().iter().any(|resource| {
+            !self.installed_fonts.contains(resource)
+                && !self.masks.iter().any(|mask| mask.descriptor == *resource)
+        }) {
             return Err(RenderError::UnsupportedResource);
         }
         validate_frame(frame.view(), FrameLimits::NATIVE_CONTROL_PLANE)
@@ -199,7 +207,10 @@ impl NativeBackend {
                 frame.view(),
                 &mut target,
                 damage,
-                &self.resources,
+                &FrameResources {
+                    installed: &self.resources,
+                    masks: &self.masks,
+                },
                 &mut self.glyph_source,
                 &mut self.glyph_atlas,
                 scratch,
@@ -299,6 +310,27 @@ fn render_profile(
         scratch_high_water_pixels,
         kernel_items: stats.kernel_items,
         scalar_items: stats.scalar_items,
+    }
+}
+
+/// Resolves a frame's resources from the installed faces and its own masks.
+struct FrameResources<'a> {
+    installed: &'a ResourceStore<System>,
+    masks: &'a [axui_iced::PublishedImage],
+}
+
+impl ResourceProvider for FrameResources<'_> {
+    fn get(&self, id: ResourceId, generation: ResourceGeneration) -> Option<ResourceData<'_>> {
+        if let Some(data) = self.installed.get(id, generation) {
+            return Some(data);
+        }
+        self.masks
+            .iter()
+            .find(|mask| mask.descriptor.id == id && mask.descriptor.generation == generation)
+            .map(|mask| ResourceData {
+                descriptor: mask.descriptor,
+                bytes: &mask.coverage,
+            })
     }
 }
 
@@ -486,6 +518,71 @@ mod tests {
         assert!(!backend.begin_frame(&frame));
         assert_eq!(backend.retained_profile().rendered_frames, 1);
         assert_eq!(backend.retained_profile().unchanged_frames, 1);
+    }
+
+    #[test]
+    fn a_canvas_curve_rasterizes_through_the_real_backend() {
+        use iced_core::Renderer as _;
+        use iced_graphics::geometry::Renderer as _;
+        use iced_graphics::geometry::frame::Backend as _;
+
+        let mut renderer =
+            axui_iced::Renderer::new_in(iced_core::renderer::Settings::default(), System);
+        let bounds = iced_core::Rectangle::with_size(iced_core::Size::new(32.0, 32.0));
+        renderer.reset(bounds);
+        let mut frame_builder = renderer.new_frame(bounds);
+        frame_builder.stroke(
+            &iced_graphics::geometry::Path::new(|builder| {
+                builder.move_to(iced_core::Point::new(2.0, 16.0));
+                builder.bezier_curve_to(
+                    iced_core::Point::new(12.0, 2.0),
+                    iced_core::Point::new(20.0, 30.0),
+                    iced_core::Point::new(30.0, 16.0),
+                );
+            }),
+            iced_graphics::geometry::Stroke::default()
+                .with_width(2.0)
+                .with_color(iced_core::Color::from_rgb(0.81, 0.08, 0.77)),
+        );
+        renderer.draw_geometry(frame_builder.into_geometry());
+        let frame = renderer.take_frame().unwrap();
+
+        let mut backend = NativeBackend::new().unwrap();
+        backend.set_masks(renderer.take_images());
+        let mut pixels = [0xff0a_0a0c_u32; 32 * 32];
+        backend
+            .render_changed(&frame, &mut pixels, Extent2d::new(32, 32).unwrap(), 32)
+            .unwrap();
+
+        // Rendering clears the target first, so "changed" says nothing. Look
+        // for the accent itself: red and blue high, green low.
+        let inked = |pixel: u32| {
+            let (r, g, b) = ((pixel >> 16) & 0xff, (pixel >> 8) & 0xff, pixel & 0xff);
+            r > 0x20 && b > 0x20 && g * 2 < r
+        };
+        let painted: Vec<(usize, usize)> = pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| inked(**pixel))
+            .map(|(index, _)| (index % 32, index / 32))
+            .collect();
+        assert!(!painted.is_empty(), "the curve painted nothing");
+
+        // A curve must ink several rows and fill none of them edge to edge --
+        // exactly what an axis-aligned rectangle could never produce.
+        let rows: std::collections::BTreeSet<usize> = painted.iter().map(|(_, y)| *y).collect();
+        assert!(rows.len() > 4, "a curve is not a horizontal rule");
+        for row in &rows {
+            let width = painted.iter().filter(|(_, y)| y == row).count();
+            assert!(width < 32, "row {row} was inked edge to edge");
+        }
+        // Its edges are antialiased, so some ink lands short of full accent.
+        assert!(
+            pixels
+                .iter()
+                .any(|pixel| inked(*pixel) && (pixel >> 16) & 0xff < 0xce),
+            "expected partial coverage at the curve's edges"
+        );
     }
 
     #[test]

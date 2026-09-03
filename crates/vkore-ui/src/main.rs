@@ -2647,6 +2647,13 @@ impl App {
         if !text_errors.is_empty() {
             return Err(format!("unsupported text request: {text_errors:?}"));
         }
+        let geometry_errors = self.renderer.take_geometry_errors();
+        if !geometry_errors.is_empty() {
+            return Err(format!("unsupported geometry request: {geometry_errors:?}"));
+        }
+        // The frame names its coverage masks by identity; hand the bytes over
+        // before it is rendered.
+        self.backend.set_masks(self.renderer.take_images());
         let text_stats = self.renderer.take_text_stats();
         let record_ns = record_started.elapsed().as_nanos();
         axgfx::frame_requirements(frame.view())

@@ -1,0 +1,5 @@
+[net]
+# Kore is currently a private repository. Use the user's authenticated Git
+# client for the pinned shared-contract dependencies.
+git-fetch-with-cli = true
+

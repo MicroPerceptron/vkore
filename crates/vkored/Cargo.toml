@@ -1,0 +1,31 @@
+[package]
+name = "vkored"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MPL-2.0"
+description = "Host control-plane daemon for Kore guests."
+
+[dependencies]
+blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
+httparse = { version = "=1.10.1", default-features = false, features = ["std"] }
+kore-hostlink.workspace = true
+kore-hostlink-shmem.workspace = true
+kore-workspace-sync.workspace = true
+memmap2 = "=0.9.11"
+vkore-vm = { path = "../vkore-vm" }
+workspacectl = { package = "vkore-workspace", path = "../vkore-workspace" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zerocopy = { version = "0.8", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lib]
+name = "hostlinkd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vkored"
+path = "src/main.rs"

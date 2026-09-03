@@ -60,17 +60,17 @@ boundary. The adapter does not download weights or execute tools. One
 supervised `llama-server` process supplies broker and worker slots with
 continuous batching, so the model is loaded once rather than once per role.
 
-The optional loopback-only UI is available at `http://127.0.0.1:8787` in the
-example above. It is a bounded observer owned by the daemon event loop and
-cannot install authority. Its views separate the user-visible worker
-conversation, exact structured model completion, every public JSON field
-returned by llama.cpp, strict validation outcome and reason, broker
-prompt/proposal, full model prompts, and post-commit installed/revoked
-authority attestations from the resident guest broker. Only validated
-`respond.text` is rendered as an assistant message; its JSON wrapper remains
-visible under Raw AI output. A public reasoning field returned by llama.cpp is
-shown in the returned-fields record. Hidden chain-of-thought that the server
-does not return cannot be displayed.
+The optional loopback-only observer API is available at `127.0.0.1:8787` in
+the example above. Run `cargo run -p vkore-ui -- --server 127.0.0.1:8787` for
+the native Axiom client. The observer is owned by the daemon event loop and
+cannot install authority. Its native views keep the user-visible worker
+conversation separate from a collapsible, human-readable activity stream.
+That stream shows validated Broker and Agent decisions such as agent creation
+and tool use, but does not expose model prompts, token chunks, validation
+envelopes, or raw JSON. Only validated `respond.text` is rendered as an
+assistant message. Conversation and activity text is selectable and copyable,
+while remaining read-only. The append-only transcript retains the structured
+audit records for diagnostics.
 
 Scheduling is deterministic round-robin across live sequences, with at most
 eight dispatches per poll. Cancellation is handled before further dispatch,

@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# `wsl.exe --exec` starts a non-login shell, so include rustup's normal user
+# install location explicitly instead of depending on interactive shell setup.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+vkore_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+kore_root=${KORE_ROOT:-"$vkore_root/../kore-722-interactive-ingress"}
+state=${VKORE_STATE:-"${XDG_STATE_HOME:-$HOME/.local/state}/vkore-chat"}
+listen=${VKORE_LISTEN:-127.0.0.1:8787}
+project=${VKORE_PROJECT:-qwen9b-live-kore}
+make_command=${MAKE:-make}
+qemu=${QEMU:-$(command -v qemu-system-x86_64 || true)}
+expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-cccf76da11fa397242c587817ec975dce529f40e}
+expected_iso=${VKORE_EXPECTED_ISO_SHA256:-b020d1effa66e7117194141f88a72a2ae831cd615f1977e1d6b34ac3a788e53c}
+check_only=0
+no_build=0
+debug=0
+debug_prompts=()
+debug_timeout=300
+debug_prompt_delay=0
+diagnostic_dir=
+
+usage() {
+    cat <<'EOF'
+usage: ./vkore-axiom [--project ID] [--state PATH] [--listen 127.0.0.1:PORT]
+                     [--kore-root PATH] [--check] [--no-build]
+                     [--debug [--prompt TEXT ...] [--timeout-seconds N]
+                              [--delay-between-prompts-seconds N]]
+
+Starts (or reuses) the vKore harness and opens the native Axiom UI. On WSL,
+the UI is built and run as a native Windows application while Kore, QEMU, and
+llama.cpp remain in WSL.
+
+--debug runs the supplied terminal prompts sequentially in one session instead
+of opening the UI. Repeat --prompt to test later chats against the same Kore VM.
+--delay-between-prompts-seconds reproduces an idle project between those chats.
+It timestamps every event and retains launcher, harness/llama.cpp, process,
+HostLink, QEMU serial, and raw UI-event logs under the diagnostics directory.
+EOF
+}
+
+while test $# -gt 0; do
+    case "$1" in
+        --project) project=${2:?missing --project ID}; shift 2 ;;
+        --state) state=${2:?missing --state PATH}; shift 2 ;;
+        --listen) listen=${2:?missing --listen address}; shift 2 ;;
+        --kore-root) kore_root=${2:?missing --kore-root PATH}; shift 2 ;;
+        --check) check_only=1; shift ;;
+        --no-build) no_build=1; shift ;;
+        --debug) debug=1; shift ;;
+        --prompt) debug_prompts+=("${2:?missing --prompt text}"); shift 2 ;;
+        --timeout-seconds) debug_timeout=${2:?missing --timeout-seconds}; shift 2 ;;
+        --delay-between-prompts-seconds)
+            debug_prompt_delay=${2:?missing --delay-between-prompts-seconds}; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+case "$listen" in
+    127.0.0.1:[0-9]*) ;;
+    *) echo "--listen must be a loopback IPv4 address: 127.0.0.1:PORT" >&2; exit 2 ;;
+esac
+port=${listen##*:}
+health_url="http://$listen/api/v1/health"
+projects_url="http://$listen/api/v1/projects"
+
+timestamp_stream() {
+    while IFS= read -r line || test -n "$line"; do
+        printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$line"
+    done
+}
+
+if test "$debug" = 1; then
+    case "$debug_timeout" in
+        ''|*[!0-9]*|0) echo "--timeout-seconds must be a positive integer" >&2; exit 2 ;;
+    esac
+    case "$debug_prompt_delay" in
+        ''|*[!0-9]*) echo "--delay-between-prompts-seconds must be a non-negative integer" >&2; exit 2 ;;
+    esac
+    mkdir -p "$state/diagnostics"
+    diagnostic_dir=$(mktemp -d "$state/diagnostics/run.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+    exec > >(timestamp_stream | tee -a "$diagnostic_dir/launcher.log") 2>&1
+    echo "vKore diagnostic run: $diagnostic_dir"
+    if test "${#debug_prompts[@]}" -eq 0; then
+        debug_prompts=(hello)
+    fi
+fi
+
+require() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "required executable is unavailable: $1" >&2
+        exit 2
+    }
+}
+
+require curl
+require cargo
+require python3
+require sha256sum
+require qemu-img
+require setsid
+require "$make_command"
+test -x "$qemu" || { echo "QEMU executable not found: $qemu" >&2; exit 2; }
+test -f "$kore_root/Cargo.toml" || {
+    echo "KORE_ROOT must name the Kore interactive-ingress checkout: $kore_root" >&2
+    exit 2
+}
+
+kore_revision() {
+    if git -C "$kore_root" rev-parse HEAD 2>/dev/null; then
+        return
+    fi
+    if command -v git.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+        git.exe -C "$(wslpath -w "$kore_root")" rev-parse HEAD | tr -d '\r'
+        return
+    fi
+    return 1
+}
+
+actual_kore=$(kore_revision) || {
+    echo "could not read the Kore checkout revision" >&2
+    exit 2
+}
+test "$actual_kore" = "$expected_kore" || {
+    echo "Kore revision mismatch: expected $expected_kore, found $actual_kore" >&2
+    echo "The launcher will not rebuild or guess which ISO to use." >&2
+    exit 2
+}
+
+make_value() {
+    local name=$1
+    "$make_command" -C "$kore_root" --no-print-directory -s \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        MODE=release CARGO_FLAGS=--release OUT_DIR=release \
+        --eval '.PHONY: _print_vkore_runtime' \
+        --eval "_print_vkore_runtime: ; \$(info \$($name))" \
+        _print_vkore_runtime
+}
+
+iso_relative=$(make_value BOOT_X86_ISO)
+ovmf_code=$(make_value OVMF_CODE)
+ovmf_vars=$(make_value OVMF_VARS)
+iso="$kore_root/$iso_relative"
+test -f "$iso" || {
+    echo "Kore ISO is missing: $iso" >&2
+    echo "This launcher never rebuilds Kore or the ISO." >&2
+    exit 2
+}
+actual_iso=$(sha256sum "$iso" | awk '{print $1}')
+test "$actual_iso" = "$expected_iso" || {
+    echo "Kore ISO digest mismatch: expected $expected_iso, found $actual_iso" >&2
+    echo "Refusing to boot a stale or unreviewed image." >&2
+    exit 2
+}
+test -f "$ovmf_code" && test -f "$ovmf_vars" || {
+    echo "OVMF firmware is unavailable" >&2
+    exit 2
+}
+
+if curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
+    harness_status=running
+elif test "$check_only" = 1; then
+    harness_status=will-start
+else
+    harness_status=will-start
+fi
+
+if test "$debug" = 1 && test "$harness_status" = running; then
+    echo "A vKore harness is already listening at $listen." >&2
+    echo "Close that vKore window/launcher before a diagnostic run so the run captures the current binary and every child process." >&2
+    exit 2
+fi
+
+if test "$harness_status" != running; then
+    project_status=will-check-after-start
+elif curl -fsS --max-time 2 "$projects_url" 2>/dev/null | python3 -c '
+import json, sys
+wanted = sys.argv[1]
+try:
+    projects = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    raise SystemExit(1)
+raise SystemExit(0 if any(p.get("id") == wanted and not p.get("archived", False) for p in projects) else 1)
+' "$project"; then
+    project_status=available
+else
+    project_status=missing
+fi
+
+if test "$check_only" = 1; then
+    printf 'vKore root: %s\n' "$vkore_root"
+    printf 'Kore provenance: %s\n' "$actual_kore"
+    printf 'ISO sha256: %s\n' "$actual_iso"
+    printf 'Harness: %s\n' "$harness_status"
+    printf 'Project %s: %s\n' "$project" "$project_status"
+    exit 0
+fi
+
+if test "$no_build" != 1; then
+    if test "$debug" = 1; then
+        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkored --bin vkore-harnessd --bin vkore
+    else
+        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkored --bin vkore-harnessd
+    fi
+fi
+harness="$vkore_root/target/debug/vkore-harnessd"
+test -x "$harness" || {
+    echo "vKore harness is not built; rerun without --no-build" >&2
+    exit 2
+}
+
+harness_pid=
+runtime=
+process_sampler_pid=
+serial_follower_pid=
+debug_follower_pid=
+cleanup() {
+    for helper in "$process_sampler_pid" "$serial_follower_pid" "$debug_follower_pid"; do
+        if test -n "$helper"; then
+            kill "$helper" 2>/dev/null || true
+            wait "$helper" 2>/dev/null || true
+        fi
+    done
+    if test -n "$harness_pid"; then
+        kill -TERM -- "-$harness_pid" 2>/dev/null || kill "$harness_pid" 2>/dev/null || true
+        wait "$harness_pid" 2>/dev/null || true
+    fi
+    if test -n "$runtime"; then
+        if test "$debug" = 1; then
+            echo "Retained diagnostic artifacts: $runtime"
+        else
+            case "$runtime" in
+                "$state"/runtime/launcher.*) rm -rf -- "$runtime" ;;
+                *) echo "refusing to remove unexpected runtime path: $runtime" >&2 ;;
+            esac
+        fi
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
+    if test "$debug" = 1; then
+        runtime=$diagnostic_dir
+    else
+        mkdir -p "$state/runtime"
+        runtime=$(mktemp -d "$state/runtime/launcher.XXXXXX")
+    fi
+    nvme="$runtime/kore.qcow2"
+    usb="$runtime/usb-stick.img"
+    vars="$runtime/ovmf-vars.fd"
+    serial_log="$runtime/kore-serial.log"
+    debug_log="$runtime/kore-debug.log"
+    harness_log="$runtime/harness.log"
+    qemu-img create -f qcow2 "$nvme" 1G >/dev/null
+    qemu-img create -f raw "$usb" 16M >/dev/null
+    cp -- "$ovmf_vars" "$vars"
+
+    qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        MODE=release CARGO_FLAGS=--release OUT_DIR=release \
+        NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \
+        QEMU_X86_HOSTLINK= \
+        --eval '.PHONY: _print_vkore_runtime' \
+        --eval '_print_vkore_runtime: ; $(info $(QEMU_X86_ARGS))' \
+        _print_vkore_runtime)
+    read -r -a qemu_array <<<"$qemu_arguments"
+    qemu_array+=(
+        -device pcie-root-port,id=rp_fb,bus=pxb1,chassis=8,slot=4
+        -device bochs-display,bus=rp_fb
+        -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
+        -drive "if=pflash,format=raw,file=$vars"
+        -serial "file:$serial_log"
+    )
+    command=("$harness" --listen "$listen" --state "$state" --qemu "$qemu")
+    for argument in "${qemu_array[@]}"; do
+        command+=(--qemu-arg "$argument")
+    done
+    if test "$debug" = 1; then
+        VKORE_HOSTLINK_TRACE=1 VKORE_LLAMA_TRACE=1 \
+            setsid "${command[@]}" > >(timestamp_stream >"$harness_log") 2>&1 &
+    else
+        VKORE_HOSTLINK_TRACE=1 setsid "${command[@]}" >"$harness_log" 2>&1 &
+    fi
+    harness_pid=$!
+
+    if test "$debug" = 1; then
+        {
+            echo "diagnostic_dir=$diagnostic_dir"
+            echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+            echo "project=$project"
+            echo "listen=$listen"
+            echo "kore_commit=$actual_kore"
+            echo "iso_sha256=$actual_iso"
+            echo "harness_pid=$harness_pid"
+            printf 'command='; printf '%q ' "${command[@]}"; echo
+        } >"$runtime/manifest.txt"
+        (
+            while kill -0 "$harness_pid" 2>/dev/null; do
+                printf '[%s]\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+                ps -eo pid,ppid,pcpu,pmem,rss,etime,stat,comm | \
+                    grep -E 'PID|[v]kore-harnessd|[q]emu-system|[l]lama-server'
+                sleep 1
+            done
+        ) >"$runtime/processes.log" 2>&1 &
+        process_sampler_pid=$!
+        (tail -n +1 -F "$serial_log" 2>/dev/null | timestamp_stream) \
+            >"$runtime/kore-serial.timeline.log" &
+        serial_follower_pid=$!
+        (tail -n +1 -F "$debug_log" 2>/dev/null | timestamp_stream) \
+            >"$runtime/kore-debug.timeline.log" &
+        debug_follower_pid=$!
+    fi
+
+    deadline=$((SECONDS + 30))
+    until curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; do
+        kill -0 "$harness_pid" 2>/dev/null || {
+            echo "vKore harness exited during startup" >&2
+            cat "$harness_log" >&2
+            exit 1
+        }
+        test "$SECONDS" -lt "$deadline" || {
+            echo "vKore harness did not become ready; log: $harness_log" >&2
+            exit 1
+        }
+        sleep 0.1
+    done
+fi
+
+curl -fsS --max-time 2 "$projects_url" | python3 -c '
+import json, sys
+wanted = sys.argv[1]
+projects = json.load(sys.stdin)
+if not any(p.get("id") == wanted and not p.get("archived", False) for p in projects):
+    raise SystemExit(f"project {wanted!r} is not available; create it once in the project picker")
+' "$project"
+
+if test "$debug" = 1; then
+    project_file="$state/projects/$project.json"
+    test -f "$project_file" && cp -- "$project_file" "$runtime/project.json"
+    cli="$vkore_root/target/debug/vkore"
+    test -x "$cli" || {
+        echo "vKore CLI is not built; rerun without --no-build" >&2
+        exit 2
+    }
+    echo "Submitting ${#debug_prompts[@]} terminal diagnostic prompt(s) in one session"
+    for index in "${!debug_prompts[@]}"; do
+        printf '  prompt %d: %s\n' "$((index + 1))" "${debug_prompts[$index]}"
+    done
+    set +e
+    {
+        for prompt_text in "${debug_prompts[@]}"; do
+            printf '%s\n' "$prompt_text"
+        done
+    } | "$cli" chat \
+        --server "$listen" --project "$project" --trace \
+        --trace-file "$runtime/events.jsonl" --timeout-seconds "$debug_timeout" \
+        --delay-between-prompts-seconds "$debug_prompt_delay"
+    cli_status=${PIPESTATUS[1]}
+    set -e
+    echo "Terminal diagnostic completed with status $cli_status"
+    exit "$cli_status"
+fi
+
+if test -n "${WSL_DISTRO_NAME:-}" && command -v cargo.exe >/dev/null 2>&1; then
+    windows_target="$vkore_root/target/vkore-windows"
+    if test "$no_build" != 1; then
+        CARGO_TARGET_DIR="$windows_target" \
+            WSLENV="${WSLENV:+$WSLENV:}CARGO_TARGET_DIR/p" \
+            cargo.exe build --manifest-path "$(wslpath -w "$vkore_root/Cargo.toml")" -p vkore-ui
+    fi
+    ui="$windows_target/debug/vkore-ui.exe"
+else
+    if test "$no_build" != 1; then
+        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkore-ui
+    fi
+    ui="$vkore_root/target/debug/vkore-ui"
+fi
+test -x "$ui" || {
+    echo "Axiom UI is not built; rerun without --no-build" >&2
+    exit 2
+}
+
+echo "Opening vKore · Axiom for project $project"
+echo "Kore $actual_kore · ISO sha256 $actual_iso"
+"$ui" --server "$listen" --project "$project"

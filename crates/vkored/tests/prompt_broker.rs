@@ -15,6 +15,7 @@ const Y: [u8; 16] = [0x22; 16];
 const CAT: [u8; 16] = [0x33; 16];
 const AGENT: [u8; 16] = [0x44; 16];
 const V: [u8; 16] = [0x55; 16];
+const HELLO: [u8; 16] = [0x66; 16];
 
 fn sequence(role: BackendRole, route: u8) -> SequenceIdentity {
     SequenceIdentity {
@@ -171,6 +172,66 @@ fn broker_planner_selects_exact_x_and_cat_and_never_y() {
         ),
         Err(BackendError::InvalidEncoding)
     );
+}
+
+#[test]
+fn conversational_prompt_creates_a_tool_inert_agent_that_responds_directly() {
+    let offers = [
+        BrokerOffer {
+            reference: X,
+            kind: BrokerOfferKind::Object,
+            permitted_ops: 1,
+            max_uses: 0,
+            label: "workspace/X",
+        },
+        BrokerOffer {
+            reference: CAT,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "cat",
+        },
+        BrokerOffer {
+            reference: HELLO,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 1,
+            label: "hello",
+        },
+    ];
+    let payload = plan_reply(
+        "hello",
+        &offers,
+        TaskBudget {
+            cpu_share: 1,
+            memory_bytes: 64 * 1024 * 1024,
+            tool_calls: 2,
+            ..TaskBudget::ZERO
+        },
+        7,
+    );
+    let reply = decode_broker_reply(&payload).unwrap();
+    assert_eq!(reply.action, BrokerActionKind::CreateAgent);
+    assert_eq!(reply.selectors().collect::<Vec<_>>(), vec![HELLO]);
+    assert_eq!(reply.budget.cpu_share, 1);
+    assert_eq!(reply.budget.memory_bytes, 64 * 1024 * 1024);
+    assert_eq!(reply.budget.tool_calls, 0);
+
+    let agent = sequence(BackendRole::Agent, 8);
+    let mut backend = DeterministicBackend::new(1);
+    backend.open(agent).unwrap();
+    backend
+        .submit(
+            agent,
+            RequestId([8; 16]),
+            &agent_request(1, AgentRequestKind::UserText, 0, None, "hello"),
+            0,
+        )
+        .unwrap();
+    let payload = completed(&mut backend, 1);
+    let event = decode_agent_event(&payload).unwrap();
+    assert_eq!(event.kind, AgentEventKind::Respond);
+    assert_eq!(event.text, "Hello! How can I help?");
 }
 
 #[test]

@@ -6,6 +6,8 @@ members = [
     "crates/vkore-packages",
     "crates/vkored",
     "crates/vkore-hostlink-ab",
+    "crates/iced-renderer-compat",
+    "crates/vkore-ui",
     "crates/vkore-vm",
     "crates/vkore-workspace",
 ]
@@ -22,13 +24,25 @@ rust-version = "1.97"
 # revision instead of copying protocol definitions into the host repository.
 [workspace.dependencies]
 blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
-kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
-kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
-kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
-kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "da97303982d1e75200b0e521539c43921b842bc0" }
+kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# `iced_widget` reexports `iced_renderer::{core, graphics}` even when every
+# widget is generic over a caller renderer. Use an explicit type-only bridge so
+# native Axiom clients do not link Tiny-Skia or WGPU merely to satisfy that
+# package-level reexport.
+[patch."https://github.com/MicroPerceptron/iced"]
+iced_renderer = { path = "crates/iced-renderer-compat" }
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+# The native client software-rasterizes directly into the presentation buffer.
+# Keep that hot path optimized even for `cargo run` development launches.
+[profile.dev.package.vkore-ui]
+opt-level = 2

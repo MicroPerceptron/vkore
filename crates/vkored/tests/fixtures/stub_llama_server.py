@@ -77,21 +77,38 @@ class Handler(BaseHTTPRequestHandler):
                 objects = [
                     offer
                     for offer in catalog
-                    if offer["kind"] in ("object", "view")
-                    and offer["label"].lower() in intent
+                    if offer[1] in ("o", "v") and offer[2].lower() in intent
                 ]
                 executables = [
                     offer
                     for offer in catalog
-                    if offer["kind"] == "executable" and offer["label"] == "cat"
+                    if offer[1] == "x" and offer[2] == "cat"
                 ]
-                ceiling = planning["budget_ceiling"]
+                hello_executables = [
+                    offer
+                    for offer in catalog
+                    if offer[1] == "x" and offer[2] == "hello"
+                ]
+                ceiling = {"tool_calls": 2}
+                selectors = planning.get("trusted_resolution", {}).get(
+                    "required_selector_indices"
+                )
+                if selectors is None:
+                    selectors = (
+                        [executables[0][0], objects[0][0]]
+                        if objects
+                        else [hello_executables[0][0]]
+                    )
                 text = json.dumps(
                     {
                         "action": "create_agent",
                         "label": "agent/catalog-selection",
-                        "selectors": [executables[0]["index"], objects[0]["index"]],
-                        "budget": {"tool_calls": min(1, ceiling["tool_calls"])},
+                        "selectors": selectors,
+                        "budget": {
+                            "tool_calls": min(2, ceiling["tool_calls"])
+                            if objects
+                            else 0
+                        },
                     },
                     separators=(",", ":"),
                 )
@@ -103,9 +120,9 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         requested = next(
                             (
-                                word.rstrip(".,")
+                                word.strip(".,;:!?()[]{}\"'")
                                 for word in message["text"].split()
-                                if word.startswith("/")
+                                if word.strip(".,;:!?()[]{}\"'").startswith("/")
                             ),
                             None,
                         )

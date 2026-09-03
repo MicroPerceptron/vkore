@@ -23,12 +23,75 @@ Product packages added in vKore include:
 - `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
 - `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
 - `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
-- `vkored` interactive binaries: authenticated harness server and headless `vkore chat` client.
+- `vkored` interactive binaries: loopback harness server and headless `vkore chat` client.
 
 See [the add-on SDK guide](docs/addons.md) for the public extension and security model.
 See [the policy guide](docs/policy.md) for approval lifetimes and matching semantics.
 See [the package guide](docs/packages.md) for installation, signing, offline use, and recovery.
 See [the harness API guide](docs/harness-api.md) for interactive sessions, events, and CLI usage.
+See [the project UI guide](docs/project-ui.md) for the setup wizard, local chat, and real inference configuration.
+
+## Native Axiom UI
+
+On the supported Windows + WSL development setup, one command verifies the
+pinned Kore commit and ISO digest, starts or reuses the loopback harness, and
+opens the preloaded project in a native Windows Axiom window:
+
+```powershell
+.\vkore-axiom.cmd
+```
+
+From a WSL terminal, use `./vkore-axiom`. The default project is
+`qwen9b-live-kore`; select another persisted project with
+`./vkore-axiom --project PROJECT_ID`. The launcher does not rebuild Kore or its
+ISO. `./vkore-axiom --check` performs only the provenance and environment
+checks. When it starts a harness itself, closing the Axiom window also stops
+that harness, QEMU, and llama.cpp process group. An already-running healthy
+harness is reused and left running.
+
+For a timestamped, terminal-only end-to-end diagnostic run, close any existing
+vKore launcher and run:
+
+```powershell
+.\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
+```
+
+Debug mode retains a self-contained run directory under
+`~/.local/state/vkore-chat/diagnostics`. It records the launcher and terminal
+timeline, full harness and llama.cpp output, raw API events, one-second process
+CPU/memory samples, QEMU serial/debugcon output with timestamped mirrors, the
+resolved project, and a launch manifest. The launcher prints the exact path and
+stops every process that it started when the prompt completes or times out.
+
+The manual two-terminal form remains available:
+
+Start the deterministic end-to-end harness from this repository:
+
+```powershell
+cargo run -p vkored --bin vkore-harnessd
+```
+
+In a second terminal, launch the native client:
+
+```powershell
+cargo run --release -p vkore-ui -- `
+  --server 127.0.0.1:8787 `
+  --project my-project
+```
+
+`--project` opens that persisted project and starts its sandbox immediately.
+When no project is specified, the client automatically opens the only active
+project; it shows the project list when there are several. Use a release launch
+for the smoothest software-rendered presentation, especially through WSLg.
+
+The window is rendered by Axiom directly into its presentation surface; no
+HTML, browser engine, WGPU, or viewport-sized staging buffer is used. There is
+no login, token, or browser session step. The bounded `axui-raster` structure
+path retains the exact last visible display list, so unchanged daemon polls
+perform no raster or presentation work. Deterministic mode exercises broker
+planning, prompt-scoped capability installation, guest-domain tool calls,
+validated output, cancellation, teardown, and KV retirement without requiring a
+model download.
 
 ## Build and test
 
@@ -75,7 +138,8 @@ cargo run -p vkored -- `
   --workspace-write
 ```
 
-The current web page is a loopback-only observer. Interactive prompt submission and the project UI are tracked in issues #5 and #6.
+The `vkored` page is a low-level loopback observer. `vkore-harnessd` serves the
+loopback project wizard and interactive harness UI.
 
 Managed VM launch is optional. Supply the QEMU base topology required by the
 Kore image as repeated arguments; vKore adds the two HostLink devices and the
@@ -97,15 +161,28 @@ transcript, and exits. If `vkored` stops first, it terminates the child VM.
 
 ## Cross-repository gate
 
-The product-level deterministic QEMU gate lives here and consumes the exact PR
-#722 checkout. It builds vKore's daemon/workspace tools, then asks Kore's thin
-guest-development Make target to build and boot the guest artifact:
+The interactive product gate starts the loopback harness, creates a real
+project through its HTTP API, submits `read X`, boots Kore, and requires the
+broker proposal, capability installation, guest `cat` execution, tool result,
+assistant response, and terminal event to return through HostLink:
+
+```sh
+KORE_ROOT=/path/to/kore-frontend-ingress ./scripts/kore-interactive-gate.sh
+```
+
+Set `VKORE_GATE_ARTIFACT_DIR` to retain the passing serial, debug, HostLink,
+and event-stream witness. `MAKE` and `QEMU` may select non-default GNU Make
+and QEMU executables.
+
+The earlier deterministic QEMU security gate remains available. It builds
+vKore's daemon/workspace tools, then asks Kore's guest-development Make target
+to build and boot the guest artifact:
 
 ```sh
 KORE_ROOT=/path/to/kore-pr722 ./scripts/kore-qemu-gate.sh
 ```
 
-The gate proves the HostLink handshake, workspace import, two isolated agent
+That gate proves the HostLink handshake, workspace import, two isolated agent
 tool loops, prompt-scoped authority lifecycle, stale-generation protection,
 and pre-expansion denial of the sibling secret.
 

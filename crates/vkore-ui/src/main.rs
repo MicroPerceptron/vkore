@@ -2218,14 +2218,38 @@ impl Model {
                 .unwrap_or(false);
             button(
                 row![
-                    text(if checked { "[x]" } else { "[ ]" })
-                        .size(13)
-                        .color(rgb(if checked { 0xb8ef6a } else { 0x8d96a5 })),
-                    text(label).size(12),
+                    container(widgets::mono(
+                        if checked { "\u{2713}" } else { " " },
+                        theme::MAGENTA,
+                    ))
+                    .width(16)
+                    .height(16)
+                    .align_x(alignment::Horizontal::Center)
+                    .align_y(alignment::Vertical::Center)
+                    .style(move |_| theme::panel(
+                        theme::BACKGROUND,
+                        Some(if checked {
+                            theme::MAGENTA
+                        } else {
+                            theme::BORDER
+                        }),
+                        theme::RADIUS_SM,
+                    )),
+                    widgets::body(
+                        label.to_owned(),
+                        theme::SIZE_SM,
+                        if checked {
+                            theme::TEXT
+                        } else {
+                            theme::TEXT_SECONDARY
+                        }
+                    ),
                 ]
-                .spacing(8),
+                .spacing(theme::SPACE_2)
+                .align_y(alignment::Vertical::Center),
             )
             .padding([7, 8])
+            .width(Length::Fill)
             .style(widgets::button_style(widgets::Button::Ghost))
             .on_press(Message::WizardToggle(pointer))
         };
@@ -2356,7 +2380,7 @@ impl Model {
             }
             2 => {
                 let mut addons = column![
-                    text("Host and guest add-ons").size(13).color(theme::rgb(theme::TEXT)),
+                    widgets::display("Host and guest add-ons"),
                     text("Enable only the bounded capabilities this project needs. Authority is still proposed per prompt.")
                         .size(11)
                         .color(theme::rgb(theme::TEXT_MUTED)),

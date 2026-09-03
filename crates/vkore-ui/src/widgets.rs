@@ -59,19 +59,21 @@ impl Button {
     fn face(self, hovered: bool) -> Face {
         match self {
             // Magenta is never a fill: the primary button is the page black
-            // with a magenta border, and lifts to off-white text on hover.
+            // with a magenta border. It reads off-white and gives the accent
+            // to its label on hover, not the other way round.
             Self::Primary => Face {
-                fill: Some(theme::BACKGROUND),
-                text: if hovered { theme::TEXT } else { theme::MAGENTA },
+                fill: Some(if hovered {
+                    theme::PANEL
+                } else {
+                    theme::BACKGROUND
+                }),
+                text: if hovered { theme::MAGENTA } else { theme::TEXT },
                 edge: Some(theme::MAGENTA),
             },
+            // Secondary and danger carry no fill: a border and a label.
             Self::Secondary => Face {
-                fill: Some(theme::PANEL),
-                text: if hovered {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_SECONDARY
-                },
+                fill: None,
+                text: theme::TEXT,
                 edge: Some(if hovered {
                     theme::MAGENTA
                 } else {
@@ -79,7 +81,7 @@ impl Button {
                 }),
             },
             Self::Danger => Face {
-                fill: Some(theme::PANEL),
+                fill: None,
                 text: theme::ERROR,
                 edge: Some(if hovered { theme::ERROR } else { theme::BORDER }),
             },
@@ -93,7 +95,7 @@ impl Button {
                 edge: None,
             },
             Self::Choice(selected) => Face {
-                fill: Some(theme::PANEL),
+                fill: None,
                 text: if selected || hovered {
                     theme::TEXT
                 } else {
@@ -183,7 +185,9 @@ pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::
 pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
     let focused = matches!(status, text_editor::Status::Focused { .. });
     text_editor::Style {
-        background: Background::Color(theme::rgb(theme::PANEL)),
+        // A field sits on the page black, not on a panel: it is a well cut
+        // into the surface rather than a card resting on it.
+        background: Background::Color(theme::rgb(theme::BACKGROUND)),
         border: theme::border(
             if focused {
                 theme::MAGENTA
@@ -337,7 +341,53 @@ mod tests {
         assert!((disabled.text_color.a - 0.4).abs() < f32::EPSILON);
         assert!((disabled.border.color.a - 0.4).abs() < f32::EPSILON);
         // A disabled control must resolve to its resting face, not its hover.
-        assert_eq!(disabled.text_color.r, theme::rgb(theme::MAGENTA).r);
+        // Primary rests off-white and takes the accent only on hover.
+        assert_eq!(disabled.text_color.r, theme::rgb(theme::TEXT).r);
+    }
+
+    /// The published component library's own variant table.
+    ///
+    /// Transcribed from `Button.jsx` in the design system bundle, which is
+    /// what the reference renders. Each row is `(fill, text, border)` at rest
+    /// and on hover. Nothing here is a judgement call.
+    #[test]
+    fn variants_match_the_published_component() {
+        let rest = |kind| styled(kind, button::Status::Active);
+        let hover = |kind| styled(kind, button::Status::Hovered);
+
+        // primary: black fill, off-white label, magenta border; the label
+        // takes the accent on hover, the fill lifts to the panel.
+        let p = rest(Button::Primary);
+        assert_eq!(
+            p.background,
+            Some(Background::Color(theme::rgb(theme::BACKGROUND)))
+        );
+        assert_eq!(p.text_color, theme::rgb(theme::TEXT));
+        assert_eq!(p.border.color, theme::rgb(theme::MAGENTA));
+        let ph = hover(Button::Primary);
+        assert_eq!(ph.text_color, theme::rgb(theme::MAGENTA));
+        assert_eq!(ph.border.color, theme::rgb(theme::MAGENTA));
+
+        // secondary: no fill at rest or on hover, only the border moves.
+        let s = rest(Button::Secondary);
+        let sh = hover(Button::Secondary);
+        assert_eq!(s.background, None);
+        assert_eq!(sh.background, None);
+        assert_eq!(s.text_color, theme::rgb(theme::TEXT));
+        assert_eq!(sh.text_color, theme::rgb(theme::TEXT));
+        assert_eq!(s.border.color, theme::rgb(theme::BORDER));
+        assert_eq!(sh.border.color, theme::rgb(theme::MAGENTA));
+
+        // ghost: transparent until hover, then the surface-hover fill.
+        let g = rest(Button::Ghost);
+        let gh = hover(Button::Ghost);
+        assert_eq!(g.background, None);
+        assert_eq!(
+            gh.background,
+            Some(Background::Color(theme::rgb(theme::HOVER)))
+        );
+        assert_eq!(g.text_color, theme::rgb(theme::TEXT_MUTED));
+        assert_eq!(gh.text_color, theme::rgb(theme::TEXT));
     }
 
     #[test]

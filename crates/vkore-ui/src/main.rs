@@ -1694,7 +1694,7 @@ impl Model {
                     theme::TEXT_MUTED
                 },
             ))
-            .height(30)
+            .height(theme::CONTROL_SM)
             .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Choice(
                 self.view == target,
@@ -1722,14 +1722,14 @@ impl Model {
                     },
                     theme::TEXT_SECONDARY
                 ))
-                .height(30)
+                .height(theme::CONTROL_SM)
                 .padding([0, 12])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press_maybe(
                     (self.project().is_some() && !self.busy).then_some(Message::ToggleSession)
                 ),
                 button(widgets::label("Clean", theme::ERROR))
-                    .height(30)
+                    .height(theme::CONTROL_SM)
                     .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Danger))
                     .on_press_maybe(self.session.as_ref().map(|_| Message::CleanSession)),
@@ -1978,13 +1978,13 @@ impl Model {
 
         let send = if self.prompt_id.is_some() {
             button(widgets::label("Cancel", theme::ERROR))
-                .height(30)
+                .height(theme::CONTROL_SM)
                 .padding([0, 12])
                 .style(widgets::button_style(widgets::Button::Danger))
                 .on_press(Message::CancelPrompt)
         } else {
             button(widgets::label("Send", theme::MAGENTA))
-                .height(30)
+                .height(theme::CONTROL_SM)
                 .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Primary))
                 .on_press_maybe(
@@ -2263,7 +2263,7 @@ impl Model {
                     theme::TEXT_MUTED
                 },
             ))
-            .height(30)
+            .height(theme::CONTROL_SM)
             .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Choice(selected)))
             .on_press(Message::WizardChoice(pointer, option))
@@ -2572,13 +2572,13 @@ impl Model {
             );
         }
         let back = button(widgets::label("Back", theme::TEXT_SECONDARY))
-            .height(30)
+            .height(theme::CONTROL_SM)
             .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
         let next: UiElement<'_> = if self.wizard_page < 4 {
             button(widgets::label("Next", theme::MAGENTA))
-                .height(30)
+                .height(theme::CONTROL_SM)
                 .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Primary))
                 .on_press(Message::WizardPage(self.wizard_page + 1))
@@ -2586,13 +2586,13 @@ impl Model {
         } else {
             row![
                 button(widgets::label("Run preflight", theme::TEXT_SECONDARY))
-                    .height(30)
+                    .height(theme::CONTROL_SM)
                     .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Secondary))
                     .on_press_maybe((!self.busy).then_some(Message::Preflight)),
                 // Saving stays closed until a preflight has actually run.
                 button(widgets::label("Save project", theme::MAGENTA))
-                    .height(30)
+                    .height(theme::CONTROL_SM)
                     .padding([0, 14])
                     .style(widgets::button_style(widgets::Button::Primary))
                     .on_press_maybe(
@@ -2618,7 +2618,7 @@ impl Model {
             container(
                 row![
                     button(widgets::label("Cancel", theme::TEXT_MUTED))
-                        .height(30)
+                        .height(theme::CONTROL_SM)
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Ghost))
                         .on_press(Message::CloseEditor),
@@ -2678,13 +2678,13 @@ impl Model {
             container(
                 row![
                     button(widgets::label("Deny", theme::ERROR))
-                        .height(30)
+                        .height(theme::CONTROL_SM)
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(Message::DecideApproval(false)),
                     space::horizontal(),
                     button(widgets::label("Allow once", theme::MAGENTA))
-                        .height(30)
+                        .height(theme::CONTROL_SM)
                         .padding([0, 14])
                         .style(widgets::button_style(widgets::Button::Primary))
                         .on_press(Message::DecideApproval(true)),

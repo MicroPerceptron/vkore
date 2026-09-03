@@ -67,6 +67,11 @@ pub const SPACE_6: f32 = 24.0;
 /// Eight spacing units.
 pub const SPACE_8: f32 = 32.0;
 
+/// Small control height. The system's controls are 32 / 40 / 52.
+pub const CONTROL_SM: f32 = 32.0;
+/// Medium control height.
+pub const CONTROL_MD: f32 = 40.0;
+
 /// Type scale. Caps are used only above 22px.
 pub const SIZE_MONO: f32 = 12.0;
 /// Body small, and the topology node name size.

@@ -29,6 +29,12 @@ Captures used to compare the harness against the MONOLITH reference.
   backend data may not be present in a development daemon. These captures use
   Axiom's painter-ordered 2px page and 14px glass-surface backdrop filters.
 
+All native captures use shape-derived control alignment: the shared button
+labels fill the inner rectangle computed by Iced and center their paragraph
+within it. A regression renders 26, 28, 30, 32, and 34px controls and checks
+the recorded glyph-run center against the recorded button-quad center, so new
+button sizes cannot silently return to padding-based alignment.
+
 The release capture benchmark at 1280x800 records no shared-kernel fallbacks
 and no pixel disagreement between optimized and scalar-reference output. The
 empty session, agents, and filesystem full-frame medians are below 1.3ms. A

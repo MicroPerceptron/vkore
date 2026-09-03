@@ -1763,7 +1763,8 @@ impl Model {
         let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
             button(widgets::nav(label))
-                .padding([8, 10])
+                .height(34)
+                .padding([0, 10])
                 .width(Length::Fill)
                 .style(widgets::button_style(widgets::Button::Ghost))
                 .on_press_maybe(message)
@@ -2401,8 +2402,9 @@ impl Model {
                         .padding([9, 10])
                         .size(12)
                         .style(input_style),
-                    button(text("Browse").size(12))
-                        .padding([9, 10])
+                    button(widgets::control("Browse"))
+                        .height(34)
+                        .padding([0, 10])
                         .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press(Message::Browse(kind)),
                 ]
@@ -2796,7 +2798,8 @@ impl Model {
             };
             steps = steps.push(
                 button(widgets::control_upper(label))
-                    .padding([6, 8])
+                    .height(28)
+                    .padding([0, 8])
                     .width(Length::Fill)
                     .style(widgets::button_style(widgets::Button::Step(position)))
                     .on_press(Message::WizardPage(index as u8)),
@@ -3794,6 +3797,42 @@ mod tests {
                 width as usize,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn control_labels_follow_the_vertical_center_of_their_button_shape() {
+        fonts::register().expect("MONOLITH faces register");
+        for height in [26.0, 28.0, 30.0, 32.0, 34.0] {
+            let size = Size::new(140.0, height);
+            let mut renderer = native_renderer();
+            renderer.reset(iced_core::Rectangle::with_size(size));
+            let element: UiElement<'_> = button(widgets::control_upper("Session"))
+                .width(140)
+                .height(height)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Choice(true)))
+                .on_press(Message::View(View::Session))
+                .into();
+            let mut interface =
+                UserInterface::build(element, size, user_interface::Cache::new(), &mut renderer);
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style {
+                    text_color: theme::rgb(theme::TEXT),
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().expect("a control frame");
+            let quad = frame.quads().first().expect("the button shape");
+            let label = frame.glyph_runs().first().expect("the button label");
+            let shape_center = quad.bounds.y + quad.bounds.height / 2.0;
+            let label_center = label.bounds.y + label.bounds.height / 2.0;
+            assert!(
+                (shape_center - label_center).abs() <= 2.0,
+                "{height}px control placed its label at {label_center}, outside the shape center {shape_center}"
+            );
+        }
     }
 
     #[test]

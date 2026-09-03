@@ -17,7 +17,7 @@
 //! disabled control dims its label too.
 
 use crate::{fonts, theme};
-use iced_core::{Background, Border, Color, Theme};
+use iced_core::{Background, Border, Color, Length, Theme, alignment};
 use iced_widget::{button, scrollable, text, text_editor};
 
 /// A wizard step's position relative to the one being edited.
@@ -250,28 +250,40 @@ pub fn label<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, 
 }
 
 /// A component-button label. Buttons preserve case and own the text colour.
+///
+/// Filling the button's computed inner height gives the paragraph a shape to
+/// center against. This keeps every control size on the same rule and avoids
+/// font- or button-specific padding offsets.
 pub fn control<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.into())
         .font(fonts::MONO_LABEL)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
+        .height(Length::Fill)
+        .align_y(alignment::Vertical::Center)
 }
 
 /// An explicitly uppercase component-button label, used by view tabs and
-/// inspector controls.
+/// inspector controls. It follows the same shape-derived vertical centering
+/// as [`control`].
 pub fn control_upper<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.as_ref().to_uppercase())
         .font(fonts::MONO_LABEL)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
+        .height(Length::Fill)
+        .align_y(alignment::Vertical::Center)
 }
 
-/// A navigation item, which the system sets slightly tighter than a label.
+/// A navigation item, which the system sets slightly tighter than a label and
+/// centers inside its control's computed height.
 pub fn nav<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.into())
         .font(fonts::MONO_NAV)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
+        .height(Length::Fill)
+        .align_y(alignment::Vertical::Center)
 }
 
 /// Machine-shaped text: paths, agent and tool names, JSON, log bodies.

@@ -128,6 +128,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "axnn",
 ]
@@ -135,6 +136,7 @@ dependencies = [
 [[package]]
 name = "axcomp"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "ax",
  "axgfx",
@@ -147,6 +149,7 @@ dependencies = [
 [[package]]
 name = "axgfx"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "axinput",
  "axui-core",
@@ -155,10 +158,12 @@ dependencies = [
 [[package]]
 name = "axinput"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 
 [[package]]
 name = "axmath"
 version = "0.1.7"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "libm",
 ]
@@ -166,10 +171,12 @@ dependencies = [
 [[package]]
 name = "axnn"
 version = "0.3.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 
 [[package]]
 name = "axnn-cpu"
 version = "0.2.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "axmath",
  "axnn",
@@ -179,14 +186,17 @@ dependencies = [
 [[package]]
 name = "axui-core"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 
 [[package]]
 name = "axui-fonts"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 
 [[package]]
 name = "axui-iced"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "axinput",
  "axui-core",
@@ -199,6 +209,7 @@ dependencies = [
 [[package]]
 name = "axui-raster"
 version = "0.1.0"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=e9cdd8affe6eb02d4c058837c5aeb3f711abd60f#e9cdd8affe6eb02d4c058837c5aeb3f711abd60f"
 dependencies = [
  "axgfx",
  "axnn",

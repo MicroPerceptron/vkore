@@ -40,6 +40,14 @@ pub enum AddonEntrypoint {
         executable: String,
         arguments: Vec<String>,
     },
+    /// A process which returns a credential-free [`ServiceRequest`](crate::ServiceRequest).
+    /// vKore executes that request through its credential broker and shapes the
+    /// response into the invocation result without exposing credentials to the
+    /// add-on process.
+    BrokeredProcess {
+        executable: String,
+        arguments: Vec<String>,
+    },
     GuestExecutable {
         artifact: String,
     },
@@ -94,6 +102,7 @@ pub enum ManifestError {
     DuplicateTool(String),
     InvalidTool(String),
     DomainMismatch(String),
+    UnsafeBrokeredTool(String),
     UnsafeLimits(String),
     UnsafeMediation(String),
 }
@@ -149,9 +158,18 @@ impl AddonManifest {
             {
                 return Err(ManifestError::UnsafeMediation(tool.name.clone()));
             }
+            if matches!(self.entrypoint, AddonEntrypoint::BrokeredProcess { .. })
+                && (tool.required_connections.is_empty() || tool.network_destinations.is_empty())
+            {
+                return Err(ManifestError::UnsafeBrokeredTool(tool.name.clone()));
+            }
             let matches = matches!(
                 (&self.entrypoint, tool.domain),
                 (AddonEntrypoint::Process { .. }, ExecutionDomain::Host)
+                    | (
+                        AddonEntrypoint::BrokeredProcess { .. },
+                        ExecutionDomain::Host
+                    )
                     | (
                         AddonEntrypoint::GuestExecutable { .. },
                         ExecutionDomain::Guest

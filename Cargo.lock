@@ -3472,6 +3472,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "vkore-git-addon"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde_json",
+ "tempfile",
+ "vkore-addon-sdk",
+]
+
+[[package]]
+name = "vkore-gmail-addon"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake3",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "vkore-addon-sdk",
+ "zeroize",
+]
+
+[[package]]
 name = "vkore-hostlink-ab"
 version = "0.0.0"
 dependencies = [

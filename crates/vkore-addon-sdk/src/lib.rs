@@ -8,6 +8,7 @@ mod authority;
 mod manifest;
 mod registry;
 mod runtime;
+mod service;
 
 pub use authority::{
     AgentRef, ArgConstraint, AuthorityError, AuthoritySet, CallConstraints, CancellationRecord,
@@ -22,3 +23,6 @@ pub use manifest::{
 };
 pub use registry::{AddonPackage, AddonRegistry, CatalogError, WorkerTool};
 pub use runtime::{HostRuntime, RuntimeError, RuntimeLimits};
+pub use service::{
+    ServiceBroker, ServiceBrokerError, ServiceMethod, ServiceRequest, ServiceResponse,
+};

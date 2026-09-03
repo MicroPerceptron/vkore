@@ -1585,6 +1585,22 @@ fn route_http(
                 {"id":"llama_cpp","name":"llama.cpp","real_inference":true,"status":"caller_supplied"}
             ],
             "addons": [
+                {"id":"git","name":"Git","version":"0.1.0","publisher":"MicroPerceptron","domain":"host","tools":[
+                    {"name":"status","description":"Show branch and working-tree status for one exact repository.","risk":"read_only"},
+                    {"name":"diff","description":"Show a bounded working-tree or staged patch, optionally for one path.","risk":"read_only"},
+                    {"name":"log","description":"Return bounded structured commit history from one exact repository.","risk":"read_only"},
+                    {"name":"show","description":"Show one exact Git revision and optional repository-relative path.","risk":"read_only"},
+                    {"name":"stage","description":"Stage an explicit list of repository-relative paths.","risk":"external_write"},
+                    {"name":"unstage","description":"Remove explicit paths from the index without changing working files.","risk":"external_write"},
+                    {"name":"commit","description":"Commit the already-staged index with an explicit message and author identity.","risk":"external_write"}
+                ],"network_destinations":[]},
+                {"id":"gmail","name":"Gmail","version":"0.1.0","publisher":"MicroPerceptron","domain":"host","tools":[
+                    {"name":"search","description":"Search the connected Gmail mailbox and return bounded message identifiers.","risk":"read_only"},
+                    {"name":"read","description":"Read one exact Gmail message by identifier.","risk":"read_only"},
+                    {"name":"send","description":"Send one plain-text email from the connected Gmail account.","risk":"external_write"},
+                    {"name":"create_draft","description":"Create one plain-text draft in the connected Gmail account.","risk":"external_write"},
+                    {"name":"trash","description":"Move one exact Gmail message to trash.","risk":"destructive"}
+                ],"network_destinations":["gmail.googleapis.com:443"]},
                 {"id":"reference.host","name":"Reference host add-on","version":"0.1.0","publisher":"MicroPerceptron","domain":"host","tools":[{"name":"echo","description":"Return a bounded message from an isolated host add-on process.","risk":"read_only"}],"network_destinations":[]},
                 {"id":"reference.guest","name":"Reference guest add-on","version":"0.1.0","publisher":"MicroPerceptron","domain":"guest","tools":[{"name":"list_workspace","description":"List names in the agent's capability-scoped Kore workspace.","risk":"read_only"}],"network_destinations":[]}
             ],

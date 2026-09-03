@@ -54,6 +54,17 @@ native vkore-ui / headless `vkore chat`
                          add-ons / packages
 ```
 
+## Key crates
+
+- `vkore-addon-sdk`: capability-scoped host, guest, and split tool contracts and runtime.
+- `vkore-git-addon`: exact-repository Git status, diff, history, staging, and commit tools.
+- `vkore-gmail-addon`: Gmail search, read, draft, send, and trash tools using vKore's
+  credential-brokered HTTPS boundary.
+- `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
+- `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
+- `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
+- `vkored` interactive binaries: loopback harness server and headless `vkore chat` client.
+
 The native UI is rendered directly with Iced and Axiom. It does not embed a
 browser or require a login, token, or browser session. Only validated public
 assistant text appears as chat output; model fragments, validation envelopes,

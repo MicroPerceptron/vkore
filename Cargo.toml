@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/vkore-addon-sdk",
+    "crates/vkore-git-addon",
+    "crates/vkore-gmail-addon",
     "crates/vkore-reference-addon",
     "crates/vkore-policy",
     "crates/vkore-packages",

@@ -16,6 +16,13 @@ const CAT: [u8; 16] = [0x33; 16];
 const AGENT: [u8; 16] = [0x44; 16];
 const V: [u8; 16] = [0x55; 16];
 const HELLO: [u8; 16] = [0x66; 16];
+const LS: [u8; 16] = [0x77; 16];
+const FIND: [u8; 16] = [0x88; 16];
+const STAT: [u8; 16] = [0x99; 16];
+const WORKSPACE: [u8; 16] = [0xaa; 16];
+const READ_RANGE: [u8; 16] = [0xbb; 16];
+const REPLACE_RANGE: [u8; 16] = [0xcc; 16];
+const TRUNCATE: [u8; 16] = [0xdd; 16];
 
 fn sequence(role: BackendRole, route: u8) -> SequenceIdentity {
     SequenceIdentity {
@@ -97,7 +104,7 @@ fn plan_reply(intent: &str, offers: &[BrokerOffer<'_>], ceiling: TaskBudget, rou
 }
 
 #[test]
-fn broker_planner_selects_exact_x_and_cat_and_never_y() {
+fn broker_planner_selects_only_cat_and_x_for_a_read() {
     let offers = [
         BrokerOffer {
             reference: X,
@@ -112,6 +119,27 @@ fn broker_planner_selects_exact_x_and_cat_and_never_y() {
             permitted_ops: 1,
             max_uses: 0,
             label: "workspace/Y",
+        },
+        BrokerOffer {
+            reference: LS,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "ls",
+        },
+        BrokerOffer {
+            reference: FIND,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "find",
+        },
+        BrokerOffer {
+            reference: STAT,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "stat",
         },
         BrokerOffer {
             reference: CAT,
@@ -171,6 +199,62 @@ fn broker_planner_selects_exact_x_and_cat_and_never_y() {
             2,
         ),
         Err(BackendError::InvalidEncoding)
+    );
+}
+
+#[test]
+fn broker_planner_selects_a_bounded_editing_profile_and_workspace_view() {
+    let offers = [
+        BrokerOffer {
+            reference: WORKSPACE,
+            kind: BrokerOfferKind::View,
+            permitted_ops: 7,
+            max_uses: 0,
+            label: "workspace/root",
+        },
+        BrokerOffer {
+            reference: FIND,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "find",
+        },
+        BrokerOffer {
+            reference: READ_RANGE,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "read-range",
+        },
+        BrokerOffer {
+            reference: REPLACE_RANGE,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "replace-range",
+        },
+        BrokerOffer {
+            reference: TRUNCATE,
+            kind: BrokerOfferKind::Executable,
+            permitted_ops: 4,
+            max_uses: 4,
+            label: "truncate",
+        },
+    ];
+    let payload = plan_reply(
+        "edit src-main.rs",
+        &offers,
+        TaskBudget {
+            tool_calls: 16,
+            ..TaskBudget::ZERO
+        },
+        9,
+    );
+    let reply = decode_broker_reply(&payload).unwrap();
+    assert_eq!(reply.action, BrokerActionKind::CreateAgent);
+    assert_eq!(
+        reply.selectors().collect::<Vec<_>>(),
+        vec![FIND, READ_RANGE, REPLACE_RANGE, TRUNCATE, WORKSPACE]
     );
 }
 

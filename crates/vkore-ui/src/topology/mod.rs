@@ -4,6 +4,7 @@
 //! `FILESYSTEM` buttons replace the session body with them, and each brings
 //! its own inspector.
 
+pub mod filesystem;
 pub mod inspector;
 pub mod layout;
 pub mod model;

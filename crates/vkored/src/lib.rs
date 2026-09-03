@@ -6,6 +6,7 @@ pub mod daemon;
 pub mod harness;
 #[cfg(unix)]
 pub mod hybrid;
+pub mod interactive;
 pub mod ivshmem;
 pub mod llama;
 pub mod protocol;
@@ -25,6 +26,11 @@ pub use daemon::{
 };
 #[cfg(unix)]
 pub use hybrid::{HybridError, HybridHostLink, HybridMetrics};
+pub use interactive::{
+    BackendHarness, CreateSession, DeterministicGuest, EventKind, HarnessEvent, HarnessHandle,
+    HarnessHttpServer, HarnessService, PromptRequest, PromptStatus, SessionState, SessionStatus,
+    TaskRuntime,
+};
 pub use ivshmem::{
     IVSHMEM_BACKING_BYTES, IvshmemBulkHost, IvshmemError, IvshmemMetrics, frozen_layout,
 };

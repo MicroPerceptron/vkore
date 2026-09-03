@@ -24,6 +24,13 @@ Captures used to compare the harness against the MONOLITH reference.
   authority labels at a viewport boundary.
 - `compare-session.png`, `compare-agents.png`, and `compare-filesystem.png` —
   reference, native, amplified difference, and 50/50 overlay in reading order.
+- `native-button-hover.png` and `native-button-pressed.png` — the same native
+  frame with the inactive AGENTS tab hovered and pressed. Iced interpolates
+  control colors and borders for 150ms on the published ease-out curve; the
+  pressed frame moves the complete control exactly one pixel right and down.
+- `edge-proof.png` — nearest-neighbour enlargements of the shell T-junction
+  and lower-left work-card corner, showing one shared hairline and the intact
+  rounded parent edge.
 - `final-wizard-0.png` through `final-wizard-4.png` and
   `final-approval.png` — mock-backed coverage for UI states whose complete
   backend data may not be present in a development daemon. These captures use
@@ -34,6 +41,11 @@ labels fill the inner rectangle computed by Iced and center their paragraph
 within it. A regression renders 26, 28, 30, 32, and 34px controls and checks
 the recorded glyph-run center against the recorded button-quad center, so new
 button sizes cannot silently return to padding-based alignment.
+
+Shared seams are native one-edge Iced borders. The work timeline, shell,
+inspector, and dialog sections no longer simulate a divider with a second
+four-sided box, so adjacent surfaces meet on one hairline and a rounded parent
+keeps all four rounded corners.
 
 The release capture benchmark at 1280x800 records no shared-kernel fallbacks
 and no pixel disagreement between optimized and scalar-reference output. The
@@ -62,3 +74,6 @@ Regenerate a native state with the ignored release capture test, for example:
     VKORE_UI_CAPTURE=artifacts/design-parity/native-agents.ppm \
     cargo +nightly-2026-07-13 test -p vkore-ui --release \
       tests::capture_and_benchmark_ui -- --ignored --exact --nocapture
+
+Set `VKORE_UI_CAPTURE_FAST=1` to record a single verified frame without
+running the timing and optimized/reference comparison loops.

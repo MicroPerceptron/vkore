@@ -12,7 +12,7 @@ use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Background, Border, Color, Element, Length, Size, Theme, alignment, keyboard, mouse,
+    Background, Border, Color, Element, Length, Size, Theme, alignment, border, keyboard, mouse,
     renderer::{self, Scale},
     shell,
 };
@@ -573,11 +573,18 @@ fn backdrop_filter<'a>(content: UiElement<'a>, radius: f32, corner_radius: f32) 
     })
 }
 
-/// A rule in the glass border colour, for a dialog's header and footer.
-fn glass_edge() -> iced_widget::container::Style {
+/// One shared glass edge between a dialog and its header or footer.
+fn glass_bottom_edge() -> iced_widget::container::Style {
     let mut style = glass_surface();
     style.background = None;
-    style.border.radius = 0.0.into();
+    style.border = Border::default();
+    style.border_sides = border::Sides::default().bottom(border::side(theme::glass_border(), 1.0));
+    style
+}
+
+fn glass_top_edge() -> iced_widget::container::Style {
+    let mut style = glass_bottom_edge();
+    style.border_sides = border::Sides::default().top(border::side(theme::glass_border(), 1.0));
     style
 }
 
@@ -608,27 +615,28 @@ fn glass_header<'a>(
     container(heading)
         .padding([14, 20])
         .width(Length::Fill)
-        .style(|_| glass_edge())
+        .style(|_| glass_bottom_edge())
         .into()
 }
 
-/// A panel carrying a single hairline rule on one edge.
-///
-/// The display list has no per-edge border width, so the rule is drawn as a
-/// full border and the panel is clipped by its neighbours on the other three
-/// sides. This is exactly how the sidebar and header read in the design.
 fn divider_right(background: u32) -> iced_widget::container::Style {
-    let mut style = theme::panel(background, None, 0.0);
-    style.border = theme::border(theme::BORDER, 0.0);
-    style
+    theme::panel(background, None, 0.0)
+        .border_sides(border::Sides::default().right(border::side(theme::rgb(theme::BORDER), 1.0)))
 }
 
 fn divider_bottom(background: u32) -> iced_widget::container::Style {
-    divider_right(background)
+    theme::panel(background, None, 0.0)
+        .border_sides(border::Sides::default().bottom(border::side(theme::rgb(theme::BORDER), 1.0)))
 }
 
 fn divider_left(background: u32) -> iced_widget::container::Style {
-    divider_right(background)
+    theme::panel(background, None, 0.0)
+        .border_sides(border::Sides::default().left(border::side(theme::rgb(theme::BORDER), 1.0)))
+}
+
+fn divider_top(background: u32) -> iced_widget::container::Style {
+    theme::panel(background, None, 0.0)
+        .border_sides(border::Sides::default().top(border::side(theme::rgb(theme::BORDER), 1.0)))
 }
 
 fn input_style(
@@ -2094,7 +2102,7 @@ impl Model {
                         container(details)
                             .padding([12, 13])
                             .width(Length::Fill)
-                            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
+                            .style(|_| divider_top(theme::PANEL)),
                     );
                 }
                 items =
@@ -2873,7 +2881,7 @@ impl Model {
             )
             .padding([14, 20])
             .width(Length::Fill)
-            .style(|_| glass_edge()),
+            .style(|_| glass_top_edge()),
         ];
         backdrop_filter(
             container(dialog)
@@ -2940,7 +2948,7 @@ impl Model {
             )
             .padding([14, 20])
             .width(Length::Fill)
-            .style(|_| glass_edge()),
+            .style(|_| glass_top_edge()),
         ])
         .width(620)
         .style(|_| glass_surface())
@@ -3039,6 +3047,26 @@ impl App {
             std::mem::take(&mut self.cache),
             &mut self.renderer,
         );
+        let now = Instant::now();
+        let waker = shell::Waker::noop();
+        let mut messages = shell::Bus::new();
+        let (state, _) = interface.update(
+            window,
+            &waker,
+            &[iced_core::Event::Window(
+                iced_core::window::Event::RedrawRequested(now),
+            )],
+            self.cursor,
+            &mut self.renderer,
+            &mut messages,
+        );
+        let animate = matches!(
+            state,
+            user_interface::State::Updated {
+                redraw_request: iced_core::window::RedrawRequest::NextFrame,
+                ..
+            }
+        );
         interface.draw(
             &mut self.renderer,
             &Theme::Dark,
@@ -3048,6 +3076,11 @@ impl App {
             self.cursor,
         );
         self.cache = interface.into_cache();
+        let mut model_changed = false;
+        for message in messages {
+            self.model.update(message);
+            model_changed = true;
+        }
         let frame = self
             .renderer
             .take_frame()
@@ -3076,7 +3109,7 @@ impl App {
                     text_stats.glyphs,
                 );
             }
-            self.redraw = false;
+            self.redraw = animate || model_changed;
             self.last_frame = Some(Instant::now());
             return Ok(());
         }
@@ -3116,7 +3149,7 @@ impl App {
                 render.scratch_high_water_pixels,
             );
         }
-        self.redraw = false;
+        self.redraw = animate || model_changed;
         self.last_frame = Some(Instant::now());
         Ok(())
     }
@@ -3836,6 +3869,27 @@ mod tests {
     }
 
     #[test]
+    fn shared_dividers_are_single_edges_instead_of_nested_boxes() {
+        let top = divider_top(theme::PANEL);
+        assert_eq!(top.border.width, 0.0);
+        assert_eq!(top.border_sides.top.width, 1.0);
+        assert_eq!(top.border_sides.right.width, 0.0);
+        assert_eq!(top.border_sides.bottom.width, 0.0);
+        assert_eq!(top.border_sides.left.width, 0.0);
+
+        let right = divider_right(theme::BACKGROUND);
+        assert_eq!(right.border.width, 0.0);
+        assert_eq!(right.border_sides.top.width, 0.0);
+        assert_eq!(right.border_sides.right.width, 1.0);
+        assert_eq!(right.border_sides.bottom.width, 0.0);
+        assert_eq!(right.border_sides.left.width, 0.0);
+
+        let glass = glass_bottom_edge();
+        assert_eq!(glass.border.width, 0.0);
+        assert_eq!(glass.border_sides.bottom.width, 1.0);
+    }
+
+    #[test]
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
@@ -3897,8 +3951,20 @@ mod tests {
         let mut backend = NativeBackend::new().unwrap();
         let mut benchmark_frame = None;
         let mut benchmark_masks = Vec::new();
+        let capture_cursor = std::env::var("VKORE_UI_CURSOR")
+            .ok()
+            .and_then(|value| {
+                value
+                    .split_once(',')
+                    .map(|(x, y)| (x.to_owned(), y.to_owned()))
+            })
+            .and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)))
+            .map(|(x, y)| mouse::Cursor::Available(iced_core::Point::new(x, y)))
+            .unwrap_or(mouse::Cursor::Unavailable);
+        let capture_press = std::env::var_os("VKORE_UI_PRESS").is_some();
+        let capture_fast = std::env::var_os("VKORE_UI_CAPTURE_FAST").is_some();
 
-        for iteration in 0..70 {
+        for iteration in 0..if capture_fast { 1 } else { 70 } {
             let started = Instant::now();
             let mut interface = UserInterface::build(
                 model.view(size),
@@ -3912,14 +3978,19 @@ mod tests {
             // every enabled control look disabled on its first frame.
             let waker = shell::Waker::noop();
             let mut messages = shell::Bus::new();
-            let events = [iced_core::Event::Window(
+            let mut events = vec![iced_core::Event::Window(
                 iced_core::window::Event::RedrawRequested(Instant::now()),
             )];
+            if capture_press && iteration == 0 {
+                events.push(iced_core::Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Left,
+                )));
+            }
             let _ = interface.update(
                 &iced_core::window::Headless,
                 &waker,
                 &events,
-                mouse::Cursor::Unavailable,
+                capture_cursor,
                 &mut renderer,
                 &mut messages,
             );
@@ -3929,7 +4000,7 @@ mod tests {
                 &renderer::Style {
                     text_color: theme::rgb(theme::TEXT),
                 },
-                mouse::Cursor::Unavailable,
+                capture_cursor,
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();
@@ -3952,6 +4023,17 @@ mod tests {
                 kernel_full_ns.push(finished.duration_since(recorded).as_nanos());
             }
             kernel_stats = stats;
+        }
+
+        if capture_fast {
+            write_ppm(
+                &std::env::var("VKORE_UI_CAPTURE")
+                    .expect("VKORE_UI_CAPTURE_FAST requires VKORE_UI_CAPTURE"),
+                1280,
+                800,
+                &target,
+            );
+            return;
         }
 
         let benchmark_frame = benchmark_frame.unwrap();
@@ -4037,7 +4119,7 @@ mod tests {
                 &iced_core::window::Headless,
                 &waker,
                 &events,
-                mouse::Cursor::Unavailable,
+                capture_cursor,
                 &mut renderer,
                 &mut messages,
             );
@@ -4047,7 +4129,7 @@ mod tests {
                 &renderer::Style {
                     text_color: theme::rgb(theme::TEXT),
                 },
-                mouse::Cursor::Unavailable,
+                capture_cursor,
             );
             cache = interface.into_cache();
             let frame = renderer.take_frame().unwrap();

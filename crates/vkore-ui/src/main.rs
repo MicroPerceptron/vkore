@@ -3,7 +3,7 @@ mod render_backend;
 mod theme;
 mod topology;
 
-use crate::topology::{inspector, layout, model, view};
+use crate::topology::{filesystem, inspector, layout, model, view};
 mod widgets;
 
 use axgfx::Extent2d;
@@ -601,6 +601,9 @@ struct Model {
     topology: view::State,
     topology_graph: model::Graph,
     topology_placements: Vec<layout::Placement>,
+    topology_filesystem: filesystem::Filesystem,
+    topology_agent_bands: Vec<layout::Placement>,
+    topology_path_bands: Vec<layout::Placement>,
     editor: Option<text_editor::Content<AxRenderer<System>>>,
     wizard_page: u8,
     preflight: Option<String>,
@@ -636,6 +639,9 @@ impl Model {
             topology: view::State::default(),
             topology_graph: model::Graph::default(),
             topology_placements: Vec::new(),
+            topology_filesystem: filesystem::Filesystem::default(),
+            topology_agent_bands: Vec::new(),
+            topology_path_bands: Vec::new(),
             editor: None,
             wizard_page: 0,
             preflight: None,
@@ -682,6 +688,11 @@ impl Model {
         self.topology_graph = model::Graph::from_events(&self.events, self.session.is_some());
         self.topology_placements =
             layout::tidy(&self.topology_graph.parents(), layout::Metrics::AGENTS);
+        self.topology_filesystem =
+            filesystem::Filesystem::from_events(&self.events, &self.topology_graph);
+        let (agents, paths) = self.topology_filesystem.place(&self.topology_graph);
+        self.topology_agent_bands = agents;
+        self.topology_path_bands = paths;
         // A changed lineage invalidates a fit taken against the old one.
         self.topology.fitted = false;
         if let Some(selected) = self.topology.selected.clone()
@@ -710,7 +721,15 @@ impl Model {
             return;
         }
         let area = self.canvas_area(viewport);
-        let placements = self.topology_placements.clone();
+        let placements: Vec<layout::Placement> = if self.view == View::Agents {
+            self.topology_placements.clone()
+        } else {
+            self.topology_agent_bands
+                .iter()
+                .chain(self.topology_path_bands.iter())
+                .copied()
+                .collect()
+        };
         self.topology.fit(&placements, area);
     }
 
@@ -1657,11 +1676,18 @@ impl Model {
             let placements = &self.topology_placements;
             let (title, subtitle, body) =
                 inspector::agents(graph, self.topology.selected.as_deref());
-            let mut layers = row![
-                container(view::canvas_layer(graph, placements, &self.topology))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-            ];
+            let canvas: UiElement<'_> = if self.view == View::Agents {
+                view::canvas_layer(graph, placements, &self.topology)
+            } else {
+                view::filesystem_layer(
+                    graph,
+                    &self.topology_filesystem,
+                    &self.topology_agent_bands,
+                    &self.topology_path_bands,
+                    &self.topology,
+                )
+            };
+            let mut layers = row![container(canvas).width(Length::Fill).height(Length::Fill)];
             if self.topology.inspector {
                 layers = layers.push(self.inspector(title, subtitle, body));
             }
@@ -1960,12 +1986,21 @@ impl Model {
                 theme::panel(if dashed { theme::MAGENTA } else { color }, None, 0.0)
             })
         };
-        let legend = row![
-            rule(theme::MAGENTA, false),
-            widgets::mono("spawn lineage", theme::TEXT_MUTED),
-            rule(theme::BORDER_DIM, false),
-            widgets::mono("withheld capability", theme::TEXT_MUTED),
-        ]
+        let legend = if self.view == View::Agents {
+            row![
+                rule(theme::MAGENTA, false),
+                widgets::mono("spawn lineage", theme::TEXT_MUTED),
+                rule(theme::BORDER_DIM, false),
+                widgets::mono("withheld capability", theme::TEXT_MUTED),
+            ]
+        } else {
+            row![
+                rule(theme::TEXT_SECONDARY, false),
+                widgets::mono("containment", theme::TEXT_MUTED),
+                rule(theme::MAGENTA, true),
+                widgets::mono("permission", theme::TEXT_MUTED),
+            ]
+        }
         .spacing(theme::SPACE_2)
         .align_y(alignment::Vertical::Center);
 

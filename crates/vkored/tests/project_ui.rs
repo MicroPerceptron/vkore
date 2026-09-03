@@ -196,6 +196,16 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     assert!(!discovery.contains("launchToken"));
     assert!(!discovery.contains("Authorization"));
 
+    let catalog = transact(&server, address, "GET", "/api/v1/catalog", "", &[]);
+    let catalog: Value = serde_json::from_str(catalog.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let addons = catalog["addons"].as_array().unwrap();
+    assert!(addons.iter().any(|addon| addon["id"] == "git"));
+    assert!(addons.iter().any(|addon| addon["id"] == "gmail"));
+    assert_eq!(
+        addons.iter().find(|addon| addon["id"] == "gmail").unwrap()["network_destinations"][0],
+        "gmail.googleapis.com:443"
+    );
+
     let body = serde_json::to_string(&config(&workspace, &temp.path().join("state"))).unwrap();
     let rejected = transact(
         &server,

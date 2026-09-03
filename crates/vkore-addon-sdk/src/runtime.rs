@@ -1,8 +1,9 @@
 use crate::{
     AddonEntrypoint, AddonPackage, ExecutionDomain, INVOCATION_PROTOCOL_VERSION,
-    InvocationApproval, InvocationResult, ResultHandle, ResultSensitivity, ValidatedInvocation,
+    InvocationApproval, InvocationResult, ResultHandle, ResultSensitivity, ServiceBroker,
+    ServiceBrokerError, ServiceRequest, ValidatedInvocation,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
@@ -43,6 +44,9 @@ pub enum RuntimeError {
     AddonFailed(Option<i32>),
     ResultIdentityMismatch,
     NetworkDestinationDenied(String),
+    ConnectionDenied,
+    MissingServiceBroker,
+    Service(ServiceBrokerError),
     DisclosureDenied(String),
 }
 
@@ -57,6 +61,12 @@ impl std::error::Error for RuntimeError {}
 impl From<std::io::Error> for RuntimeError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<ServiceBrokerError> for RuntimeError {
+    fn from(value: ServiceBrokerError) -> Self {
+        Self::Service(value)
     }
 }
 
@@ -83,6 +93,24 @@ impl HostRuntime {
         package: &AddonPackage,
         validated: ValidatedInvocation,
     ) -> Result<InvocationResult, RuntimeError> {
+        self.invoke_inner(package, validated, None)
+    }
+
+    pub fn invoke_brokered(
+        &self,
+        package: &AddonPackage,
+        validated: ValidatedInvocation,
+        broker: &dyn ServiceBroker,
+    ) -> Result<InvocationResult, RuntimeError> {
+        self.invoke_inner(package, validated, Some(broker))
+    }
+
+    fn invoke_inner(
+        &self,
+        package: &AddonPackage,
+        validated: ValidatedInvocation,
+        broker: Option<&dyn ServiceBroker>,
+    ) -> Result<InvocationResult, RuntimeError> {
         let approval = validated.approval();
         let tool = package
             .manifest
@@ -101,18 +129,25 @@ impl HostRuntime {
         }) {
             return Err(RuntimeError::NetworkDestinationDenied(destination.clone()));
         }
-        let (executable, arguments) = match &package.manifest.entrypoint {
+        let (executable, arguments, brokered) = match &package.manifest.entrypoint {
             AddonEntrypoint::Process {
                 executable,
                 arguments,
-            }
-            | AddonEntrypoint::SplitProcess {
+            } => (executable, arguments, false),
+            AddonEntrypoint::BrokeredProcess {
+                executable,
+                arguments,
+            } => (executable, arguments, true),
+            AddonEntrypoint::SplitProcess {
                 executable,
                 arguments,
                 ..
-            } => (executable, arguments),
+            } => (executable, arguments, false),
             AddonEntrypoint::GuestExecutable { .. } => return Err(RuntimeError::InvalidEntrypoint),
         };
+        if brokered && broker.is_none() {
+            return Err(RuntimeError::MissingServiceBroker);
+        }
         let executable = resolve_entrypoint(&package.root, executable)?;
         verify_hash(&executable, &package.manifest.package_hash)?;
         let input = serde_json::to_vec(approval).map_err(RuntimeError::InvalidResult)?;
@@ -171,6 +206,53 @@ impl HostRuntime {
         let _ = std::fs::remove_dir_all(&invocation_dir);
         if !status.success() {
             return Err(RuntimeError::AddonFailed(status.code()));
+        }
+        if brokered {
+            let request: ServiceRequest =
+                serde_json::from_slice(&output).map_err(RuntimeError::InvalidResult)?;
+            request.validate_shape()?;
+            if request.invocation_id != approval.invocation.invocation_id
+                || request.agent != approval.invocation.agent
+                || request.package_hash != approval.invocation.package_hash
+                || request.tool != approval.invocation.tool
+            {
+                return Err(RuntimeError::ResultIdentityMismatch);
+            }
+            if approval.invocation.resources.get("connection") != Some(&request.connection)
+                || !tool.required_connections.contains(&request.connection_kind)
+            {
+                return Err(RuntimeError::ConnectionDenied);
+            }
+            if !tool.network_destinations.contains(&request.destination) {
+                return Err(RuntimeError::NetworkDestinationDenied(request.destination));
+            }
+            let response = broker
+                .ok_or(RuntimeError::MissingServiceBroker)?
+                .execute(&request, output_limit)?;
+            let response_bytes = serde_json::to_vec(&response.body)
+                .map_err(RuntimeError::InvalidResult)?
+                .len();
+            if response_bytes > output_limit {
+                return Err(RuntimeError::OutputTooLarge);
+            }
+            let mut disclosed = Map::new();
+            if validated.disclosure_fields().contains("status") {
+                disclosed.insert("status".into(), Value::from(response.status));
+            }
+            if validated.disclosure_fields().contains("response") {
+                disclosed.insert("response".into(), response.body);
+            }
+            let fields: Vec<_> = disclosed.keys().cloned().collect();
+            let result = InvocationResult::from_addon(
+                approval,
+                tool.result_sensitivity,
+                Value::Object(disclosed),
+                fields,
+            );
+            if result.handle.byte_count > output_limit {
+                return Err(RuntimeError::OutputTooLarge);
+            }
+            return Ok(result);
         }
         let result: InvocationResult =
             serde_json::from_slice(&output).map_err(RuntimeError::InvalidResult)?;

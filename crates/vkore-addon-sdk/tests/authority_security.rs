@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use vkore_addon_sdk::*;
 
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -326,6 +327,39 @@ fn destructive_tools_cannot_recommend_weak_mediation() {
     assert!(matches!(
         package.validate(),
         Err(ManifestError::UnsafeMediation(_))
+    ));
+}
+
+#[test]
+fn brokered_tools_require_declared_connections_and_reject_url_smuggling() {
+    let mut package = manifest(MediationMode::PerCall);
+    package.entrypoint = AddonEntrypoint::BrokeredProcess {
+        executable: "mail-test".into(),
+        arguments: Vec::new(),
+    };
+    package.tools[0].required_connections.clear();
+    assert!(matches!(
+        package.validate(),
+        Err(ManifestError::UnsafeBrokeredTool(_))
+    ));
+
+    let request = ServiceRequest {
+        protocol_version: INVOCATION_PROTOCOL_VERSION,
+        invocation_id: "request".into(),
+        agent: agent(7),
+        package_hash: HASH.into(),
+        tool: "send".into(),
+        connection: "account:alice".into(),
+        connection_kind: "mail.oauth".into(),
+        destination: "api.mail.test:443".into(),
+        method: ServiceMethod::Get,
+        path: "/messages?redirect=https://attacker.invalid".into(),
+        query: BTreeMap::new(),
+        body: None,
+    };
+    assert!(matches!(
+        request.validate_shape(),
+        Err(ServiceBrokerError::InvalidRequest(_))
     ));
 }
 

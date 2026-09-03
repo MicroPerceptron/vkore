@@ -336,7 +336,10 @@ fn run_git_owned(repository: &Path, arguments: &[String]) -> Result<String, Stri
     command
         .env_clear()
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", null_device())
+        // An empty override disables the global config on every platform.
+        // Git for Windows does not accept the Win32 `NUL` device here as a
+        // config-file path, even though it works as a shell redirection.
+        .env("GIT_CONFIG_GLOBAL", "")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
         .env("LC_ALL", "C")
@@ -509,7 +512,12 @@ fn required_revision(arguments: &BTreeMap<String, Value>, name: &str) -> Result<
 
 fn git_executable() -> PathBuf {
     let candidates = if cfg!(windows) {
-        vec![PathBuf::from("git.exe")]
+        vec![
+            PathBuf::from(r"C:\Program Files\Git\cmd\git.exe"),
+            PathBuf::from(r"C:\Program Files\Git\bin\git.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\Git\cmd\git.exe"),
+            PathBuf::from("git.exe"),
+        ]
     } else {
         vec![
             PathBuf::from("/usr/bin/git"),
@@ -522,10 +530,6 @@ fn git_executable() -> PathBuf {
         .into_iter()
         .find(|candidate| candidate.components().count() == 1 || candidate.is_file())
         .unwrap_or_else(|| PathBuf::from("git"))
-}
-
-fn null_device() -> &'static str {
-    if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
 
 fn executable_name() -> String {

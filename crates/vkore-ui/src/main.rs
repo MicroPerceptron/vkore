@@ -2772,6 +2772,21 @@ impl App {
             application: 1.0,
         });
         self.model.fit_topology(logical_size(window));
+        if self.profile {
+            let size = logical_size(window);
+            let physical = window.inner_size();
+            eprintln!(
+                "vkore-ui state: view={:?} logical={}x{} physical={}x{} scale={} projects={} connected={}",
+                self.model.view,
+                size.width,
+                size.height,
+                physical.width,
+                physical.height,
+                window.scale_factor(),
+                self.model.projects.len(),
+                self.model.connected,
+            );
+        }
         let mut interface = UserInterface::build(
             self.model.view(logical_size(window)),
             logical_size(window),

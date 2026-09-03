@@ -361,6 +361,105 @@ fn decision_payload(event: &Value) -> Option<Value> {
     }
 }
 
+fn format_agent_tool_call(call: &Value) -> Option<String> {
+    if call["action"]
+        .as_str()
+        .is_some_and(|action| action != "tool_call")
+    {
+        return None;
+    }
+    let command = call["command"].as_str().or_else(|| call["tool"].as_str())?;
+    let arguments = tool_arguments(&call["arguments"]);
+    Some(format!(
+        "{command}{}",
+        if arguments.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", arguments.join(" "))
+        }
+    ))
+}
+
+fn action_summary(
+    role: &str,
+    action: &Value,
+    catalog: &BTreeMap<u64, CatalogEntry>,
+) -> Option<String> {
+    if role.eq_ignore_ascii_case("broker") {
+        let rendered = format_broker_action(action, catalog);
+        return Some(
+            rendered
+                .strip_prefix("Tool_use: ")
+                .unwrap_or(&rendered)
+                .to_owned(),
+        );
+    }
+    if role.eq_ignore_ascii_case("agent") {
+        return format_agent_tool_call(action);
+    }
+    None
+}
+
+/// Project only a schema-shaped model action into the public work timeline.
+/// Raw completions are untrusted and may contain response text or tool output,
+/// so never render them verbatim.
+fn raw_model_proposal(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> Option<WorkRow> {
+    let payload = &event["payload"];
+    if event["kind"] != "inference" || payload["kind"] != "RawModelCompletion" {
+        return None;
+    }
+    let role = payload["role"].as_str()?;
+    let action = embedded_json(&payload["payload"])?;
+    let action_name = action["action"].as_str()?;
+    if role.eq_ignore_ascii_case("broker") {
+        if action_name == "respond" {
+            return None;
+        }
+    } else if !role.eq_ignore_ascii_case("agent") || action_name != "tool_call" {
+        return None;
+    }
+    Some(WorkRow {
+        speaker: if role.eq_ignore_ascii_case("broker") {
+            "Broker".into()
+        } else {
+            "Agent 1".into()
+        },
+        body: format!("Proposed: {}", action_summary(role, &action, catalog)?),
+        kind: "decision".into(),
+    })
+}
+
+fn model_validation_row(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> Option<WorkRow> {
+    let payload = &event["payload"];
+    if payload["kind"] != "Validation" {
+        return None;
+    }
+    let accepted = payload["accepted"].as_bool()?;
+    let role = payload["role"].as_str()?;
+    let action = embedded_json(&payload["payload"])?;
+    let summary = action_summary(role, &action, catalog)?;
+    let detail = payload["detail"].as_str().unwrap_or("policy validation");
+    Some(WorkRow {
+        speaker: "Kore".into(),
+        body: if accepted {
+            format!("Allowed: {summary}")
+        } else {
+            format!("Denied: {summary} — {detail}")
+        },
+        kind: if accepted { "authority" } else { "error" }.into(),
+    })
+}
+
+fn bounded_work_text(value: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        compact
+    } else {
+        format!("{}…", compact.chars().take(MAX_CHARS).collect::<String>())
+    }
+}
+
 fn meaningful_error(event: &Value) -> String {
     let payload = &event["payload"];
     payload["message"]
@@ -375,41 +474,65 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
     let catalog = broker_catalog(events);
     let mut rows = Vec::new();
     let mut seen = BTreeSet::new();
+    let has_raw_broker_proposal = events.iter().any(|event| {
+        event["kind"] == "inference"
+            && event["payload"]["kind"] == "RawModelCompletion"
+            && event["payload"]["role"] == "Broker"
+    });
 
     for event in events {
         let event_kind = event["kind"].as_str().unwrap_or("event");
-        let row = match event_kind {
-            "broker_proposal" => decision_payload(event).map(|action| WorkRow {
-                speaker: "Broker".into(),
-                body: format_broker_action(&action, &catalog),
-                kind: "decision".into(),
-            }),
-            "tool_call" => decision_payload(event).map(|call| {
-                let command = call["command"]
-                    .as_str()
-                    .or_else(|| call["tool"].as_str())
-                    .unwrap_or("tool");
-                let arguments = tool_arguments(&call["arguments"]);
-                WorkRow {
+        let row = raw_model_proposal(event, &catalog)
+            .or_else(|| model_validation_row(event, &catalog))
+            .or_else(|| match event_kind {
+                "broker_proposal" if !has_raw_broker_proposal => {
+                    decision_payload(event).map(|action| WorkRow {
+                        speaker: "Broker".into(),
+                        body: format_broker_action(&action, &catalog),
+                        kind: "decision".into(),
+                    })
+                }
+                "tool_call" => decision_payload(event).map(|call| WorkRow {
                     speaker: "Agent 1".into(),
                     body: format!(
-                        "Tool_use: {command}{}",
-                        if arguments.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {}", arguments.join(" "))
-                        }
+                        "Executing: {}",
+                        format_agent_tool_call(&call).unwrap_or_else(|| "tool".into())
                     ),
                     kind: "decision".into(),
-                }
-            }),
-            "error" => Some(WorkRow {
-                speaker: "Error".into(),
-                body: meaningful_error(event),
-                kind: "error".into(),
-            }),
-            _ => None,
-        };
+                }),
+                "tool_result" => decision_payload(event).map(|result| {
+                    let status = result["result"]
+                        .as_str()
+                        .or_else(|| result["status"].as_str())
+                        .unwrap_or("result");
+                    let text = result["text"]
+                        .as_str()
+                        .map(bounded_work_text)
+                        .unwrap_or_default();
+                    let failed = matches!(
+                        status.to_ascii_lowercase().as_str(),
+                        "refused" | "revoked" | "cancelled" | "failed" | "error"
+                    );
+                    WorkRow {
+                        speaker: "Tool".into(),
+                        body: format!(
+                            "Result ({status}){}",
+                            if text.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {text}")
+                            }
+                        ),
+                        kind: if failed { "error" } else { "result" }.into(),
+                    }
+                }),
+                "error" => Some(WorkRow {
+                    speaker: "Error".into(),
+                    body: meaningful_error(event),
+                    kind: "error".into(),
+                }),
+                _ => None,
+            });
         if let Some(row) = row
             && seen.insert((row.speaker.clone(), row.body.clone()))
         {
@@ -4230,7 +4353,7 @@ mod tests {
     }
 
     #[test]
-    fn working_rows_show_only_readable_validated_ai_activity() {
+    fn working_rows_show_sanitized_proposal_execution_and_result() {
         let events = vec![
             json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"read X"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read X\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",[],1,null],[31,\"x\",\"cat\",[],2,null]]}"}}),
@@ -4249,21 +4372,47 @@ mod tests {
 
         assert_eq!(
             rows.len(),
-            2,
+            3,
             "duplicate calls and hidden records stay hidden"
         );
         assert_eq!(rows[0].speaker, "Broker");
-        assert_eq!(rows[0].body, "Tool_use: create_agent(Agent 1, [cat], [X])");
+        assert_eq!(rows[0].body, "Proposed: create_agent(Agent 1, [cat], [X])");
         assert_eq!(rows[1].speaker, "Agent 1");
-        assert_eq!(rows[1].body, "Tool_use: cat X");
+        assert_eq!(rows[1].body, "Executing: cat X");
+        assert_eq!(rows[2].speaker, "Tool");
+        assert_eq!(rows[2].body, "Result (result): MANIFOLD-ORANGE-742");
         let visible = rows
             .iter()
             .map(|row| format!("{}: {}", row.speaker, row.body))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!visible.contains("SECRET SYSTEM PROMPT"));
-        assert!(!visible.contains("MANIFOLD-ORANGE-742"));
+        assert!(visible.contains("MANIFOLD-ORANGE-742"));
         assert!(!visible.contains('{'));
+    }
+
+    #[test]
+    fn rejected_raw_broker_proposal_is_visible_before_validation_failure() {
+        let events = vec![
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read archetecture.md\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",1,0,null],[19,\"o\",\"workspace/Y\",1,0,null],[20,\"o\",\"workspace/V\",1,0,null],[21,\"x\",\"hello\",1,4096,null],[22,\"x\",\"time\",1,4096,null],[23,\"x\",\"sleep\",1,4096,null],[24,\"x\",\"status\",1,4096,null],[25,\"x\",\"help\",1,4096,null]]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":0},\"label\":\"agent/prompt\",\"selectors\":[18,19,20,21,22,23,24,25]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"accepted":false,"detail":"broker action fields do not match the offered authority kinds or ceilings","kind":"Validation","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":0},\"label\":\"agent/prompt\",\"selectors\":[18,19,20,21,22,23,24,25]}"}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].speaker, "Broker");
+        assert_eq!(
+            rows[0].body,
+            "Proposed: create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V])"
+        );
+        assert_eq!(rows[1].speaker, "Kore");
+        assert!(rows[1].body.starts_with(
+            "Denied: create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V])"
+        ));
+        assert!(rows[1].body.contains("do not match"));
     }
 
     #[test]

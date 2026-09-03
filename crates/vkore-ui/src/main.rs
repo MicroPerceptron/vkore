@@ -427,6 +427,63 @@ fn session_work_rows(events: &[Value]) -> Vec<WorkRow> {
     rows
 }
 
+/// The surface a dialog sits on.
+///
+/// The system specifies a backdrop blur behind this fill. The display list
+/// carries no blur, so the surface composites flat at the same opacity;
+/// against the near-black page the difference is not visible.
+fn glass_surface() -> iced_widget::container::Style {
+    iced_widget::container::Style {
+        background: Some(Background::Color(theme::glass())),
+        border: Border {
+            color: theme::glass_border(),
+            width: 1.0,
+            radius: theme::RADIUS_GLASS.into(),
+        },
+        shadow: theme::no_shadow(),
+        ..Default::default()
+    }
+}
+
+/// A rule in the glass border colour, for a dialog's header and footer.
+fn glass_edge() -> iced_widget::container::Style {
+    let mut style = glass_surface();
+    style.background = None;
+    style.border.radius = 0.0.into();
+    style
+}
+
+/// A dialog header: a display title over a mono subtitle, and a way out.
+fn glass_header<'a>(
+    title: &'static str,
+    subtitle: &'static str,
+    close: Option<Message>,
+) -> UiElement<'a> {
+    let mut heading = row![
+        column![
+            widgets::display(title),
+            widgets::mono(subtitle, theme::TEXT_MUTED),
+        ]
+        .spacing(theme::SPACE_1)
+        .width(Length::Fill)
+    ]
+    .align_y(alignment::Vertical::Center);
+    if let Some(close) = close {
+        heading = heading.push(
+            button(widgets::label("x", theme::TEXT_MUTED))
+                .height(26)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Ghost))
+                .on_press(close),
+        );
+    }
+    container(heading)
+        .padding([14, 20])
+        .width(Length::Fill)
+        .style(|_| glass_edge())
+        .into()
+}
+
 /// A panel carrying a single hairline rule on one edge.
 ///
 /// The display list has no per-edge border width, so the rule is drawn as a
@@ -1444,11 +1501,10 @@ impl Model {
     fn modal_layer<'a>(&self, content: UiElement<'a>) -> UiElement<'a> {
         container(content)
             .center(Length::Fill)
+            .padding(32)
             .style(|_| {
                 let mut overlay = theme::panel(theme::BACKGROUND, None, 0.0);
-                if let Some(Background::Color(color)) = overlay.background.as_mut() {
-                    color.a = 0.86;
-                }
+                overlay.background = Some(Background::Color(theme::scrim()));
                 overlay
             })
             .into()
@@ -2152,10 +2208,18 @@ impl Model {
         };
         let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
             let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
-            button(text(label).size(12))
-                .padding([8, 10])
-                .style(widgets::button_style(widgets::Button::Row(selected)))
-                .on_press(Message::WizardChoice(pointer, option))
+            button(widgets::label(
+                label,
+                if selected {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_MUTED
+                },
+            ))
+            .height(30)
+            .padding([0, 12])
+            .style(widgets::button_style(widgets::Button::Choice(selected)))
+            .on_press(Message::WizardChoice(pointer, option))
         };
 
         let page: UiElement<'_> = match self.wizard_page {
@@ -2429,124 +2493,164 @@ impl Model {
             }
         };
 
-        let mut steps = row![].spacing(4);
-        for index in 0..5 {
-            let done = index <= usize::from(self.wizard_page);
+        // The strip names each step and says where the reader is, rather
+        // than showing five anonymous rules.
+        const STEPS: [&str; 5] = [
+            "01 workspace",
+            "02 runtime",
+            "03 add-ons",
+            "04 policy",
+            "05 review",
+        ];
+        let mut steps = row![].spacing(6);
+        for (index, label) in STEPS.iter().enumerate() {
+            let position = match index.cmp(&usize::from(self.wizard_page)) {
+                core::cmp::Ordering::Equal => widgets::Step::Current,
+                core::cmp::Ordering::Less => widgets::Step::Complete,
+                core::cmp::Ordering::Greater => widgets::Step::Upcoming,
+            };
             steps = steps.push(
-                container(space::Space::new().height(1).width(Length::Fill)).style(move |_| {
-                    theme::panel(if done { theme::MAGENTA } else { theme::BORDER }, None, 0.0)
-                }),
+                button(widgets::label(
+                    label,
+                    match position {
+                        widgets::Step::Current => theme::TEXT,
+                        widgets::Step::Complete => theme::TEXT_SECONDARY,
+                        widgets::Step::Upcoming => theme::TEXT_MUTED,
+                    },
+                ))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(widgets::button_style(widgets::Button::Step(position)))
+                .on_press(Message::WizardPage(index as u8)),
             );
         }
-        let back = button(text("Back").size(12))
-            .padding([8, 11])
+        let back = button(widgets::label("Back", theme::TEXT_SECONDARY))
+            .height(30)
+            .padding([0, 12])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
         let next: UiElement<'_> = if self.wizard_page < 4 {
-            button(text("Next").size(12))
-                .padding([8, 13])
+            button(widgets::label("Next", theme::MAGENTA))
+                .height(30)
+                .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Primary))
                 .on_press(Message::WizardPage(self.wizard_page + 1))
                 .into()
         } else {
             row![
-                button(text("Run preflight").size(12))
-                    .padding([8, 11])
+                button(widgets::label("Run preflight", theme::TEXT_SECONDARY))
+                    .height(30)
+                    .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Secondary))
                     .on_press_maybe((!self.busy).then_some(Message::Preflight)),
-                button(text("Save project").size(12))
-                    .padding([8, 13])
+                // Saving stays closed until a preflight has actually run.
+                button(widgets::label("Save project", theme::MAGENTA))
+                    .height(30)
+                    .padding([0, 14])
                     .style(widgets::button_style(widgets::Button::Primary))
                     .on_press_maybe(
                         (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
                     ),
             ]
-            .spacing(8)
+            .spacing(theme::SPACE_2)
             .into()
         };
         let dialog = column![
-            text("Project configuration")
-                .size(22)
-                .color(theme::rgb(theme::TEXT)),
-            text("Portable vKore schema · credentials and capabilities are never stored here.")
-                .size(11)
-                .color(theme::rgb(theme::TEXT_MUTED)),
-            steps,
-            scrollable(page).height(Length::Fill),
+            glass_header(
+                "Project configuration",
+                "portable vkore schema · no credentials or capabilities are stored here",
+                Some(Message::CloseEditor),
+            ),
+            container(steps).padding(iced_core::Padding {
+                top: 14.0,
+                right: 20.0,
+                bottom: 0.0,
+                left: 20.0,
+            }),
+            container(scrollable(page).height(Length::Fill)).padding(20),
             container(
                 row![
-                    button(text("Cancel").size(12))
-                        .padding([8, 11])
-                        .style(widgets::button_style(widgets::Button::Danger))
+                    button(widgets::label("Cancel", theme::TEXT_MUTED))
+                        .height(30)
+                        .padding([0, 12])
+                        .style(widgets::button_style(widgets::Button::Ghost))
                         .on_press(Message::CloseEditor),
                     space::horizontal(),
                     back,
                     next,
                 ]
-                .spacing(8)
+                .spacing(theme::SPACE_2)
                 .align_y(alignment::Vertical::Center),
             )
-            .padding(iced_core::Padding {
-                top: 16.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0
-            })
+            .padding([14, 20])
             .width(Length::Fill)
-            .style(|_| divider_right(0x11151a)),
-        ]
-        .spacing(12);
+            .style(|_| glass_edge()),
+        ];
         container(dialog)
-            .padding(22)
             .width(760)
             .height(Length::FillPortion(9))
-            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_MD))
+            .style(|_| glass_surface())
             .into()
     }
 
     fn approval_panel(&self) -> UiElement<'_> {
         let request = self.approval.as_ref().unwrap_or(&Value::Null);
-        container(
-            column![
-                text("Review exact authority")
-                    .size(22)
-                    .color(theme::rgb(theme::TEXT)),
-                text(
-                    request["effect_summary"]
-                        .as_str()
-                        .unwrap_or("The add-on requests a bounded tool ceiling.")
-                )
-                .size(12)
-                .color(theme::rgb(theme::WARNING)),
-                container(
-                    text(serde_json::to_string_pretty(request).unwrap_or_default())
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_SECONDARY)),
-                )
-                .padding(11)
-                .style(|_| theme::panel(
-                    theme::BACKGROUND,
-                    Some(theme::BORDER),
-                    theme::RADIUS_SM
-                )),
+        container(column![
+            glass_header("Review exact authority", "", None),
+            container(
+                column![
+                    widgets::body(
+                        request["effect_summary"]
+                            .as_str()
+                            .unwrap_or("The add-on requests a bounded tool ceiling.")
+                            .to_owned(),
+                        theme::SIZE_SM,
+                        theme::WARNING,
+                    ),
+                    container(widgets::mono(
+                        serde_json::to_string_pretty(request).unwrap_or_default(),
+                        theme::TEXT_SECONDARY,
+                    ))
+                    .padding(11)
+                    .width(Length::Fill)
+                    .style(|_| theme::panel(
+                        theme::BACKGROUND,
+                        Some(theme::BORDER),
+                        theme::RADIUS_MD
+                    )),
+                    // The dialog says plainly where it came from: a model or a
+                    // transcript cannot put this in front of the reader.
+                    widgets::mono(
+                        "Authenticated user action. Model or transcript text cannot create this dialog.",
+                        theme::TEXT_MUTED,
+                    ),
+                ]
+                .spacing(theme::SPACE_2)
+            )
+            .padding(20),
+            container(
                 row![
-                    button(text("Deny").size(12))
-                        .padding([8, 11])
+                    button(widgets::label("Deny", theme::ERROR))
+                        .height(30)
+                        .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(Message::DecideApproval(false)),
                     space::horizontal(),
-                    button(text("Allow once").size(12))
-                        .padding([8, 13])
+                    button(widgets::label("Allow once", theme::MAGENTA))
+                        .height(30)
+                        .padding([0, 14])
                         .style(widgets::button_style(widgets::Button::Primary))
                         .on_press(Message::DecideApproval(true)),
                 ]
-                .spacing(8)
-            ]
-            .spacing(14),
-        )
-        .padding(24)
+                .spacing(theme::SPACE_2)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding([14, 20])
+            .width(Length::Fill)
+            .style(|_| glass_edge()),
+        ])
         .width(620)
-        .style(|_| theme::panel(theme::PANEL, Some(theme::WARNING), theme::RADIUS_MD))
+        .style(|_| glass_surface())
         .into()
     }
 }
@@ -3054,6 +3158,12 @@ mod tests {
                 "filesystem" => View::Filesystem,
                 _ => View::Session,
             };
+        }
+        if std::env::var("VKORE_UI_WIZARD").is_ok() {
+            model.update(Message::EditProject);
+            if let Ok(page) = std::env::var("VKORE_UI_WIZARD_PAGE") {
+                model.wizard_page = page.parse().unwrap_or(0);
+            }
         }
         if let Ok(selected) = std::env::var("VKORE_UI_SELECT") {
             model.topology.selected = Some(selected);

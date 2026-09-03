@@ -529,17 +529,65 @@ enum AgentTarget {
     PromptY,
 }
 
-fn inspection_tool_index(label: &str) -> Option<usize> {
-    ["ls", "find", "stat", "cat"]
-        .iter()
-        .position(|candidate| *candidate == label)
+fn useful_tool_index(label: &str) -> Option<usize> {
+    [
+        "ls",
+        "find",
+        "stat",
+        "cat",
+        "read-range",
+        "write",
+        "write-at",
+        "replace-range",
+        "truncate",
+        "mkdir",
+        "mv",
+        "rm",
+    ]
+    .iter()
+    .position(|candidate| *candidate == label)
 }
 
-fn require_inspection_tools(tools: [Option<[u8; 16]>; 4]) -> Result<[[u8; 16]; 4], BackendError> {
-    let [Some(ls), Some(find), Some(stat), Some(cat)] = tools else {
-        return Err(BackendError::InvalidEncoding);
+fn editing_intent(intent: &str) -> bool {
+    intent
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "edit" | "write" | "change" | "modify" | "refactor"
+            )
+        })
+}
+
+fn select_tools(
+    intent: &str,
+    tools: [Option<[u8; 16]>; 12],
+) -> Result<([[u8; 16]; kore_hostlink::AGENT_TOOLS_MAX], u8), BackendError> {
+    let requested: &[usize] = if editing_intent(intent) {
+        &[1, 4, 7, 8]
+    } else if intent
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "find" | "search" | "locate"
+            )
+        })
+    {
+        &[1, 3]
+    } else if intent
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| matches!(word.to_ascii_lowercase().as_str(), "list" | "directory"))
+    {
+        &[0, 2]
+    } else {
+        &[3]
     };
-    Ok([ls, find, stat, cat])
+    let mut selected = [[0; 16]; kore_hostlink::AGENT_TOOLS_MAX];
+    for (at, index) in requested.iter().copied().enumerate() {
+        selected[at] = tools[index].ok_or(BackendError::InvalidEncoding)?;
+    }
+    Ok((selected, requested.len() as u8))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -552,7 +600,8 @@ enum BrokerPending {
     Create {
         plan: [u8; 16],
         object: [u8; 16],
-        executables: [[u8; 16]; 4],
+        executables: [[u8; 16]; kore_hostlink::AGENT_TOOLS_MAX],
+        executable_count: u8,
         budget: TaskBudget,
     },
     GrantObject {
@@ -698,15 +747,13 @@ impl DeterministicBackend {
                     plan,
                     object,
                     executables,
+                    executable_count,
                     budget,
                 } => {
-                    let selectors = [
-                        executables[0],
-                        executables[1],
-                        executables[2],
-                        executables[3],
-                        object,
-                    ];
+                    let mut selectors = [[0; 16]; kore_hostlink::BROKER_SELECTORS_MAX];
+                    let tool_count = usize::from(executable_count);
+                    selectors[..tool_count].copy_from_slice(&executables[..tool_count]);
+                    selectors[tool_count] = object;
                     BrokerPlanningReply {
                         plan,
                         action: BrokerActionKind::CreateAgent,
@@ -717,7 +764,7 @@ impl DeterministicBackend {
                         limit: 0,
                         reason: 0,
                         label: "agent/prompt",
-                        selectors: &selectors,
+                        selectors: &selectors[..tool_count + 1],
                     }
                     .encode(&mut wire)
                 }
@@ -1016,21 +1063,19 @@ impl InferenceBackend for DeterministicBackend {
             }
             let mut object = None;
             let mut fallback_object = None;
+            let mut workspace_view = None;
             let mut executable = None;
             let mut hello_executable = None;
-            let mut inspection_executables = [None; 4];
+            let mut useful_executables = [None; 12];
             let mut view = None;
             let mut agent = None;
             for offer in planning.offers() {
                 if offer.kind == BrokerOfferKind::Executable
                     && offer.permitted_ops != 0
                     && offer.max_uses != 0
-                    && let Some(index) = inspection_tool_index(offer.label)
+                    && let Some(index) = useful_tool_index(offer.label)
                 {
-                    if inspection_executables[index]
-                        .replace(offer.reference)
-                        .is_some()
-                    {
+                    if useful_executables[index].replace(offer.reference).is_some() {
                         return Err(BackendError::InvalidEncoding);
                     }
                 }
@@ -1053,6 +1098,13 @@ impl InferenceBackend for DeterministicBackend {
                         if offer.permitted_ops & 1 != 0 =>
                     {
                         if fallback_object.replace(offer.reference).is_some() {
+                            return Err(BackendError::InvalidEncoding);
+                        }
+                    }
+                    (_, BrokerOfferKind::View, "workspace/root")
+                        if offer.permitted_ops & 1 != 0 =>
+                    {
+                        if workspace_view.replace(offer.reference).is_some() {
                             return Err(BackendError::InvalidEncoding);
                         }
                     }
@@ -1120,12 +1172,17 @@ impl InferenceBackend for DeterministicBackend {
                         ..planning.ceiling
                     },
                 },
-                "read X" => BrokerPending::Create {
-                    plan: planning.plan,
-                    object: object.ok_or(BackendError::InvalidEncoding)?,
-                    executables: require_inspection_tools(inspection_executables)?,
-                    budget: planning.ceiling,
-                },
+                "read X" => {
+                    let (executables, executable_count) =
+                        select_tools(planning.intent, useful_executables)?;
+                    BrokerPending::Create {
+                        plan: planning.plan,
+                        object: object.ok_or(BackendError::InvalidEncoding)?,
+                        executables,
+                        executable_count,
+                        budget: planning.ceiling,
+                    }
+                }
                 "read Y" => BrokerPending::GrantObject {
                     plan: planning.plan,
                     agent: agent.ok_or(BackendError::InvalidEncoding)?,
@@ -1155,12 +1212,21 @@ impl InferenceBackend for DeterministicBackend {
                     plan: planning.plan,
                     agent: agent.ok_or(BackendError::InvalidEncoding)?,
                 },
-                _ => BrokerPending::Create {
-                    plan: planning.plan,
-                    object: fallback_object.ok_or(BackendError::InvalidEncoding)?,
-                    executables: require_inspection_tools(inspection_executables)?,
-                    budget: planning.ceiling,
-                },
+                _ => {
+                    let (executables, executable_count) =
+                        select_tools(planning.intent, useful_executables)?;
+                    BrokerPending::Create {
+                        plan: planning.plan,
+                        object: if editing_intent(planning.intent) {
+                            workspace_view.ok_or(BackendError::InvalidEncoding)?
+                        } else {
+                            fallback_object.ok_or(BackendError::InvalidEncoding)?
+                        },
+                        executables,
+                        executable_count,
+                        budget: planning.ceiling,
+                    }
+                }
             })
         } else {
             None

@@ -385,7 +385,7 @@ fn supervised_llama_preserves_the_exact_legacy_kore_boot_probe() {
 }
 
 #[test]
-fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
+fn full_production_catalog_reaches_the_model_and_is_narrowed_by_its_plan() {
     const OBJECTS: [&str; 21] = [
         "workspace/identity",
         "workspace/README.md",
@@ -409,7 +409,7 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
         "workspace/Y",
         "workspace/V",
     ];
-    const EXECUTABLES: [&str; 23] = [
+    const EXECUTABLES: [&str; 27] = [
         "hello",
         "time",
         "sleep",
@@ -421,8 +421,12 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
         "ls",
         "stat",
         "cat",
+        "read-range",
         "workspace-check",
         "write",
+        "write-at",
+        "replace-range",
+        "truncate",
         "mkdir",
         "touch",
         "mv",
@@ -456,6 +460,14 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
             label,
         });
     }
+    let workspace_root = [0xf0; 16];
+    offers.push(BrokerOffer {
+        reference: workspace_root,
+        kind: BrokerOfferKind::View,
+        permitted_ops: 7,
+        max_uses: 0,
+        label: "workspace/root",
+    });
     let mut inner = [0; kore_hostlink::INFERENCE_INPUT_MAX];
     let inner_len = TaskIntentRequest {
         plan: [0x61; 16],
@@ -520,16 +532,7 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
                 let reply = decode_broker_reply(&payload).unwrap();
                 assert_eq!(reply.action, BrokerActionKind::CreateAgent);
                 let selected = reply.selectors().collect::<Vec<_>>();
-                assert_eq!(
-                    selected,
-                    vec![
-                        references[29],
-                        references[39],
-                        references[30],
-                        references[31],
-                        references[2],
-                    ]
-                );
+                assert_eq!(selected, vec![references[31], references[2]]);
                 let prompts: Vec<_> = std::iter::from_fn(|| backend.take_observation())
                     .filter(|event| event.kind == ObservationKind::ModelPrompt)
                     .collect();
@@ -539,21 +542,22 @@ fn full_production_catalog_is_bounded_and_narrowed_before_model_inference() {
                         .payload
                         .contains("workspace/docs-architecture.md")
                 );
-                for tool in ["ls", "find", "stat", "cat"] {
+                for tool in ["ls", "find", "stat", "cat", "write-at", "truncate"] {
                     assert!(prompts[0].payload.contains(&format!("\"{tool}\"")));
                 }
                 assert!(
                     prompts[0]
                         .payload
-                        .contains("\"required_selector_indices\":[29,39,30,31,2]")
+                        .contains("\"required_resource_indices\":[2]")
                 );
                 assert!(
-                    !prompts[0]
+                    prompts[0]
                         .payload
                         .contains("workspace/secrets-credentials.txt")
                 );
-                assert!(!prompts[0].payload.contains("workspace/identity"));
-                assert!(!prompts[0].payload.contains("\"write\""));
+                assert!(prompts[0].payload.contains("workspace/identity"));
+                assert!(prompts[0].payload.contains("workspace/root"));
+                assert!(prompts[0].payload.contains("\"write\""));
                 return;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("raw broker JSON escaped KBR1"),

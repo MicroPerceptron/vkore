@@ -5,12 +5,14 @@ mod splash;
 mod theme;
 mod topology;
 mod transcript;
+mod writing;
 
 use crate::topology::{filesystem, inspector, layout, model, view};
 use crate::transcript::{
     AssistantBlock, InlineMarkdownHighlighter, assistant_blocks, inline_markdown_format,
     user_message_width,
 };
+use crate::writing::{WritingIssue, WritingSuggestion};
 mod widgets;
 
 use axgfx::Extent2d;
@@ -23,7 +25,8 @@ use iced_core::{
 };
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_widget::{
-    button, column, container, row, scrollable, space, stack, text, text_editor, text_input,
+    button, column, container, mouse_area, rich_text, row, scrollable, space, span, stack, text,
+    text_editor, text_input,
 };
 use iced_winit::{conversion, winit};
 use serde_json::{Value, json};
@@ -35,6 +38,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     num::NonZeroU32,
     rc::Rc,
+    sync::Arc,
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -57,8 +61,10 @@ type UiElement<'a> = Element<'a, Message, Theme, AxUi>;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const COPY_FEEDBACK_LIFETIME: Duration = Duration::from_millis(1800);
 
 fn native_renderer() -> AxRenderer<System> {
+    fonts::register().expect("register bundled vKore fonts");
     AxRenderer::new_in(renderer::Settings::default(), System)
 }
 
@@ -82,6 +88,12 @@ enum Message {
     CleanSession,
     PromptAction(iced_core::text::editor::Action),
     SelectText(String, iced_core::text::editor::Action),
+    OpenSelectionMenu(String),
+    CloseSelectionMenu,
+    CopySelection(String),
+    CopyResponse(String),
+    NextWritingIssue,
+    ApplyWritingSuggestion(usize),
     SendPrompt,
     CancelPrompt,
     ToggleWorking(String),
@@ -156,6 +168,26 @@ struct WorkOutput {
     summary: String,
     body: String,
     failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CopyTarget {
+    Selection,
+    Response(String),
+}
+
+#[derive(Debug)]
+struct ClipboardRequest {
+    text: String,
+    target: CopyTarget,
+}
+
+#[derive(Debug)]
+struct CopyFeedback {
+    target: CopyTarget,
+    message: String,
+    failed: bool,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -502,6 +534,20 @@ fn work_output(result: &Value) -> WorkOutput {
 fn work_output_height(text: &str) -> f32 {
     let lines = text.lines().count().max(1) as f32;
     (lines * 19.2 + 16.0).clamp(35.2, 180.0)
+}
+
+fn char_position(text: &str, offset: usize) -> iced_core::text::Position {
+    let mut line = 0;
+    let mut index = 0;
+    for character in text.chars().take(offset) {
+        if character == '\n' {
+            line += 1;
+            index = 0;
+        } else {
+            index += character.len_utf8();
+        }
+    }
+    iced_core::text::Position { line, index }
 }
 
 fn capability_row(event: &Value) -> WorkRow {
@@ -920,6 +966,7 @@ struct Request {
 enum UserEvent {
     Response(RequestKind, Result<ApiResponse, String>),
     Poll(Result<Vec<Value>, String>),
+    Clipboard(iced_core::clipboard::Event, Option<CopyTarget>),
 }
 
 #[derive(Debug)]
@@ -1042,6 +1089,11 @@ struct Model {
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
     assistant_blocks: BTreeMap<String, Vec<AssistantBlock>>,
+    selection_menu: Option<String>,
+    clipboard_request: Option<ClipboardRequest>,
+    copy_feedback: Option<CopyFeedback>,
+    writing_issues: Vec<WritingIssue>,
+    active_writing_issue: Option<usize>,
     expanded_work: BTreeSet<String>,
     expanded_outputs: BTreeSet<String>,
     view: View,
@@ -1085,6 +1137,11 @@ impl Model {
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
             assistant_blocks: BTreeMap::new(),
+            selection_menu: None,
+            clipboard_request: None,
+            copy_feedback: None,
+            writing_issues: Vec::new(),
+            active_writing_issue: None,
             expanded_work: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
             view: View::Session,
@@ -1331,7 +1388,13 @@ impl Model {
                     self.update(Message::ToggleSession);
                 }
             }
-            Message::PromptAction(action) => self.prompt.perform(action),
+            Message::PromptAction(action) => {
+                let edited = action.is_edit();
+                self.prompt.perform(action);
+                if edited {
+                    self.refresh_writing_issues();
+                }
+            }
             Message::SelectText(key, action) => {
                 if !action.is_edit()
                     && let Some(content) = self.selectable_text.get_mut(&key)
@@ -1339,6 +1402,44 @@ impl Model {
                     content.perform(action);
                 }
             }
+            Message::OpenSelectionMenu(key) => {
+                self.selection_menu = self
+                    .selectable_text
+                    .get(&key)
+                    .and_then(text_editor::Content::selection)
+                    .filter(|selection| !selection.is_empty())
+                    .map(|_| key);
+            }
+            Message::CloseSelectionMenu => self.selection_menu = None,
+            Message::CopySelection(key) => {
+                if let Some(text) = self
+                    .selectable_text
+                    .get(&key)
+                    .and_then(text_editor::Content::selection)
+                    .filter(|selection| !selection.is_empty())
+                {
+                    self.clipboard_request = Some(ClipboardRequest {
+                        text,
+                        target: CopyTarget::Selection,
+                    });
+                }
+                self.selection_menu = None;
+            }
+            Message::CopyResponse(prompt_id) => {
+                if let Some(text) = self.response_text(&prompt_id) {
+                    self.clipboard_request = Some(ClipboardRequest {
+                        text,
+                        target: CopyTarget::Response(prompt_id),
+                    });
+                }
+            }
+            Message::NextWritingIssue => {
+                self.active_writing_issue = (!self.writing_issues.is_empty()).then(|| {
+                    self.active_writing_issue
+                        .map_or(0, |index| (index + 1) % self.writing_issues.len())
+                });
+            }
+            Message::ApplyWritingSuggestion(index) => self.apply_writing_suggestion(index),
             Message::SendPrompt => self.send_prompt(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
@@ -1602,6 +1703,108 @@ impl Model {
             })),
         });
         self.prompt = text_editor::Content::new();
+        self.writing_issues.clear();
+        self.active_writing_issue = None;
+    }
+
+    fn refresh_writing_issues(&mut self) {
+        self.writing_issues = writing::check(&self.prompt.text());
+        self.active_writing_issue = match self.active_writing_issue {
+            Some(index) if !self.writing_issues.is_empty() => {
+                Some(index.min(self.writing_issues.len() - 1))
+            }
+            _ => (!self.writing_issues.is_empty()).then_some(0),
+        };
+    }
+
+    fn apply_writing_suggestion(&mut self, suggestion_index: usize) {
+        let Some(issue_index) = self.active_writing_issue else {
+            return;
+        };
+        let Some(issue) = self.writing_issues.get(issue_index).cloned() else {
+            return;
+        };
+        let Some(suggestion) = issue.suggestions.get(suggestion_index) else {
+            return;
+        };
+        let text = self.prompt.text();
+        let start = char_position(&text, issue.start);
+        let end = char_position(&text, issue.end);
+        match suggestion {
+            WritingSuggestion::Replace(replacement) => {
+                self.prompt.move_to(iced_core::text::editor::Cursor {
+                    position: end,
+                    selection: Some(start),
+                });
+                self.prompt.perform(iced_core::text::editor::Action::Edit(
+                    iced_core::text::editor::Edit::Paste(Arc::new(replacement.clone())),
+                ));
+            }
+            WritingSuggestion::InsertAfter(inserted) => {
+                self.prompt.move_to(iced_core::text::editor::Cursor {
+                    position: end,
+                    selection: None,
+                });
+                self.prompt.perform(iced_core::text::editor::Action::Edit(
+                    iced_core::text::editor::Edit::Paste(Arc::new(inserted.clone())),
+                ));
+            }
+            WritingSuggestion::Remove => {
+                self.prompt.move_to(iced_core::text::editor::Cursor {
+                    position: end,
+                    selection: Some(start),
+                });
+                self.prompt.perform(iced_core::text::editor::Action::Edit(
+                    iced_core::text::editor::Edit::Backspace,
+                ));
+            }
+        }
+        self.refresh_writing_issues();
+    }
+
+    fn response_text(&self, prompt_id: &str) -> Option<String> {
+        self.events
+            .iter()
+            .find(|event| {
+                event["prompt_id"].as_str() == Some(prompt_id)
+                    && event["kind"] == "assistant"
+                    && event["public"].as_bool().unwrap_or(false)
+            })
+            .and_then(|event| event["payload"]["text"].as_str())
+            .map(str::to_owned)
+    }
+
+    fn take_clipboard_request(&mut self) -> Option<ClipboardRequest> {
+        self.clipboard_request.take()
+    }
+
+    fn clipboard_finished(&mut self, target: CopyTarget, result: Result<(), String>) {
+        let (message, failed) = match result {
+            Ok(()) => (
+                match target {
+                    CopyTarget::Selection => "Selection copied".into(),
+                    CopyTarget::Response(_) => "Response copied".into(),
+                },
+                false,
+            ),
+            Err(error) => (format!("Could not copy: {error}"), true),
+        };
+        self.copy_feedback = Some(CopyFeedback {
+            target,
+            message,
+            failed,
+            expires_at: Instant::now() + COPY_FEEDBACK_LIFETIME,
+        });
+    }
+
+    fn expire_copy_feedback(&mut self) {
+        if self
+            .copy_feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.expires_at <= Instant::now())
+        {
+            self.copy_feedback = None;
+        }
     }
 
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
@@ -1887,19 +2090,19 @@ impl Model {
         face: iced_core::Font,
         line_height: f32,
     ) -> UiElement<'a> {
-        let key_owned = key.to_owned();
+        let action_key = key.to_owned();
         let content = self
             .selectable_text
             .get(key)
             .expect("selectable conversation text must be synchronized");
-        text_editor(content)
-            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+        let editor = text_editor(content)
+            .on_action(move |action| Message::SelectText(action_key.clone(), action))
             .padding(0)
             .size(size)
             .line_height(iced_core::text::LineHeight::Relative(line_height))
             .font(face)
-            .style(widgets::selectable(color))
-            .into()
+            .style(widgets::selectable(color));
+        self.selection_surface(key, editor.into())
     }
 
     fn selectable_width<'a>(
@@ -1910,20 +2113,20 @@ impl Model {
         color: u32,
         face: iced_core::Font,
     ) -> UiElement<'a> {
-        let key_owned = key.to_owned();
+        let action_key = key.to_owned();
         let content = self
             .selectable_text
             .get(key)
             .expect("selectable conversation text must be synchronized");
-        text_editor(content)
-            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+        let editor = text_editor(content)
+            .on_action(move |action| Message::SelectText(action_key.clone(), action))
             .padding(0)
             .width(width)
             .size(size)
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .font(face)
-            .style(widgets::selectable(color))
-            .into()
+            .style(widgets::selectable(color));
+        self.selection_surface(key, editor.into())
     }
 
     fn selectable_markdown<'a>(
@@ -1933,20 +2136,58 @@ impl Model {
         color: u32,
         face: iced_core::Font,
     ) -> UiElement<'a> {
-        let key_owned = key.to_owned();
+        let action_key = key.to_owned();
         let content = self
             .selectable_text
             .get(key)
             .expect("selectable conversation text must be synchronized");
-        text_editor(content)
-            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+        let editor = text_editor(content)
+            .on_action(move |action| Message::SelectText(action_key.clone(), action))
             .padding(0)
             .size(size)
             .line_height(iced_core::text::LineHeight::Relative(1.7))
             .font(face)
             .highlight_with::<InlineMarkdownHighlighter>((), inline_markdown_format)
-            .style(widgets::selectable(color))
-            .into()
+            .style(widgets::selectable(color));
+        self.selection_surface(key, editor.into())
+    }
+
+    fn selection_surface<'a>(&'a self, key: &str, editor: UiElement<'a>) -> UiElement<'a> {
+        let body: UiElement<'a> = mouse_area(editor)
+            .on_right_press(Message::OpenSelectionMenu(key.to_owned()))
+            .into();
+        if self.selection_menu.as_deref() != Some(key)
+            || self
+                .selectable_text
+                .get(key)
+                .and_then(text_editor::Content::selection)
+                .is_none_or(|selection| selection.is_empty())
+        {
+            return body;
+        }
+        let actions = row![
+            button(widgets::control("Copy selection"))
+                .height(28)
+                .padding([5, 9])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(Message::CopySelection(key.to_owned())),
+            button(widgets::control("Close"))
+                .height(28)
+                .padding([5, 9])
+                .style(widgets::button_style(widgets::Button::Ghost))
+                .on_press(Message::CloseSelectionMenu),
+        ]
+        .spacing(theme::SPACE_1);
+        column![
+            body,
+            container(actions).padding(6).style(|_| theme::panel(
+                theme::PANEL,
+                Some(theme::BORDER),
+                theme::RADIUS_SM
+            ))
+        ]
+        .spacing(theme::SPACE_1)
+        .into()
     }
 
     fn apply_picker(&mut self, kind: RequestKind, path: &str) {
@@ -2521,7 +2762,37 @@ impl Model {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) && let Some(blocks) = self.assistant_blocks.get(prompt_id)
                 {
-                    let mut response_blocks = column![].spacing(theme::SPACE_4);
+                    let response_feedback = self.copy_feedback.as_ref().filter(|feedback| {
+                        feedback.target == CopyTarget::Response(prompt_id.to_owned())
+                    });
+                    let copy_label = response_feedback
+                        .filter(|feedback| !feedback.failed)
+                        .map_or("Copy response", |_| "Copied");
+                    let mut response_header = row![
+                        space::horizontal(),
+                        button(widgets::control(copy_label))
+                            .height(28)
+                            .padding([4, 8])
+                            .style(widgets::button_style(widgets::Button::Ghost))
+                            .on_press(Message::CopyResponse(prompt_id.to_owned())),
+                    ]
+                    .align_y(alignment::Vertical::Center);
+                    if let Some(feedback) = response_feedback.filter(|feedback| feedback.failed) {
+                        response_header = row![
+                            text(feedback.message.clone())
+                                .font(fonts::BODY)
+                                .size(theme::SIZE_MONO)
+                                .color(theme::rgb(theme::ERROR)),
+                            space::horizontal(),
+                            button(widgets::control("Retry copy"))
+                                .height(28)
+                                .padding([4, 8])
+                                .style(widgets::button_style(widgets::Button::Ghost))
+                                .on_press(Message::CopyResponse(prompt_id.to_owned())),
+                        ]
+                        .align_y(alignment::Vertical::Center);
+                    }
+                    let mut response_blocks = column![response_header].spacing(theme::SPACE_4);
                     for (index, block) in blocks.iter().enumerate() {
                         let key = format!("prompt:{prompt_id}:assistant:{index}");
                         let element: UiElement<'_> = match block {
@@ -2653,6 +2924,16 @@ impl Model {
                     Some(iced_core::text::editor::Binding::Custom(
                         Message::SendPrompt,
                     ))
+                } else if matches!(press.key, keyboard::Key::Named(keyboard::key::Named::F7)) {
+                    Some(iced_core::text::editor::Binding::Custom(
+                        Message::NextWritingIssue,
+                    ))
+                } else if matches!(&press.key, keyboard::Key::Character(value) if value == ".")
+                    && press.modifiers.command()
+                {
+                    Some(iced_core::text::editor::Binding::Custom(
+                        Message::ApplyWritingSuggestion(0),
+                    ))
                 } else {
                     iced_core::text::editor::Binding::from_key_press(press)
                 }
@@ -2663,31 +2944,155 @@ impl Model {
             .font(fonts::BODY)
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .style(widgets::composer_editor);
-        let composer = container(column![
-            prompt,
-            container(
+        let prompt: UiElement<'_> = if self.writing_issues.is_empty() {
+            prompt.into()
+        } else {
+            let chars = self.prompt.text().chars().collect::<Vec<_>>();
+            let mut spans: Vec<iced_core::text::Span<'_, ()>> = Vec::new();
+            let mut cursor = 0;
+            for issue in &self.writing_issues {
+                if cursor < issue.start {
+                    spans.push(
+                        span(chars[cursor..issue.start].iter().collect::<String>())
+                            .color(Color::TRANSPARENT),
+                    );
+                }
+                spans.push(
+                    span(chars[issue.start..issue.end].iter().collect::<String>())
+                        .color(theme::rgb(theme::ERROR))
+                        .underline(true),
+                );
+                cursor = issue.end;
+            }
+            if cursor < chars.len() {
+                spans.push(
+                    span(chars[cursor..].iter().collect::<String>()).color(Color::TRANSPARENT),
+                );
+            }
+            let underlines = container(
+                rich_text(spans)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .size(theme::SIZE_SM)
+                    .font(fonts::BODY)
+                    .line_height(iced_core::text::LineHeight::Relative(1.55)),
+            )
+            .padding([14, 16])
+            .width(Length::Fill)
+            .height(96)
+            .clip(true);
+            stack![prompt, underlines].height(96).into()
+        };
+
+        let mut composer_body = column![prompt];
+        if let Some(issue_index) = self.active_writing_issue
+            && let Some(issue) = self.writing_issues.get(issue_index)
+        {
+            let title = format!(
+                "{} · {} of {}",
+                issue.kind,
+                issue_index + 1,
+                self.writing_issues.len()
+            );
+            let mut suggestion_buttons = row![].spacing(theme::SPACE_1);
+            for (index, suggestion) in issue.suggestions.iter().enumerate() {
+                suggestion_buttons = suggestion_buttons.push(
+                    button(widgets::control(suggestion.label()))
+                        .height(28)
+                        .padding([5, 9])
+                        .style(widgets::button_style(widgets::Button::Secondary))
+                        .on_press(Message::ApplyWritingSuggestion(index)),
+                );
+            }
+            if self.writing_issues.len() > 1 {
+                suggestion_buttons = suggestion_buttons.push(
+                    button(widgets::control("Next · F7"))
+                        .height(28)
+                        .padding([5, 9])
+                        .style(widgets::button_style(widgets::Button::Ghost))
+                        .on_press(Message::NextWritingIssue),
+                );
+            }
+            let details: UiElement<'_> = if viewport.width <= 720.0 {
+                column![
+                    widgets::label(title, theme::ERROR),
+                    text(issue.message.clone())
+                        .font(fonts::BODY)
+                        .size(theme::SIZE_MONO)
+                        .color(theme::rgb(theme::TEXT_SECONDARY)),
+                    scrollable(suggestion_buttons)
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::hidden()
+                        ))
+                        .style(widgets::hidden_scrollbar),
+                ]
+                .spacing(theme::SPACE_1)
+                .into()
+            } else {
                 row![
-                    space::horizontal(),
-                    container(widgets::mono(access, theme::TEXT_MUTED))
-                        .padding([3, 8])
-                        .style(|_| theme::panel(
-                            theme::BACKGROUND,
-                            Some(theme::BORDER),
-                            theme::RADIUS_SM
-                        )),
-                    send,
+                    column![
+                        widgets::label(title, theme::ERROR),
+                        text(issue.message.clone())
+                            .font(fonts::BODY)
+                            .size(theme::SIZE_MONO)
+                            .color(theme::rgb(theme::TEXT_SECONDARY)),
+                    ]
+                    .spacing(theme::SPACE_1)
+                    .width(Length::Fill),
+                    suggestion_buttons,
                 ]
                 .spacing(theme::SPACE_2)
                 .align_y(alignment::Vertical::Center)
-            )
-            .padding(iced_core::Padding {
-                top: 8.0,
-                right: 10.0,
-                bottom: 8.0,
-                left: 16.0,
-            })
-            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
-        ])
+                .into()
+            };
+            composer_body = composer_body.push(
+                container(details)
+                    .padding([8, 12])
+                    .width(Length::Fill)
+                    .style(|_| theme::panel(theme::BACKGROUND, None, 0.0)),
+            );
+        }
+
+        let feedback: UiElement<'_> = if let Some(feedback) = &self.copy_feedback {
+            text(feedback.message.clone())
+                .font(fonts::BODY)
+                .size(theme::SIZE_MONO)
+                .color(theme::rgb(if feedback.failed {
+                    theme::ERROR
+                } else {
+                    theme::TEXT_MUTED
+                }))
+                .into()
+        } else {
+            space::horizontal().into()
+        };
+        let composer = container(
+            composer_body.push(
+                container(
+                    row![
+                        feedback,
+                        space::horizontal(),
+                        container(widgets::mono(access, theme::TEXT_MUTED))
+                            .padding([3, 8])
+                            .style(|_| theme::panel(
+                                theme::BACKGROUND,
+                                Some(theme::BORDER),
+                                theme::RADIUS_SM
+                            )),
+                        send,
+                    ]
+                    .spacing(theme::SPACE_2)
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding(iced_core::Padding {
+                    top: 8.0,
+                    right: 10.0,
+                    bottom: 8.0,
+                    left: 16.0,
+                })
+                .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
+            ),
+        )
         .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
         let sidebar_width = if viewport.width <= 720.0 {
             0.0
@@ -3448,9 +3853,40 @@ struct App {
     redraw_requested: bool,
     last_frame: Option<Instant>,
     profile: bool,
+    clipboard: iced_winit::Clipboard,
+    proxy: EventLoopProxy<UserEvent>,
 }
 
 impl App {
+    fn fulfill_clipboard(&mut self, requests: iced_core::Clipboard) {
+        for kind in requests.reads {
+            let proxy = self.proxy.clone();
+            self.clipboard.read(kind, move |result| {
+                let _ = proxy.send_event(UserEvent::Clipboard(
+                    iced_core::clipboard::Event::Read(result.map(Arc::new)),
+                    None,
+                ));
+            });
+        }
+        if let Some(content) = requests.write {
+            self.write_clipboard(content, Some(CopyTarget::Selection));
+        }
+    }
+
+    fn write_clipboard(
+        &mut self,
+        content: impl Into<iced_core::clipboard::Content>,
+        target: Option<CopyTarget>,
+    ) {
+        let proxy = self.proxy.clone();
+        self.clipboard.write(content.into(), move |result| {
+            let _ = proxy.send_event(UserEvent::Clipboard(
+                iced_core::clipboard::Event::Written(result),
+                target,
+            ));
+        });
+    }
+
     fn process_events(&mut self, window: &Rc<Window>) {
         if self.events.is_empty() {
             return;
@@ -3473,6 +3909,10 @@ impl App {
             &mut self.renderer,
             &mut messages,
         );
+        let clipboard = match &state {
+            user_interface::State::Updated { clipboard, .. } => clipboard.clone(),
+            user_interface::State::Outdated => iced_core::Clipboard::new(),
+        };
         if let user_interface::State::Updated {
             mouse_interaction, ..
         } = state
@@ -3489,6 +3929,10 @@ impl App {
         for message in messages {
             self.model.update(message);
         }
+        self.fulfill_clipboard(clipboard);
+        if let Some(request) = self.model.take_clipboard_request() {
+            self.write_clipboard(request.text, Some(request.target));
+        }
         self.redraw = true;
     }
 
@@ -3497,6 +3941,7 @@ impl App {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        self.model.expire_copy_feedback();
         let record_started = Instant::now();
         let scale = window.scale_factor() as f32;
         self.renderer.hint(Scale {
@@ -3538,6 +3983,10 @@ impl App {
             &mut self.renderer,
             &mut messages,
         );
+        let clipboard = match &state {
+            user_interface::State::Updated { clipboard, .. } => clipboard.clone(),
+            user_interface::State::Outdated => iced_core::Clipboard::new(),
+        };
         let animate = matches!(
             state,
             user_interface::State::Updated {
@@ -3558,6 +4007,10 @@ impl App {
         for message in messages {
             self.model.update(message);
             model_changed = true;
+        }
+        self.fulfill_clipboard(clipboard);
+        if let Some(request) = self.model.take_clipboard_request() {
+            self.write_clipboard(request.text, Some(request.target));
         }
         let frame = self
             .renderer
@@ -3587,7 +4040,7 @@ impl App {
                     text_stats.glyphs,
                 );
             }
-            self.redraw = animate || model_changed;
+            self.redraw = animate || model_changed || self.model.copy_feedback.is_some();
             self.last_frame = Some(Instant::now());
             return Ok(());
         }
@@ -3627,7 +4080,7 @@ impl App {
                 render.scratch_high_water_pixels,
             );
         }
-        self.redraw = animate || model_changed;
+        self.redraw = animate || model_changed || self.model.copy_feedback.is_some();
         self.last_frame = Some(Instant::now());
         Ok(())
     }
@@ -3661,6 +4114,28 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Response(kind, result) => self.model.response(kind, result),
             UserEvent::Poll(result) => self.model.poll_result(result),
+            UserEvent::Clipboard(event, target) => {
+                if let (iced_core::clipboard::Event::Written(result), Some(target)) =
+                    (&event, target)
+                {
+                    self.model.clipboard_finished(
+                        target,
+                        result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|error| format!("{error:?}")),
+                    );
+                }
+                self.events.push(iced_core::Event::Clipboard(event));
+                if let Some(window) = self
+                    .surface
+                    .as_ref()
+                    .map(SoftSurface::window)
+                    .map(Rc::clone)
+                {
+                    self.process_events(&window);
+                }
+            }
         }
         self.redraw = true;
     }
@@ -3868,7 +4343,8 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("create event loop");
-    let network = Network::start(options.server, event_loop.create_proxy());
+    let proxy = event_loop.create_proxy();
+    let network = Network::start(options.server, proxy.clone());
     let context = SoftContext::new(event_loop.owned_display_handle())
         .expect("create software presentation context");
     let mut app = App {
@@ -3888,6 +4364,8 @@ fn main() {
         redraw_requested: false,
         last_frame: None,
         profile: std::env::var_os("VKORE_UI_PROFILE").is_some(),
+        clipboard: iced_winit::Clipboard::new(),
+        proxy,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
@@ -4338,6 +4816,8 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().expect("a control frame");
+            let text_errors = renderer.take_text_errors();
+            assert!(text_errors.is_empty(), "{text_errors:?}");
             let quad = frame.quads().first().expect("the button shape");
             let label = frame.glyph_runs().first().expect("the button label");
             let shape_center = quad.bounds.y + quad.bounds.height / 2.0;
@@ -4370,6 +4850,10 @@ mod tests {
         if std::env::var_os("VKORE_UI_EMPTY").is_some() {
             model.events.clear();
             model.selectable_text.clear();
+        }
+        if let Ok(prompt) = std::env::var("VKORE_UI_PROMPT") {
+            model.prompt = text_editor::Content::with_text(&prompt);
+            model.refresh_writing_issues();
         }
         if std::env::var_os("VKORE_UI_EXPAND_OUTPUTS").is_some() {
             model.expanded_outputs.extend(
@@ -4683,6 +5167,197 @@ mod tests {
     }
 
     #[test]
+    fn character_offsets_map_to_unicode_editor_positions() {
+        assert_eq!(
+            char_position("aé\n猫z", 4),
+            iced_core::text::Position { line: 1, index: 3 }
+        );
+    }
+
+    #[test]
+    fn selected_transcript_text_is_queued_exactly_for_copy() {
+        let mut model = populated_fixture_model();
+        let key = "copy-test".to_owned();
+        let mut content = text_editor::Content::with_text("alpha βeta gamma");
+        content.move_to(iced_core::text::editor::Cursor {
+            position: char_position("alpha βeta gamma", 10),
+            selection: Some(char_position("alpha βeta gamma", 6)),
+        });
+        model.selectable_text.insert(key.clone(), content);
+
+        model.update(Message::OpenSelectionMenu(key.clone()));
+        assert_eq!(model.selection_menu.as_deref(), Some(key.as_str()));
+        model.update(Message::CopySelection(key));
+
+        let request = model.take_clipboard_request().unwrap();
+        assert_eq!(request.text, "βeta");
+        assert_eq!(request.target, CopyTarget::Selection);
+        assert!(model.selection_menu.is_none());
+    }
+
+    #[test]
+    fn platform_copy_shortcut_emits_the_exact_editor_selection() {
+        let size = Size::new(320.0, 80.0);
+        let cursor = mouse::Cursor::Available(iced_core::Point::new(12.0, 12.0));
+        let mut renderer = native_renderer();
+        renderer.reset(iced_core::Rectangle::with_size(size));
+        let mut content = text_editor::Content::with_text("alpha βeta gamma");
+
+        let element: UiElement<'_> = text_editor(&content)
+            .on_action(Message::PromptAction)
+            .width(size.width)
+            .height(Length::Fill)
+            .into();
+        let mut interface =
+            UserInterface::build(element, size, user_interface::Cache::new(), &mut renderer);
+        let waker = shell::Waker::noop();
+        let mut messages = shell::Bus::new();
+        let _ = interface.update(
+            &iced_core::window::Headless,
+            &waker,
+            &[iced_core::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            ))],
+            cursor,
+            &mut renderer,
+            &mut messages,
+        );
+        let cache = interface.into_cache();
+
+        content.move_to(iced_core::text::editor::Cursor {
+            position: char_position("alpha βeta gamma", 10),
+            selection: Some(char_position("alpha βeta gamma", 6)),
+        });
+        let element: UiElement<'_> = text_editor(&content)
+            .on_action(Message::PromptAction)
+            .width(size.width)
+            .height(Length::Fill)
+            .into();
+        let mut interface = UserInterface::build(element, size, cache, &mut renderer);
+        let mut messages = shell::Bus::new();
+        let (state, _) = interface.update(
+            &iced_core::window::Headless,
+            &waker,
+            &[iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character("c".into()),
+                modified_key: keyboard::Key::Character("c".into()),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyC),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::COMMAND,
+                text: None,
+                repeat: false,
+            })],
+            cursor,
+            &mut renderer,
+            &mut messages,
+        );
+        let user_interface::State::Updated { clipboard, .. } = state else {
+            panic!("copy shortcut must update the interface");
+        };
+        assert_eq!(
+            clipboard.write,
+            Some(iced_core::clipboard::Content::Text("βeta".into()))
+        );
+    }
+
+    #[test]
+    fn response_copy_preserves_complete_markdown() {
+        let mut model = populated_fixture_model();
+        let expected = "First paragraph.\n\n- one\n- two\n\n```rust\nfn main() {}\n```";
+        model.events.push(json!({
+            "kind":"assistant",
+            "prompt_id":"copy-markdown",
+            "public":true,
+            "payload":{"text":expected}
+        }));
+
+        model.update(Message::CopyResponse("copy-markdown".into()));
+
+        let request = model.take_clipboard_request().unwrap();
+        assert_eq!(request.text, expected);
+        assert_eq!(request.target, CopyTarget::Response("copy-markdown".into()));
+    }
+
+    #[test]
+    fn clipboard_feedback_reports_failure_and_expires() {
+        let mut model = populated_fixture_model();
+        model.clipboard_finished(CopyTarget::Selection, Err("clipboard unavailable".into()));
+
+        let feedback = model.copy_feedback.as_mut().unwrap();
+        assert!(feedback.failed);
+        assert!(feedback.message.contains("clipboard unavailable"));
+        feedback.expires_at = Instant::now();
+        model.expire_copy_feedback();
+        assert!(model.copy_feedback.is_none());
+    }
+
+    #[test]
+    fn writing_corrections_are_explicit_and_undoable() {
+        let mut model = populated_fixture_model();
+        let original = "This are a sentnce.";
+        model.prompt = text_editor::Content::with_text(original);
+
+        model.refresh_writing_issues();
+        assert_eq!(
+            model.prompt.text(),
+            original,
+            "linting never rewrites input"
+        );
+        let (issue_index, suggestion_index) = model
+            .writing_issues
+            .iter()
+            .enumerate()
+            .find_map(|(issue_index, issue)| {
+                issue
+                    .suggestions
+                    .iter()
+                    .position(|suggestion| {
+                        matches!(suggestion, WritingSuggestion::Replace(value) if value == "sentence")
+                    })
+                    .map(|suggestion_index| (issue_index, suggestion_index))
+            })
+            .expect("the misspelling should have a correction");
+        model.active_writing_issue = Some(issue_index);
+
+        model.update(Message::ApplyWritingSuggestion(suggestion_index));
+        assert_eq!(model.prompt.text(), "This are a sentence.");
+
+        model.update(Message::PromptAction(
+            iced_core::text::editor::Action::Edit(iced_core::text::editor::Edit::Undo),
+        ));
+        assert_eq!(model.prompt.text(), original);
+    }
+
+    #[test]
+    fn writing_assistance_renders_at_wide_and_narrow_widths() {
+        let mut model = populated_fixture_model();
+        model.prompt = text_editor::Content::with_text("This are a sentnce.");
+        model.refresh_writing_issues();
+        assert!(!model.writing_issues.is_empty());
+
+        for size in [Size::new(1280.0, 800.0), Size::new(600.0, 700.0)] {
+            let mut renderer = native_renderer();
+            renderer.reset(iced_core::Rectangle::with_size(size));
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            assert!(renderer.take_frame().is_ok());
+            let text_errors = renderer.take_text_errors();
+            assert!(text_errors.is_empty(), "{text_errors:?}");
+            assert!(renderer.take_geometry_errors().is_empty());
+        }
+    }
+
+    #[test]
     fn launch_project_opens_directly_and_single_project_is_the_default() {
         for requested in [Some("qwen9b-live-kore".into()), None] {
             let (requests, request_receiver) = mpsc::channel();
@@ -4860,7 +5535,8 @@ mod tests {
             );
             let frame = renderer.take_frame().expect("conversation frame");
             axgfx::frame_requirements(frame.view()).expect("supported conversation display list");
-            assert!(renderer.take_text_errors().is_empty());
+            let text_errors = renderer.take_text_errors();
+            assert!(text_errors.is_empty(), "{text_errors:?}");
             assert!(frame.glyphs().len() > 30);
         }
     }

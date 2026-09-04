@@ -860,6 +860,29 @@ fn glass_header<'a>(
         .into()
 }
 
+fn settings_header<'a>() -> UiElement<'a> {
+    container(
+        row![
+            text("Settings")
+                .font(fonts::DISPLAY)
+                .size(theme::SIZE_DISPLAY)
+                .line_height(iced_core::text::LineHeight::Relative(1.25))
+                .color(theme::rgb(theme::TEXT)),
+            space::horizontal(),
+            button(widgets::control("x"))
+                .height(26)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Ghost))
+                .on_press(Message::CloseSettings),
+        ]
+        .align_y(alignment::Vertical::Center),
+    )
+    .padding([14, 20])
+    .width(Length::Fill)
+    .style(|_| glass_bottom_edge())
+    .into()
+}
+
 fn divider_right(background: u32) -> iced_widget::container::Style {
     theme::panel(background, None, 0.0)
         .border_sides(border::Sides::default().right(border::side(theme::rgb(theme::BORDER), 1.0)))
@@ -876,10 +899,17 @@ fn divider_left(background: u32) -> iced_widget::container::Style {
 }
 
 fn settings_section<'a>(title: &'static str, body: UiElement<'a>) -> UiElement<'a> {
-    column![widgets::display(title), body]
-        .spacing(theme::SPACE_2)
-        .width(Length::Fill)
-        .into()
+    column![
+        text(title)
+            .font(fonts::DISPLAY)
+            .size(theme::SIZE_MD)
+            .line_height(iced_core::text::LineHeight::Relative(1.25))
+            .color(theme::rgb(theme::TEXT)),
+        body,
+    ]
+    .spacing(theme::SPACE_2)
+    .width(Length::Fill)
+    .into()
 }
 
 fn settings_row<'a>(
@@ -3013,17 +3043,7 @@ impl Model {
         let modal_height = (self.viewport.height - 64.0).clamp(240.0, 720.0);
         backdrop_filter(
             container(column![
-                glass_header(
-                    "Settings",
-                    "application preferences",
-                    Some(Message::CloseSettings),
-                ),
-                container(widgets::mono(self.status.clone(), theme::TEXT_MUTED))
-                    .padding([0.0, theme::SPACE_8])
-                    .height(28)
-                    .width(Length::Fill)
-                    .align_y(alignment::Vertical::Center)
-                    .style(|_| glass_bottom_edge()),
+                settings_header(),
                 scrollable(
                     container(content)
                         .padding(iced_core::Padding {
@@ -4951,6 +4971,41 @@ mod tests {
         model.update(Message::CloseSettings);
         assert!(!model.settings_open);
         assert_eq!(model.view, View::Filesystem);
+    }
+
+    #[test]
+    fn settings_modal_does_not_render_unrelated_application_status() {
+        fonts::register().unwrap();
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.viewport = Size::new(920.0, 720.0);
+        model.activity = Some(Ok(Vec::new()));
+        let glyph_count = |model: &Model| {
+            let mut renderer = native_renderer();
+            let mut interface = UserInterface::build(
+                model.settings_panel(),
+                model.viewport,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            renderer.take_frame().unwrap().glyphs().len()
+        };
+
+        model.status = "Cancellation requested.".into();
+        let cancellation = glyph_count(&model);
+        model.status = "An unrelated project status with a very different length.".into();
+
+        assert_eq!(cancellation, glyph_count(&model));
     }
 
     #[test]

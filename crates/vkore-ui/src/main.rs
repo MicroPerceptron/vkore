@@ -202,15 +202,33 @@ fn broker_catalog(events: &[&Value]) -> BTreeMap<u64, CatalogEntry> {
         let Some(input) = embedded_json(&event["payload"]["payload"]) else {
             continue;
         };
-        for tuple in input["offer_catalog"].as_array().into_iter().flatten() {
-            let Some(tuple) = tuple.as_array() else {
-                continue;
+        for offer in input["offer_catalog"].as_array().into_iter().flatten() {
+            let decoded = if let Some(tuple) = offer.as_array() {
+                match (
+                    tuple.first().and_then(Value::as_u64),
+                    tuple.get(1).and_then(Value::as_str),
+                    tuple.get(2).and_then(Value::as_str),
+                ) {
+                    (Some(index), Some(kind), Some(label)) => Some((index, kind, label)),
+                    _ => None,
+                }
+            } else {
+                match (
+                    offer["index"].as_u64(),
+                    offer["kind"].as_str(),
+                    offer["label"].as_str(),
+                ) {
+                    (Some(index), Some(kind), Some(label)) => Some((index, kind, label)),
+                    _ => None,
+                }
             };
-            if let (Some(index), Some(kind), Some(label)) = (
-                tuple.first().and_then(Value::as_u64),
-                tuple.get(1).and_then(Value::as_str),
-                tuple.get(2).and_then(Value::as_str),
-            ) {
+            if let Some((index, kind, label)) = decoded {
+                let kind = match kind {
+                    "executable" => "x",
+                    "object" => "o",
+                    "view" => "v",
+                    other => other,
+                };
                 entries.insert(
                     index,
                     CatalogEntry {
@@ -253,37 +271,66 @@ fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -
         return format!("install scoped object · {path}");
     }
     if action_name == "create_agent" {
-        let selected = action["selectors"]
-            .as_array()
+        let indices = |field: &str| {
+            action[field]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect::<Vec<_>>()
+        };
+        let split_schema = action.get("executables").is_some() || action.get("resources").is_some();
+        let selectors = indices("selectors");
+        let executable_indices = if split_schema {
+            indices("executables")
+        } else {
+            selectors
+                .iter()
+                .copied()
+                .filter(|index| catalog.get(index).is_some_and(|entry| entry.kind == "x"))
+                .collect()
+        };
+        let resource_indices = if split_schema {
+            indices("resources")
+        } else {
+            selectors
+                .iter()
+                .copied()
+                .filter(|index| {
+                    catalog
+                        .get(index)
+                        .is_none_or(|entry| matches!(entry.kind.as_str(), "o" | "v"))
+                })
+                .collect()
+        };
+        let tools = executable_indices
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .filter_map(|index| catalog.get(&index).map(|entry| (index, entry)))
+            .map(|index| {
+                catalog
+                    .get(&index)
+                    .filter(|entry| entry.kind == "x")
+                    .map_or_else(
+                        || format!("#{index}"),
+                        |entry| display_resource(&entry.label),
+                    )
+            })
             .collect::<Vec<_>>();
-        let tools = selected
-            .iter()
-            .filter(|(_, entry)| entry.kind == "x")
-            .map(|(_, entry)| display_resource(&entry.label))
-            .collect::<Vec<_>>();
-        let resources = selected
-            .iter()
-            .filter(|(_, entry)| matches!(entry.kind.as_str(), "o" | "v"))
-            .map(|(_, entry)| display_resource(&entry.label))
-            .collect::<Vec<_>>();
-        let unresolved = action["selectors"]
-            .as_array()
+        let resources = resource_indices
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .filter(|index| !catalog.contains_key(index))
-            .map(|index| format!("#{index}"))
+            .map(|index| {
+                catalog
+                    .get(&index)
+                    .filter(|entry| matches!(entry.kind.as_str(), "o" | "v"))
+                    .map_or_else(
+                        || format!("#{index}"),
+                        |entry| display_resource(&entry.label),
+                    )
+            })
             .collect::<Vec<_>>();
-        let mut visible_resources = resources;
-        visible_resources.extend(unresolved);
         return format!(
             "Tool_use: create_agent(Agent 1, [{}], [{}])",
             tools.join(", "),
-            visible_resources.join(", ")
+            resources.join(", ")
         );
     }
     if action_name == "refused" {
@@ -419,6 +466,21 @@ fn raw_model_proposal(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> O
         body: action_summary(role, &action, catalog)?,
         kind: "decision".into(),
         output: None,
+    })
+}
+
+fn broker_validation_status(events: &[&Value], proposal_index: usize) -> Option<bool> {
+    events.iter().skip(proposal_index + 1).find_map(|event| {
+        let payload = &event["payload"];
+        if payload["kind"] == "Validation"
+            && payload["role"]
+                .as_str()
+                .is_some_and(|role| role.eq_ignore_ascii_case("broker"))
+        {
+            payload["accepted"].as_bool()
+        } else {
+            None
+        }
     })
 }
 
@@ -603,34 +665,34 @@ fn meaningful_error(event: &Value) -> String {
 fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
     let catalog = broker_catalog(events);
     let mut rows = Vec::new();
-    let has_raw_broker_proposal = events.iter().any(|event| {
-        event["kind"] == "inference"
-            && event["payload"]["kind"] == "RawModelCompletion"
-            && event["payload"]["role"] == "Broker"
+    let has_validated_raw_broker_proposal = events.iter().enumerate().any(|(index, event)| {
+        raw_model_proposal(event, &catalog).is_some()
+            && broker_validation_status(events, index) == Some(true)
     });
 
     let mut consumed_results = BTreeSet::new();
     let mut seen_tool_calls: BTreeMap<(String, String), Option<u64>> = BTreeMap::new();
     for (event_index, event) in events.iter().enumerate() {
         let event_kind = event["kind"].as_str().unwrap_or("event");
-        let row = raw_model_proposal(event, &catalog)
+        let row = (broker_validation_status(events, event_index) == Some(true))
+            .then(|| raw_model_proposal(event, &catalog))
+            .flatten()
             .or_else(|| model_validation_row(event, &catalog))
             .or_else(|| match event_kind {
-                "broker_proposal" if !has_raw_broker_proposal => {
-                    decision_payload(event).map(|action| WorkRow {
+                "broker_proposal" if !has_validated_raw_broker_proposal => decision_payload(event)
+                    .map(|action| WorkRow {
                         speaker: "Broker".into(),
                         context: None,
                         body: format_broker_action(&action, &catalog),
                         kind: "decision".into(),
                         output: None,
-                    })
-                }
+                    }),
                 "capability" => Some(capability_row(event)),
                 "tool_call" => decision_payload(event).and_then(|call| {
-                    let speaker = agent_name(event);
+                    let agent = agent_name(event);
                     let body = format_agent_tool_call(&call).unwrap_or_else(|| "tool".into());
                     let call_id = call["call_id"].as_u64();
-                    let signature = (speaker.clone(), body.clone());
+                    let signature = (agent.clone(), body.clone());
                     if seen_tool_calls
                         .get(&signature)
                         .is_some_and(|seen_id| call_id.is_none() || *seen_id == call_id)
@@ -655,22 +717,53 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                         .as_str()
                         .unwrap_or("guest")
                         .replace('_', " ");
+                    let output = result.as_ref().map(work_output);
+                    let denied = output.as_ref().is_some_and(|output| output.failed);
                     WorkRow {
-                        speaker,
-                        context: Some(format!("tool · {domain}")),
+                        speaker: if denied {
+                            "Denied".into()
+                        } else {
+                            agent.clone()
+                        },
+                        context: Some(if denied {
+                            format!("{agent} · tool · {domain}")
+                        } else {
+                            format!("tool · {domain}")
+                        }),
                         body,
-                        kind: "decision".into(),
-                        output: result.as_ref().map(work_output),
+                        kind: if denied {
+                            "error".into()
+                        } else {
+                            "decision".into()
+                        },
+                        output,
                     }
                     .into()
                 }),
                 "tool_result" if !consumed_results.contains(&event_index) => {
-                    decision_payload(event).map(|result| WorkRow {
-                        speaker: agent_name(event),
-                        context: Some("tool · guest".into()),
-                        body: "Tool response".into(),
-                        kind: "result".into(),
-                        output: Some(work_output(&result)),
+                    decision_payload(event).map(|result| {
+                        let agent = agent_name(event);
+                        let output = work_output(&result);
+                        let denied = output.failed;
+                        WorkRow {
+                            speaker: if denied {
+                                "Denied".into()
+                            } else {
+                                agent.clone()
+                            },
+                            context: Some(if denied {
+                                format!("{agent} · tool · guest")
+                            } else {
+                                "tool · guest".into()
+                            }),
+                            body: "Tool response".into(),
+                            kind: if denied {
+                                "error".into()
+                            } else {
+                                "result".into()
+                            },
+                            output: Some(output),
+                        }
                     })
                 }
                 "error" => Some(WorkRow {
@@ -4620,6 +4713,7 @@ mod tests {
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelPrompt","role":"Broker","payload":"SECRET SYSTEM PROMPT"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelOutputChunk","role":"Broker","payload":"{\"action\":"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"selectors\":[31,18]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"accepted":true,"detail":"accepted by strict KBR1 validation","kind":"Validation","role":"Broker","payload":""}}),
             json!({"kind":"broker_proposal","prompt_id":"p","payload":{"kind":"BrokerProposal","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":2},\"label\":\"agent/prompt\",\"selectors\":[31,18]}"}}),
             json!({"kind":"tool_call","prompt_id":"p","payload":{"kind":"ToolCall","role":"Agent","payload":"{\"arguments\":[\"Path(\\\"/X\\\")\"],\"call_id\":1,\"command\":\"cat\"}"}}),
             json!({"kind":"tool_call","prompt_id":"p","payload":{"command":"cat","arguments":"[Path(\"/X\")]"}}),
@@ -4662,6 +4756,26 @@ mod tests {
     }
 
     #[test]
+    fn validated_llama_broker_schema_resolves_tools_and_resources() {
+        let events = [
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"create secret\",\"offer_catalog\":[{\"index\":0,\"kind\":\"executable\",\"label\":\"touch\",\"permitted_ops\":4,\"max_uses\":2},{\"index\":1,\"kind\":\"executable\",\"label\":\"write\",\"permitted_ops\":4,\"max_uses\":2},{\"index\":2,\"kind\":\"view\",\"label\":\"workspace/root\",\"permitted_ops\":7,\"max_uses\":4}]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"label\":\"writer\",\"executables\":[0,1],\"resources\":[2],\"budget\":{\"tool_calls\":3}}"}}),
+            json!({"kind":"validation","prompt_id":"p","payload":{"accepted":true,"detail":"accepted by strict KBR1 validation","kind":"Validation","role":"Broker","payload":""}}),
+            json!({"kind":"broker_proposal","prompt_id":"p","payload":{"action":"CreateAgent","selectors":["00","01","02"],"label":"writer"}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].speaker, "Broker");
+        assert_eq!(
+            rows[0].body,
+            "create_agent(Agent 1, [touch, write], [root])"
+        );
+    }
+
+    #[test]
     fn authority_rows_render_the_current_prompt_selection_without_inventing_a_tool() {
         let events = [
             json!({"kind":"capability","prompt_id":"hello","payload":{"state":"installed","tools":[],"capabilities":[],"scope":"prompt"}}),
@@ -4683,7 +4797,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_raw_broker_proposal_is_visible_before_validation_failure() {
+    fn rejected_raw_broker_proposal_is_only_presented_as_denied() {
         let events = [
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read archetecture.md\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",1,0,null],[19,\"o\",\"workspace/Y\",1,0,null],[20,\"o\",\"workspace/V\",1,0,null],[21,\"x\",\"hello\",1,4096,null],[22,\"x\",\"time\",1,4096,null],[23,\"x\",\"sleep\",1,4096,null],[24,\"x\",\"status\",1,4096,null],[25,\"x\",\"help\",1,4096,null]]}"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":0},\"label\":\"agent/prompt\",\"selectors\":[18,19,20,21,22,23,24,25]}"}}),
@@ -4693,17 +4807,12 @@ mod tests {
 
         let rows = work_rows(&refs);
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].speaker, "Broker");
-        assert_eq!(
-            rows[0].body,
-            "create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V])"
-        );
-        assert_eq!(rows[1].speaker, "Denied");
-        assert!(rows[1].body.starts_with(
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].speaker, "Denied");
+        assert!(rows[0].body.starts_with(
             "create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V]) refused"
         ));
-        assert!(rows[1].body.contains("do not match"));
+        assert!(rows[0].body.contains("do not match"));
     }
 
     #[test]
@@ -4806,12 +4915,14 @@ mod tests {
             json!({"kind":"tool_result","generation":1,"payload":{"call_id":11,"result":"output","text":long_output}}),
             json!({"kind":"tool_call","generation":2,"payload":{"command":"grep","arguments":["Text(\"needle\")","Path(\"/two\")"],"call_id":12,"execution_domain":"host"}}),
             json!({"kind":"tool_result","generation":2,"payload":{"call_id":12,"result":"output","text":"match"}}),
+            json!({"kind":"tool_call","generation":3,"agent_name":"Writer","payload":{"command":"write","arguments":["Path(\"/secret\")","Text(\"value\")"],"call_id":13,"execution_domain":"guest"}}),
+            json!({"kind":"tool_result","generation":3,"payload":{"call_id":13,"result":"refused","text":"object is outside the installed filesystem view"}}),
         ];
         let refs = events.iter().collect::<Vec<_>>();
 
         let rows = work_rows(&refs);
 
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].speaker, "Reader");
         assert_eq!(rows[0].context.as_deref(), Some("tool · guest"));
         assert_eq!(rows[0].output.as_ref().unwrap().body, long_output);
@@ -4822,6 +4933,14 @@ mod tests {
         assert_eq!(rows[1].speaker, "Agent 2");
         assert_eq!(rows[1].context.as_deref(), Some("tool · host"));
         assert_eq!(rows[1].output.as_ref().unwrap().body, "match");
+        assert_eq!(rows[2].speaker, "Denied");
+        assert_eq!(rows[2].context.as_deref(), Some("Writer · tool · guest"));
+        assert_eq!(rows[2].kind, "error");
+        assert_eq!(rows[2].body, "write /secret value");
+        assert_eq!(
+            rows[2].output.as_ref().unwrap().body,
+            "object is outside the installed filesystem view"
+        );
         assert_eq!(work_output_height(&long_output), 180.0);
     }
 

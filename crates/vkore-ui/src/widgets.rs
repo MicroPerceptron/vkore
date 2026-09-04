@@ -183,6 +183,32 @@ pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
+/// A text-only disclosure used by the work timeline. The reference treatment
+/// changes only the label colour on hover; it never paints a row behind it.
+pub fn disclosure_button_style(
+    resting_color: u32,
+) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
+    move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let disabled = matches!(status, button::Status::Disabled);
+        let mut text_color = theme::rgb(if hovered && !disabled {
+            theme::TEXT
+        } else {
+            resting_color
+        });
+        if disabled {
+            text_color.a *= 0.4;
+        }
+        button::Style {
+            background: None,
+            text_color,
+            border: Border::default(),
+            shadow: theme::no_shadow(),
+            ..Default::default()
+        }
+    }
+}
+
 /// The prompt composer and every wizard field share one editor treatment.
 pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
     let focused = matches!(status, text_editor::Status::Focused { .. });
@@ -385,6 +411,20 @@ mod tests {
         assert_eq!(rest.border.color, theme::rgb(theme::BORDER));
         assert_eq!(hovered.border.color, theme::rgb(theme::MAGENTA));
         assert_eq!(rest.background, hovered.background);
+        assert_eq!(hovered.text_color, theme::rgb(theme::TEXT));
+    }
+
+    #[test]
+    fn transcript_disclosures_only_change_text_on_hover() {
+        let style = disclosure_button_style(theme::TEXT_MUTED);
+        let rest = style(&Theme::Dark, button::Status::Active);
+        let hovered = style(&Theme::Dark, button::Status::Hovered);
+
+        assert_eq!(rest.background, None);
+        assert_eq!(hovered.background, None);
+        assert_eq!(rest.border.width, 0.0);
+        assert_eq!(hovered.border.width, 0.0);
+        assert_eq!(rest.text_color, theme::rgb(theme::TEXT_MUTED));
         assert_eq!(hovered.text_color, theme::rgb(theme::TEXT));
     }
 

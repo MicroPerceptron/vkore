@@ -18,6 +18,8 @@ use iced_core::{Background, Border, Color, Shadow};
 pub const BACKGROUND: u32 = 0x0A0A0C;
 /// Panel and card fill.
 pub const PANEL: u32 = 0x131316;
+/// Recessed row inside the expanded work timeline.
+pub const CHAT_ROW: u32 = 0x101013;
 /// Topology directory node fill.
 pub const PANEL_DIR: u32 = 0x17171B;
 /// Topology file node fill.
@@ -30,6 +32,8 @@ pub const BORDER: u32 = 0x2A2A30;
 pub const BORDER_DIM: u32 = 0x3A3A42;
 /// Primary off-white text.
 pub const TEXT: u32 = 0xF2F0EC;
+/// Primary machine-readable text in work rows.
+pub const CHAT_TEXT: u32 = 0xDEDCD8;
 /// Secondary text.
 pub const TEXT_SECONDARY: u32 = 0xB9B9BE;
 /// Muted text, used for mono metadata.
@@ -78,8 +82,6 @@ pub const SIZE_MONO: f32 = 12.0;
 pub const SIZE_SM: f32 = 14.0;
 /// Body.
 pub const SIZE_MD: f32 = 16.0;
-/// Large conversational prose.
-pub const SIZE_LG: f32 = 18.0;
 /// Display, used for dialog titles and section heads.
 pub const SIZE_DISPLAY: f32 = 22.0;
 

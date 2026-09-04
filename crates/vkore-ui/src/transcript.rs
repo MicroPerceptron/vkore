@@ -207,10 +207,12 @@ pub(crate) fn assistant_blocks(source: &str) -> Vec<AssistantBlock> {
 
 pub(crate) fn user_message_width(text: &str, transcript_width: f32) -> f32 {
     const MIN_MESSAGE_WIDTH: f32 = 120.0;
-    const MAX_MESSAGE_WIDTH: f32 = 800.0;
-    const APPROXIMATE_GLYPH_WIDTH: f32 = 9.0;
+    const MAX_TURN_WIDTH: f32 = 820.0;
+    const USER_WIDTH_FRACTION: f32 = 0.76;
+    const APPROXIMATE_GLYPH_WIDTH: f32 = 7.0;
 
-    let available = (transcript_width * 0.8).clamp(MIN_MESSAGE_WIDTH, MAX_MESSAGE_WIDTH);
+    let available =
+        (transcript_width.min(MAX_TURN_WIDTH) * USER_WIDTH_FRACTION).max(MIN_MESSAGE_WIDTH);
     let longest_line = text
         .lines()
         .map(|line| line.chars().count())
@@ -272,8 +274,8 @@ mod tests {
     #[test]
     fn user_message_width_is_content_sized_and_responsive() {
         assert_eq!(user_message_width("Hi", 900.0), 120.0);
-        assert_eq!(user_message_width(&"x".repeat(200), 900.0), 720.0);
-        assert!((user_message_width(&"x".repeat(200), 300.0) - 240.0).abs() < 0.01);
+        assert!((user_message_width(&"x".repeat(200), 900.0) - 623.2).abs() < 0.01);
+        assert!((user_message_width(&"x".repeat(200), 300.0) - 228.0).abs() < 0.01);
         assert!(user_message_width("a moderately sized request", 900.0) < 560.0);
     }
 }

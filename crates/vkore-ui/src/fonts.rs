@@ -54,6 +54,9 @@ pub const DISPLAY: Font = face(
 pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
 pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
+/// JetBrains Mono 500 without tracking. Timestamps use the heavier face but
+/// keep the compact spacing of ordinary metadata.
+pub const MONO_MEDIUM: Font = face(theme::MONO_FAMILY, font::Weight::Medium, 0.0);
 /// JetBrains Mono 500. Uppercase labels, metadata, navigation.
 pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_LABEL);
 
@@ -92,6 +95,7 @@ mod tests {
         // Prose is set solid; labels and wordmarks are tracked out.
         assert_eq!(BODY.tracking, font::Tracking::NONE);
         assert_eq!(MONO.tracking, font::Tracking::NONE);
+        assert_eq!(MONO_MEDIUM.tracking, font::Tracking::NONE);
         assert_eq!(MONO_LABEL.tracking, font::Tracking(theme::TRACK_LABEL));
         assert_eq!(MONO_NAV.tracking, font::Tracking(theme::TRACK_NAV));
         assert_eq!(DISPLAY.tracking, font::Tracking(theme::TRACK_WORDMARK));
@@ -113,6 +117,7 @@ mod tests {
         assert_eq!(BODY.family, font::Family::Name(theme::BODY_FAMILY));
         assert_eq!(MONO.family, font::Family::Name(theme::MONO_FAMILY));
         assert_eq!(MONO.weight, font::Weight::Normal);
+        assert_eq!(MONO_MEDIUM.weight, font::Weight::Medium);
         assert_eq!(MONO_LABEL.weight, font::Weight::Medium);
     }
 }

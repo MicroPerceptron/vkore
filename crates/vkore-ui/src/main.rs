@@ -501,7 +501,7 @@ fn work_output(result: &Value) -> WorkOutput {
 
 fn work_output_height(text: &str) -> f32 {
     let lines = text.lines().count().max(1) as f32;
-    (lines * 25.0).clamp(48.0, 176.0)
+    (lines * 19.2 + 16.0).clamp(35.2, 180.0)
 }
 
 fn capability_row(event: &Value) -> WorkRow {
@@ -1876,6 +1876,7 @@ impl Model {
         size: f32,
         color: u32,
         face: iced_core::Font,
+        line_height: f32,
     ) -> UiElement<'a> {
         let key_owned = key.to_owned();
         let content = self
@@ -1886,6 +1887,7 @@ impl Model {
             .on_action(move |action| Message::SelectText(key_owned.clone(), action))
             .padding(0)
             .size(size)
+            .line_height(iced_core::text::LineHeight::Relative(line_height))
             .font(face)
             .style(widgets::selectable(color))
             .into()
@@ -1931,7 +1933,7 @@ impl Model {
             .on_action(move |action| Message::SelectText(key_owned.clone(), action))
             .padding(0)
             .size(size)
-            .line_height(iced_core::text::LineHeight::Relative(1.55))
+            .line_height(iced_core::text::LineHeight::Relative(1.7))
             .font(face)
             .highlight_with::<InlineMarkdownHighlighter>((), inline_markdown_format)
             .style(widgets::selectable(color))
@@ -2272,7 +2274,7 @@ impl Model {
         let conversation: UiElement<'_> = if self.events.is_empty() {
             container(space::vertical()).height(Length::Fill).into()
         } else {
-            let mut items = column![].spacing(theme::SPACE_6);
+            let mut items = column![].spacing(44.0);
             let prompts = self
                 .events
                 .iter()
@@ -2299,26 +2301,26 @@ impl Model {
                     transcript_width,
                 );
                 let user_time = started_at.and_then(format_event_time).unwrap_or_default();
-                items = items.push(
-                    container(
-                        column![
-                            self.selectable_width(
-                                &user_key,
-                                message_width,
-                                theme::SIZE_LG,
-                                theme::TEXT_SECONDARY,
-                                fonts::BODY
-                            ),
-                            text(user_time)
-                                .font(fonts::MONO)
-                                .size(theme::SIZE_SM)
-                                .color(theme::rgb(theme::TEXT_MUTED)),
-                        ]
-                        .spacing(theme::SPACE_4)
-                        .align_x(alignment::Horizontal::Right),
-                    )
-                    .align_right(Length::Fill),
-                );
+                let user_block = container(
+                    column![
+                        self.selectable_width(
+                            &user_key,
+                            message_width,
+                            theme::SIZE_SM,
+                            theme::TEXT_MUTED,
+                            fonts::BODY
+                        ),
+                        text(user_time)
+                            .font(fonts::MONO_MEDIUM)
+                            .size(theme::SIZE_MONO)
+                            .line_height(iced_core::text::LineHeight::Relative(1.0))
+                            .color(theme::rgb(theme::TEXT_MUTED)),
+                    ]
+                    .spacing(theme::SPACE_2)
+                    .align_x(alignment::Horizontal::Right),
+                )
+                .align_right(Length::Fill);
+                let mut turn = column![user_block].spacing(18.0);
 
                 let rows = work_rows(&prompt_events);
                 let terminal = prompt_events
@@ -2335,9 +2337,16 @@ impl Model {
                     })
                     .or(started_at);
                 let work_title = if active {
-                    "Working".to_owned()
+                    "Working…".to_owned()
                 } else if failed {
-                    "Stopped · failed".to_owned()
+                    format!(
+                        "Stopped after {}",
+                        format_elapsed(
+                            ended_at
+                                .unwrap_or_default()
+                                .saturating_sub(started_at.unwrap_or_default())
+                        )
+                    )
                 } else {
                     format!(
                         "Worked for {}",
@@ -2348,24 +2357,34 @@ impl Model {
                         )
                     )
                 };
+                let work_color = if active {
+                    theme::MAGENTA
+                } else if failed {
+                    theme::ERROR
+                } else {
+                    theme::TEXT_MUTED
+                };
                 let expanded = self.expanded_work.contains(prompt_id);
                 let work_header = button(
                     row![
-                        widgets::body(work_title, theme::SIZE_MD, theme::TEXT_MUTED),
+                        text(work_title)
+                            .font(fonts::BODY)
+                            .size(theme::SIZE_SM)
+                            .line_height(iced_core::text::LineHeight::Relative(1.5)),
                         text(if expanded { "\u{25be}" } else { "\u{25b8}" })
                             .font(fonts::MONO)
-                            .size(theme::SIZE_SM)
+                            .size(9)
                             .color(theme::rgb(theme::TEXT_MUTED)),
                     ]
-                    .spacing(theme::SPACE_2)
+                    .spacing(7)
                     .align_y(alignment::Vertical::Center),
                 )
-                .padding([4, 0])
-                .style(widgets::button_style(widgets::Button::Ghost))
+                .padding(0)
+                .style(widgets::disclosure_button_style(work_color))
                 .on_press(Message::ToggleWorking(prompt_id.to_owned()));
-                let mut timeline = column![work_header].spacing(theme::SPACE_2);
+                let mut timeline = column![work_header].spacing(12);
                 if expanded {
-                    let mut details = column![].spacing(theme::SPACE_4);
+                    let mut details = column![].spacing(10);
                     if rows.is_empty() {
                         details = details
                             .push(widgets::mono("waiting for the sandbox", theme::TEXT_MUTED));
@@ -2380,79 +2399,77 @@ impl Model {
                         let body_color = if work.kind == "error" {
                             theme::ERROR
                         } else {
-                            theme::TEXT
+                            theme::CHAT_TEXT
                         };
                         let work_key = format!("prompt:{prompt_id}:work:{index}");
-                        let mut label = row![widgets::body(
-                            work.speaker.clone(),
-                            theme::SIZE_MD,
-                            label_color,
-                        )]
+                        let mut label = row![
+                            text(work.speaker.clone())
+                                .font(fonts::BODY)
+                                .size(13)
+                                .line_height(iced_core::text::LineHeight::Relative(1.45))
+                                .color(theme::rgb(label_color))
+                        ]
                         .spacing(theme::SPACE_1);
                         if let Some(context) = &work.context {
-                            label = label.push(widgets::body(
-                                format!("· {context}"),
-                                theme::SIZE_MD,
-                                theme::TEXT_MUTED,
-                            ));
+                            label = label.push(
+                                text(format!("· {context}"))
+                                    .font(fonts::BODY)
+                                    .size(13)
+                                    .line_height(iced_core::text::LineHeight::Relative(1.45))
+                                    .color(theme::rgb(theme::TEXT_MUTED)),
+                            );
                         }
                         let mut card = column![self.selectable(
                             &work_key,
-                            theme::SIZE_MD,
+                            theme::SIZE_MONO,
                             body_color,
                             fonts::MONO,
+                            1.6,
                         )]
-                        .spacing(theme::SPACE_2);
+                        .spacing(theme::SPACE_1);
                         if let Some(output) = &work.output {
                             let output_key = format!("{work_key}:output");
                             let output_expanded = self.expanded_outputs.contains(&output_key);
-                            card = card.push(
-                                button(
-                                    row![
-                                        text(if output_expanded {
-                                            "\u{25be}"
-                                        } else {
-                                            "\u{25b8}"
-                                        })
-                                        .font(fonts::MONO)
-                                        .size(theme::SIZE_SM)
-                                        .color(theme::rgb(theme::TEXT_MUTED)),
-                                        text(output.summary.clone())
-                                            .font(fonts::MONO)
-                                            .size(theme::SIZE_SM)
-                                            .color(theme::rgb(if output.failed {
-                                                theme::ERROR
-                                            } else {
-                                                theme::TEXT_MUTED
-                                            })),
-                                    ]
-                                    .spacing(theme::SPACE_2)
-                                    .align_y(alignment::Vertical::Center),
-                                )
-                                .padding(0)
-                                .style(widgets::button_style(widgets::Button::Ghost))
-                                .on_press(Message::ToggleWorkOutput(output_key.clone())),
-                            );
+                            let output_button = button(
+                                text(format!(
+                                    "{} {}",
+                                    if output_expanded {
+                                        "\u{25be}"
+                                    } else {
+                                        "\u{25b8}"
+                                    },
+                                    output.summary
+                                ))
+                                .font(fonts::MONO_NAV)
+                                .size(11)
+                                .line_height(iced_core::text::LineHeight::Relative(1.6)),
+                            )
+                            .padding(0)
+                            .style(widgets::disclosure_button_style(theme::TEXT_MUTED))
+                            .on_press(Message::ToggleWorkOutput(output_key.clone()));
+                            let mut output_group = column![output_button].spacing(6);
                             if output_expanded {
-                                card = card.push(
+                                output_group = output_group.push(
                                     container(
                                         scrollable(self.selectable(
                                             &output_key,
-                                            theme::SIZE_MD,
+                                            theme::SIZE_MONO,
                                             if output.failed {
                                                 theme::ERROR
                                             } else {
                                                 theme::TEXT_SECONDARY
                                             },
                                             fonts::MONO,
+                                            1.6,
                                         ))
-                                        .height(work_output_height(&output.body))
+                                        .height(Length::Fill)
                                         .direction(scrollable::Direction::Vertical(
                                             scrollable::Scrollbar::hidden(),
                                         ))
                                         .style(widgets::hidden_scrollbar),
                                     )
-                                    .padding([10, 12])
+                                    .padding([8, 10])
+                                    .height(work_output_height(&output.body))
                                     .width(Length::Fill)
                                     .style(|_| {
                                         theme::panel(
@@ -2463,36 +2480,39 @@ impl Model {
                                     }),
                                 );
                             }
+                            card = card.push(output_group);
                         }
                         details = details.push(
                             column![
                                 label,
                                 container(card)
-                                    .padding([12, 13])
+                                    .padding([9, 11])
                                     .width(Length::Fill)
-                                    .style(|_| theme::panel(theme::PANEL, None, theme::RADIUS_SM)),
+                                    .style(|_| {
+                                        theme::panel(theme::CHAT_ROW, None, theme::RADIUS_SM)
+                                    }),
                             ]
-                            .spacing(theme::SPACE_2),
+                            .spacing(6),
                         );
                     }
                     timeline = timeline.push(
                         container(details)
                             .padding(iced_core::Padding {
-                                top: theme::SPACE_2,
+                                top: 0.0,
                                 right: 0.0,
                                 bottom: 0.0,
-                                left: 13.0,
+                                left: 22.0,
                             })
                             .width(Length::Fill),
                     );
                 }
-                items = items.push(timeline);
+                turn = turn.push(timeline);
 
                 if let Some(assistant) = prompt_events.iter().find(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) {
                     let response = assistant["payload"]["text"].as_str().unwrap_or_default();
-                    let mut response_blocks = column![].spacing(theme::SPACE_6);
+                    let mut response_blocks = column![].spacing(theme::SPACE_4);
                     for (index, block) in assistant_blocks(response).into_iter().enumerate() {
                         let key = format!("prompt:{prompt_id}:assistant:{index}");
                         let element: UiElement<'_> = match block {
@@ -2501,20 +2521,21 @@ impl Model {
                                 if level <= 2 {
                                     theme::SIZE_DISPLAY
                                 } else {
-                                    theme::SIZE_LG
+                                    theme::SIZE_MD
                                 },
                                 theme::TEXT,
                                 fonts::BODY,
+                                1.7,
                             ),
                             AssistantBlock::Paragraph(_) => self.selectable_markdown(
                                 &key,
-                                theme::SIZE_LG,
+                                theme::SIZE_MD,
                                 theme::TEXT,
                                 fonts::BODY,
                             ),
                             AssistantBlock::List(_) => container(self.selectable_markdown(
                                 &key,
-                                theme::SIZE_LG,
+                                theme::SIZE_MD,
                                 theme::TEXT,
                                 fonts::BODY,
                             ))
@@ -2527,9 +2548,10 @@ impl Model {
                             .into(),
                             AssistantBlock::Quote(_) => container(self.selectable(
                                 &key,
-                                theme::SIZE_LG,
+                                theme::SIZE_MD,
                                 theme::TEXT_SECONDARY,
                                 fonts::BODY,
+                                1.7,
                             ))
                             .padding(iced_core::Padding {
                                 top: 4.0,
@@ -2554,6 +2576,7 @@ impl Model {
                                         theme::SIZE_MONO,
                                         theme::TEXT_SECONDARY,
                                         fonts::MONO,
+                                        1.6,
                                     ),
                                 ]
                                 .spacing(theme::SPACE_2),
@@ -2567,8 +2590,17 @@ impl Model {
                         };
                         response_blocks = response_blocks.push(element);
                     }
-                    items = items.push(response_blocks);
+                    turn = turn.push(container(response_blocks).padding(iced_core::Padding {
+                        top: 0.0,
+                        right: 64.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    }));
                 }
+                items = items.push(
+                    container(container(turn).width(transcript_width.min(820.0)))
+                        .center_x(Length::Fill),
+                );
             }
             container(
                 scrollable(items)
@@ -2650,7 +2682,16 @@ impl Model {
             .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
         ])
         .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
-        let composer_wrap = container(composer)
+        let sidebar_width = if viewport.width <= 720.0 {
+            0.0
+        } else if viewport.width <= 1050.0 {
+            210.0
+        } else {
+            248.0
+        };
+        let composer_width = (viewport.width - sidebar_width - 80.0).clamp(160.0, 820.0);
+        let composer_wrap = container(container(composer).width(composer_width))
+            .center_x(Length::Fill)
             .padding(iced_core::Padding {
                 top: 10.0,
                 right: 40.0,
@@ -4859,7 +4900,7 @@ mod tests {
         assert_eq!(rows[1].speaker, "Agent 2");
         assert_eq!(rows[1].context.as_deref(), Some("tool · host"));
         assert_eq!(rows[1].output.as_ref().unwrap().body, "match");
-        assert_eq!(work_output_height(&long_output), 176.0);
+        assert_eq!(work_output_height(&long_output), 180.0);
     }
 
     #[test]

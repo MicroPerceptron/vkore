@@ -17,9 +17,9 @@ agent, and tool activity separate from validated assistant output._
 
 ## What is here
 
-- **Native project UI.** Create and persist projects, select a workspace and
-  access mode, configure inference and resource ceilings, chat with an agent,
-  inspect the agent/filesystem topology, review approvals, and open the
+- **Native project UI.** Create a project by selecting one workspace folder,
+  manage application defaults and project overrides in Settings, chat with an
+  agent, inspect the agent/filesystem topology, review approvals, and open the
   append-only transcript.
 - **Interactive runtime.** `vkore-harnessd` exposes the same loopback-only,
   versioned API to the desktop UI, the headless client, integration tests, and
@@ -88,9 +88,11 @@ In another terminal, start the native client:
 cargo run --release -p vkore-ui -- --server 127.0.0.1:8787
 ```
 
-Keep the state directory outside any workspace you plan to open. Create a
-project in the setup wizard and choose a narrow workspace directory. For an
-existing project, open it directly with `--project PROJECT_ID`.
+Keep the state directory outside any workspace you plan to open. Choose **New
+project**, then select one narrow workspace directory in the trusted native
+folder picker. vKore derives the name, identity, application-owned state, and
+current application model default before opening the project. For an existing
+project, open it directly with `--project PROJECT_ID`.
 
 You can also use the terminal client against the same harness:
 
@@ -141,9 +143,10 @@ cargo run -p vkored --bin vkore-harnessd -- `
   --llama-model C:\path\to\model.gguf
 ```
 
-Repeated `--llama-arg` values pass backend-specific options. Project
-configuration records the selected Kore image, runtime, model, context/output
-limits, threads, slots, VM resources, workspace mode, add-ons, approvals, and
+Repeated `--llama-arg` values pass backend-specific options. Application
+Settings owns the default model used by newly created projects; changing it
+does not replace an existing project's model override. Project configuration
+records the selected runtime plus project-scoped workspace, policy, and
 retention preferences.
 
 ## Security boundary

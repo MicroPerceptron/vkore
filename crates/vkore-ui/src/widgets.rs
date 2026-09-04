@@ -20,17 +20,6 @@ use crate::{fonts, theme};
 use iced_core::{Background, Border, Color, Length, Theme, alignment};
 use iced_widget::{button, scrollable, text, text_editor};
 
-/// A wizard step's position relative to the one being edited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
-    /// The step being edited.
-    Current,
-    /// A step already passed.
-    Complete,
-    /// A step not yet reached.
-    Upcoming,
-}
-
 /// The controls the design defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -40,14 +29,12 @@ pub enum Button {
     Secondary,
     /// Hairline border, error text. Cancel a running prompt, Deny.
     Danger,
-    /// Bare until hover. Wizard cancel, sidebar footer navigation.
+    /// Bare until hover. Sidebar footer navigation.
     Ghost,
     /// A selectable option: view tabs, workspace access, backends, add-ons.
     Choice(bool),
     /// A project row. Selected carries a magenta border; unselected has none.
     Row(bool),
-    /// A wizard step marker.
-    Step(Step),
 }
 
 /// Resolved colours for one control state, before the disabled dimming.
@@ -118,38 +105,12 @@ impl Button {
                 },
                 edge: (selected || hovered).then_some(theme::MAGENTA),
             },
-            Self::Step(Step::Current) => Face {
-                fill: None,
-                text: theme::TEXT,
-                edge: Some(theme::MAGENTA),
-            },
-            Self::Step(Step::Complete) => Face {
-                fill: None,
-                text: theme::TEXT_SECONDARY,
-                edge: Some(theme::MAGENTA_DARKER),
-            },
-            Self::Step(Step::Upcoming) => Face {
-                fill: None,
-                text: if hovered {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_MUTED
-                },
-                edge: Some(if hovered {
-                    theme::MAGENTA
-                } else {
-                    theme::BORDER
-                }),
-            },
         }
     }
 
     /// The radius this control carries.
     const fn radius(self) -> f32 {
-        match self {
-            Self::Step(_) => theme::RADIUS_SM,
-            _ => theme::RADIUS_MD,
-        }
+        theme::RADIUS_MD
     }
 }
 
@@ -206,27 +167,6 @@ pub fn disclosure_button_style(
             shadow: theme::no_shadow(),
             ..Default::default()
         }
-    }
-}
-
-/// The prompt composer and every wizard field share one editor treatment.
-pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
-    let focused = matches!(status, text_editor::Status::Focused { .. });
-    text_editor::Style {
-        // A field sits on the page black, not on a panel: it is a well cut
-        // into the surface rather than a card resting on it.
-        background: Background::Color(theme::rgb(theme::BACKGROUND)),
-        border: theme::border(
-            if focused {
-                theme::MAGENTA
-            } else {
-                theme::BORDER
-            },
-            theme::RADIUS_MD,
-        ),
-        placeholder: theme::rgb(theme::TEXT_MUTED),
-        value: theme::rgb(theme::TEXT),
-        selection: theme::rgba(theme::MAGENTA, 0.28),
     }
 }
 
@@ -328,7 +268,7 @@ pub fn body<'a>(
     color: u32,
 ) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.into())
-        .font(fonts::BODY)
+        .font(fonts::body())
         .size(size)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
         .color(theme::rgb(color))
@@ -363,9 +303,6 @@ mod tests {
             Button::Choice(false),
             Button::Row(true),
             Button::Row(false),
-            Button::Step(Step::Current),
-            Button::Step(Step::Complete),
-            Button::Step(Step::Upcoming),
         ] {
             for status in [
                 button::Status::Active,
@@ -497,16 +434,5 @@ mod tests {
         );
         assert_eq!(g.text_color, theme::rgb(theme::TEXT_MUTED));
         assert_eq!(gh.text_color, theme::rgb(theme::TEXT));
-    }
-
-    #[test]
-    fn a_focused_editor_takes_the_accent_border() {
-        let resting = editor(&Theme::Dark, text_editor::Status::Active);
-        let focused = editor(
-            &Theme::Dark,
-            text_editor::Status::Focused { is_hovered: false },
-        );
-        assert_eq!(resting.border.color, theme::rgb(theme::BORDER));
-        assert_eq!(focused.border.color, theme::rgb(theme::MAGENTA));
     }
 }

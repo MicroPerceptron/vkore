@@ -1,7 +1,7 @@
 use hostlinkd::{
     ApprovalProfile, BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer,
-    HarnessService, InferenceConfig, ProjectConfig, ProjectStore, ResourceLimits, RetentionConfig,
-    RuntimeBackend, UiApprovalService, WorkspaceAccess, WorkspaceConfig,
+    HarnessService, InferenceConfig, ProjectConfig, ProjectError, ProjectStore, ResourceLimits,
+    RetentionConfig, RuntimeBackend, UiApprovalService, WorkspaceAccess, WorkspaceConfig,
 };
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -21,8 +21,6 @@ fn config(root: &Path, state: &Path) -> ProjectConfig {
             state: state.into(),
             access: WorkspaceAccess::ReadOnly,
             exclusions: vec![".git/objects".into()],
-            max_write_bytes: 0,
-            max_write_files: 0,
         },
         inference: InferenceConfig {
             backend: RuntimeBackend::Deterministic,
@@ -80,47 +78,108 @@ fn project_persists_without_credentials_or_capabilities_and_reopens() {
 }
 
 #[test]
-fn project_preflight_rejects_state_inside_root_missing_artifacts_and_unbounded_writeback() {
+fn legacy_workspace_quotas_are_removed_without_disabling_writes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let projects = temporary.path().join("projects");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&projects).unwrap();
+    let mut legacy = serde_json::to_value(config(
+        &workspace,
+        &temporary.path().join("workspace-state"),
+    ))
+    .unwrap();
+    legacy["workspace"]["access"] = Value::String("review_changes".into());
+    legacy["workspace"]["max_write_bytes"] = Value::from(0);
+    legacy["workspace"]["max_write_files"] = Value::from(0);
+    std::fs::write(
+        projects.join("secure-project.json"),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let store = ProjectStore::open(&projects).unwrap();
+    let migrated = store.get("secure-project").unwrap();
+    assert_eq!(migrated.workspace.access, WorkspaceAccess::ReviewChanges);
+    let serialized = std::fs::read_to_string(projects.join("secure-project.json")).unwrap();
+    assert!(!serialized.contains("max_write_bytes"));
+    assert!(!serialized.contains("max_write_files"));
+}
+
+#[test]
+fn folder_first_project_creation_derives_identity_defaults_and_reuses_the_workspace() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("My Workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let store = ProjectStore::open(temporary.path().join("projects")).unwrap();
+    let inference = config(&workspace, &temporary.path().join("unused")).inference;
+
+    let created = store
+        .create_from_workspace(&workspace, inference.clone())
+        .unwrap();
+    assert!(created.created);
+    assert_eq!(created.project.name, "My Workspace");
+    assert!(created.project.id.starts_with("my-workspace-"));
+    assert_eq!(
+        created.project.workspace.access,
+        WorkspaceAccess::ReviewChanges
+    );
+    assert_eq!(created.project.inference, inference);
+    assert!(!created.project.workspace.state.starts_with(&workspace));
+    assert!(created.preflight.ready);
+
+    let existing = store
+        .create_from_workspace(&workspace, created.project.inference.clone())
+        .unwrap();
+    assert!(!existing.created);
+    assert_eq!(existing.project.id, created.project.id);
+    assert_eq!(store.list().len(), 1);
+
+    store.archive(&created.project.id, true).unwrap();
+    let reopened = store
+        .create_from_workspace(&workspace, created.project.inference.clone())
+        .unwrap();
+    assert!(!reopened.created);
+    assert!(!reopened.project.archived);
+
+    let not_a_folder = temporary.path().join("file.txt");
+    std::fs::write(&not_a_folder, b"not a workspace").unwrap();
+    assert_eq!(
+        store.create_from_workspace(&not_a_folder, created.project.inference.clone()),
+        Err(ProjectError::RootNotDirectory)
+    );
+
+    let json = std::fs::read_to_string(
+        temporary
+            .path()
+            .join("projects")
+            .join(format!("{}.json", created.project.id)),
+    )
+    .unwrap();
+    assert!(!json.contains("max_write"));
+}
+
+#[test]
+fn project_preflight_rejects_state_inside_root_and_missing_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let store = ProjectStore::open(temp.path().join("projects")).unwrap();
     let mut empty_state = config(&workspace, Path::new(""));
-    assert!(
-        store
-            .save(empty_state.clone())
-            .unwrap_err()
-            .to_string()
-            .contains("InvalidWorkspaceState")
+    assert_eq!(
+        store.save(empty_state.clone()),
+        Err(ProjectError::InvalidWorkspaceState)
     );
     empty_state.workspace.state = temp.path().join("state");
     let mut value = config(&workspace, &workspace.join("state"));
-    assert!(
-        store
-            .save(value.clone())
-            .unwrap_err()
-            .to_string()
-            .contains("StateInsideWorkspace")
+    assert_eq!(
+        store.save(value.clone()),
+        Err(ProjectError::StateInsideWorkspace)
     );
     value.workspace.state = temp.path().join("state");
     value.workspace.access = WorkspaceAccess::AutomaticWriteback;
-    assert!(
-        store
-            .save(value.clone())
-            .unwrap_err()
-            .to_string()
-            .contains("UnsafeWritebackBounds")
-    );
-    value.workspace.max_write_bytes = 1024;
-    value.workspace.max_write_files = 1;
     value.inference.backend = RuntimeBackend::LlamaCpp;
-    assert!(
-        store
-            .save(value)
-            .unwrap_err()
-            .to_string()
-            .contains("InvalidRuntime")
-    );
+    assert_eq!(store.save(value), Err(ProjectError::InvalidRuntime));
 
     let runtime = temp.path().join("llama-server");
     let model_directory = temp.path().join("model.gguf");
@@ -130,12 +189,9 @@ fn project_preflight_rejects_state_inside_root_missing_artifacts_and_unbounded_w
     invalid_artifact.inference.backend = RuntimeBackend::LlamaCpp;
     invalid_artifact.inference.llama_server = Some(runtime);
     invalid_artifact.inference.model = Some(model_directory);
-    assert!(
-        store
-            .save(invalid_artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("MissingArtifact")
+    assert_eq!(
+        store.save(invalid_artifact),
+        Err(ProjectError::MissingArtifact("model".into()))
     );
 
     let credential_root = temp.path().join(".ssh");
@@ -148,6 +204,12 @@ fn project_preflight_rejects_state_inside_root_missing_artifacts_and_unbounded_w
             .unwrap()
             .contains("credentials")
     );
+    let error = store
+        .create_from_workspace(&credential_root, risky.inference)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("too broad or sensitive"), "{error}");
+    assert!(error.contains("credentials"), "{error}");
 }
 
 #[test]
@@ -206,6 +268,53 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
         "gmail.googleapis.com:443"
     );
 
+    let settings = transact(&server, address, "GET", "/api/v1/settings", "", &[]);
+    let settings: Value = serde_json::from_str(settings.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(settings["default_model_id"], "deterministic");
+    assert_eq!(settings["show_working"], true);
+    assert!(
+        settings["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == "deterministic")
+    );
+
+    let origin = format!("http://{address}");
+    let changed = transact(
+        &server,
+        address,
+        "POST",
+        "/api/v1/settings",
+        r#"{"body_font":"archivo","show_working":false}"#,
+        &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
+    );
+    let changed: Value = serde_json::from_str(changed.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(changed["body_font"], "archivo");
+    assert_eq!(changed["show_working"], false);
+    assert!(temp.path().join("settings.json").is_file());
+
+    let folder_workspace = temp.path().join("folder-first");
+    std::fs::create_dir(&folder_workspace).unwrap();
+    let created = transact(
+        &server,
+        address,
+        "POST",
+        "/api/v1/projects/from-workspace",
+        &serde_json::to_string(&serde_json::json!({"root":folder_workspace})).unwrap(),
+        &[("Origin", &origin), ("X-vKore-Client", "harness-ui-v1")],
+    );
+    assert!(created.starts_with("HTTP/1.1 200"), "{created}");
+    let created: Value = serde_json::from_str(created.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(created["created"], true);
+    assert_eq!(created["project"]["name"], "folder-first");
+    assert_eq!(created["project"]["workspace"]["access"], "review_changes");
+    assert!(
+        created["project"]["workspace"]
+            .get("max_write_bytes")
+            .is_none()
+    );
+
     let body = serde_json::to_string(&config(&workspace, &temp.path().join("state"))).unwrap();
     let rejected = transact(
         &server,
@@ -220,7 +329,6 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     );
     assert!(rejected.starts_with("HTTP/1.1 403"));
 
-    let origin = format!("http://{address}");
     let saved = transact(
         &server,
         address,

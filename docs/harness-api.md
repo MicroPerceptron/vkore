@@ -53,6 +53,11 @@ All JSON records use `api_version: 1`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | Loopback liveness |
+| `GET` | `/api/v1/settings` | Read versioned application preferences and available models/fonts |
+| `POST` | `/api/v1/settings` | Atomically update validated application preferences |
+| `GET` | `/api/v1/activity` | Read bounded, privacy-safe local session summaries |
+| `GET` | `/api/v1/projects` | List persisted projects |
+| `POST` | `/api/v1/projects/from-workspace` | Validate one folder, derive defaults, and create or reopen its project |
 | `POST` | `/api/v1/sessions` | Create or idempotently reopen a project session |
 | `GET` | `/api/v1/sessions/{session}` | Retrieve bounded reconnect state |
 | `POST` | `/api/v1/sessions/{session}/prompts` | Submit user intent |
@@ -65,6 +70,15 @@ Retrying an exact request returns the original prompt ID and cannot repeat work.
 Reusing a key with changed text or identity is refused. A stale event cursor is
 refused after the bounded replay window rather than silently returning an
 incomplete history.
+
+Ordinary project creation sends only `{"root":"..."}` to
+`/api/v1/projects/from-workspace`. The server derives the project name, stable
+ID, app-owned state path, review-first workspace posture, and current
+application model default. Selecting an already registered workspace returns
+that existing project with `created: false`; it never creates a duplicate.
+Unsafe roots, missing folders, unsupported entries, and unavailable default
+models return actionable errors. Portable project JSON has no configurable
+workspace byte or file-count quota; legacy quota keys are removed on load.
 
 ## Events
 

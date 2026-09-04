@@ -161,9 +161,7 @@ print(json.dumps({
     "root": os.environ["WORKSPACE"],
     "state": os.environ["WORKSPACE_STATE"],
     "access": "read_only",
-    "exclusions": [],
-    "max_write_bytes": 0,
-    "max_write_files": 0
+    "exclusions": []
   },
   "inference": {
     "backend": "deterministic",

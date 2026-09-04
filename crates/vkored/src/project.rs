@@ -25,8 +25,6 @@ pub struct WorkspaceConfig {
     pub access: WorkspaceAccess,
     #[serde(default)]
     pub exclusions: Vec<String>,
-    pub max_write_bytes: u64,
-    pub max_write_files: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,7 +120,8 @@ pub enum ProjectError {
     StateInsideWorkspace,
     WorkspaceInsideState,
     MissingArtifact(String),
-    UnsafeWritebackBounds,
+    UnsafeWorkspace(String),
+    UnsupportedWorkspace(String),
     InvalidRuntime,
     NotFound,
     Conflict,
@@ -131,7 +130,37 @@ pub enum ProjectError {
 
 impl fmt::Display for ProjectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::InvalidIdentity => f.write_str("The generated project identity is invalid."),
+            Self::InvalidName => f.write_str("Enter a project name between 1 and 128 characters."),
+            Self::UnsupportedSchema => {
+                f.write_str("This project was created by an unsupported vKore version.")
+            }
+            Self::RootMissing => f.write_str("The selected workspace no longer exists."),
+            Self::RootNotDirectory => f.write_str("Select a workspace folder, not a file."),
+            Self::InvalidWorkspaceState => {
+                f.write_str("vKore could not derive a safe application state location.")
+            }
+            Self::StateInsideWorkspace | Self::WorkspaceInsideState => f.write_str(
+                "The application state and workspace overlap. Choose a different workspace folder.",
+            ),
+            Self::MissingArtifact(artifact) => write!(
+                f,
+                "The configured {artifact} is unavailable. Choose an installed model in Settings."
+            ),
+            Self::UnsafeWorkspace(reason) => {
+                write!(f, "This workspace is too broad or sensitive: {reason}")
+            }
+            Self::UnsupportedWorkspace(reason) => {
+                write!(f, "This workspace contains an unsupported entry: {reason}")
+            }
+            Self::InvalidRuntime => f.write_str(
+                "The configured model runtime is incomplete. Choose an available model in Settings.",
+            ),
+            Self::NotFound => f.write_str("That project is no longer available."),
+            Self::Conflict => f.write_str("A project with that identity already exists."),
+            Self::Io(reason) => write!(f, "The project could not be saved: {reason}"),
+        }
     }
 }
 impl std::error::Error for ProjectError {}
@@ -151,9 +180,22 @@ impl ProjectStore {
             if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = fs::read(entry.path()).map_err(io_error)?;
-            let config: ProjectConfig = serde_json::from_slice(&bytes)
+            let path = entry.path();
+            let bytes = fs::read(&path).map_err(io_error)?;
+            let mut serialized: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|error| ProjectError::Io(error.to_string()))?;
+            let had_legacy_quotas = serialized
+                .pointer_mut("/workspace")
+                .and_then(serde_json::Value::as_object_mut)
+                .is_some_and(|workspace| {
+                    workspace.remove("max_write_bytes").is_some()
+                        | workspace.remove("max_write_files").is_some()
+                });
+            let config: ProjectConfig = serde_json::from_value(serialized)
+                .map_err(|error| ProjectError::Io(error.to_string()))?;
+            if had_legacy_quotas {
+                write_project_atomically(&root, &config)?;
+            }
             projects.insert(config.id.clone(), config);
         }
         Ok(Self {
@@ -185,12 +227,7 @@ impl ProjectStore {
             return Err(ProjectError::RootMissing);
         }
         fs::create_dir_all(&report.resolved_state).map_err(io_error)?;
-        let bytes = serde_json::to_vec_pretty(&config)
-            .map_err(|error| ProjectError::Io(error.to_string()))?;
-        let path = self.root.join(format!("{}.json", config.id));
-        let temporary = self.root.join(format!(".{}.json.tmp", config.id));
-        fs::write(&temporary, &bytes).map_err(io_error)?;
-        fs::rename(&temporary, &path).map_err(io_error)?;
+        write_project_atomically(&self.root, &config)?;
         self.projects
             .lock()
             .map_err(|_| ProjectError::Io("project store lock poisoned".into()))?
@@ -229,6 +266,137 @@ impl ProjectStore {
     pub fn derived_state(&self, id: &str, workspace: &Path) -> PathBuf {
         derived_workspace_state(&self.root, id, workspace)
     }
+
+    /// Creates the ordinary folder-first project shape used by the native UI.
+    ///
+    /// Project identity and state are derived from the canonical workspace;
+    /// selecting the same folder again resolves to the existing project.
+    pub fn create_from_workspace(
+        &self,
+        workspace: &Path,
+        inference: InferenceConfig,
+    ) -> Result<NewProjectOutcome, ProjectError> {
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|_| ProjectError::RootMissing)?;
+        if !canonical.is_dir() {
+            return Err(ProjectError::RootNotDirectory);
+        }
+        if let Some(mut project) = self
+            .list()
+            .into_iter()
+            .find(|project| project.workspace.root.canonicalize().ok().as_ref() == Some(&canonical))
+        {
+            if project.archived {
+                project.archived = false;
+                project = self.save(project)?;
+            }
+            let report = preflight(&project)?;
+            return Ok(NewProjectOutcome {
+                project,
+                preflight: report,
+                created: false,
+            });
+        }
+        if let Some(warning) = broad_root_warning(&canonical) {
+            return Err(ProjectError::UnsafeWorkspace(warning));
+        }
+
+        let name = canonical
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Workspace")
+            .to_owned();
+        let id = self.unique_workspace_id(&name, &canonical)?;
+        let state = self.derived_state(&id, &canonical);
+        let config = ProjectConfig {
+            schema_version: PROJECT_SCHEMA_VERSION,
+            id: id.clone(),
+            name,
+            workspace: WorkspaceConfig {
+                root: canonical,
+                state,
+                // A project can make useful edits, but every write remains in
+                // the explicit review/approval path by default.
+                access: WorkspaceAccess::ReviewChanges,
+                exclusions: vec![".git/objects".into()],
+            },
+            inference,
+            addons: Vec::new(),
+            approvals: ApprovalProfile {
+                default_scope: "once".into(),
+                confirm_external_writes: true,
+                confirm_destructive: true,
+                standing_policy_enabled: false,
+            },
+            retention: RetentionConfig {
+                transcript_days: 30,
+                clean_kv_on_close: true,
+                retain_raw_model_output: false,
+            },
+            resources: ResourceLimits {
+                memory_mib: 2_048,
+                virtual_cpus: 2,
+                prompt_seconds: 300,
+                agent_limit: 4,
+            },
+            archived: false,
+        };
+        let report = preflight(&config)?;
+        if let Some(entry) = report.unsupported_entries.first() {
+            return Err(ProjectError::UnsupportedWorkspace(entry.clone()));
+        }
+        let project = self.save(config)?;
+        Ok(NewProjectOutcome {
+            project,
+            preflight: report,
+            created: true,
+        })
+    }
+
+    fn unique_workspace_id(&self, name: &str, workspace: &Path) -> Result<String, ProjectError> {
+        let mut slug = name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        while slug.contains("--") {
+            slug = slug.replace("--", "-");
+        }
+        let slug = slug.trim_matches('-');
+        let slug = if slug.is_empty() { "project" } else { slug };
+        let digest = blake3::hash(workspace.as_os_str().to_string_lossy().as_bytes()).to_hex();
+        let prefix = slug.chars().take(47).collect::<String>();
+        let base = format!("{prefix}-{}", &digest.as_str()[..12]);
+        let projects = self
+            .projects
+            .lock()
+            .map_err(|_| ProjectError::Io("project store lock poisoned".into()))?;
+        if !projects.contains_key(&base) {
+            return Ok(base);
+        }
+        for suffix in 2..=9_999 {
+            let candidate = format!("{}-{suffix}", base.chars().take(59).collect::<String>());
+            if !projects.contains_key(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        Err(ProjectError::Conflict)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct NewProjectOutcome {
+    pub project: ProjectConfig,
+    pub preflight: WorkspacePreflight,
+    pub created: bool,
 }
 
 pub fn derived_workspace_state(project_store: &Path, id: &str, workspace: &Path) -> PathBuf {
@@ -274,7 +442,6 @@ pub fn preflight(config: &ProjectConfig) -> Result<WorkspacePreflight, ProjectEr
         };
         for entry in entries {
             if entries_scanned == SCAN_ENTRY_LIMIT {
-                unsupported_entries.push(format!("scan bounded at {SCAN_ENTRY_LIMIT} entries"));
                 pending.clear();
                 break;
             }
@@ -331,11 +498,6 @@ fn validate_config(config: &ProjectConfig) -> Result<(), ProjectError> {
     if config.workspace.state.as_os_str().is_empty() {
         return Err(ProjectError::InvalidWorkspaceState);
     }
-    if config.workspace.access != WorkspaceAccess::ReadOnly
-        && (config.workspace.max_write_bytes == 0 || config.workspace.max_write_files == 0)
-    {
-        return Err(ProjectError::UnsafeWritebackBounds);
-    }
     for (label, path) in [
         ("Kore image", config.inference.kore_image.as_ref()),
         ("llama.cpp runtime", config.inference.llama_server.as_ref()),
@@ -354,6 +516,35 @@ fn validate_config(config: &ProjectConfig) -> Result<(), ProjectError> {
         && (config.inference.llama_server.is_none() || config.inference.model.is_none())
     {
         return Err(ProjectError::InvalidRuntime);
+    }
+    Ok(())
+}
+
+fn write_project_atomically(root: &Path, config: &ProjectConfig) -> Result<(), ProjectError> {
+    let bytes =
+        serde_json::to_vec_pretty(config).map_err(|error| ProjectError::Io(error.to_string()))?;
+    let path = root.join(format!("{}.json", config.id));
+    let temporary = root.join(format!(".{}.json.tmp", config.id));
+    let backup = root.join(format!(".{}.json.bak", config.id));
+    let mut file = fs::File::create(&temporary).map_err(io_error)?;
+    use std::io::Write as _;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(io_error)?;
+    if path.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(io_error)?;
+        }
+        fs::rename(&path, &backup).map_err(io_error)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &path);
+        }
+        return Err(io_error(error));
+    }
+    if backup.exists() {
+        fs::remove_file(backup).map_err(io_error)?;
     }
     Ok(())
 }

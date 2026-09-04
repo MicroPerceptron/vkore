@@ -40,10 +40,6 @@ pub const TEXT_SECONDARY: u32 = 0xB9B9BE;
 pub const TEXT_MUTED: u32 = 0x8B8B90;
 /// The single accent.
 pub const MAGENTA: u32 = 0xCE15C4;
-/// First dark accent step, used for completed wizard steps.
-pub const MAGENTA_DARK: u32 = 0xA410A0;
-/// Second dark accent step.
-pub const MAGENTA_DARKER: u32 = 0x7A0C77;
 /// Success.
 pub const SUCCESS: u32 = 0x3FCB6E;
 /// Warning, and the colour of external paths.

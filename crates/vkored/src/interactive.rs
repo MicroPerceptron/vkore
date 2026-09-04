@@ -2,7 +2,7 @@
 
 use crate::{
     BackendEvent, BackendRole, InferenceBackend, InferenceObservation, ObservationKind,
-    ProjectConfig, ProjectStore, SequenceIdentity, UiApprovalService,
+    ProjectConfig, ProjectStore, SequenceIdentity, SettingsStore, UiApprovalService,
 };
 use kore_hostlink::{
     AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
@@ -1436,6 +1436,8 @@ pub struct HarnessHttpServer {
     address: SocketAddr,
     projects: Arc<ProjectStore>,
     approvals: Arc<UiApprovalService>,
+    settings: Arc<SettingsStore>,
+    transcript_root: PathBuf,
 }
 
 impl HarnessHttpServer {
@@ -1453,8 +1455,10 @@ impl HarnessHttpServer {
             return Err(HarnessError::NonLoopback);
         }
         let project_root = project_root.into();
+        let state_root = project_root.parent().unwrap_or(&project_root).to_path_buf();
         let server = tiny_http::Server::http(address)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
+        #[allow(clippy::infallible_destructuring_match)]
         let address = match server.server_addr() {
             tiny_http::ListenAddr::IP(address) => address,
             #[cfg(unix)]
@@ -1475,6 +1479,11 @@ impl HarnessHttpServer {
             approvals: Arc::new(
                 UiApprovalService::open(&project_root.join("policy")).map_err(HarnessError::Io)?,
             ),
+            settings: Arc::new(
+                SettingsStore::open(state_root.join("settings.json"))
+                    .map_err(|error| HarnessError::Io(error.to_string()))?,
+            ),
+            transcript_root: state_root.join("transcripts"),
         })
     }
 
@@ -1510,9 +1519,13 @@ impl HarnessHttpServer {
         )
         .and_then(|_| {
             route_http(
-                &self.handle,
-                &self.projects,
-                &self.approvals,
+                HttpRouteState {
+                    handle: &self.handle,
+                    projects: &self.projects,
+                    approvals: &self.approvals,
+                    settings: &self.settings,
+                    transcript_root: &self.transcript_root,
+                },
                 &method,
                 &url,
                 &body,
@@ -1549,14 +1562,27 @@ impl HarnessHttpServer {
     }
 }
 
+struct HttpRouteState<'a> {
+    handle: &'a HarnessHandle,
+    projects: &'a ProjectStore,
+    approvals: &'a UiApprovalService,
+    settings: &'a SettingsStore,
+    transcript_root: &'a Path,
+}
+
 fn route_http(
-    handle: &HarnessHandle,
-    projects: &ProjectStore,
-    approvals: &UiApprovalService,
+    state: HttpRouteState<'_>,
     method: &str,
     url: &str,
     body: &[u8],
 ) -> Result<(&'static str, Vec<u8>), HarnessError> {
+    let HttpRouteState {
+        handle,
+        projects,
+        approvals,
+        settings,
+        transcript_root,
+    } = state;
     if method == "GET" && url == "/" {
         return Ok((
             "application/json",
@@ -1607,6 +1633,15 @@ fn route_http(
             "package_actions":{"install":"Use vkore-packages verified local import or download APIs","automatic_download":false}
         }),
         ("GET", ["api", "v1", "projects"]) => serde_json::to_value(projects.list()).unwrap(),
+        ("GET", ["api", "v1", "settings"]) => settings.view(projects).map_err(settings_error)?,
+        ("POST", ["api", "v1", "settings"]) => {
+            let patch: Value = serde_json::from_slice(body).map_err(http_json)?;
+            settings.update(&patch, projects).map_err(settings_error)?
+        }
+        ("GET", ["api", "v1", "activity"]) => serde_json::to_value(
+            crate::settings::recent_activity(transcript_root, projects).map_err(settings_error)?,
+        )
+        .unwrap(),
         ("GET", ["api", "v1", "approvals"]) => approvals.state().map_err(HarnessError::Io)?,
         ("POST", ["api", "v1", "projects", project, "approvals"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;
@@ -1657,6 +1692,23 @@ fn route_http(
                 config.workspace.state = projects.derived_state(&config.id, &config.workspace.root);
             }
             serde_json::to_value(projects.save(config).map_err(project_error)?).unwrap()
+        }
+        ("POST", ["api", "v1", "projects", "from-workspace"]) => {
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let root = PathBuf::from(
+                value["root"]
+                    .as_str()
+                    .ok_or(HarnessError::InvalidIdentity)?,
+            );
+            let inference = settings
+                .default_inference(projects)
+                .map_err(settings_error)?;
+            serde_json::to_value(
+                projects
+                    .create_from_workspace(&root, inference)
+                    .map_err(project_error)?,
+            )
+            .unwrap()
         }
         ("GET", ["api", "v1", "projects", project]) => {
             serde_json::to_value(projects.get(project).map_err(project_error)?).unwrap()
@@ -1819,6 +1871,9 @@ fn http_json(error: serde_json::Error) -> HarnessError {
     HarnessError::Http(error.to_string())
 }
 fn project_error(error: crate::project::ProjectError) -> HarnessError {
+    HarnessError::Http(error.to_string())
+}
+fn settings_error(error: crate::settings::SettingsError) -> HarnessError {
     HarnessError::Http(error.to_string())
 }
 

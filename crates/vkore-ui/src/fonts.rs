@@ -8,6 +8,12 @@
 use crate::theme;
 use axui_core::ResourceId;
 use iced_core::{Font, font};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const BODY_DESIGN_DEFAULT: u8 = 0;
+const BODY_ARCHIVO: u8 = 1;
+const BODY_JETBRAINS_MONO: u8 = 2;
+static BODY_PREFERENCE: AtomicU8 = AtomicU8::new(BODY_DESIGN_DEFAULT);
 
 /// The registered resource identities, in registration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +75,27 @@ pub const SPLASH: Font = face(
     font::Weight::Semibold,
     theme::TRACK_SPLASH,
 );
+
+/// Applies one persisted, registered body-family choice.
+pub fn set_body_preference(preference: &str) -> bool {
+    let value = match preference {
+        "design_default" => BODY_DESIGN_DEFAULT,
+        "archivo" => BODY_ARCHIVO,
+        "jetbrains_mono" => BODY_JETBRAINS_MONO,
+        _ => return false,
+    };
+    BODY_PREFERENCE.store(value, Ordering::Release);
+    true
+}
+
+/// The body face selected in application Settings.
+pub fn body() -> Font {
+    match BODY_PREFERENCE.load(Ordering::Acquire) {
+        BODY_ARCHIVO => face(theme::DISPLAY_FAMILY, font::Weight::Semibold, 0.0),
+        BODY_JETBRAINS_MONO => face(theme::MONO_FAMILY, font::Weight::Normal, 0.0),
+        _ => BODY,
+    }
+}
 
 #[cfg(test)]
 mod tests {

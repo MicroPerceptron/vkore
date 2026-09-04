@@ -50,9 +50,10 @@ Then launch
 The named persisted project opens directly and its sandbox starts without the
 project modal. If the daemon has exactly one active project, `--project` may be
 omitted and that project opens automatically. There is no login, token, or
-browser-session step. Create a project only when you need a new configuration,
-and pick one narrow workspace directory. vKore derives
-transaction/replay state under
+browser-session step. Choose **New project** and pick one narrow workspace
+directory. There is no configuration wizard: vKore derives the display name
+and stable identity, inherits the application model default, opens the project
+after automatic preflight, and stores transaction/replay state under
 `.vkore-state/workspaces`; it refuses a state directory nested inside the shared
 workspace. The bounded preflight scan reports symlinks without following them,
 identifies unsupported entries, and warns for drive roots, home folders, and
@@ -62,8 +63,12 @@ The access modes are:
 
 - **Read only:** verified live reads with no writeback.
 - **Review changes:** configuration for staged, exact-change approval.
-- **Automatic writeback:** requires nonzero byte and file-count bounds. Kore's
-  grant remains the enforcement boundary.
+- **Automatic writeback:** applies approved changes inside the scoped
+  workspace. Kore's grant remains the enforcement boundary.
+
+Workspace byte-count and file-count quotas are not configurable or enforced.
+Legacy `max_write_bytes` and `max_write_files` keys are removed when an older
+project is loaded; a legacy zero never disables writes.
 
 The deterministic backend is explicitly labeled as a test oracle. It drives the
 broker/agent/tool protocol and is useful for UI, policy, and
@@ -82,8 +87,8 @@ cargo run -p vkored --bin vkore-harnessd -- `
 
 Use repeated `--llama-arg` values for backend-specific options. For example,
 `--llama-arg --device --llama-arg none` forces CPU inference when an installed
-accelerator backend is unavailable. The same values can be recorded in the
-wizard's advanced llama.cpp arguments field.
+accelerator backend is unavailable. The same values can be recorded in a
+project-specific runtime configuration.
 
 The UI records the Kore image, llama.cpp runtime, and model paths, and refuses
 missing files during preflight. It never downloads a selected model implicitly.
@@ -145,10 +150,41 @@ idle UI cannot strand cleanup or leave a stale cancellation between chats.
 Capability, tool-call, and tool-result observations stream into the existing UI
 while the prompt runs.
 
+## Settings, defaults, and activity
+
+**Settings** is available from the persistent left navigation and is also
+reachable from the compact header on narrow windows. It contains separate
+General/inference, Appearance, Interface, Activity, and current-project
+sections.
+
+The application model is a default for newly created projects. Changing it
+does not silently replace an existing project override. In Current project,
+**Use application default model** copies the current default into that project;
+save the project to persist the change. Missing local model files are shown as
+unavailable and cannot be selected as a default.
+
+The font preference is applied after a successful atomic settings save and is
+restored before project content is rendered on the next launch. Structured
+activity, paths, and logs retain a readable monospace face. **Show Working
+panel** controls only whether the per-turn Working UI is rendered. Hiding it
+does not delete transcript or audit events. When Working is shown, its default
+is collapsed unless **Expand Working by default** is enabled; each turn remains
+individually reversible.
+
+Activity reads at most a bounded set of recent local transcript files and
+shows summary metadata only: project, session, model, timestamps, terminal
+state, and aggregate prompt/result counts. Prompts, raw model output,
+credentials, capabilities, and validation envelopes are never included.
+Application preferences live in a versioned `settings.json` in the app state
+area, outside portable project JSON. Writes use a temporary file and atomic
+replacement; malformed settings are preserved for diagnosis and replaced by
+safe defaults.
+
 ## Add-ons and approvals
 
-The wizard displays add-on publisher, version, execution domain, tools, and
-network destinations. Enabling an add-on establishes only a project ceiling.
+The post-creation plugin and policy surfaces display add-on publisher, version,
+execution domain, tools, and network destinations. Enabling an add-on
+establishes only a project ceiling.
 On sandbox start, the UI submits the exact tool request through `vkore-policy`.
 The approval dialog is an authenticated user action; model or transcript text
 cannot create it. Candidate authority and committed grants are rendered in

@@ -67,16 +67,13 @@ enum Message {
     SelectProject(usize),
     NewProject,
     EditProject,
-    ConfigAction(iced_core::text::editor::Action),
-    WizardField(&'static str, String),
-    WizardToggle(&'static str),
-    WizardChoice(&'static str, &'static str),
-    WizardAddon(String),
-    WizardPage(u8),
-    Preflight,
+    ChooseDefaultModel(String),
+    ChooseBodyFont(String),
+    ToggleShowWorking,
+    ToggleWorkingExpanded,
+    ProjectNameChanged(String),
+    UseDefaultModelForProject,
     SaveProject,
-    Browse(RequestKind),
-    CloseEditor,
     ToggleSession,
     #[allow(dead_code)]
     CleanSession,
@@ -109,6 +106,8 @@ enum View {
     Agents,
     /// The workspace permission graph and its inspector.
     Filesystem,
+    /// Application defaults, appearance, interface preferences, and activity.
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +116,10 @@ enum RequestKind {
     Catalog,
     Projects,
     Approvals,
-    Preflight,
+    Settings,
+    SaveSettings,
+    Activity,
+    CreateProject,
     SaveProject,
     StartSession,
     StopSession,
@@ -129,9 +131,6 @@ enum RequestKind {
     ArchiveProject,
     DuplicateProject,
     PickWorkspace,
-    PickKore,
-    PickLlama,
-    PickModel,
 }
 
 fn rgb(hex: u32) -> Color {
@@ -896,17 +895,71 @@ fn input_style(
     status: iced_widget::text_input::Status,
 ) -> iced_widget::text_input::Style {
     let focused = matches!(status, iced_widget::text_input::Status::Focused { .. });
+    let disabled = status == iced_widget::text_input::Status::Disabled;
+    let dim = |mut color: Color| {
+        if disabled {
+            color.a *= 0.4;
+        }
+        color
+    };
     iced_widget::text_input::Style {
         background: Background::Color(theme::rgb(theme::BACKGROUND)),
         border: Border {
-            color: rgb(if focused { 0x596573 } else { 0x343b45 }),
+            color: dim(rgb(if focused { 0x596573 } else { 0x343b45 })),
             width: 1.0,
             radius: 8.0.into(),
         },
-        placeholder: theme::rgb(theme::BORDER_DIM),
-        value: theme::rgb(theme::TEXT),
+        placeholder: dim(theme::rgb(theme::BORDER_DIM)),
+        value: dim(theme::rgb(theme::TEXT)),
         selection: theme::rgb(theme::MAGENTA),
     }
+}
+
+fn settings_section<'a>(
+    title: &'static str,
+    description: &'static str,
+    body: UiElement<'a>,
+) -> UiElement<'a> {
+    container(
+        column![
+            widgets::display(title),
+            widgets::body(description, theme::SIZE_SM, theme::TEXT_MUTED),
+            container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
+                theme::BORDER,
+                None,
+                0.0
+            )),
+            body,
+        ]
+        .spacing(theme::SPACE_4),
+    )
+    .padding(theme::SPACE_6)
+    .width(Length::Fill)
+    .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG))
+    .into()
+}
+
+fn model_option_selectable(status: &str, selected: bool, busy: bool) -> bool {
+    status == "installed" && !selected && !busy
+}
+
+fn new_project_selectable(session: Option<&str>, busy: bool) -> bool {
+    session.is_none() && !busy
+}
+
+fn working_panel_visible(settings: &Value) -> bool {
+    settings["show_working"].as_bool().unwrap_or(true)
+}
+
+fn opens_settings(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Character(key),
+            modifiers,
+            ..
+        }) if modifiers.control() && key == ","
+    )
 }
 
 struct Request {
@@ -1033,6 +1086,9 @@ struct Model {
     projects: Vec<Value>,
     catalog: Value,
     approvals: Value,
+    settings: Value,
+    settings_loaded: bool,
+    activity: Option<Result<Vec<Value>, String>>,
     selected: Option<usize>,
     launch_project: Option<String>,
     auto_open_pending: bool,
@@ -1054,9 +1110,6 @@ struct Model {
     topology_agent_bands: Vec<layout::Placement>,
     topology_path_bands: Vec<layout::Placement>,
     viewport: Size,
-    editor: Option<text_editor::Content<AxRenderer<System>>>,
-    wizard_page: u8,
-    preflight: Option<String>,
     approval: Option<Value>,
     status: String,
     busy: bool,
@@ -1066,7 +1119,26 @@ struct Model {
 impl Model {
     #[cfg(test)]
     fn new(network: Network) -> Self {
-        Self::with_launch_project(network, None)
+        let mut model = Self::with_launch_project(network, None);
+        model.settings_loaded = true;
+        model.settings = json!({
+            "schema_version":1,
+            "default_model_id":"deterministic",
+            "default_inference":{
+                "backend":"deterministic","kore_image":null,"llama_server":null,
+                "model":null,"extra_args":[],"context_tokens":32768,
+                "output_tokens":512,"threads":2,"slots":3
+            },
+            "body_font":"design_default",
+            "show_working":true,
+            "working_expanded_default":false,
+            "models":[{
+                "id":"deterministic","display_name":"Deterministic security oracle",
+                "backend":"deterministic","provider":"vKore","path":null,
+                "status":"installed"
+            }]
+        });
+        model
     }
 
     fn with_launch_project(network: Network, launch_project: Option<String>) -> Self {
@@ -1076,6 +1148,9 @@ impl Model {
             projects: Vec::new(),
             catalog: Value::Null,
             approvals: Value::Null,
+            settings: Value::Null,
+            settings_loaded: false,
+            activity: None,
             selected: None,
             launch_project,
             auto_open_pending: true,
@@ -1096,9 +1171,6 @@ impl Model {
             topology_agent_bands: Vec::new(),
             topology_path_bands: Vec::new(),
             viewport: Size::new(1280.0, 800.0),
-            editor: None,
-            wizard_page: 0,
-            preflight: None,
             approval: None,
             status: "Connecting to the vKore daemon…".into(),
             busy: false,
@@ -1114,6 +1186,8 @@ impl Model {
             (RequestKind::Catalog, "/api/v1/catalog"),
             (RequestKind::Projects, "/api/v1/projects"),
             (RequestKind::Approvals, "/api/v1/approvals"),
+            (RequestKind::Settings, "/api/v1/settings"),
+            (RequestKind::Activity, "/api/v1/activity"),
         ] {
             self.network.request(Request {
                 kind,
@@ -1167,9 +1241,9 @@ impl Model {
         let inspector = if self.topology.inspector { 300.0 } else { 0.0 };
         Size::new(
             (viewport.width - sidebar - inspector).max(1.0),
-            // The graph sits below both the 64px harness header and the 52px
-            // embedded topology toolbar.
-            (viewport.height - 116.0).max(1.0),
+            // The graph sits below the 64px header, 28px status line, and
+            // 52px embedded topology toolbar.
+            (viewport.height - 144.0).max(1.0),
         )
     }
 
@@ -1222,72 +1296,69 @@ impl Model {
                 }
             }
             Message::NewProject => {
-                // The published control stays visually available while a
-                // session is active, but its handler is intentionally a no-op.
                 if self.session.is_some() {
+                    self.status =
+                        "Close the current project before choosing another workspace.".into();
                     return;
                 }
-                let root = std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                self.editor = Some(
-                    text_editor::Content::with_text(&serde_json::to_string_pretty(&json!({
-                        "schema_version":1,
-                        "id":"my-project",
-                        "name":"My project",
-                        "workspace":{"root":root,"state":"","access":"read_only","exclusions":[".git/objects"],"max_write_bytes":0,"max_write_files":0},
-                        "inference":{"backend":"deterministic","kore_image":null,"llama_server":null,"model":null,"extra_args":[],"context_tokens":32768,"output_tokens":512,"threads":4,"slots":3},
-                        "addons":[],
-                        "approvals":{"default_scope":"once","confirm_external_writes":true,"confirm_destructive":true,"standing_policy_enabled":false},
-                        "retention":{"transcript_days":30,"clean_kv_on_close":true,"retain_raw_model_output":false},
-                        "resources":{"memory_mib":2048,"virtual_cpus":2,"prompt_seconds":300,"agent_limit":4},
-                        "archived":false
-                    }))
-                    .unwrap()),
-                );
-                self.wizard_page = 0;
-                self.preflight = None;
-            }
-            Message::EditProject => {
-                if let Some(project) = self.project() {
-                    self.editor = Some(text_editor::Content::with_text(
-                        &serde_json::to_string_pretty(project).unwrap_or_default(),
-                    ));
-                    self.wizard_page = 0;
-                    self.preflight = None;
-                }
-            }
-            Message::ConfigAction(action) => {
-                if let Some(editor) = self.editor.as_mut() {
-                    editor.perform(action);
-                    self.preflight = None;
-                }
-            }
-            Message::WizardField(pointer, value) => self.update_config(pointer, &value),
-            Message::WizardToggle(pointer) => self.toggle_config(pointer),
-            Message::WizardChoice(pointer, value) => self.update_config(pointer, value),
-            Message::WizardAddon(id) => self.toggle_addon(&id),
-            Message::WizardPage(page) => {
-                self.wizard_page = page.min(4);
-                if self.wizard_page == 4 {
-                    self.preflight = None;
-                }
-            }
-            Message::Preflight => self.submit_editor(RequestKind::Preflight),
-            Message::SaveProject => self.submit_editor(RequestKind::SaveProject),
-            Message::Browse(kind) => {
-                let directory = kind == RequestKind::PickWorkspace;
+                self.busy = true;
+                self.status = "Choose one workspace folder for the new project.".into();
                 self.network.request(Request {
-                    kind,
+                    kind: RequestKind::PickWorkspace,
                     method: "POST",
                     path: "/api/v1/picker".into(),
-                    body: Some(json!({"kind":if directory {"directory"} else {"file"}})),
+                    body: Some(json!({"kind":"directory"})),
                 });
             }
-            Message::CloseEditor => {
-                self.editor = None;
-                self.preflight = None;
+            Message::EditProject => {
+                if self.project().is_some() {
+                    self.view = View::Settings;
+                }
+            }
+            Message::ChooseDefaultModel(id) => {
+                self.save_settings(json!({"default_model_id": id}));
+            }
+            Message::ChooseBodyFont(font) => {
+                self.save_settings(json!({"body_font": font}));
+            }
+            Message::ToggleShowWorking => {
+                let show = !self.settings["show_working"].as_bool().unwrap_or(true);
+                self.save_settings(json!({"show_working": show}));
+            }
+            Message::ToggleWorkingExpanded => {
+                let expanded = !self.settings["working_expanded_default"]
+                    .as_bool()
+                    .unwrap_or(false);
+                self.save_settings(json!({"working_expanded_default": expanded}));
+            }
+            Message::ProjectNameChanged(name) => {
+                if let Some(index) = self.selected
+                    && let Some(project) = self.projects.get_mut(index)
+                {
+                    project["name"] = Value::String(name);
+                }
+            }
+            Message::UseDefaultModelForProject => {
+                if let (Some(index), Some(inference)) = (
+                    self.selected,
+                    self.settings.get("default_inference").cloned(),
+                ) && let Some(project) = self.projects.get_mut(index)
+                {
+                    project["inference"] = inference;
+                }
+            }
+            Message::SaveProject => {
+                if self.session.is_none()
+                    && let Some(project) = self.project().cloned()
+                {
+                    self.busy = true;
+                    self.network.request(Request {
+                        kind: RequestKind::SaveProject,
+                        method: "POST",
+                        path: "/api/v1/projects".into(),
+                        body: Some(project),
+                    });
+                }
             }
             Message::ToggleSession => {
                 if let Some(session) = self.session.clone() {
@@ -1406,6 +1477,15 @@ impl Model {
                     self.topology.fitted = false;
                 }
                 self.view = value;
+                if value == View::Settings {
+                    self.activity = None;
+                    self.network.request(Request {
+                        kind: RequestKind::Activity,
+                        method: "GET",
+                        path: "/api/v1/activity".into(),
+                        body: None,
+                    });
+                }
             }
             Message::TopologySelectPath(index) => {
                 self.topology.selected = None;
@@ -1457,108 +1537,14 @@ impl Model {
         }
     }
 
-    fn submit_editor(&mut self, kind: RequestKind) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        match serde_json::from_str(&source.text()) {
-            Ok(body) => {
-                self.busy = true;
-                self.network.request(Request {
-                    kind,
-                    method: "POST",
-                    path: if kind == RequestKind::Preflight {
-                        "/api/v1/projects/preflight".into()
-                    } else {
-                        "/api/v1/projects".into()
-                    },
-                    body: Some(body),
-                });
-            }
-            Err(error) => self.preflight = Some(format!("Invalid JSON: {error}")),
-        }
-    }
-
-    fn update_config(&mut self, pointer: &str, value: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(slot) = config.pointer_mut(pointer) else {
-            return;
-        };
-        *slot = match slot {
-            Value::Number(_) => value
-                .parse::<u64>()
-                .map(Value::from)
-                .unwrap_or_else(|_| Value::from(0)),
-            Value::Array(_) if pointer == "/inference/extra_args" => Value::Array(
-                value
-                    .split_whitespace()
-                    .map(|part| Value::String(part.to_owned()))
-                    .collect(),
-            ),
-            Value::Null if value.is_empty() => Value::Null,
-            _ => Value::String(value.to_owned()),
-        };
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
-    }
-
-    fn toggle_config(&mut self, pointer: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(slot) = config.pointer_mut(pointer) else {
-            return;
-        };
-        *slot = Value::Bool(!slot.as_bool().unwrap_or(false));
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
-    }
-
-    fn toggle_addon(&mut self, id: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(addons) = config["addons"].as_array_mut() else {
-            return;
-        };
-        if let Some(addon) = addons.iter_mut().find(|addon| addon["id"] == id) {
-            addon["enabled"] = Value::Bool(!addon["enabled"].as_bool().unwrap_or(false));
-        } else if let Some(catalog) = self.catalog["addons"]
-            .as_array()
-            .and_then(|entries| entries.iter().find(|addon| addon["id"] == id))
-        {
-            let tools = catalog["tools"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|tool| tool["name"].as_str())
-                .collect::<Vec<_>>();
-            addons.push(json!({
-                "id": id,
-                "enabled": true,
-                "mediation": catalog["domain"].as_str().unwrap_or("host"),
-                "tool_ceiling": tools,
-            }));
-        }
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
+    fn save_settings(&mut self, patch: Value) {
+        self.busy = true;
+        self.network.request(Request {
+            kind: RequestKind::SaveSettings,
+            method: "POST",
+            path: "/api/v1/settings".into(),
+            body: Some(patch),
+        });
     }
 
     fn start_session(&mut self) {
@@ -1586,7 +1572,13 @@ impl Model {
             return;
         }
         let prompt_id = format!("p-{}", now_id());
-        self.expanded_work.insert(prompt_id.clone());
+        if working_panel_visible(&self.settings)
+            && self.settings["working_expanded_default"]
+                .as_bool()
+                .unwrap_or(false)
+        {
+            self.expanded_work.insert(prompt_id.clone());
+        }
         self.prompt_id = Some(prompt_id.clone());
         self.busy = true;
         self.network.poll(Some(session.clone()), true);
@@ -1612,6 +1604,23 @@ impl Model {
                 self.status = "Connected to the resident vKore broker.".into();
             }
             (RequestKind::Catalog, Ok(value)) => self.catalog = value,
+            (kind @ (RequestKind::Settings | RequestKind::SaveSettings), Ok(value)) => {
+                self.busy = false;
+                self.settings = value;
+                self.settings_loaded = true;
+                let preference = self.settings["body_font"]
+                    .as_str()
+                    .unwrap_or("design_default");
+                fonts::set_body_preference(preference);
+                self.status = if kind == RequestKind::SaveSettings {
+                    "Application settings saved.".into()
+                } else {
+                    "Application settings loaded.".into()
+                };
+            }
+            (RequestKind::Activity, Ok(Value::Array(activity))) => {
+                self.activity = Some(Ok(activity));
+            }
             (RequestKind::Projects, Ok(Value::Array(projects))) => {
                 self.projects = projects;
                 if self
@@ -1648,11 +1657,6 @@ impl Model {
                 }
             }
             (RequestKind::Approvals, Ok(value)) => self.approvals = value,
-            (RequestKind::Preflight, Ok(value)) => {
-                self.busy = false;
-                self.preflight = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
-                self.status = "Preflight passed.".into();
-            }
             (RequestKind::SaveProject, Ok(value)) => {
                 self.busy = false;
                 let id = value["id"].as_str().unwrap_or_default();
@@ -1663,12 +1667,29 @@ impl Model {
                     self.projects.push(value);
                     self.selected = Some(self.projects.len() - 1);
                 }
-                self.editor = None;
-                self.preflight = None;
-                self.status = "Project saved after daemon preflight. Starting sandbox…".into();
+                self.status = "Project settings saved.".into();
                 if self.session.is_some() {
                     self.restart_after_stop = true;
+                    self.update(Message::ToggleSession);
                 }
+            }
+            (RequestKind::CreateProject, Ok(value)) => {
+                self.busy = false;
+                let project = value["project"].clone();
+                let id = project["id"].as_str().unwrap_or_default();
+                if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
+                    self.projects[index] = project;
+                    self.selected = Some(index);
+                } else {
+                    self.projects.push(project);
+                    self.selected = Some(self.projects.len() - 1);
+                }
+                self.status = if value["created"].as_bool().unwrap_or(false) {
+                    "Workspace validated. Project created and opened.".into()
+                } else {
+                    "This workspace already has a project. Opening it instead.".into()
+                };
+                self.view = View::Session;
                 self.update(Message::ToggleSession);
             }
             (RequestKind::StartSession, Ok(value)) => {
@@ -1747,22 +1768,28 @@ impl Model {
                 self.status = "Project duplicated. Starting sandbox…".into();
                 self.update(Message::ToggleSession);
             }
-            (
-                kind @ (RequestKind::PickWorkspace
-                | RequestKind::PickKore
-                | RequestKind::PickLlama
-                | RequestKind::PickModel),
-                Ok(value),
-            ) => {
+            (RequestKind::PickWorkspace, Ok(value)) => {
                 if let Some(path) = value["path"].as_str() {
-                    self.apply_picker(kind, path);
+                    self.network.request(Request {
+                        kind: RequestKind::CreateProject,
+                        method: "POST",
+                        path: "/api/v1/projects/from-workspace".into(),
+                        body: Some(json!({"root": path})),
+                    });
+                    self.status = "Validating workspace and applying application defaults…".into();
+                } else {
+                    self.busy = false;
+                    self.status = "New project cancelled.".into();
                 }
             }
             (_, Err(error)) => {
                 self.busy = false;
                 self.status = format!("Request refused: {error}");
-                if kind == RequestKind::Preflight {
-                    self.preflight = Some(self.status.clone());
+                if kind == RequestKind::Settings {
+                    self.settings_loaded = true;
+                }
+                if kind == RequestKind::Activity {
+                    self.activity = Some(Err(error.clone()));
                 }
                 if kind == RequestKind::SendPrompt {
                     self.prompt_id = None;
@@ -1949,32 +1976,22 @@ impl Model {
             .into()
     }
 
-    fn apply_picker(&mut self, kind: RequestKind, path: &str) {
-        let Some(editor) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&editor.text()) else {
-            self.preflight = Some("Fix the project JSON before applying a selected path.".into());
-            return;
-        };
-        let pointer = match kind {
-            RequestKind::PickWorkspace => "/workspace/root",
-            RequestKind::PickKore => "/inference/kore_image",
-            RequestKind::PickLlama => "/inference/llama_server",
-            RequestKind::PickModel => "/inference/model",
-            _ => return,
-        };
-        if let Some(slot) = config.pointer_mut(pointer) {
-            *slot = Value::String(path.into());
-            self.editor = Some(text_editor::Content::with_text(
-                &serde_json::to_string_pretty(&config).unwrap_or_default(),
-            ));
-            self.preflight = None;
-        }
-    }
-
     fn view(&self, viewport: Size) -> UiElement<'_> {
-        let base: UiElement<'_> = if viewport.width <= 720.0 {
+        let base: UiElement<'_> = if !self.settings_loaded {
+            container(
+                column![
+                    widgets::display("Loading settings"),
+                    widgets::mono(
+                        "Application preferences are loaded before project content.",
+                        theme::TEXT_MUTED,
+                    ),
+                ]
+                .spacing(theme::SPACE_2),
+            )
+            .center(Length::Fill)
+            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
+            .into()
+        } else if viewport.width <= 720.0 {
             self.main_panel(viewport)
         } else if viewport.width <= 1050.0 {
             row![self.sidebar(210.0), self.main_panel(viewport)]
@@ -1991,12 +2008,7 @@ impl Model {
                 .height(Length::Fill)
                 .into();
         }
-        if self.editor.is_some() {
-            stack![base, self.modal_layer(self.editor_panel())]
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        } else if self.approval.is_some() {
+        if self.approval.is_some() {
             stack![base, self.modal_layer(self.approval_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -2132,7 +2144,10 @@ impl Model {
                 .height(theme::CONTROL_SM)
                 .padding([0, 10])
                 .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press(Message::NewProject)
+                .on_press_maybe(
+                    new_project_selectable(self.session.as_deref(), self.busy)
+                        .then_some(Message::NewProject),
+                )
             )
             .padding(10),
             container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
@@ -2159,6 +2174,7 @@ impl Model {
                         project_idle.then_some(Message::ArchiveProject)
                     ),
                     nav("Transcript & audit", Some(Message::View(View::Session))),
+                    nav("Settings  Ctrl+,", Some(Message::View(View::Settings))),
                 ]
                 .spacing(3)
             )
@@ -2177,25 +2193,33 @@ impl Model {
     }
 
     fn main_panel(&self, viewport: Size) -> UiElement<'_> {
-        let project_name = self
-            .project()
-            .and_then(|p| p["name"].as_str())
-            .unwrap_or("No project open");
+        let settings_view = self.view == View::Settings;
+        let project_name = if settings_view {
+            "Settings"
+        } else {
+            self.project()
+                .and_then(|p| p["name"].as_str())
+                .unwrap_or("No project open")
+        };
         // The subtitle carries what status chips used to: backend, workspace
         // root, and either the live session id or that the sandbox is stopped.
-        let subtitle = match self.project() {
-            None => "create a project to begin".to_owned(),
-            Some(project) => {
-                let backend = project["inference"]["backend"]
-                    .as_str()
-                    .unwrap_or("deterministic")
-                    .replace('_', " ");
-                let root = project["workspace"]["root"]
-                    .as_str()
-                    .unwrap_or("no workspace");
-                match self.session.as_deref() {
-                    Some(session) => format!("{backend} · {root} · {session}"),
-                    None => format!("{backend} · {root} · sandbox stopped"),
+        let subtitle = if settings_view {
+            "application defaults · appearance · interface · activity".to_owned()
+        } else {
+            match self.project() {
+                None => "create a project to begin".to_owned(),
+                Some(project) => {
+                    let backend = project["inference"]["backend"]
+                        .as_str()
+                        .unwrap_or("deterministic")
+                        .replace('_', " ");
+                    let root = project["workspace"]["root"]
+                        .as_str()
+                        .unwrap_or("no workspace");
+                    match self.session.as_deref() {
+                        Some(session) => format!("{backend} · {root} · {session}"),
+                        None => format!("{backend} · {root} · sandbox stopped"),
+                    }
                 }
             }
         };
@@ -2208,31 +2232,73 @@ impl Model {
                 )))
                 .on_press(Message::View(target))
         };
-        let top = container(
-            row![
-                column![
-                    widgets::body(project_name.to_owned(), theme::SIZE_SM, theme::TEXT)
-                        .wrapping(iced_core::text::Wrapping::None)
-                        .ellipsis(iced_core::text::Ellipsis::End),
-                    widgets::mono(subtitle, theme::TEXT_MUTED)
-                        .wrapping(iced_core::text::Wrapping::None)
-                        .ellipsis(iced_core::text::Ellipsis::End),
-                ]
-                .spacing(2)
-                .width(Length::Fill)
-                .clip(true),
-                view_button("Session", View::Session),
-                view_button("Agents", View::Agents),
-                view_button("Filesystem", View::Filesystem),
+        let mut top_content = row![
+            column![
+                widgets::body(project_name.to_owned(), theme::SIZE_SM, theme::TEXT)
+                    .wrapping(iced_core::text::Wrapping::None)
+                    .ellipsis(iced_core::text::Ellipsis::End),
+                widgets::mono(subtitle, theme::TEXT_MUTED)
+                    .wrapping(iced_core::text::Wrapping::None)
+                    .ellipsis(iced_core::text::Ellipsis::End),
             ]
-            .spacing(6)
-            .align_y(alignment::Vertical::Center),
-        )
-        .padding([0, 22])
-        .height(64)
-        .width(Length::Fill)
-        .align_y(alignment::Vertical::Center)
-        .style(|_| divider_bottom(theme::BACKGROUND));
+            .spacing(2)
+            .width(Length::Fill)
+            .clip(true)
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center);
+        if !settings_view {
+            top_content = top_content.push(view_button("Session", View::Session));
+            if self.viewport.width > 720.0 {
+                top_content = top_content
+                    .push(view_button("Agents", View::Agents))
+                    .push(view_button("Filesystem", View::Filesystem));
+            } else {
+                if self.project().is_none() {
+                    top_content = top_content.push(
+                        button(widgets::control_upper("New project"))
+                            .height(30)
+                            .padding([0, 12])
+                            .style(widgets::button_style(widgets::Button::Secondary))
+                            .on_press_maybe(
+                                new_project_selectable(self.session.as_deref(), self.busy)
+                                    .then_some(Message::NewProject),
+                            ),
+                    );
+                }
+                top_content = top_content.push(view_button("Settings", View::Settings));
+            }
+        } else if self.viewport.width <= 720.0 {
+            top_content = top_content.push(view_button("Session", View::Session));
+        }
+        let top = container(top_content)
+            .padding([0, 22])
+            .height(64)
+            .width(Length::Fill)
+            .align_y(alignment::Vertical::Center)
+            .style(|_| divider_bottom(theme::BACKGROUND));
+        let status_color = if self.status.contains("refused")
+            || self.status.contains("failed")
+            || self.status.contains("unavailable")
+        {
+            theme::ERROR
+        } else {
+            theme::TEXT_MUTED
+        };
+        let status_bar = container(widgets::mono(self.status.clone(), status_color))
+            .padding([0, 22])
+            .height(28)
+            .width(Length::Fill)
+            .align_y(alignment::Vertical::Center)
+            .style(|_| divider_bottom(theme::BACKGROUND));
+
+        if settings_view {
+            return container(column![top, status_bar, self.settings_panel()])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
+                .into();
+        }
 
         if self.view != View::Session {
             let graph = &self.topology_graph;
@@ -2269,6 +2335,7 @@ impl Model {
             }
             return container(column![
                 top,
+                status_bar,
                 self.topology_controls(),
                 layers.height(Length::Fill)
             ])
@@ -2317,7 +2384,7 @@ impl Model {
                             message_width,
                             theme::SIZE_SM,
                             theme::TEXT_MUTED,
-                            fonts::BODY
+                            fonts::body()
                         ),
                         text(user_time)
                             .font(fonts::MONO_MEDIUM)
@@ -2377,7 +2444,7 @@ impl Model {
                 let work_header = button(
                     row![
                         text(work_title)
-                            .font(fonts::BODY)
+                            .font(fonts::body())
                             .size(theme::SIZE_SM)
                             .line_height(iced_core::text::LineHeight::Relative(1.5)),
                         text(if expanded { "\u{25be}" } else { "\u{25b8}" })
@@ -2413,7 +2480,7 @@ impl Model {
                         let work_key = format!("prompt:{prompt_id}:work:{index}");
                         let mut label = row![
                             text(work.speaker.clone())
-                                .font(fonts::BODY)
+                                .font(fonts::body())
                                 .size(13)
                                 .line_height(iced_core::text::LineHeight::Relative(1.45))
                                 .color(theme::rgb(label_color))
@@ -2422,7 +2489,7 @@ impl Model {
                         if let Some(context) = &work.context {
                             label = label.push(
                                 text(format!("· {context}"))
-                                    .font(fonts::BODY)
+                                    .font(fonts::body())
                                     .size(13)
                                     .line_height(iced_core::text::LineHeight::Relative(1.45))
                                     .color(theme::rgb(theme::TEXT_MUTED)),
@@ -2515,7 +2582,9 @@ impl Model {
                             .width(Length::Fill),
                     );
                 }
-                turn = turn.push(timeline);
+                if working_panel_visible(&self.settings) {
+                    turn = turn.push(timeline);
+                }
 
                 if prompt_events.iter().any(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
@@ -2533,19 +2602,19 @@ impl Model {
                                     theme::SIZE_MD
                                 },
                                 theme::TEXT,
-                                fonts::BODY,
+                                fonts::body(),
                             ),
                             AssistantBlock::Paragraph(_) => self.selectable_markdown(
                                 &key,
                                 theme::SIZE_MD,
                                 theme::TEXT,
-                                fonts::BODY,
+                                fonts::body(),
                             ),
                             AssistantBlock::List(_) => container(self.selectable_markdown(
                                 &key,
                                 theme::SIZE_MD,
                                 theme::TEXT,
-                                fonts::BODY,
+                                fonts::body(),
                             ))
                             .padding(iced_core::Padding {
                                 top: 0.0,
@@ -2558,7 +2627,7 @@ impl Model {
                                 &key,
                                 theme::SIZE_MD,
                                 theme::TEXT_SECONDARY,
-                                fonts::BODY,
+                                fonts::body(),
                             ))
                             .padding(iced_core::Padding {
                                 top: 4.0,
@@ -2660,7 +2729,7 @@ impl Model {
             .height(96)
             .padding([14, 16])
             .size(theme::SIZE_SM)
-            .font(fonts::BODY)
+            .font(fonts::body())
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .style(widgets::composer_editor);
         let composer = container(column![
@@ -2707,7 +2776,7 @@ impl Model {
             })
             .width(Length::Fill)
             .style(|_| theme::panel(theme::BACKGROUND, None, 0.0));
-        container(column![top, conversation, composer_wrap])
+        container(column![top, status_bar, conversation, composer_wrap])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
@@ -2843,533 +2912,383 @@ impl Model {
         .into()
     }
 
-    fn editor_panel(&self) -> UiElement<'_> {
-        let source = self.editor.as_ref().expect("editor panel requires content");
-        let config = serde_json::from_str::<Value>(&source.text()).unwrap_or(Value::Null);
-        let value = |pointer: &str| {
-            config
-                .pointer(pointer)
-                .map(|value| match value {
-                    Value::String(value) => value.clone(),
-                    Value::Null => String::new(),
-                    Value::Array(values) => values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default()
-        };
-        let field = |label: &'static str, pointer: &'static str, placeholder: &'static str| {
-            column![
-                text(label)
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_SECONDARY)),
-                text_input(placeholder, value(pointer))
-                    .on_input(move |value| Message::WizardField(pointer, value))
-                    .padding([9, 10])
-                    .size(12)
-                    .style(input_style),
-            ]
-            .spacing(6)
-        };
-        let picker = |label: &'static str,
-                      pointer: &'static str,
-                      placeholder: &'static str,
-                      kind: RequestKind| {
-            column![
-                text(label)
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_SECONDARY)),
-                row![
-                    text_input(placeholder, value(pointer))
-                        .on_input(move |value| Message::WizardField(pointer, value))
-                        .padding([9, 10])
-                        .size(12)
-                        .style(input_style),
-                    button(widgets::control("Browse"))
-                        .height(34)
-                        .padding([0, 10])
-                        .style(widgets::button_style(widgets::Button::Secondary))
-                        .on_press(Message::Browse(kind)),
-                ]
-                .spacing(6),
-            ]
-            .spacing(6)
-        };
-        let toggle = |label: &'static str, pointer: &'static str| {
-            let checked = config
-                .pointer(pointer)
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            button(
-                row![
-                    container(widgets::mono(
-                        if checked { "\u{2713}" } else { " " },
-                        theme::MAGENTA,
-                    ))
-                    .width(16)
-                    .height(16)
-                    .align_x(alignment::Horizontal::Center)
-                    .align_y(alignment::Vertical::Center)
-                    .style(move |_| theme::panel(
-                        theme::BACKGROUND,
-                        Some(if checked {
-                            theme::MAGENTA
-                        } else {
-                            theme::BORDER
-                        }),
-                        theme::RADIUS_SM,
-                    )),
-                    widgets::body(
-                        label.to_owned(),
-                        theme::SIZE_SM,
-                        if checked {
-                            theme::TEXT
-                        } else {
-                            theme::TEXT_SECONDARY
-                        }
-                    ),
-                ]
-                .spacing(theme::SPACE_2)
-                .align_y(alignment::Vertical::Center),
-            )
-            .padding([7, 8])
-            .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Ghost))
-            .on_press(Message::WizardToggle(pointer))
-        };
-        let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
-            let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
-            button(widgets::control(label))
-                .height(theme::CONTROL_SM)
-                .padding([0, 12])
-                .style(widgets::button_style(widgets::Button::Choice(selected)))
-                .on_press(Message::WizardChoice(pointer, option))
-        };
-
-        let page: UiElement<'_> = match self.wizard_page {
-            0 => column![
-                row![
-                    field("Project name", "/name", "My project"),
-                    field("Portable project ID", "/id", "my-project"),
-                ]
-                .spacing(13),
-                picker(
-                    "Workspace root",
-                    "/workspace/root",
-                    "Choose a project folder",
-                    RequestKind::PickWorkspace,
-                ),
-                field(
-                    "vKore state directory",
-                    "/workspace/state",
-                    "Outside the workspace"
-                ),
-                column![
-                    text("Workspace access")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_SECONDARY)),
+    fn settings_panel(&self) -> UiElement<'_> {
+        let selected_model = self.settings["default_model_id"]
+            .as_str()
+            .unwrap_or("deterministic");
+        let mut model_choices = column![].spacing(theme::SPACE_2);
+        if let Some(models) = self.settings["models"].as_array() {
+            for model in models {
+                let id = model["id"].as_str().unwrap_or_default().to_owned();
+                let name = model["display_name"]
+                    .as_str()
+                    .unwrap_or("Unnamed model")
+                    .to_owned();
+                let backend = model["backend"].as_str().unwrap_or("unknown");
+                let provider = model["provider"].as_str().unwrap_or("unknown");
+                let path = model["path"].as_str().unwrap_or("built in");
+                let status = model["status"].as_str().unwrap_or("unavailable");
+                let detail = model["detail"]
+                    .as_str()
+                    .unwrap_or("Restore the model files or choose another installed model.");
+                let selected = id == selected_model;
+                let selectable = model_option_selectable(status, selected, self.busy);
+                let mut card = column![
                     row![
-                        choice("Read only", "/workspace/access", "read_only"),
-                        choice("Review changes", "/workspace/access", "review_changes"),
-                        choice(
-                            "Automatic writeback",
-                            "/workspace/access",
-                            "automatic_writeback"
+                        widgets::body(name, theme::SIZE_SM, theme::TEXT),
+                        space::horizontal(),
+                        widgets::label(
+                            if selected {
+                                "Default"
+                            } else if status == "installed" {
+                                "Available"
+                            } else {
+                                "Unavailable"
+                            },
+                            if status == "installed" {
+                                theme::SUCCESS
+                            } else {
+                                theme::ERROR
+                            },
                         ),
                     ]
-                    .spacing(6),
-                ]
-                .spacing(6),
-                row![
-                    field("Maximum write bytes", "/workspace/max_write_bytes", "0"),
-                    field("Maximum write files", "/workspace/max_write_files", "0"),
-                ]
-                .spacing(13),
-            ]
-            .spacing(13)
-            .into(),
-            1 => {
-                let real = config.pointer("/inference/backend").and_then(Value::as_str)
-                    == Some("llama_cpp");
-                let mut form = column![
-                    column![
-                        text("Inference backend")
-                            .size(11)
-                            .color(theme::rgb(theme::TEXT_SECONDARY)),
-                        row![
-                            choice(
-                                "Deterministic security oracle",
-                                "/inference/backend",
-                                "deterministic"
-                            ),
-                            choice("llama.cpp", "/inference/backend", "llama_cpp"),
-                        ]
-                        .spacing(6),
-                    ]
-                    .spacing(6),
-                    picker(
-                        "Kore guest image",
-                        "/inference/kore_image",
-                        "Optional for deterministic testing",
-                        RequestKind::PickKore
+                    .align_y(alignment::Vertical::Center),
+                    widgets::mono(
+                        format!("{provider} · {backend} · {path}"),
+                        theme::TEXT_MUTED,
                     ),
                 ]
-                .spacing(13);
-                if real {
-                    form = form
-                        .push(picker(
-                            "llama-server executable",
-                            "/inference/llama_server",
-                            "llama-server",
-                            RequestKind::PickLlama,
-                        ))
-                        .push(picker(
-                            "GGUF model",
-                            "/inference/model",
-                            "Model file",
-                            RequestKind::PickModel,
-                        ))
-                        .push(field(
-                            "Advanced llama.cpp arguments",
-                            "/inference/extra_args",
-                            "--device none",
-                        ));
+                .spacing(theme::SPACE_1);
+                if status != "installed" {
+                    card = card.push(widgets::body(
+                        detail.to_owned(),
+                        theme::SIZE_SM,
+                        theme::ERROR,
+                    ));
                 }
-                form.push(
-                    row![
-                        field("Context tokens", "/inference/context_tokens", "32768"),
-                        field("Output tokens", "/inference/output_tokens", "512"),
-                        field("Threads", "/inference/threads", "4"),
-                        field("Inference slots", "/inference/slots", "3"),
-                    ]
-                    .spacing(10),
-                )
-                .push(
-                    container(text(if real {
-                        "llama.cpp runs behind the authenticated Kore bridge; paths remain host-side configuration."
-                    } else {
-                        "Deterministic mode tests the complete authenticated broker, agent, tool, and UI flow without downloading a model."
-                    }).size(11).color(theme::rgb(theme::MAGENTA)))
-                    .padding(10)
-                    .style(|_| theme::panel(theme::PANEL, Some(theme::SUCCESS), theme::RADIUS_MD)),
-                )
-                .into()
-            }
-            2 => {
-                let mut addons = column![
-                    widgets::display("Host and guest add-ons"),
-                    text("Enable only the bounded capabilities this project needs. Authority is still proposed per prompt.")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                ]
-                .spacing(8);
-                if let Some(entries) = self.catalog["addons"].as_array() {
-                    for addon in entries {
-                        let id = addon["id"].as_str().unwrap_or_default().to_owned();
-                        let name = addon["name"].as_str().unwrap_or("Add-on");
-                        let domain = addon["domain"].as_str().unwrap_or("bounded");
-                        let enabled = config["addons"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|selected| selected["id"] == id && selected["enabled"] == true);
-                        let mut detail = addon["tools"]
-                            .as_array()
-                            .map(|tools| {
-                                tools
-                                    .iter()
-                                    .map(|tool| {
-                                        format!(
-                                            "{} ({})",
-                                            tool["name"].as_str().unwrap_or("tool"),
-                                            tool["risk"]
-                                                .as_str()
-                                                .unwrap_or("bounded")
-                                                .replace('_', " ")
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .filter(|tools| !tools.is_empty())
-                            .unwrap_or_else(|| "No declared tools".into());
-                        let destinations = addon["network_destinations"]
-                            .as_array()
-                            .map(|entries| {
-                                entries
-                                    .iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .filter(|entries| !entries.is_empty())
-                            .unwrap_or_else(|| "no network destinations".into());
-                        detail.push_str(" · ");
-                        detail.push_str(&destinations);
-                        addons = addons.push(
-                            button(
-                                row![
-                                    container(widgets::mono(
-                                        if enabled { "✓" } else { "" },
-                                        theme::MAGENTA,
-                                    ))
-                                    .width(16)
-                                    .height(16)
-                                    .align_x(alignment::Horizontal::Center)
-                                    .align_y(alignment::Vertical::Center)
-                                    .style(move |_| {
-                                        theme::panel(
-                                            theme::BACKGROUND,
-                                            Some(if enabled {
-                                                theme::MAGENTA
-                                            } else {
-                                                theme::BORDER
-                                            }),
-                                            3.0,
-                                        )
-                                    }),
-                                    column![
-                                        text(domain.to_uppercase())
-                                            .size(9)
-                                            .color(theme::rgb(theme::TEXT_MUTED)),
-                                        text(name.to_owned())
-                                            .size(12)
-                                            .color(theme::rgb(theme::TEXT)),
-                                        text(detail).size(11).color(theme::rgb(theme::TEXT_MUTED)),
-                                    ]
-                                    .spacing(4),
-                                ]
-                                .spacing(12)
-                                .align_y(alignment::Vertical::Top),
-                            )
-                            .padding(12)
-                            .width(Length::Fill)
-                            .style(widgets::button_style(widgets::Button::Choice(enabled)))
-                            .on_press(Message::WizardAddon(id)),
-                        );
-                    }
-                }
-                addons.into()
-            }
-            3 => column![
-                text("Authority defaults")
-                    .size(13)
-                    .color(theme::rgb(theme::TEXT)),
-                row![
-                    choice("Allow once", "/approvals/default_scope", "once"),
-                    choice("For this session", "/approvals/default_scope", "session"),
-                ]
-                .spacing(6),
-                toggle(
-                    "Confirm external writes",
-                    "/approvals/confirm_external_writes"
-                ),
-                toggle(
-                    "Confirm destructive operations",
-                    "/approvals/confirm_destructive"
-                ),
-                toggle(
-                    "Enable standing policy",
-                    "/approvals/standing_policy_enabled"
-                ),
-                container(space::Space::new().height(1).width(Length::Fill))
-                    .style(|_| theme::panel(theme::BORDER, None, 0.0)),
-                text("Retention and project limits")
-                    .size(13)
-                    .color(theme::rgb(theme::TEXT)),
-                row![
-                    field("Transcript days", "/retention/transcript_days", "30"),
-                    field("Memory (MiB)", "/resources/memory_mib", "2048"),
-                    field("Virtual CPUs", "/resources/virtual_cpus", "2"),
-                ]
-                .spacing(10),
-                row![
-                    field("Prompt timeout (s)", "/resources/prompt_seconds", "300"),
-                    field("Agent limit", "/resources/agent_limit", "4"),
-                ]
-                .spacing(10),
-                toggle(
-                    "Clean Kore KV state on close",
-                    "/retention/clean_kv_on_close"
-                ),
-                toggle(
-                    "Retain raw model output",
-                    "/retention/retain_raw_model_output"
-                ),
-            ]
-            .spacing(10)
-            .into(),
-            _ => {
-                let report = self.preflight.as_deref().unwrap_or(
-                    "Run preflight to resolve paths, scan workspace bounds, and verify the selected runtime before saving.",
+                model_choices = model_choices.push(
+                    button(card)
+                        .padding([10, 12])
+                        .width(Length::Fill)
+                        .style(widgets::button_style(widgets::Button::Choice(selected)))
+                        .on_press_maybe(selectable.then_some(Message::ChooseDefaultModel(id))),
                 );
-                column![
-                    text("Review and preflight")
-                        .size(13)
-                        .color(theme::rgb(theme::TEXT)),
-                    container(
-                        column![
-                            text(value("/name")).size(16).color(theme::rgb(theme::TEXT)),
-                            text(format!(
-                                "{} · {}",
-                                value("/workspace/access"),
-                                value("/inference/backend")
-                            ))
-                            .size(11)
-                            .color(theme::rgb(theme::TEXT_MUTED)),
-                            text(value("/workspace/root"))
-                                .size(11)
-                                .color(theme::rgb(theme::TEXT_SECONDARY)),
-                        ]
-                        .spacing(6),
-                    )
-                    .padding(13)
-                    .width(Length::Fill)
-                    .style(|_| theme::panel(
-                        theme::BACKGROUND,
-                        Some(theme::BORDER),
-                        theme::RADIUS_SM
-                    )),
-                    container(text(report.to_owned()).size(11).color(rgb(
-                        if self.preflight.is_some() {
-                            0xb8ef6a
-                        } else {
-                            0xf5c66a
-                        }
-                    )))
-                    .padding(11)
-                    .width(Length::Fill)
-                    // Warning before a preflight has run, success after it.
-                    .style(|_| theme::panel(
-                        theme::PANEL,
-                        Some(if self.preflight.is_some() {
-                            theme::SUCCESS
-                        } else {
-                            theme::WARNING
-                        }),
-                        theme::RADIUS_MD
-                    )),
-                    text("Advanced portable configuration")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                    text_editor(source)
-                        .on_action(Message::ConfigAction)
-                        .height(150)
-                        .size(11)
-                        .style(widgets::editor),
-                ]
-                .spacing(11)
-                .into()
             }
-        };
-
-        // The strip names each step and says where the reader is, rather
-        // than showing five anonymous rules.
-        const STEPS: [&str; 5] = [
-            "01 workspace",
-            "02 runtime",
-            "03 add-ons",
-            "04 policy",
-            "05 review",
-        ];
-        let mut steps = row![].spacing(6);
-        for (index, label) in STEPS.iter().enumerate() {
-            let position = match index.cmp(&usize::from(self.wizard_page)) {
-                core::cmp::Ordering::Equal => widgets::Step::Current,
-                core::cmp::Ordering::Less => widgets::Step::Complete,
-                core::cmp::Ordering::Greater => widgets::Step::Upcoming,
-            };
-            steps = steps.push(
-                button(widgets::control_upper(label))
-                    .height(28)
-                    .padding([0, 8])
-                    .width(Length::Fill)
-                    .style(widgets::button_style(widgets::Button::Step(position)))
-                    .on_press(Message::WizardPage(index as u8)),
-            );
         }
-        let back = button(widgets::control("Back"))
-            .height(theme::CONTROL_SM)
-            .padding([0, 12])
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
-        let next: UiElement<'_> = if self.wizard_page < 4 {
-            button(widgets::control("Next"))
-                .height(theme::CONTROL_SM)
-                .padding([0, 14])
-                .style(widgets::button_style(widgets::Button::Primary))
-                .on_press(Message::WizardPage(self.wizard_page + 1))
-                .into()
-        } else {
-            row![
-                button(widgets::control("Run preflight"))
+        let general = settings_section(
+            "General / inference",
+            "The default model applies to new projects. Existing projects keep their override.",
+            model_choices.into(),
+        );
+
+        let selected_font = self.settings["body_font"]
+            .as_str()
+            .unwrap_or("design_default");
+        let mut font_choices = row![].spacing(theme::SPACE_2);
+        for (id, label) in [
+            ("design_default", "Design default"),
+            ("archivo", "Archivo"),
+            ("jetbrains_mono", "JetBrains Mono"),
+        ] {
+            let selected = id == selected_font;
+            font_choices = font_choices.push(
+                button(widgets::control(label))
                     .height(theme::CONTROL_SM)
                     .padding([0, 12])
-                    .style(widgets::button_style(widgets::Button::Secondary))
-                    .on_press_maybe((!self.busy).then_some(Message::Preflight)),
-                // Saving stays closed until a preflight has actually run.
-                button(widgets::control("Save project"))
-                    .height(theme::CONTROL_SM)
-                    .padding([0, 14])
-                    .style(widgets::button_style(widgets::Button::Primary))
+                    .style(widgets::button_style(widgets::Button::Choice(selected)))
                     .on_press_maybe(
-                        (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
+                        (!selected && !self.busy).then_some(Message::ChooseBodyFont(id.to_owned())),
                     ),
+            );
+        }
+        let appearance = settings_section(
+            "Appearance",
+            "Choose a registered application body face. Machine-shaped activity stays monospace.",
+            column![
+                font_choices,
+                container(
+                    column![
+                        widgets::label("Live preview", theme::TEXT_MUTED),
+                        widgets::body(
+                            "A clear project summary with readable body text.",
+                            theme::SIZE_MD,
+                            theme::TEXT,
+                        ),
+                        widgets::mono(
+                            "agent/prompt · workspace/src/main.rs · completed",
+                            theme::TEXT_SECONDARY,
+                        ),
+                    ]
+                    .spacing(theme::SPACE_2),
+                )
+                .padding(theme::SPACE_4)
+                .width(Length::Fill)
+                .style(|_| theme::panel(
+                    theme::BACKGROUND,
+                    Some(theme::BORDER),
+                    theme::RADIUS_MD,
+                )),
+            ]
+            .spacing(theme::SPACE_4)
+            .into(),
+        );
+
+        let show_working = self.settings["show_working"].as_bool().unwrap_or(true);
+        let expanded = self.settings["working_expanded_default"]
+            .as_bool()
+            .unwrap_or(false);
+        let interface = settings_section(
+            "Interface",
+            "Working is presentation-only. Hiding it never deletes transcript or audit data.",
+            column![
+                button(
+                    row![
+                        widgets::body(
+                            "Show Working panel",
+                            theme::SIZE_SM,
+                            if show_working {
+                                theme::TEXT
+                            } else {
+                                theme::TEXT_SECONDARY
+                            },
+                        ),
+                        space::horizontal(),
+                        widgets::label(
+                            if show_working { "Shown" } else { "Hidden" },
+                            if show_working {
+                                theme::SUCCESS
+                            } else {
+                                theme::TEXT_MUTED
+                            },
+                        ),
+                    ]
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding([10, 12])
+                .width(Length::Fill)
+                .style(widgets::button_style(widgets::Button::Choice(show_working)))
+                .on_press_maybe((!self.busy).then_some(Message::ToggleShowWorking)),
+                button(
+                    row![
+                        widgets::body(
+                            "Expand Working by default",
+                            theme::SIZE_SM,
+                            theme::TEXT_SECONDARY,
+                        ),
+                        space::horizontal(),
+                        widgets::label(
+                            if expanded { "Expanded" } else { "Collapsed" },
+                            theme::TEXT_MUTED,
+                        ),
+                    ]
+                    .align_y(alignment::Vertical::Center),
+                )
+                .padding([10, 12])
+                .width(Length::Fill)
+                .style(widgets::button_style(widgets::Button::Choice(expanded)))
+                .on_press_maybe(
+                    (show_working && !self.busy).then_some(Message::ToggleWorkingExpanded),
+                ),
             ]
             .spacing(theme::SPACE_2)
-            .into()
-        };
-        let dialog = column![
-            glass_header(
-                "Project configuration",
-                "portable vkore schema · no credentials or capabilities are stored here",
-                Some(Message::CloseEditor),
-            ),
-            container(steps).padding(iced_core::Padding {
-                top: 14.0,
-                right: 20.0,
-                bottom: 0.0,
-                left: 20.0,
-            }),
-            container(
-                scrollable(page)
-                    .direction(scrollable::Direction::Vertical(
-                        scrollable::Scrollbar::hidden()
-                    ))
-                    .style(widgets::hidden_scrollbar)
-                    .height(Length::Fill)
-            )
-            .padding(20),
-            container(
-                row![
-                    button(widgets::control("Cancel"))
+            .into(),
+        );
+
+        let mut activity_rows = column![].spacing(theme::SPACE_2);
+        match &self.activity {
+            None => {
+                activity_rows = activity_rows.push(widgets::mono(
+                    "Loading recent local activity…",
+                    theme::TEXT_MUTED,
+                ));
+            }
+            Some(Err(error)) => {
+                activity_rows = activity_rows.push(widgets::body(
+                    format!("Activity unavailable: {error}"),
+                    theme::SIZE_SM,
+                    theme::ERROR,
+                ));
+            }
+            Some(Ok(entries)) if entries.is_empty() => {
+                activity_rows = activity_rows.push(widgets::body(
+                    "No local sessions have been recorded yet.",
+                    theme::SIZE_SM,
+                    theme::TEXT_MUTED,
+                ));
+            }
+            Some(Ok(entries)) => {
+                for entry in entries {
+                    let status = entry["status"].as_str().unwrap_or("unknown");
+                    let color = match status {
+                        "failed" => theme::ERROR,
+                        "cancelled" => theme::WARNING,
+                        "completed" | "closed" => theme::SUCCESS,
+                        _ => theme::MAGENTA,
+                    };
+                    let time = entry["updated_at_unix_ms"]
+                        .as_u64()
+                        .and_then(format_event_time)
+                        .unwrap_or_else(|| "time unavailable".into());
+                    activity_rows = activity_rows.push(
+                        container(
+                            column![
+                                row![
+                                    widgets::body(
+                                        entry["project_name"]
+                                            .as_str()
+                                            .unwrap_or("Unknown project")
+                                            .to_owned(),
+                                        theme::SIZE_SM,
+                                        theme::TEXT,
+                                    ),
+                                    space::horizontal(),
+                                    widgets::label(status, color),
+                                ]
+                                .align_y(alignment::Vertical::Center),
+                                widgets::mono(
+                                    format!(
+                                        "{} · {} · {} prompt{}",
+                                        entry["model"].as_str().unwrap_or("Unavailable"),
+                                        time,
+                                        entry["prompts"].as_u64().unwrap_or_default(),
+                                        if entry["prompts"].as_u64() == Some(1) {
+                                            ""
+                                        } else {
+                                            "s"
+                                        },
+                                    ),
+                                    theme::TEXT_MUTED,
+                                ),
+                                widgets::mono(
+                                    format!(
+                                        "session {} · {} completed · {} cancelled · {} failed",
+                                        entry["session_id"].as_str().unwrap_or("unavailable"),
+                                        entry["completed"].as_u64().unwrap_or_default(),
+                                        entry["cancelled"].as_u64().unwrap_or_default(),
+                                        entry["failed"].as_u64().unwrap_or_default(),
+                                    ),
+                                    theme::TEXT_MUTED,
+                                ),
+                            ]
+                            .spacing(theme::SPACE_1),
+                        )
+                        .padding([10, 12])
+                        .width(Length::Fill)
+                        .style(|_| {
+                            theme::panel(theme::BACKGROUND, Some(theme::BORDER), theme::RADIUS_MD)
+                        }),
+                    );
+                }
+            }
+        }
+        let activity = settings_section(
+            "Activity",
+            "Bounded local summaries only—never prompts, raw model output, credentials, or capabilities.",
+            activity_rows.into(),
+        );
+
+        let project_settings = if let Some(project) = self.project() {
+            let name = project["name"].as_str().unwrap_or_default();
+            let uses_default = project["inference"] == self.settings["default_inference"];
+            settings_section(
+                "Current project",
+                "Project identity and model override. Workspace authority remains project-scoped.",
+                column![
+                    column![
+                        widgets::label("Project name", theme::TEXT_MUTED),
+                        text_input("Project name", name)
+                            .on_input_maybe(
+                                (self.session.is_none() && !self.busy)
+                                    .then_some(Message::ProjectNameChanged),
+                            )
+                            .padding([10, 10])
+                            .size(theme::SIZE_SM)
+                            .font(fonts::body())
+                            .style(input_style),
+                    ]
+                    .spacing(theme::SPACE_1),
+                    column![
+                        widgets::label("Workspace", theme::TEXT_MUTED),
+                        widgets::mono(
+                            project["workspace"]["root"]
+                                .as_str()
+                                .unwrap_or("Unavailable")
+                                .to_owned(),
+                            theme::TEXT_SECONDARY,
+                        ),
+                    ]
+                    .spacing(theme::SPACE_1),
+                    row![
+                        button(widgets::control(if uses_default {
+                            "Using application default"
+                        } else {
+                            "Use application default model"
+                        }))
                         .height(theme::CONTROL_SM)
                         .padding([0, 12])
-                        .style(widgets::button_style(widgets::Button::Ghost))
-                        .on_press(Message::CloseEditor),
-                    space::horizontal(),
-                    back,
-                    next,
+                        .style(widgets::button_style(widgets::Button::Secondary))
+                        .on_press_maybe(
+                            (!uses_default && self.session.is_none() && !self.busy)
+                                .then_some(Message::UseDefaultModelForProject),
+                        ),
+                        space::horizontal(),
+                        button(widgets::control("Save project settings"))
+                            .height(theme::CONTROL_SM)
+                            .padding([0, 12])
+                            .style(widgets::button_style(widgets::Button::Primary))
+                            .on_press_maybe(
+                                (self.session.is_none() && !self.busy && !name.trim().is_empty())
+                                    .then_some(Message::SaveProject),
+                            ),
+                    ]
+                    .spacing(theme::SPACE_2)
+                    .align_y(alignment::Vertical::Center),
+                    if self.session.is_some() {
+                        widgets::mono(
+                            "Stop the project before changing its persisted settings.",
+                            theme::WARNING,
+                        )
+                    } else {
+                        widgets::mono("Changes affect this project only.", theme::TEXT_MUTED)
+                    },
                 ]
-                .spacing(theme::SPACE_2)
-                .align_y(alignment::Vertical::Center),
-            )
-            .padding([14, 20])
-            .width(Length::Fill)
-            .style(|_| glass_top_edge()),
-        ];
-        backdrop_filter(
-            container(dialog)
-                .width(760)
-                .height(Length::FillPortion(9))
-                .style(|_| glass_surface())
+                .spacing(theme::SPACE_4)
                 .into(),
-            14.0,
-            theme::RADIUS_GLASS,
+            )
+        } else {
+            settings_section(
+                "Current project",
+                "Select a project to inspect or change its project-specific values.",
+                widgets::mono("No project selected.", theme::TEXT_MUTED).into(),
+            )
+        };
+
+        let content: UiElement<'_> = if self.viewport.width > 1_050.0 {
+            row![
+                column![general, interface].spacing(theme::SPACE_4),
+                column![appearance, project_settings, activity].spacing(theme::SPACE_4),
+            ]
+            .spacing(theme::SPACE_4)
+            .into()
+        } else {
+            column![general, appearance, interface, project_settings, activity]
+                .spacing(theme::SPACE_4)
+                .into()
+        };
+        container(
+            scrollable(
+                container(content)
+                    .padding(theme::SPACE_6)
+                    .width(Length::Fill),
+            )
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::hidden(),
+            ))
+            .style(widgets::hidden_scrollbar),
         )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn approval_panel(&self) -> UiElement<'_> {
@@ -3454,6 +3373,9 @@ impl App {
     fn process_events(&mut self, window: &Rc<Window>) {
         if self.events.is_empty() {
             return;
+        }
+        if self.events.iter().any(opens_settings) {
+            self.model.update(Message::View(View::Settings));
         }
         let size = logical_size(window);
         self.model.fit_topology(size);
@@ -4384,6 +4306,7 @@ mod tests {
             model.view = match view.as_str() {
                 "agents" => View::Agents,
                 "filesystem" => View::Filesystem,
+                "settings" => View::Settings,
                 _ => View::Session,
             };
         }
@@ -4391,11 +4314,8 @@ mod tests {
             let elapsed = std::time::Duration::from_millis(ms.parse().unwrap_or(0));
             model.booted_at = Instant::now().checked_sub(elapsed);
         }
-        if std::env::var("VKORE_UI_WIZARD").is_ok() {
-            model.update(Message::EditProject);
-            if let Ok(page) = std::env::var("VKORE_UI_WIZARD_PAGE") {
-                model.wizard_page = page.parse().unwrap_or(0);
-            }
+        if std::env::var("VKORE_UI_SETTINGS").is_ok() {
+            model.view = View::Settings;
         }
         if std::env::var_os("VKORE_UI_APPROVAL").is_some() {
             model.approval = Some(json!({
@@ -5122,29 +5042,30 @@ mod tests {
     }
 
     #[test]
-    fn every_native_wizard_page_records_and_renders() {
+    fn settings_screen_records_at_wide_and_narrow_widths() {
+        fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
             sender: requests,
             session: sessions,
         });
-        model.catalog = json!({
-            "addons":[
-                {"id":"reference.host","name":"Reference host add-on","domain":"host","tools":[{"name":"echo"}]},
-                {"id":"reference.guest","name":"Reference guest add-on","domain":"guest","tools":[{"name":"list_workspace"}]}
-            ]
-        });
-        model.update(Message::NewProject);
+        model.view = View::Settings;
+        model.activity = Some(Ok(vec![json!({
+            "project_id":"project","project_name":"Project","session_id":"session",
+            "model":"Deterministic security oracle","updated_at_unix_ms":1_750_000_000_000_u64,
+            "status":"completed","prompts":1
+        })]));
 
-        for page in 0..5 {
-            model.wizard_page = page;
+        for (width, height) in [(1180.0, 760.0), (700.0, 640.0)] {
+            model.topology.fitted = false;
             let mut renderer = native_renderer();
             renderer.hint(Scale {
                 window: 1.25,
                 application: 1.0,
             });
-            let size = Size::new(1024.0, 640.0);
+            let size = Size::new(width, height);
+            model.fit_topology(size);
             let mut interface = UserInterface::build(
                 model.view(size),
                 size,
@@ -5162,27 +5083,272 @@ mod tests {
             let frame = renderer.take_frame().unwrap();
             let masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
-            assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
+            assert!(frame.glyphs().len() > 25, "settings screen lost text");
 
-            let mut target = vec![0u32; 1280 * 800];
-            let stats = render_test_frame(&frame, masks, &mut target, 1280, 800);
-            assert!(stats.pixels_written > 1280 * 800 / 5);
+            let physical_width = (width * 1.25) as u32;
+            let physical_height = (height * 1.25) as u32;
+            let mut target = vec![0u32; (physical_width * physical_height) as usize];
+            let stats =
+                render_test_frame(&frame, masks, &mut target, physical_width, physical_height);
+            assert!(stats.pixels_written > 0);
         }
     }
 
     #[test]
-    fn new_project_control_is_a_no_op_during_a_live_session() {
+    fn project_content_is_gated_until_settings_finish_loading() {
+        fonts::register().unwrap();
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::with_launch_project(
+            Network {
+                sender: requests,
+                session: sessions,
+            },
+            None,
+        );
+        model.booted_at = None;
+        model.projects = vec![json!({"id":"private-project","name":"Must not render yet"})];
+        model.selected = Some(0);
+        assert!(!model.settings_loaded);
+
+        let mut renderer = native_renderer();
+        let size = Size::new(900.0, 600.0);
+        let mut interface = UserInterface::build(
+            model.view(size),
+            size,
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        interface.draw(
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style::default(),
+            mouse::Cursor::Unavailable,
+        );
+        let frame = renderer.take_frame().unwrap();
+        assert_eq!(
+            frame.glyphs().len(),
+            67,
+            "only the two fixed settings-gate strings may render"
+        );
+    }
+
+    #[test]
+    fn activity_loading_empty_error_and_populated_states_render() {
+        fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
             sender: requests,
             session: sessions,
         });
+        model.view = View::Settings;
+        model.booted_at = None;
+        let states = [
+            None,
+            Some(Ok(Vec::new())),
+            Some(Err("transcript directory unavailable".into())),
+            Some(Ok(vec![json!({
+                "project_name":"Project","model":"Deterministic security oracle",
+                "updated_at_unix_ms":1_750_000_000_000_u64,"status":"completed",
+                "prompts":1
+            })])),
+        ];
+        let size = Size::new(700.0, 640.0);
+        model.fit_topology(size);
+        for state in states {
+            model.activity = state;
+            let mut renderer = native_renderer();
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().unwrap();
+            assert!(frame.glyphs().len() > 20);
+        }
+    }
+
+    #[test]
+    fn settings_controls_persist_response_state_without_erasing_activity() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.events = vec![json!({"kind":"user_prompt","payload":{"text":"private"}})];
+        let events_before = model.events.clone();
+
+        model.update(Message::ToggleShowWorking);
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::SaveSettings);
+        assert_eq!(request.body.unwrap(), json!({"show_working":false}));
+        assert!(working_panel_visible(&model.settings));
+
+        let mut saved = model.settings.clone();
+        saved["show_working"] = Value::Bool(false);
+        model.response(
+            RequestKind::SaveSettings,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&saved).unwrap(),
+            }),
+        );
+        assert!(!working_panel_visible(&model.settings));
+        assert_eq!(model.events, events_before);
+        assert_eq!(model.status, "Application settings saved.");
+    }
+
+    #[test]
+    fn project_override_changes_only_after_explicit_use_default_and_save() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({
+            "id":"project","name":"Project","archived":false,"addons":[],
+            "workspace":{"root":"C:/workspace","state":"C:/state","access":"review_changes"},
+            "inference":{"backend":"llama_cpp","model":"legacy.gguf"}
+        })];
+        model.selected = Some(0);
+        let original = model.projects[0]["inference"].clone();
+        assert_ne!(original, model.settings["default_inference"]);
+
+        model.update(Message::UseDefaultModelForProject);
+        assert_eq!(
+            model.projects[0]["inference"],
+            model.settings["default_inference"]
+        );
+        assert!(request_receiver.try_recv().is_err());
+
+        model.update(Message::SaveProject);
+        let save = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(save.kind, RequestKind::SaveProject);
+        assert_eq!(
+            save.body.unwrap()["inference"],
+            model.settings["default_inference"]
+        );
+    }
+
+    #[test]
+    fn unavailable_and_busy_settings_controls_are_not_activatable() {
+        assert!(!model_option_selectable("unavailable", false, false));
+        assert!(!model_option_selectable("installed", true, false));
+        assert!(!model_option_selectable("installed", false, true));
+        assert!(model_option_selectable("installed", false, false));
+        assert!(!new_project_selectable(Some("live-session"), false));
+        assert!(!new_project_selectable(None, true));
+        assert!(new_project_selectable(None, false));
+    }
+
+    #[test]
+    fn settings_has_a_shell_keyboard_shortcut() {
+        let shortcut = iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(",".into()),
+            modified_key: keyboard::Key::Character(",".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Comma),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::CTRL,
+            text: Some(",".into()),
+            repeat: false,
+        });
+        assert!(opens_settings(&shortcut));
+    }
+
+    #[test]
+    fn new_project_opens_only_the_trusted_folder_picker() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+
+        model.update(Message::NewProject);
+
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::PickWorkspace);
+        assert_eq!(request.path, "/api/v1/picker");
+        assert_eq!(request.body.unwrap(), json!({"kind":"directory"}));
+        assert!(request_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn validated_folder_project_opens_immediately() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.response(
+            RequestKind::PickWorkspace,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"path":"C:/workspace"})).unwrap(),
+            }),
+        );
+        let create = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(create.kind, RequestKind::CreateProject);
+        assert_eq!(create.body.unwrap(), json!({"root":"C:/workspace"}));
+
+        let project = json!({
+            "id":"workspace-123","name":"workspace","archived":false,"addons":[],
+            "workspace":{"root":"C:/workspace","access":"review_changes"},
+            "inference":{"backend":"deterministic"}
+        });
+        model.response(
+            RequestKind::CreateProject,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"created":true,"project":project})).unwrap(),
+            }),
+        );
+        let start = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(start.kind, RequestKind::StartSession);
+        assert_eq!(start.body.unwrap()["project_id"], "workspace-123");
+        assert_eq!(model.view, View::Session);
+    }
+
+    #[test]
+    fn new_project_is_disabled_while_a_project_session_is_live() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
         model.session = Some("session-live".into());
 
         model.update(Message::NewProject);
 
-        assert!(model.editor.is_none());
+        assert!(request_receiver.try_recv().is_err());
+        assert!(model.status.contains("Close the current project"));
     }
 
     #[test]

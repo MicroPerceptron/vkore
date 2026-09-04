@@ -34,6 +34,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     num::NonZeroU32,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
     thread,
@@ -66,6 +67,9 @@ fn native_renderer() -> AxRenderer<System> {
 enum Message {
     SelectProject(usize),
     NewProject,
+    ChooseWorkspaceFolder,
+    DropWorkspaceFolder(PathBuf),
+    CancelWorkspaceSelection,
     EditProject,
     ChooseDefaultModel(String),
     ChooseBodyFont(String),
@@ -962,6 +966,16 @@ fn opens_settings(event: &iced_core::Event) -> bool {
     )
 }
 
+fn closes_workspace_selection(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        })
+    )
+}
+
 struct Request {
     kind: RequestKind,
     method: &'static str,
@@ -1111,6 +1125,9 @@ struct Model {
     topology_path_bands: Vec<layout::Placement>,
     viewport: Size,
     approval: Option<Value>,
+    workspace_selection_open: bool,
+    workspace_drop_hovered: bool,
+    workspace_error: Option<String>,
     status: String,
     busy: bool,
     restart_after_stop: bool,
@@ -1172,6 +1189,9 @@ impl Model {
             topology_path_bands: Vec::new(),
             viewport: Size::new(1280.0, 800.0),
             approval: None,
+            workspace_selection_open: false,
+            workspace_drop_hovered: false,
+            workspace_error: None,
             status: "Connecting to the vKore daemon…".into(),
             busy: false,
             restart_after_stop: false,
@@ -1301,14 +1321,42 @@ impl Model {
                         "Close the current project before choosing another workspace.".into();
                     return;
                 }
-                self.busy = true;
+                self.workspace_selection_open = true;
+                self.workspace_drop_hovered = false;
+                self.workspace_error = None;
                 self.status = "Choose one workspace folder for the new project.".into();
+            }
+            Message::ChooseWorkspaceFolder => {
+                if !self.workspace_selection_open || self.busy {
+                    return;
+                }
+                self.busy = true;
+                self.workspace_error = None;
+                self.status = "Waiting for the system folder picker…".into();
                 self.network.request(Request {
                     kind: RequestKind::PickWorkspace,
                     method: "POST",
                     path: "/api/v1/picker".into(),
                     body: Some(json!({"kind":"directory"})),
                 });
+            }
+            Message::DropWorkspaceFolder(path) => {
+                if !self.workspace_selection_open {
+                    return;
+                }
+                self.workspace_drop_hovered = false;
+                if self.busy {
+                    return;
+                }
+                self.select_workspace(&path);
+            }
+            Message::CancelWorkspaceSelection => {
+                if !self.busy {
+                    self.workspace_selection_open = false;
+                    self.workspace_drop_hovered = false;
+                    self.workspace_error = None;
+                    self.status = "New project cancelled.".into();
+                }
             }
             Message::EditProject => {
                 if self.project().is_some() {
@@ -1596,6 +1644,31 @@ impl Model {
         self.prompt = text_editor::Content::new();
     }
 
+    fn select_workspace(&mut self, path: &Path) {
+        let error = if !path.exists() {
+            Some("The selected workspace no longer exists.")
+        } else if !path.is_dir() {
+            Some("Select a workspace folder, not a file.")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.workspace_error = Some(error.into());
+            self.status = error.into();
+            return;
+        }
+
+        self.busy = true;
+        self.workspace_error = None;
+        self.network.request(Request {
+            kind: RequestKind::CreateProject,
+            method: "POST",
+            path: "/api/v1/projects/from-workspace".into(),
+            body: Some(json!({"root": path})),
+        });
+        self.status = "Validating workspace and applying application defaults…".into();
+    }
+
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
         let result = result.and_then(ApiResponse::json);
         match (kind, result) {
@@ -1675,6 +1748,9 @@ impl Model {
             }
             (RequestKind::CreateProject, Ok(value)) => {
                 self.busy = false;
+                self.workspace_selection_open = false;
+                self.workspace_drop_hovered = false;
+                self.workspace_error = None;
                 let project = value["project"].clone();
                 let id = project["id"].as_str().unwrap_or_default();
                 if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
@@ -1770,20 +1846,23 @@ impl Model {
             }
             (RequestKind::PickWorkspace, Ok(value)) => {
                 if let Some(path) = value["path"].as_str() {
-                    self.network.request(Request {
-                        kind: RequestKind::CreateProject,
-                        method: "POST",
-                        path: "/api/v1/projects/from-workspace".into(),
-                        body: Some(json!({"root": path})),
-                    });
-                    self.status = "Validating workspace and applying application defaults…".into();
+                    self.busy = false;
+                    self.select_workspace(Path::new(path));
                 } else {
                     self.busy = false;
-                    self.status = "New project cancelled.".into();
+                    self.status =
+                        "Folder selection cancelled. Choose a folder or drop one here.".into();
                 }
             }
             (_, Err(error)) => {
                 self.busy = false;
+                if matches!(
+                    kind,
+                    RequestKind::PickWorkspace | RequestKind::CreateProject
+                ) && self.workspace_selection_open
+                {
+                    self.workspace_error = Some(error.clone());
+                }
                 self.status = format!("Request refused: {error}");
                 if kind == RequestKind::Settings {
                     self.settings_loaded = true;
@@ -2010,6 +2089,11 @@ impl Model {
         }
         if self.approval.is_some() {
             stack![base, self.modal_layer(self.approval_panel())]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if self.workspace_selection_open {
+            stack![base, self.modal_layer(self.workspace_selection_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -3351,6 +3435,85 @@ impl Model {
         .style(|_| glass_surface())
         .into(), 14.0, theme::RADIUS_GLASS)
     }
+
+    fn workspace_selection_panel(&self) -> UiElement<'_> {
+        let target_message = if self.busy {
+            None
+        } else {
+            Some(Message::ChooseWorkspaceFolder)
+        };
+        let target_hint = if self.workspace_drop_hovered {
+            "Release to use this folder"
+        } else {
+            "Click to open the system folder picker"
+        };
+        let target = button(
+            container(
+                column![
+                    widgets::body("Select or drop a folder here", theme::SIZE_MD, theme::TEXT,),
+                    widgets::mono(target_hint, theme::TEXT_MUTED),
+                ]
+                .spacing(theme::SPACE_2)
+                .align_x(alignment::Horizontal::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(132)
+        .padding(theme::SPACE_4)
+        .style(widgets::button_style(widgets::Button::Choice(
+            self.workspace_drop_hovered,
+        )))
+        .on_press_maybe(target_message);
+
+        let feedback: UiElement<'_> = if let Some(error) = &self.workspace_error {
+            widgets::body(error.clone(), theme::SIZE_SM, theme::ERROR).into()
+        } else {
+            widgets::mono(self.status.clone(), theme::TEXT_MUTED).into()
+        };
+        let details = column![target, feedback].spacing(theme::SPACE_2);
+
+        backdrop_filter(
+            container(
+                column![
+                    glass_header(
+                        "Select workspace",
+                        "One local folder · no in-app filesystem browser",
+                        (!self.busy).then_some(Message::CancelWorkspaceSelection),
+                    ),
+                    container(details).padding(20),
+                    container(
+                        row![
+                            widgets::mono(
+                                "Folders are validated before a project is opened.",
+                                theme::TEXT_MUTED,
+                            ),
+                            space::horizontal(),
+                            button(widgets::control("Cancel"))
+                                .height(theme::CONTROL_SM)
+                                .padding([0, 12])
+                                .style(widgets::button_style(widgets::Button::Secondary))
+                                .on_press_maybe(
+                                    (!self.busy).then_some(Message::CancelWorkspaceSelection),
+                                ),
+                        ]
+                        .spacing(theme::SPACE_2)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .padding([14, 20])
+                    .width(Length::Fill)
+                    .style(|_| glass_top_edge()),
+                ]
+                .width(Length::Fill),
+            )
+            .width(520)
+            .style(|_| glass_surface())
+            .into(),
+            14.0,
+            theme::RADIUS_GLASS,
+        )
+    }
 }
 
 struct App {
@@ -3376,6 +3539,12 @@ impl App {
         }
         if self.events.iter().any(opens_settings) {
             self.model.update(Message::View(View::Settings));
+        }
+        if self.model.workspace_selection_open
+            && !self.model.busy
+            && self.events.iter().any(closes_workspace_selection)
+        {
+            self.model.update(Message::CancelWorkspaceSelection);
         }
         let size = logical_size(window);
         self.model.fit_topology(size);
@@ -3606,6 +3775,20 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::HoveredFile(path) if self.model.workspace_selection_open => {
+                self.model.workspace_drop_hovered = path.is_dir() && !self.model.busy;
+                self.redraw = true;
+            }
+            WindowEvent::HoveredFileCancelled if self.model.workspace_selection_open => {
+                self.model.workspace_drop_hovered = false;
+                self.redraw = true;
+            }
+            WindowEvent::DroppedFile(path) if self.model.workspace_selection_open => {
+                self.model
+                    .update(Message::DropWorkspaceFolder(path.clone()));
+                self.redraw = true;
+                return;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = mouse::Cursor::Available(conversion::cursor_position(
                     *position,
@@ -4989,6 +5172,43 @@ mod tests {
     }
 
     #[test]
+    fn workspace_selection_modal_records_a_supported_native_frame() {
+        fonts::register().expect("MONOLITH faces register");
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.update(Message::NewProject);
+
+        let size = Size::new(900.0, 600.0);
+        let mut renderer = native_renderer();
+        renderer.hint(Scale {
+            window: 1.0,
+            application: 1.0,
+        });
+        let mut interface = UserInterface::build(
+            model.view(size),
+            size,
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        interface.draw(
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style::default(),
+            mouse::Cursor::Unavailable,
+        );
+
+        let frame = renderer.take_frame().expect("workspace selector frame");
+        axgfx::frame_requirements(frame.view()).expect("supported workspace selector display list");
+        assert!(renderer.take_text_errors().is_empty());
+        assert!(renderer.take_geometry_errors().is_empty());
+        assert!(frame.glyphs().len() > 20);
+    }
+
+    #[test]
     fn expanded_and_collapsed_working_panel_render_directly() {
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
@@ -5272,7 +5492,7 @@ mod tests {
     }
 
     #[test]
-    fn new_project_opens_only_the_trusted_folder_picker() {
+    fn new_project_opens_compact_workspace_target_before_the_native_picker() {
         let (requests, request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
@@ -5282,6 +5502,12 @@ mod tests {
         request_receiver.try_iter().for_each(drop);
 
         model.update(Message::NewProject);
+
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert!(request_receiver.try_recv().is_err());
+
+        model.update(Message::ChooseWorkspaceFolder);
 
         let request = request_receiver
             .recv_timeout(Duration::from_secs(1))
@@ -5294,6 +5520,9 @@ mod tests {
 
     #[test]
     fn validated_folder_project_opens_immediately() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
         let (requests, request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
@@ -5301,18 +5530,19 @@ mod tests {
             session: sessions,
         });
         request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
         model.response(
             RequestKind::PickWorkspace,
             Ok(ApiResponse {
                 content_type: "application/json".into(),
-                body: serde_json::to_vec(&json!({"path":"C:/workspace"})).unwrap(),
+                body: serde_json::to_vec(&json!({"path":workspace})).unwrap(),
             }),
         );
         let create = request_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
         assert_eq!(create.kind, RequestKind::CreateProject);
-        assert_eq!(create.body.unwrap(), json!({"root":"C:/workspace"}));
+        assert_eq!(create.body.unwrap(), json!({"root":workspace}));
 
         let project = json!({
             "id":"workspace-123","name":"workspace","archived":false,"addons":[],
@@ -5332,6 +5562,110 @@ mod tests {
         assert_eq!(start.kind, RequestKind::StartSession);
         assert_eq!(start.body.unwrap()["project_id"], "workspace-123");
         assert_eq!(model.view, View::Session);
+        assert!(!model.workspace_selection_open);
+    }
+
+    #[test]
+    fn dropped_folder_uses_the_same_validated_project_creation_flow() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("dropped-workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+
+        model.update(Message::NewProject);
+        model.update(Message::DropWorkspaceFolder(workspace.clone()));
+
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::CreateProject);
+        assert_eq!(request.body.unwrap(), json!({"root":workspace}));
+        assert!(model.busy);
+        assert!(model.workspace_selection_open);
+    }
+
+    #[test]
+    fn dropped_file_is_rejected_in_the_selector_without_a_request() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("not-a-folder.txt");
+        std::fs::write(&file, "not a workspace").unwrap();
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+
+        model.update(Message::NewProject);
+        model.update(Message::DropWorkspaceFolder(file));
+
+        assert!(request_receiver.try_recv().is_err());
+        assert_eq!(
+            model.workspace_error.as_deref(),
+            Some("Select a workspace folder, not a file.")
+        );
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+    }
+
+    #[test]
+    fn daemon_workspace_validation_error_stays_visible_in_the_selector() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
+        model.busy = true;
+
+        model.response(
+            RequestKind::CreateProject,
+            Err("This workspace is too broad or sensitive.".into()),
+        );
+
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert_eq!(
+            model.workspace_error.as_deref(),
+            Some("This workspace is too broad or sensitive.")
+        );
+    }
+
+    #[test]
+    fn cancelling_native_picker_keeps_the_folder_target_available() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
+        model.update(Message::ChooseWorkspaceFolder);
+        request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        model.response(
+            RequestKind::PickWorkspace,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"path":null})).unwrap(),
+            }),
+        );
+
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert!(model.status.contains("Folder selection cancelled"));
     }
 
     #[test]

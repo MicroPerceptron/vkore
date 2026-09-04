@@ -50,8 +50,11 @@ Then launch
 The named persisted project opens directly and its sandbox starts without the
 project modal. If the daemon has exactly one active project, `--project` may be
 omitted and that project opens automatically. There is no login, token, or
-browser-session step. Choose **New project** and pick one narrow workspace
-directory. There is no configuration wizard: vKore derives the display name
+browser-session step. Choose **New project**, then click **Select or drop a
+folder here** to open the operating system's folder picker. A folder can also
+be dropped directly on that target when the windowing system provides a
+directory path. There is no in-app filesystem explorer or configuration wizard:
+vKore derives the display name
 and stable identity, inherits the application model default, opens the project
 after automatic preflight, and stores transaction/replay state under
 `.vkore-state/workspaces`; it refuses a state directory nested inside the shared

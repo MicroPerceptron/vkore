@@ -243,11 +243,11 @@ fn broker_catalog(events: &[&Value]) -> BTreeMap<u64, CatalogEntry> {
 }
 
 fn display_resource(label: &str) -> String {
-    label
-        .strip_prefix("workspace/")
-        .unwrap_or(label)
-        .trim_start_matches('/')
-        .to_owned()
+    if let Some(path) = label.strip_prefix("/workspace/") {
+        format!("/{path}")
+    } else {
+        label.strip_prefix("workspace/").unwrap_or(label).to_owned()
+    }
 }
 
 fn scalar(value: &Value) -> Option<String> {
@@ -259,8 +259,52 @@ fn scalar(value: &Value) -> Option<String> {
     }
 }
 
+fn compact_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => {
+            if value.is_empty() || value.chars().any(char::is_whitespace) {
+                serde_json::to_string(value).unwrap_or_else(|_| value.clone())
+            } else {
+                value.clone()
+            }
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(compact_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", compact_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+fn canonical_action_name(name: &str) -> String {
+    let mut output = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index != 0 {
+                output.push('_');
+            }
+            output.push(character.to_ascii_lowercase());
+        } else {
+            output.push(character.to_ascii_lowercase());
+        }
+    }
+    output
+}
+
 fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> String {
-    let action_name = action["action"].as_str().unwrap_or("decision");
+    let action_name = canonical_action_name(action["action"].as_str().unwrap_or("decision"));
     if action_name == "intent_claimed" {
         let objects = action["objects"].as_u64().unwrap_or_default();
         let turns = action["turns"].as_u64().unwrap_or_default();
@@ -327,17 +371,34 @@ fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -
                     )
             })
             .collect::<Vec<_>>();
-        return format!(
-            "Tool_use: create_agent(Agent 1, [{}], [{}])",
-            tools.join(", "),
-            resources.join(", ")
-        );
+        let label = action["label"].as_str().unwrap_or("agent");
+        let tool_calls = action["budget"]["tool_calls"].as_u64();
+        let selected = action["selectors"].as_array().map_or(0, Vec::len);
+        let mut details = vec![label.to_owned()];
+        if !tools.is_empty() {
+            details.push(format!("tools [{}]", tools.join(", ")));
+        }
+        if !resources.is_empty() {
+            details.push(format!("resources [{}]", resources.join(", ")));
+        }
+        if tools.is_empty() && resources.is_empty() && selected != 0 {
+            details.push(format!("{selected} capabilities"));
+        }
+        if let Some(tool_calls) = tool_calls {
+            details.push(format!(
+                "{tool_calls} tool call{}",
+                if tool_calls == 1 { "" } else { "s" }
+            ));
+        }
+        return format!("Tool_use: create_agent({})", details.join(" · "));
     }
     if action_name == "refused" {
         let reason = action["reason"]
             .as_str()
             .or_else(|| action["detail"].as_str())
-            .unwrap_or("the requested authority was not available");
+            .map(str::to_owned)
+            .or_else(|| scalar(&action["reason"]))
+            .unwrap_or_else(|| "the requested authority was not available".into());
         return format!("Refused: {reason}");
     }
 
@@ -346,54 +407,197 @@ fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -
         .into_iter()
         .flat_map(|object| object.iter())
         .filter(|(key, _)| key.as_str() != "action")
-        .filter_map(|(key, value)| scalar(value).map(|value| format!("{key}: {value}")))
+        .map(|(key, value)| format!("{key}: {}", compact_value(value)))
         .collect::<Vec<_>>();
     format!("Tool_use: {action_name}({})", arguments.join(", "))
 }
 
 fn clean_tool_argument(argument: &str) -> String {
     let argument = argument.trim();
-    for prefix in ["Path(\"", "Object(\"", "Text(\""] {
+    for wrapper in ["Path", "Utf8", "Object", "Text", "U64", "Bool"] {
         if let Some(value) = argument
-            .strip_prefix(prefix)
-            .and_then(|value| value.strip_suffix("\")"))
+            .strip_prefix(wrapper)
+            .and_then(|value| value.strip_prefix('('))
+            .and_then(|value| value.strip_suffix(')'))
         {
-            return value.strip_prefix("workspace/").unwrap_or(value).to_owned();
+            let value = serde_json::from_str::<String>(value).unwrap_or_else(|_| {
+                value
+                    .trim_matches('"')
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+            });
+            return display_resource(&value);
         }
     }
     let argument = argument.trim_matches('"');
-    argument
-        .strip_prefix("workspace/")
-        .unwrap_or(argument)
-        .to_owned()
+    display_resource(argument)
+}
+
+fn split_legacy_arguments(arguments: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in arguments.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(arguments[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < arguments.len() {
+        parts.push(arguments[start..].trim());
+    }
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 fn tool_arguments(value: &Value) -> Vec<String> {
     if let Some(arguments) = value.as_array() {
         return arguments
             .iter()
-            .filter_map(|argument| match argument {
-                Value::String(argument) => Some(clean_tool_argument(argument)),
-                Value::Object(argument) => argument
-                    .get("value")
-                    .or_else(|| argument.get("path"))
-                    .and_then(Value::as_str)
-                    .map(clean_tool_argument),
-                _ => scalar(argument),
+            .map(|argument| match argument {
+                Value::String(argument) => clean_tool_argument(argument),
+                Value::Object(argument)
+                    if argument.contains_key("kind") && argument.contains_key("value") =>
+                {
+                    if argument["kind"]
+                        .as_str()
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("path"))
+                    {
+                        argument["value"]
+                            .as_str()
+                            .map(clean_tool_argument)
+                            .unwrap_or_else(|| compact_value(&argument["value"]))
+                    } else {
+                        compact_value(&argument["value"])
+                    }
+                }
+                _ => compact_value(argument),
             })
+            .collect();
+    }
+    if let Some(arguments) = value.as_object() {
+        return arguments
+            .iter()
+            .map(|(name, value)| format!("{name}={}", compact_value(value)))
             .collect();
     }
     let Some(arguments) = value.as_str() else {
         return Vec::new();
     };
-    arguments
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(", ")
-        .filter(|argument| !argument.is_empty())
+    let arguments = arguments.trim();
+    let arguments = arguments
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(arguments);
+    split_legacy_arguments(arguments)
+        .into_iter()
         .map(clean_tool_argument)
         .collect()
+}
+
+fn call_arguments(call: &Value) -> Vec<String> {
+    let arguments = tool_arguments(&call["arguments"]);
+    if !arguments.is_empty() {
+        return arguments;
+    }
+    call.as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "action" | "command" | "tool" | "arguments" | "call_id" | "execution_domain"
+            )
+        })
+        .map(|(name, value)| {
+            if name == "path" {
+                clean_tool_argument(&compact_value(value))
+            } else {
+                format!("{name}={}", compact_value(value))
+            }
+        })
+        .collect()
+}
+
+fn debug_path_argument(argument: &str) -> Option<String> {
+    let value = argument.trim().strip_prefix("Path(")?.strip_suffix(')')?;
+    serde_json::from_str::<String>(value)
+        .ok()
+        .or_else(|| Some(value.trim_matches('"').to_owned()))
+}
+
+fn call_path_arguments(call: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = call["path"].as_str() {
+        paths.push(path.to_owned());
+    }
+    match &call["arguments"] {
+        Value::Array(arguments) => {
+            for argument in arguments {
+                match argument {
+                    Value::String(argument) => {
+                        if let Some(path) = debug_path_argument(argument) {
+                            paths.push(path);
+                        }
+                    }
+                    Value::Object(argument)
+                        if argument["kind"]
+                            .as_str()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("path")) =>
+                    {
+                        if let Some(path) = argument["value"].as_str() {
+                            paths.push(path.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Object(arguments) => {
+            for (name, value) in arguments {
+                if name.to_ascii_lowercase().contains("path") {
+                    if let Some(path) = value.as_str() {
+                        paths.push(path.to_owned());
+                    } else if let Some(values) = value.as_array() {
+                        paths.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                }
+            }
+        }
+        Value::String(arguments) => {
+            let arguments = arguments.trim();
+            let arguments = arguments
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(arguments);
+            paths.extend(
+                split_legacy_arguments(arguments)
+                    .into_iter()
+                    .filter_map(debug_path_argument),
+            );
+        }
+        _ => {}
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn decision_payload(event: &Value) -> Option<Value> {
@@ -415,7 +619,7 @@ fn format_agent_tool_call(call: &Value) -> Option<String> {
         return None;
     }
     let command = call["command"].as_str().or_else(|| call["tool"].as_str())?;
-    let arguments = tool_arguments(&call["arguments"]);
+    let arguments = call_arguments(call);
     Some(format!(
         "{command}{}",
         if arguments.is_empty() {
@@ -544,11 +748,18 @@ fn work_output(result: &Value) -> WorkOutput {
         .or_else(|| result["status"].as_str())
         .unwrap_or("output")
         .to_ascii_lowercase();
-    let body = result["text"]
-        .as_str()
-        .or_else(|| result["output"].as_str())
-        .unwrap_or_default()
-        .to_owned();
+    let body = result
+        .get("text")
+        .or_else(|| result.get("output"))
+        .or_else(|| result.get("data"))
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| compact_value(value))
+        })
+        .unwrap_or_default();
     let lines = body.lines().count();
     let failed = matches!(
         status.as_str(),
@@ -606,7 +817,7 @@ fn capability_row(event: &Value) -> WorkRow {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(str::to_ascii_lowercase)
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     if let Some(right) = payload["rights"].as_str() {
         rights.push(right.to_ascii_lowercase());
@@ -617,7 +828,7 @@ fn capability_row(event: &Value) -> WorkRow {
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(str::to_ascii_lowercase)
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     if !has_capability_set {
         if details.is_empty() && !tools.is_empty() {
@@ -760,6 +971,10 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                         let agent = agent_name(event);
                         let output = work_output(&result);
                         let denied = output.failed;
+                        let domain = result["execution_domain"]
+                            .as_str()
+                            .unwrap_or("guest")
+                            .replace('_', " ");
                         WorkRow {
                             speaker: if denied {
                                 "Denied".into()
@@ -767,9 +982,9 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                                 agent.clone()
                             },
                             context: Some(if denied {
-                                format!("{agent} · tool · guest")
+                                format!("{agent} · tool · {domain}")
                             } else {
-                                "tool · guest".into()
+                                format!("tool · {domain}")
                             }),
                             body: "Tool response".into(),
                             kind: if denied {
@@ -4778,7 +4993,10 @@ mod tests {
             "duplicate calls and hidden records stay hidden"
         );
         assert_eq!(rows[0].speaker, "Broker");
-        assert_eq!(rows[0].body, "create_agent(Agent 1, [cat], [X])");
+        assert_eq!(
+            rows[0].body,
+            "create_agent(agent · tools [cat] · resources [X])"
+        );
         assert_eq!(rows[1].speaker, "Agent 1");
         assert_eq!(rows[1].context.as_deref(), Some("tool · guest"));
         assert_eq!(rows[1].body, "cat /X");
@@ -4819,7 +5037,7 @@ mod tests {
         assert_eq!(rows[0].speaker, "Broker");
         assert_eq!(
             rows[0].body,
-            "create_agent(Agent 1, [touch, write], [root])"
+            "create_agent(writer · tools [touch, write] · resources [root] · 3 tool calls)"
         );
     }
 
@@ -4858,9 +5076,35 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].speaker, "Denied");
         assert!(rows[0].body.starts_with(
-            "create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V]) refused"
+            "create_agent(agent/prompt · tools [hello, time, sleep, status, help] · resources [X, Y, V] · 0 tool calls) refused"
         ));
         assert!(rows[0].body.contains("do not match"));
+    }
+
+    #[test]
+    fn arbitrary_typed_tool_arguments_are_preserved_without_comma_splitting() {
+        let call = json!({
+            "action":"tool_call",
+            "command":"publish_release",
+            "arguments":"[Utf8(\"release, candidate\"), U64(7), Bool(true), Path(\"/workspace/releases/a b.txt\")]"
+        });
+        assert_eq!(
+            format_agent_tool_call(&call).as_deref(),
+            Some("publish_release release, candidate 7 true /releases/a b.txt")
+        );
+
+        let structured = json!({
+            "tool":"http_request",
+            "arguments":{
+                "method":"POST",
+                "headers":{"x-trace":"abc"},
+                "retry":true
+            }
+        });
+        assert_eq!(
+            format_agent_tool_call(&structured).as_deref(),
+            Some("http_request headers={x-trace: abc} method=POST retry=true")
+        );
     }
 
     #[test]
@@ -4990,6 +5234,24 @@ mod tests {
             "object is outside the installed filesystem view"
         );
         assert_eq!(work_output_height(&long_output), 180.0);
+    }
+
+    #[test]
+    fn repeated_identical_calls_with_distinct_ids_are_all_visible() {
+        let events = [
+            json!({"kind":"tool_call","generation":9,"payload":{"command":"status","arguments":[],"call_id":1}}),
+            json!({"kind":"tool_result","generation":9,"payload":{"call_id":1,"result":"output","data":{"state":"starting"}}}),
+            json!({"kind":"tool_call","generation":9,"payload":{"command":"status","arguments":[],"call_id":2}}),
+            json!({"kind":"tool_result","generation":9,"payload":{"call_id":2,"result":"output","data":{"state":"ready"}}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body, "status");
+        assert_eq!(rows[1].body, "status");
+        assert_eq!(rows[0].output.as_ref().unwrap().body, "{state: starting}");
+        assert_eq!(rows[1].output.as_ref().unwrap().body, "{state: ready}");
     }
 
     #[test]

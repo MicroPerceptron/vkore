@@ -7,8 +7,8 @@
 //! it, which is why selecting an agent lights more than the paths it was
 //! granted directly.
 //!
-//! Paths are discovered from the tool calls that touched them. Nothing is
-//! assumed to exist because a workspace usually has it.
+//! Paths are discovered from explicit resource leases and typed tool-call
+//! arguments. Nothing is assumed to exist because a workspace usually has it.
 
 use crate::topology::layout::Placement;
 use crate::topology::model::Graph;
@@ -87,20 +87,10 @@ impl Filesystem {
     pub fn from_events(events: &[Value], graph: &Graph) -> Self {
         let mut filesystem = Self::default();
         for event in events {
-            if event["kind"] != "tool_call" {
-                continue;
-            }
-            let Some(call) = crate::decision_payload(event) else {
-                continue;
-            };
-            let Some(path) = call["path"]
-                .as_str()
-                .or_else(|| call["arguments"]["path"].as_str())
-            else {
-                continue;
-            };
-            let index = filesystem.intern(path);
-            let generation = event["generation"].as_u64().unwrap_or_default();
+            let generation = event["generation"]
+                .as_u64()
+                .or_else(|| event["payload"]["generation"].as_u64())
+                .unwrap_or_default();
             let Some(agent) = graph
                 .agents
                 .iter()
@@ -108,24 +98,47 @@ impl Filesystem {
             else {
                 continue;
             };
-            let rights = call["tool"]
-                .as_str()
-                .or_else(|| call["command"].as_str())
-                .unwrap_or("access")
-                .to_owned();
-            if !filesystem
-                .grants
-                .iter()
-                .any(|grant| grant.agent == agent && grant.path == index)
-            {
-                filesystem.grants.push(Grant {
-                    agent,
-                    path: index,
-                    rights,
-                });
+            match event["kind"].as_str() {
+                Some("capability") => {
+                    for (path, rights) in leased_paths(event) {
+                        filesystem.grant(agent, &path, &rights);
+                    }
+                }
+                Some("tool_call") => {
+                    let Some(call) = crate::decision_payload(event) else {
+                        continue;
+                    };
+                    let rights = call["tool"]
+                        .as_str()
+                        .or_else(|| call["command"].as_str())
+                        .unwrap_or("access");
+                    for path in crate::call_path_arguments(&call) {
+                        filesystem.grant(agent, &path, rights);
+                    }
+                }
+                _ => {}
             }
         }
         filesystem
+    }
+
+    fn grant(&mut self, agent: usize, path: &str, rights: &str) {
+        let path = normalize_path(path);
+        if path.is_empty() {
+            return;
+        }
+        let index = self.intern(&path);
+        if !self
+            .grants
+            .iter()
+            .any(|grant| grant.agent == agent && grant.path == index)
+        {
+            self.grants.push(Grant {
+                agent,
+                path: index,
+                rights: rights.to_owned(),
+            });
+        }
     }
 
     /// Returns the index for `path`, adding it and its ancestors if needed.
@@ -324,6 +337,51 @@ impl Filesystem {
     }
 }
 
+fn normalize_path(path: &str) -> String {
+    path.strip_prefix("/workspace/")
+        .or_else(|| path.strip_prefix("workspace/"))
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn leased_paths(event: &Value) -> Vec<(String, String)> {
+    let payload = &event["payload"];
+    if !matches!(
+        payload["state"]
+            .as_str()
+            .unwrap_or("installed")
+            .to_ascii_lowercase()
+            .as_str(),
+        "installed" | "granted" | "active"
+    ) {
+        return Vec::new();
+    }
+    let mut paths = payload["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| {
+            let kind = capability["kind"].as_str()?;
+            if !matches!(kind.to_ascii_lowercase().as_str(), "object" | "view") {
+                return None;
+            }
+            Some((capability["label"].as_str()?.to_owned(), kind.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    if payload["kind"]
+        .as_str()
+        .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "object" | "view"))
+        && let Some(path) = payload["label"].as_str()
+    {
+        paths.push((
+            path.to_owned(),
+            payload["kind"].as_str().unwrap_or("access").to_owned(),
+        ));
+    }
+    paths
+}
+
 /// The design's node width: wide enough for the name, floored at 120.
 fn node_width(name: &str) -> f32 {
     (120.0f32).max(40.0 + name.chars().count() as f32 * 8.4) + 42.0
@@ -369,6 +427,43 @@ mod tests {
             .unwrap();
         assert!(src < main);
         assert_eq!(filesystem.paths[main].parent, Some(src));
+    }
+
+    #[test]
+    fn dynamic_resource_leases_and_typed_path_arguments_enter_the_graph() {
+        let events = vec![
+            json!({"kind":"capability","generation":4,"payload":{"state":"installed","capabilities":[
+                {"kind":"view","label":"workspace/releases"},
+                {"kind":"executable","label":"publish_release"}
+            ]}}),
+            json!({"kind":"tool_call","generation":4,"payload":{"command":"publish_release","arguments":[
+                {"kind":"path","value":"/workspace/releases/v1/manifest.json"},
+                {"kind":"utf8","value":"release, candidate"}
+            ]}}),
+        ];
+        let graph = Graph::from_events(&events, false);
+        let filesystem = Filesystem::from_events(&events, &graph);
+        let worker = graph.index_of("agent-4").unwrap();
+        let releases = filesystem
+            .paths
+            .iter()
+            .position(|path| path.path == "releases")
+            .unwrap();
+        let manifest = filesystem
+            .paths
+            .iter()
+            .position(|path| path.path == "releases/v1/manifest.json")
+            .unwrap();
+
+        assert!(filesystem.covers(worker, releases));
+        assert!(filesystem.covers(worker, manifest));
+        assert_eq!(filesystem.grants.len(), 2);
+        assert!(
+            filesystem
+                .paths
+                .iter()
+                .all(|path| !path.path.contains("release, candidate"))
+        );
     }
 
     #[test]

@@ -133,8 +133,12 @@ impl Graph {
 
         // One worker per generation the stream mentions, in first-seen order.
         let mut workers: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut calls: BTreeMap<(u64, u64), (usize, usize)> = BTreeMap::new();
         for event in events {
-            let Some(generation) = event["generation"].as_u64() else {
+            let Some(generation) = event["generation"]
+                .as_u64()
+                .or_else(|| event["payload"]["generation"].as_u64())
+            else {
                 continue;
             };
             if generation == 0 {
@@ -162,14 +166,56 @@ impl Graph {
             });
 
             match event["kind"].as_str() {
+                Some("broker_proposal") => {
+                    if let Some(label) = crate::decision_payload(event)
+                        .and_then(|proposal| proposal["label"].as_str().map(str::to_owned))
+                        .filter(|label| !label.is_empty())
+                    {
+                        agents[index].name = label;
+                    }
+                }
                 Some("capability") => {
-                    if let Some(label) = capability_label(event) {
+                    for label in capability_labels(event) {
                         grant(&mut agents[index], &label);
                     }
                 }
                 Some("tool_call") => {
                     if let Some(call) = tool_call(event) {
+                        let call_id = crate::decision_payload(event)
+                            .and_then(|payload| payload["call_id"].as_u64());
+                        if call_id.is_some_and(|call_id| calls.contains_key(&(generation, call_id)))
+                        {
+                            continue;
+                        }
                         agents[index].tools.push(call);
+                        if let Some(call_id) = call_id {
+                            calls.insert(
+                                (generation, call_id),
+                                (index, agents[index].tools.len() - 1),
+                            );
+                        }
+                    }
+                }
+                Some("tool_result") => {
+                    if tool_result_failed(event) {
+                        let call_id = crate::decision_payload(event)
+                            .and_then(|payload| payload["call_id"].as_u64());
+                        let tool = call_id
+                            .and_then(|call_id| calls.get(&(generation, call_id)).copied())
+                            .or_else(|| {
+                                agents[index]
+                                    .tools
+                                    .len()
+                                    .checked_sub(1)
+                                    .map(|tool| (index, tool))
+                            });
+                        if let Some((agent, tool)) = tool
+                            && let Some(call) = agents
+                                .get_mut(agent)
+                                .and_then(|agent| agent.tools.get_mut(tool))
+                        {
+                            call.failed = true;
+                        }
                     }
                 }
                 Some("error") => {
@@ -215,14 +261,59 @@ fn grant(agent: &mut Agent, label: &str) {
     });
 }
 
-fn capability_label(event: &Value) -> Option<String> {
+fn capability_labels(event: &Value) -> Vec<String> {
     let payload = &event["payload"];
-    payload["capability"]
+    let state = payload["state"].as_str().unwrap_or("installed");
+    if !matches!(
+        state.to_ascii_lowercase().as_str(),
+        "installed" | "granted" | "active"
+    ) {
+        return Vec::new();
+    }
+    let mut labels = payload["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| {
+            capability
+                .as_str()
+                .or_else(|| capability["label"].as_str())
+                .or_else(|| capability["name"].as_str())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    labels.extend(
+        payload["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+    if let Some(label) = payload["capability"]
         .as_str()
         .or_else(|| payload["label"].as_str())
         .or_else(|| payload["name"].as_str())
         .or_else(|| payload["tool"].as_str())
-        .map(str::to_owned)
+    {
+        labels.push(label.to_owned());
+    }
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn tool_result_failed(event: &Value) -> bool {
+    let payload = crate::decision_payload(event).unwrap_or(Value::Null);
+    payload["result"]
+        .as_str()
+        .or_else(|| payload["status"].as_str())
+        .is_some_and(|status| {
+            matches!(
+                status.to_ascii_lowercase().as_str(),
+                "refused" | "revoked" | "cancelled" | "failed" | "error"
+            )
+        })
 }
 
 fn tool_call(event: &Value) -> Option<ToolCall> {
@@ -231,7 +322,7 @@ fn tool_call(event: &Value) -> Option<ToolCall> {
         .as_str()
         .or_else(|| call["tool"].as_str())?
         .to_owned();
-    let detail = crate::tool_arguments(&call["arguments"]).join(" ");
+    let detail = crate::call_arguments(&call).join(" ");
     Some(ToolCall {
         name,
         detail,
@@ -315,6 +406,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["write_workspace"]
         );
+    }
+
+    #[test]
+    fn dynamic_lease_installs_every_capability_and_refused_result_marks_its_call() {
+        let graph = Graph::from_events(
+            &[
+                catalog_event(),
+                json!({"kind":"broker_proposal","generation":7,"payload":{"action":"CreateAgent","label":"release-worker"}}),
+                json!({"kind":"capability","generation":7,"payload":{"state":"installed","capabilities":[
+                    {"kind":"executable","label":"publish_release"},
+                    {"kind":"view","label":"workspace/releases"}
+                ],"tools":["publish_release","checksum"]}}),
+                json!({"kind":"tool_call","generation":7,"payload":{"command":"publish_release","call_id":41,"arguments":[{"kind":"path","value":"/workspace/releases/v1"}]}}),
+                json!({"kind":"tool_result","generation":7,"payload":{"call_id":41,"result":"Refused","text":"policy denied"}}),
+            ],
+            false,
+        );
+        let worker = &graph.agents[1];
+        assert_eq!(worker.name, "release-worker");
+        assert_eq!(
+            worker
+                .held()
+                .map(|cap| cap.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["checksum", "publish_release", "workspace/releases"]
+        );
+        assert_eq!(worker.tools.len(), 1);
+        assert!(worker.tools[0].failed);
+        assert_eq!(worker.tools[0].detail, "/releases/v1");
     }
 
     #[test]

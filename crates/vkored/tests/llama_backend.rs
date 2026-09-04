@@ -155,7 +155,11 @@ fn broker_planning_request_for(turn: u64, intent: &str, timeout_ticks: u32) -> V
         ceiling: TaskBudget {
             cpu_share: 1,
             memory_bytes: 64 * 1024 * 1024,
-            tool_calls: 3,
+            tool_calls: if intent.contains("HIGH_BUDGET") {
+                4096
+            } else {
+                3
+            },
             ..TaskBudget::ZERO
         },
         offers: &offers,
@@ -352,6 +356,127 @@ fn supervised_stub_uses_kbp1_and_returns_validated_kbr1() {
         }
     }
     panic!("broker planner timed out")
+}
+
+#[test]
+fn broker_retries_one_invalid_plan_before_completing() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    backend
+        .submit(
+            broker,
+            RequestId(id(93)),
+            &broker_planning_request_for(
+                1,
+                "RETRY_INVALID_BROKER Read workspace/docs/architecture.md",
+                500,
+            ),
+            0,
+        )
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 0;
+    while Instant::now() < deadline {
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, .. }) => {
+                let reply = decode_broker_reply(&payload).unwrap();
+                assert_eq!(reply.action, BrokerActionKind::CreateAgent);
+                assert_eq!(
+                    reply.selectors().collect::<Vec<_>>(),
+                    vec![[5; 16], [2; 16]]
+                );
+                assert_eq!(backend.metrics().restarts, 0);
+                return;
+            }
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    panic!("broker validation retry timed out")
+}
+
+#[test]
+fn broker_watchdog_accepts_complete_valid_json_without_a_done_event() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    let started = Instant::now();
+    backend
+        .submit(
+            broker,
+            RequestId(id(94)),
+            &broker_planning_request_for(
+                1,
+                "HANG_AFTER_COMPLETE_JSON Read workspace/docs/architecture.md",
+                500,
+            ),
+            0,
+        )
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 0;
+    while Instant::now() < deadline {
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, .. }) => {
+                assert!(decode_broker_reply(&payload).is_some());
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "the backend waited for the server's delayed close instead of the JSON watchdog"
+                );
+                return;
+            }
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    panic!("complete-JSON watchdog timed out")
+}
+
+#[test]
+fn broker_advertises_and_enforces_the_small_prompt_tool_budget() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    backend
+        .submit(
+            broker,
+            RequestId(id(95)),
+            &broker_planning_request_for(1, "HIGH_BUDGET Read workspace/docs/architecture.md", 500),
+            0,
+        )
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 0;
+    while Instant::now() < deadline {
+        tick += 1;
+        match backend.poll(tick) {
+            Some(BackendEvent::Completed { payload, .. }) => {
+                let reply = decode_broker_reply(&payload).unwrap();
+                assert!(reply.budget.tool_calls <= 8);
+                let observations: Vec<_> =
+                    std::iter::from_fn(|| backend.take_observation()).collect();
+                assert!(observations.iter().any(|observation| {
+                    observation.kind == ObservationKind::ModelPrompt
+                        && observation
+                            .payload
+                            .contains(r#""budget_ceiling":{"tool_calls":8}"#)
+                }));
+                return;
+            }
+            Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
+            Some(other) => panic!("unexpected event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    panic!("bounded broker budget test timed out")
 }
 
 #[test]

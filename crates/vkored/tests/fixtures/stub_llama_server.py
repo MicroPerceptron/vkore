@@ -92,20 +92,35 @@ class Handler(BaseHTTPRequestHandler):
                     else []
                 )
                 selected_resources = [objects[0]["index"]] if objects else []
-                text = json.dumps(
-                    {
-                        "action": "create_agent",
-                        "label": "agent/catalog-selection",
-                        "executables": selected_executables,
-                        "resources": selected_resources,
-                        "budget": {
-                            "tool_calls": min(2, ceiling["tool_calls"])
-                            if objects
-                            else 0
+                if (
+                    "retry_invalid_broker" in intent
+                    and "Validation correction:" not in prompt
+                ):
+                    text = json.dumps(
+                        {
+                            "action": "create_agent",
+                            "label": "invalid-first-attempt",
+                            "executables": [executables[0]["index"]],
+                            "resources": [executables[0]["index"]],
+                            "budget": {"tool_calls": 0},
                         },
-                    },
-                    separators=(",", ":"),
-                )
+                        separators=(",", ":"),
+                    )
+                else:
+                    text = json.dumps(
+                        {
+                            "action": "create_agent",
+                            "label": "agent/catalog-selection",
+                            "executables": selected_executables,
+                            "resources": selected_resources,
+                            "budget": {
+                                "tool_calls": min(2, ceiling["tool_calls"])
+                                if objects
+                                else 0
+                            },
+                        },
+                        separators=(",", ":"),
+                    )
             elif marker.startswith("{"):
                 message = json.loads(marker)
                 if message.get("kind") == "user_text":
@@ -157,8 +172,10 @@ class Handler(BaseHTTPRequestHandler):
                         ).encode()
                         + b"\n\n"
                     )
-            events.append(b"data: {\"content\":\"\",\"tokens\":[],\"stop\":true}\n\n")
-            events.append(b"data: [DONE]\n\n")
+            hangs_after_json = "hang_after_complete_json" in prompt.lower()
+            if not hangs_after_json:
+                events.append(b"data: {\"content\":\"\",\"tokens\":[],\"stop\":true}\n\n")
+                events.append(b"data: [DONE]\n\n")
         for event in events:
             try:
                 self.wfile.write(f"{len(event):x}\r\n".encode())
@@ -169,6 +186,9 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.2)
             except (BrokenPipeError, ConnectionResetError):
                 return
+        if "hang_after_complete_json" in prompt.lower():
+            time.sleep(3)
+            return
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
 

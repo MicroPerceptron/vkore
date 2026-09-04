@@ -484,6 +484,21 @@ fn broker_validation_status(events: &[&Value], proposal_index: usize) -> Option<
     })
 }
 
+fn broker_selection_pending(events: &[&Value]) -> bool {
+    !events.iter().any(|event| {
+        let payload = &event["payload"];
+        (payload["kind"] == "Validation"
+            && payload["role"]
+                .as_str()
+                .is_some_and(|role| role.eq_ignore_ascii_case("broker"))
+            && payload["accepted"].as_bool() == Some(true))
+            || matches!(
+                event["kind"].as_str(),
+                Some("broker_proposal" | "capability" | "tool_call" | "tool_result" | "assistant")
+            )
+    })
+}
+
 fn model_validation_row(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> Option<WorkRow> {
     let payload = &event["payload"];
     if payload["kind"] != "Validation" {
@@ -1333,6 +1348,18 @@ impl Model {
     fn events_changed(&mut self) {
         self.sync_selectable_text();
         self.refresh_topology();
+        if let Some(prompt_id) = self.prompt_id.as_deref() {
+            let prompt_events = self
+                .events
+                .iter()
+                .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
+                .collect::<Vec<_>>();
+            self.status = if broker_selection_pending(&prompt_events) {
+                "Broker selecting capabilities…".into()
+            } else {
+                "Agent working with Kore-provided capabilities…".into()
+            };
+        }
     }
 
     /// Rebuilds the derived graph and its placement.
@@ -1878,7 +1905,7 @@ impl Model {
             }
             (RequestKind::SendPrompt, Ok(_)) => {
                 self.busy = false;
-                self.status = "Prompt accepted by the broker.".into();
+                self.status = "Broker selecting capabilities…".into();
             }
             (RequestKind::CancelPrompt, Ok(_)) => {
                 self.status = "Cancellation requested.".into();
@@ -2593,8 +2620,12 @@ impl Model {
                 if expanded {
                     let mut details = column![].spacing(10);
                     if rows.is_empty() {
-                        details = details
-                            .push(widgets::mono("waiting for the sandbox", theme::TEXT_MUTED));
+                        let phase = if broker_selection_pending(&prompt_events) {
+                            "Broker selecting capabilities…"
+                        } else {
+                            "Kore preparing the agent…"
+                        };
+                        details = details.push(widgets::mono(phase, theme::TEXT_MUTED));
                     }
                     for (index, work) in rows.into_iter().enumerate() {
                         let label_color = match work.kind.as_str() {
@@ -4703,6 +4734,23 @@ mod tests {
             assert_eq!(request.kind, RequestKind::StartSession);
             assert_eq!(request.path, "/api/v1/sessions");
         }
+    }
+
+    #[test]
+    fn prompt_phase_distinguishes_broker_selection_from_agent_work() {
+        let selecting = [
+            json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"create a file"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelOutputChunk","role":"Broker","payload":"{\"action\":"}}),
+        ];
+        let selecting = selecting.iter().collect::<Vec<_>>();
+        assert!(broker_selection_pending(&selecting));
+
+        let working = [
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Validation","role":"Broker","accepted":true,"payload":""}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"installed","tools":["touch"]}}),
+        ];
+        let working = working.iter().collect::<Vec<_>>();
+        assert!(!broker_selection_pending(&working));
     }
 
     #[test]

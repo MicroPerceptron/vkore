@@ -2062,6 +2062,9 @@ impl Model {
                 .into()
         } else if self.workspace_selection_open {
             stack![base, self.modal_layer(self.workspace_selection_panel())]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
         } else if self.settings_open {
             stack![base, self.modal_layer(self.settings_panel())]
                 .width(Length::Fill)

@@ -969,6 +969,23 @@ impl InferenceBackend for DeterministicBackend {
         let turn = decoded.turn;
         let input = decoded.input;
         let limits = self.registry.limits;
+        // A resident broker sequence is reused across interactive prompts, but
+        // each structured turn-one BrokerPlan is an independent authority
+        // transaction. Match the llama backend's prompt-boundary reset so a
+        // deterministic test broker cannot carry a prior prompt's plan state.
+        let reset_broker_context = identity.role == BackendRole::Broker
+            && turn == 1
+            && input
+                .get(..4)
+                .is_some_and(|magic| magic == kore_hostlink::BROKER_REQUEST_MAGIC.to_le_bytes())
+            && self.registry.get(identity).is_ok_and(|entry| {
+                entry.state.accepted_turn != 0
+                    && entry.state.pending.is_empty()
+                    && !entry.state.seen.contains(&request)
+            });
+        if reset_broker_context {
+            self.registry.get_mut(identity)?.state = DeterministicSequence::new(limits);
+        }
         let entry = self.registry.get_mut(identity)?;
         let sequence = &mut entry.state;
         if input.is_empty() || input.len() > kore_hostlink::INLINE_MAX {

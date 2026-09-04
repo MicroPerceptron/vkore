@@ -52,6 +52,7 @@ struct ProjectRuntime {
     vm_pause_due: Option<Instant>,
     vm_suspended: bool,
     backend_failure: Option<String>,
+    completed_frontend_broker_decisions: u64,
     completed_frontend_teardowns: u64,
     completed_frontend_idle_barriers: u64,
 }
@@ -182,6 +183,7 @@ impl ProjectRuntime {
             vm_pause_due: None,
             vm_suspended: false,
             backend_failure: None,
+            completed_frontend_broker_decisions: 0,
             completed_frontend_teardowns: 0,
             completed_frontend_idle_barriers: 0,
         })
@@ -435,6 +437,12 @@ impl ProjectRuntime {
             if observation.kind == crate::ObservationKind::ModelPrompt {
                 self.model_turn_started(emit);
             }
+            if observation.role == crate::BackendRole::Broker
+                && observation.kind == crate::ObservationKind::BrokerProposal
+            {
+                self.completed_frontend_broker_decisions =
+                    self.completed_frontend_broker_decisions.saturating_add(1);
+            }
             emit_inference_observation(observation, emit);
         }
         while let Some(observation) = self.daemon.take_authority_observation() {
@@ -527,6 +535,9 @@ impl TaskRuntime for KoreVmRuntime {
         let started = Instant::now();
         let mut next_progress = started;
         let tick_interval = hostlink_tick_interval();
+        let broker_decision_target = runtime
+            .completed_frontend_broker_decisions
+            .saturating_add(1);
         let teardown_target = runtime.completed_frontend_teardowns.saturating_add(1);
         let idle_barrier_target = runtime.completed_frontend_idle_barriers.saturating_add(1);
         let mut pending_terminal = None;
@@ -662,6 +673,8 @@ impl TaskRuntime for KoreVmRuntime {
             }
             if let Some(status) = terminal_after_reclaim_and_idle(
                 pending_terminal,
+                runtime.completed_frontend_broker_decisions,
+                broker_decision_target,
                 runtime.completed_frontend_teardowns,
                 teardown_target,
                 runtime.completed_frontend_idle_barriers,
@@ -735,12 +748,16 @@ fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
 
 fn terminal_after_reclaim_and_idle(
     pending: Option<PromptStatus>,
+    observed_broker_decisions: u64,
+    broker_decision_target: u64,
     observed_teardowns: u64,
     teardown_target: u64,
     observed_idle_barriers: u64,
     idle_barrier_target: u64,
 ) -> Option<PromptStatus> {
-    (observed_teardowns >= teardown_target && observed_idle_barriers >= idle_barrier_target)
+    (observed_broker_decisions >= broker_decision_target
+        && observed_teardowns >= teardown_target
+        && observed_idle_barriers >= idle_barrier_target)
         .then_some(pending)
         .flatten()
 }
@@ -865,17 +882,24 @@ mod tests {
 
     #[test]
     fn frontend_result_is_not_terminal_until_kore_is_ready_for_the_next_chat() {
-        assert_eq!(terminal_after_reclaim_and_idle(None, 4, 5, 7, 8), None);
         assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 4, 5, 7, 8),
+            terminal_after_reclaim_and_idle(None, 2, 3, 4, 5, 7, 8),
             None
         );
         assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 5, 5, 7, 8),
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 2, 3, 4, 5, 7, 8),
             None
         );
         assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 5, 5, 8, 8),
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 4, 5, 7, 8),
+            None
+        );
+        assert_eq!(
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 5, 5, 7, 8),
+            None
+        );
+        assert_eq!(
+            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 5, 5, 8, 8),
             Some(PromptStatus::Completed)
         );
     }

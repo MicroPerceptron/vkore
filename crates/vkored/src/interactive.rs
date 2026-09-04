@@ -898,8 +898,10 @@ impl GuestBridge for DeterministicGuest {
 
 struct RuntimeSession {
     broker: SequenceIdentity,
+    // The inference sequence owns bounded conversation history, not
+    // authority. Prompt-scoped GuestAgents below can therefore rotate without
+    // erasing the user's prior turns.
     agent_sequence: SequenceIdentity,
-    guest_agent: GuestAgent,
     turn: u64,
     incarnation: u64,
 }
@@ -925,13 +927,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
         self.backend.reset();
     }
 
-    fn found_session(
-        &mut self,
-        session: &SessionState,
-        prompt: &PromptRequest,
-        emit: &mut dyn FnMut(EventKind, bool, Value),
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(), String> {
+    fn open_session(&mut self, session: &SessionState) -> Result<(), String> {
         let generation = TaskGeneration::new(session.generation).ok_or("invalid generation")?;
         let broker = SequenceIdentity {
             route: RouteId(digest16(b"broker", &[session.session_id.as_bytes()])),
@@ -941,6 +937,39 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
         self.backend
             .open(broker)
             .map_err(|error| format!("open broker: {error:?}"))?;
+        let agent_sequence = SequenceIdentity {
+            route: RouteId(digest16(b"agent", &[session.session_id.as_bytes()])),
+            generation,
+            role: BackendRole::Agent,
+        };
+        if let Err(error) = self.backend.open(agent_sequence) {
+            let _ = self.backend.close(broker);
+            return Err(format!("open agent: {error:?}"));
+        }
+        self.sessions.insert(
+            session.session_id.clone(),
+            RuntimeSession {
+                broker,
+                agent_sequence,
+                turn: 0,
+                incarnation: self.backend.metrics().incarnation,
+            },
+        );
+        Ok(())
+    }
+
+    fn lease_prompt_authority(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<GuestAgent, String> {
+        let broker = self
+            .sessions
+            .get(&session.session_id)
+            .ok_or("runtime session is not open")?
+            .broker;
         let offers = self.guest.offers(session);
         let borrowed: Vec<_> = offers
             .iter()
@@ -1005,32 +1034,51 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
             }),
         );
         let guest_agent = self.guest.admit(session, prompt, &decision)?;
+        let capabilities = offers
+            .iter()
+            .filter(|offer| decision.selectors.contains(&offer.reference))
+            .map(|offer| {
+                json!({
+                    "kind": match offer.kind {
+                        BrokerOfferKind::Object => "object",
+                        BrokerOfferKind::View => "view",
+                        BrokerOfferKind::Executable => "executable",
+                        BrokerOfferKind::Budget => "budget",
+                        BrokerOfferKind::ExistingAgent => "existing_agent",
+                        BrokerOfferKind::ExistingGrant => "existing_grant",
+                    },
+                    "label": offer.label,
+                })
+            })
+            .collect::<Vec<_>>();
         emit(
             EventKind::Capability,
             false,
             json!({
                 "state":"installed", "agent":hex16(&guest_agent.id), "generation":guest_agent.generation,
                 "tools":guest_agent.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                "capabilities": capabilities,
+                "scope":"prompt", "prompt_id":prompt.prompt_id,
                 "committed_by":"resident_broker_bridge"
             }),
         );
-        let agent_sequence = SequenceIdentity {
-            route: RouteId(digest16(b"agent", &[session.session_id.as_bytes()])),
-            generation,
-            role: BackendRole::Agent,
-        };
-        self.backend
-            .open(agent_sequence)
-            .map_err(|error| format!("open agent: {error:?}"))?;
-        self.sessions.insert(
-            session.session_id.clone(),
-            RuntimeSession {
-                broker,
-                agent_sequence,
-                guest_agent,
-                turn: 0,
-                incarnation: self.backend.metrics().incarnation,
-            },
+        Ok(guest_agent)
+    }
+
+    fn release_prompt_authority(
+        &mut self,
+        prompt: &PromptRequest,
+        agent: &GuestAgent,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<(), String> {
+        self.guest.close(agent)?;
+        emit(
+            EventKind::Capability,
+            false,
+            json!({
+                "state":"teardown", "agent":hex16(&agent.id), "generation":agent.generation,
+                "scope":"prompt", "prompt_id":prompt.prompt_id,
+            }),
         );
         Ok(())
     }
@@ -1105,7 +1153,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
         cancelled: &dyn Fn() -> bool,
     ) -> PromptStatus {
         if !self.sessions.contains_key(&session.session_id)
-            && let Err(error) = self.found_session(session, prompt, emit, cancelled)
+            && let Err(error) = self.open_session(session)
         {
             emit(
                 EventKind::Error,
@@ -1118,11 +1166,10 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 PromptStatus::Failed
             };
         }
-        let (sequence, mut agent, incarnation, turn) = {
+        let (sequence, incarnation, turn) = {
             let runtime = &self.sessions[&session.session_id];
             (
                 runtime.agent_sequence,
-                runtime.guest_agent.clone(),
                 runtime.incarnation,
                 runtime.turn + 1,
             )
@@ -1135,26 +1182,41 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             );
             return PromptStatus::Failed;
         }
-        let mut tools = [0_u8; AGENT_TEXT_MAX];
-        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
-            emit(
-                EventKind::Error,
-                true,
-                json!({"error":"agent tool catalog exceeded bounds"}),
-            );
-            return PromptStatus::Failed;
+        let mut agent = match self.lease_prompt_authority(session, prompt, emit, cancelled) {
+            Ok(agent) => agent,
+            Err(error) => {
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"stage":"broker", "error":error}),
+                );
+                return if cancelled() {
+                    PromptStatus::Cancelled
+                } else {
+                    PromptStatus::Failed
+                };
+            }
         };
-        let mut last_tool_result = None;
-        let next = AgentRequestView {
-            kind: AgentRequestKind::UserText,
-            turn,
-            call_id: 0,
-            result: None,
-            tools: &tools[..tools_len],
-            resources: &[],
-            text: &prompt.text,
-        };
-        {
+        let status = (|| {
+            let mut tools = [0_u8; AGENT_TEXT_MAX];
+            let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"error":"agent tool catalog exceeded bounds"}),
+                );
+                return PromptStatus::Failed;
+            };
+            let mut last_tool_result = None;
+            let next = AgentRequestView {
+                kind: AgentRequestKind::UserText,
+                turn,
+                call_id: 0,
+                result: None,
+                tools: &tools[..tools_len],
+                resources: &[],
+                text: &prompt.text,
+            };
             let mut inner = [0u8; kore_hostlink::INFERENCE_PART_MAX];
             let Some(inner_len) = next.encode(&mut inner) else {
                 emit(
@@ -1285,18 +1347,26 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 }
                 AgentEventKind::Cancelled => PromptStatus::Cancelled,
             }
+        })();
+        if let Err(error) = self.release_prompt_authority(prompt, &agent, emit) {
+            emit(
+                EventKind::Error,
+                true,
+                json!({"stage":"authority_teardown", "error":error}),
+            );
+            return PromptStatus::Failed;
         }
+        status
     }
 
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
         if let Some(runtime) = self.sessions.remove(&session.session_id) {
             let _ = self.backend.close(runtime.agent_sequence);
             let _ = self.backend.close(runtime.broker);
-            let _ = self.guest.close(&runtime.guest_agent);
             emit(
                 EventKind::Capability,
                 false,
-                json!({"state":"teardown","agent":hex16(&runtime.guest_agent.id),"generation":runtime.guest_agent.generation}),
+                json!({"state":"teardown","scope":"session","generation":session.generation}),
             );
         }
     }

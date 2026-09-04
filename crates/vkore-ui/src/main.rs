@@ -513,12 +513,31 @@ fn capability_row(event: &Value) -> WorkRow {
         .as_str()
         .unwrap_or("installed")
         .to_ascii_lowercase();
-    let mut details = Vec::new();
+    let has_capability_set = payload["capabilities"].is_array();
+    let mut details = payload["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| {
+            let kind = capability["kind"].as_str()?;
+            let label = capability["label"].as_str().unwrap_or_default();
+            Some(if label.is_empty() {
+                kind.to_ascii_lowercase()
+            } else {
+                format!("{} {label}", kind.to_ascii_lowercase())
+            })
+        })
+        .collect::<Vec<_>>();
     if let Some(kind) = payload["kind"]
         .as_str()
         .or_else(|| payload["capability"].as_str())
     {
-        details.push(kind.to_ascii_lowercase());
+        let label = payload["label"].as_str().unwrap_or_default();
+        details.push(if label.is_empty() {
+            kind.to_ascii_lowercase()
+        } else {
+            format!("{} {label}", kind.to_ascii_lowercase())
+        });
     }
     let mut rights = payload["rights"]
         .as_array()
@@ -538,15 +557,21 @@ fn capability_row(event: &Value) -> WorkRow {
         .filter_map(Value::as_str)
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    if details.is_empty() && !tools.is_empty() {
-        details.push("object".into());
+    if !has_capability_set {
+        if details.is_empty() && !tools.is_empty() {
+            details.push("executable".into());
+        }
+        details.extend(tools);
     }
-    details.extend(tools);
     WorkRow {
         speaker: "Authority".into(),
         context: None,
         body: if details.is_empty() {
-            state
+            if state == "installed" {
+                "installed no tool or resource capabilities".into()
+            } else {
+                state
+            }
         } else {
             let first = details.remove(0);
             let remainder = if details.is_empty() {
@@ -4870,6 +4895,27 @@ mod tests {
         assert!(!visible.contains("SECRET SYSTEM PROMPT"));
         assert!(visible.contains("MANIFOLD-ORANGE-742"));
         assert!(!visible.contains('{'));
+    }
+
+    #[test]
+    fn authority_rows_render_the_current_prompt_selection_without_inventing_a_tool() {
+        let events = [
+            json!({"kind":"capability","prompt_id":"hello","payload":{"state":"installed","tools":[],"capabilities":[],"scope":"prompt"}}),
+            json!({"kind":"capability","prompt_id":"read","payload":{"state":"installed","tools":["cat"],"capabilities":[
+                {"kind":"object","label":"workspace/X"},
+                {"kind":"executable","label":"cat"}
+            ],"scope":"prompt"}}),
+        ];
+
+        let greeting = capability_row(&events[0]);
+        let reading = capability_row(&events[1]);
+
+        assert_eq!(greeting.body, "installed no tool or resource capabilities");
+        assert_eq!(
+            reading.body,
+            "installed object workspace/X · executable cat"
+        );
+        assert!(!greeting.body.contains("cat"));
     }
 
     #[test]

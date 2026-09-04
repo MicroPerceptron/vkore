@@ -128,7 +128,7 @@ fn conversational_prompt_founds_a_tool_inert_agent_and_answers_directly() {
 }
 
 #[test]
-fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() {
+fn greeting_then_tool_prompt_is_rebrokered_with_a_fresh_prompt_lease() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
@@ -136,7 +136,7 @@ fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() 
     );
     let handle = service.handle();
     create(&handle, "sequential");
-    let first = prompt("p1", "read X");
+    let first = prompt("p1", "hello");
     assert_eq!(
         handle.submit_prompt("sequential", first.clone()).unwrap(),
         "p1"
@@ -152,8 +152,61 @@ fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() 
             .iter()
             .filter(|event| event.kind == EventKind::BrokerProposal)
             .count(),
-        1
+        2
     );
+    for prompt_id in ["p1", "p2"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::BrokerProposal
+                        && event.prompt_id.as_deref() == Some(prompt_id)
+                })
+                .count(),
+            1,
+            "each prompt must have its own broker decision"
+        );
+    }
+    let installed = events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::Capability && event.payload["state"] == "installed"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(installed.len(), 2);
+    assert_eq!(installed[0].payload["tools"], serde_json::json!([]));
+    assert_eq!(installed[0].payload["capabilities"], serde_json::json!([]));
+    assert_eq!(installed[1].payload["tools"], serde_json::json!(["cat"]));
+    assert_eq!(
+        installed[1].payload["capabilities"],
+        serde_json::json!([
+            {"kind":"object", "label":"workspace/X"},
+            {"kind":"executable", "label":"cat"}
+        ])
+    );
+    assert_ne!(installed[0].payload["agent"], installed[1].payload["agent"]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| event.kind == EventKind::Capability && event.payload["state"] == "teardown"
+            )
+            .count(),
+        2
+    );
+    assert!(events.iter().any(|event| event.kind == EventKind::ToolCall));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == EventKind::ToolResult)
+    );
+    let worker_turns = events
+        .iter()
+        .filter(|event| event.kind == EventKind::Inference && event.payload["state"] == "submitted")
+        .filter_map(|event| event.payload["turn"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(worker_turns.first(), Some(&1));
+    assert!(worker_turns.iter().any(|turn| *turn > 1));
     assert_eq!(handle.state("sequential").unwrap().prompts.len(), 2);
 }
 

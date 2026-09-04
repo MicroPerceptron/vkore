@@ -10,11 +10,6 @@ approvals, add-ons, packages, transcripts, and diagnostics. Kore remains the
 authority-bearing guest. A host path, model response, tool name, or UI event is
 never authority by itself.
 
-![The native vKore chat harness showing a scoped workspace read and validated assistant response](artifacts/readme/chat-harness.png)
-
-_The native Iced + Axiom harness. The expandable Working timeline keeps broker,
-agent, and tool activity separate from validated assistant output._
-
 ## What is here
 
 - **Native project UI.** Create and persist projects, select a workspace and

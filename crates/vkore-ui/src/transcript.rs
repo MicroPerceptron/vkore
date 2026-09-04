@@ -206,19 +206,17 @@ pub(crate) fn assistant_blocks(source: &str) -> Vec<AssistantBlock> {
 }
 
 pub(crate) fn user_message_width(text: &str, transcript_width: f32) -> f32 {
-    const MIN_BUBBLE_WIDTH: f32 = 96.0;
-    const MAX_BUBBLE_WIDTH: f32 = 560.0;
-    const BUBBLE_HORIZONTAL_PADDING: f32 = 30.0;
-    const APPROXIMATE_GLYPH_WIDTH: f32 = 7.5;
+    const MIN_MESSAGE_WIDTH: f32 = 120.0;
+    const MAX_MESSAGE_WIDTH: f32 = 800.0;
+    const APPROXIMATE_GLYPH_WIDTH: f32 = 9.0;
 
-    let available = (transcript_width * 0.72).clamp(MIN_BUBBLE_WIDTH, MAX_BUBBLE_WIDTH);
+    let available = (transcript_width * 0.8).clamp(MIN_MESSAGE_WIDTH, MAX_MESSAGE_WIDTH);
     let longest_line = text
         .lines()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(0) as f32;
-    (longest_line * APPROXIMATE_GLYPH_WIDTH + BUBBLE_HORIZONTAL_PADDING)
-        .clamp(MIN_BUBBLE_WIDTH, available)
+    (longest_line * APPROXIMATE_GLYPH_WIDTH).clamp(MIN_MESSAGE_WIDTH, available)
 }
 
 #[cfg(test)]
@@ -272,10 +270,10 @@ mod tests {
     }
 
     #[test]
-    fn user_bubble_width_is_content_sized_and_responsive() {
-        assert_eq!(user_message_width("Hi", 900.0), 96.0);
-        assert_eq!(user_message_width(&"x".repeat(200), 900.0), 560.0);
-        assert!((user_message_width(&"x".repeat(200), 300.0) - 216.0).abs() < 0.01);
+    fn user_message_width_is_content_sized_and_responsive() {
+        assert_eq!(user_message_width("Hi", 900.0), 120.0);
+        assert_eq!(user_message_width(&"x".repeat(200), 900.0), 720.0);
+        assert!((user_message_width(&"x".repeat(200), 300.0) - 240.0).abs() < 0.01);
         assert!(user_message_width("a moderately sized request", 900.0) < 560.0);
     }
 }

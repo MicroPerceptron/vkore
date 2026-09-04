@@ -78,6 +78,8 @@ pub const SIZE_MONO: f32 = 12.0;
 pub const SIZE_SM: f32 = 14.0;
 /// Body.
 pub const SIZE_MD: f32 = 16.0;
+/// Large conversational prose.
+pub const SIZE_LG: f32 = 18.0;
 /// Display, used for dialog titles and section heads.
 pub const SIZE_DISPLAY: f32 = 22.0;
 

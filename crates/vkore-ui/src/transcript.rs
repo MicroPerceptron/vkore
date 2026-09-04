@@ -115,6 +115,15 @@ fn is_list_item(line: &str) -> bool {
         })
 }
 
+fn heading_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let level = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    ((1..=6).contains(&level) && trimmed.as_bytes().get(level) == Some(&b' ')).then_some(level)
+}
+
 /// Split a response into typographic blocks. Fenced code is the only block
 /// that receives a card in the transcript view.
 pub(crate) fn assistant_blocks(source: &str) -> Vec<AssistantBlock> {
@@ -144,16 +153,13 @@ pub(crate) fn assistant_blocks(source: &str) -> Vec<AssistantBlock> {
             continue;
         }
         let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count();
-            if (1..=6).contains(&level) && trimmed.as_bytes().get(level) == Some(&b' ') {
-                blocks.push(AssistantBlock::Heading {
-                    level,
-                    text: trimmed[level..].trim_start().to_owned(),
-                });
-                index += 1;
-                continue;
-            }
+        if let Some(level) = heading_level(line) {
+            blocks.push(AssistantBlock::Heading {
+                level,
+                text: trimmed[level..].trim_start().to_owned(),
+            });
+            index += 1;
+            continue;
         }
         if is_list_item(line) {
             let start = index;
@@ -192,7 +198,7 @@ pub(crate) fn assistant_blocks(source: &str) -> Vec<AssistantBlock> {
             let trimmed = next.trim_start();
             if next.trim().is_empty()
                 || trimmed.starts_with("```")
-                || trimmed.starts_with('#')
+                || heading_level(next).is_some()
                 || trimmed.starts_with("> ")
                 || is_list_item(next)
             {
@@ -247,6 +253,16 @@ mod tests {
                     text: "fn main() {}".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn hash_prefixed_text_without_heading_syntax_stays_in_its_paragraph() {
+        assert_eq!(
+            assistant_blocks("First line\n#not-a-heading\nstill the same paragraph"),
+            vec![AssistantBlock::Paragraph(
+                "First line\n#not-a-heading\nstill the same paragraph".into()
+            )]
         );
     }
 

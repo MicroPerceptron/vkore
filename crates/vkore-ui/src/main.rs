@@ -1041,6 +1041,7 @@ struct Model {
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
+    assistant_blocks: BTreeMap<String, Vec<AssistantBlock>>,
     expanded_work: BTreeSet<String>,
     expanded_outputs: BTreeSet<String>,
     view: View,
@@ -1083,6 +1084,7 @@ impl Model {
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
+            assistant_blocks: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
             view: View::Session,
@@ -1214,6 +1216,7 @@ impl Model {
                     self.expanded_work.clear();
                     self.expanded_outputs.clear();
                     self.selectable_text.clear();
+                    self.assistant_blocks.clear();
                     self.status = "Opening a fresh isolated Kore sandbox…".into();
                     self.update(Message::ToggleSession);
                 }
@@ -1676,6 +1679,7 @@ impl Model {
                     .or_else(|| value["id"].as_str().map(str::to_owned));
                 self.events.clear();
                 self.selectable_text.clear();
+                self.assistant_blocks.clear();
                 self.expanded_work.clear();
                 self.expanded_outputs.clear();
                 self.prompt_id = None;
@@ -1690,6 +1694,7 @@ impl Model {
                 self.expanded_work.clear();
                 self.expanded_outputs.clear();
                 self.selectable_text.clear();
+                self.assistant_blocks.clear();
                 self.status = "Routes retired and session KV erased.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
@@ -1793,6 +1798,7 @@ impl Model {
 
     fn sync_selectable_text(&mut self) {
         let mut desired = BTreeMap::new();
+        let mut assistant_blocks_by_prompt = BTreeMap::new();
         for user in self
             .events
             .iter()
@@ -1828,12 +1834,14 @@ impl Model {
                 event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
             }) {
                 let response = assistant["payload"]["text"].as_str().unwrap_or_default();
-                for (index, block) in assistant_blocks(response).into_iter().enumerate() {
+                let blocks = assistant_blocks(response);
+                for (index, block) in blocks.iter().enumerate() {
                     desired.insert(
                         format!("prompt:{prompt_id}:assistant:{index}"),
                         block.text().to_owned(),
                     );
                 }
+                assistant_blocks_by_prompt.insert(prompt_id.to_owned(), blocks);
             }
         }
 
@@ -1863,6 +1871,7 @@ impl Model {
                     .insert(key, text_editor::Content::with_text(&value));
             }
         }
+        self.assistant_blocks = assistant_blocks_by_prompt;
     }
 
     /// Read-only conversation text the reader can select and copy.
@@ -2508,24 +2517,23 @@ impl Model {
                 }
                 turn = turn.push(timeline);
 
-                if let Some(assistant) = prompt_events.iter().find(|event| {
+                if prompt_events.iter().any(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
-                }) {
-                    let response = assistant["payload"]["text"].as_str().unwrap_or_default();
+                }) && let Some(blocks) = self.assistant_blocks.get(prompt_id)
+                {
                     let mut response_blocks = column![].spacing(theme::SPACE_4);
-                    for (index, block) in assistant_blocks(response).into_iter().enumerate() {
+                    for (index, block) in blocks.iter().enumerate() {
                         let key = format!("prompt:{prompt_id}:assistant:{index}");
                         let element: UiElement<'_> = match block {
-                            AssistantBlock::Heading { level, .. } => self.selectable(
+                            AssistantBlock::Heading { level, .. } => self.selectable_markdown(
                                 &key,
-                                if level <= 2 {
+                                if *level <= 2 {
                                     theme::SIZE_DISPLAY
                                 } else {
                                     theme::SIZE_MD
                                 },
                                 theme::TEXT,
                                 fonts::BODY,
-                                1.7,
                             ),
                             AssistantBlock::Paragraph(_) => self.selectable_markdown(
                                 &key,
@@ -2546,12 +2554,11 @@ impl Model {
                                 left: 12.0,
                             })
                             .into(),
-                            AssistantBlock::Quote(_) => container(self.selectable(
+                            AssistantBlock::Quote(_) => container(self.selectable_markdown(
                                 &key,
                                 theme::SIZE_MD,
                                 theme::TEXT_SECONDARY,
                                 fonts::BODY,
-                                1.7,
                             ))
                             .padding(iced_core::Padding {
                                 top: 4.0,
@@ -2567,7 +2574,7 @@ impl Model {
                                         if language.is_empty() {
                                             "Code"
                                         } else {
-                                            &language
+                                        language
                                         },
                                         theme::TEXT_MUTED
                                     ),
@@ -4799,6 +4806,8 @@ mod tests {
             json!({"kind":"assistant","prompt_id":"p","public":true,"payload":{"text":"Answer.\n\n```rs\nlet x = 1;\n```"}}),
         ];
         model.events_changed();
+
+        assert_eq!(model.assistant_blocks["p"].len(), 2);
 
         for key in ["prompt:p:assistant:0", "prompt:p:assistant:1"] {
             let original = model.selectable_text[key].text();

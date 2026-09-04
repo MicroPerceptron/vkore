@@ -789,7 +789,7 @@ impl GuestBridge for DeterministicGuest {
         prompt: &PromptRequest,
         decision: &BrokerDecision,
     ) -> Result<GuestAgent, String> {
-        if decision.action != BrokerActionKind::CreateAgent || decision.selectors.is_empty() {
+        if decision.action != BrokerActionKind::CreateAgent {
             return Err("resident broker refused non-create deterministic plan".into());
         }
         let offered: BTreeSet<_> = self
@@ -804,7 +804,8 @@ impl GuestBridge for DeterministicGuest {
         {
             return Err("proposal selected a non-offered resource".into());
         }
-        if !decision.selectors.contains(&OFFER_CAT) {
+        let cat_selected = decision.selectors.contains(&OFFER_CAT);
+        if decision.budget.tool_calls != 0 && !cat_selected {
             return Err("proposal omitted the executable scope".into());
         }
         let mut paths = BTreeSet::new();
@@ -821,11 +822,9 @@ impl GuestBridge for DeterministicGuest {
             b"vkore.guest.agent",
             &[session.session_id.as_bytes(), prompt.prompt_id.as_bytes()],
         );
-        let agent = GuestAgent {
-            id,
-            generation: session.generation,
-            tool_calls: u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX),
-            tools: vec![GuestTool {
+        let tool_calls = u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX);
+        let tools = if cat_selected && tool_calls != 0 {
+            vec![GuestTool {
                 name: "cat".into(),
                 usage: "cat /absolute/path".into(),
                 summary: "Read one object from the installed filesystem view.".into(),
@@ -837,15 +836,24 @@ impl GuestBridge for DeterministicGuest {
                 },
                 effects: TOOL_EFFECT_OBSERVE,
                 result_sensitivity: TOOL_RESULT_WORKSPACE,
-                remaining_uses: u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX),
-            }],
+                remaining_uses: tool_calls,
+            }]
+        } else {
+            Vec::new()
+        };
+        let installed_tools = tools.iter().map(|tool| tool.name.clone()).collect();
+        let agent = GuestAgent {
+            id,
+            generation: session.generation,
+            tool_calls,
+            tools,
         };
         self.agents.insert(
             id,
             DeterministicAgent {
                 generation: agent.generation,
                 paths,
-                tools: ["cat".into()].into_iter().collect(),
+                tools: installed_tools,
             },
         );
         Ok(agent)
@@ -1110,7 +1118,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 PromptStatus::Failed
             };
         }
-        let (sequence, agent, incarnation, turn) = {
+        let (sequence, mut agent, incarnation, turn) = {
             let runtime = &self.sessions[&session.session_id];
             (
                 runtime.agent_sequence,
@@ -1210,6 +1218,14 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             }
             match event.kind {
                 AgentEventKind::ToolCall => {
+                    if !consume_tool(&mut agent, event.command) {
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"error":"agent exceeded an installed tool-use limit"}),
+                        );
+                        return PromptStatus::Failed;
+                    }
                     let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                     emit(
                         EventKind::ToolCall,
@@ -1234,7 +1250,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                         emit,
                         cancelled,
                         sequence,
-                        &agent,
+                        &mut agent,
                         event.turn + 1,
                         event.call_id,
                         kind,
@@ -1298,14 +1314,15 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
     emit: &mut dyn FnMut(EventKind, bool, Value),
     cancelled: &dyn Fn() -> bool,
     sequence: SequenceIdentity,
-    agent: &GuestAgent,
+    agent: &mut GuestAgent,
     mut turn: u64,
     mut call_id: u64,
     mut result_kind: ToolResultKind,
     mut owned_text: String,
     last_tool_result: &mut Option<String>,
 ) -> PromptStatus {
-    for _ in 0..agent.tool_calls.saturating_add(1) {
+    let mut remaining_tool_calls = agent.tool_calls.saturating_sub(1);
+    for _ in 0..agent.tool_calls {
         let mut tools = [0_u8; AGENT_TEXT_MAX];
         let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
             return PromptStatus::Failed;
@@ -1363,6 +1380,15 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         );
         match event.kind {
             AgentEventKind::ToolCall => {
+                if remaining_tool_calls == 0 || !consume_tool(agent, event.command) {
+                    emit(
+                        EventKind::Error,
+                        true,
+                        json!({"error":"agent exceeded an installed tool-use limit"}),
+                    );
+                    return PromptStatus::Failed;
+                }
+                remaining_tool_calls -= 1;
                 let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                 emit(
                     EventKind::ToolCall,
@@ -1411,6 +1437,17 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         json!({"error":"tool loop limit reached"}),
     );
     PromptStatus::Failed
+}
+
+fn consume_tool(agent: &mut GuestAgent, command: &str) -> bool {
+    let Some(tool) = agent.tools.iter_mut().find(|tool| tool.name == command) else {
+        return false;
+    };
+    if tool.remaining_uses == 0 {
+        return false;
+    }
+    tool.remaining_uses -= 1;
+    true
 }
 
 fn owned_argument(argument: ToolArgument<'_>) -> OwnedArgument {

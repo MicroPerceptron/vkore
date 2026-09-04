@@ -315,7 +315,7 @@ fn conversational_prompt_creates_a_tool_inert_agent_that_responds_directly() {
     );
     let reply = decode_broker_reply(&payload).unwrap();
     assert_eq!(reply.action, BrokerActionKind::CreateAgent);
-    assert_eq!(reply.selectors().collect::<Vec<_>>(), vec![HELLO]);
+    assert!(reply.selectors().next().is_none());
     assert_eq!(reply.budget.cpu_share, 1);
     assert_eq!(reply.budget.memory_bytes, 64 * 1024 * 1024);
     assert_eq!(reply.budget.tool_calls, 0);

@@ -594,7 +594,6 @@ fn select_tools(
 enum BrokerPending {
     CreateConversation {
         plan: [u8; 16],
-        executable: [u8; 16],
         budget: TaskBudget,
     },
     Create {
@@ -723,26 +722,19 @@ impl DeterministicBackend {
         if let Some(broker) = broker {
             let mut wire = [0; kore_hostlink::INFERENCE_PART_MAX];
             let len = match broker {
-                BrokerPending::CreateConversation {
+                BrokerPending::CreateConversation { plan, budget } => BrokerPlanningReply {
                     plan,
-                    executable,
+                    action: BrokerActionKind::CreateAgent,
+                    target: [0; 16],
+                    subject: [0; 16],
                     budget,
-                } => {
-                    let selectors = [executable];
-                    BrokerPlanningReply {
-                        plan,
-                        action: BrokerActionKind::CreateAgent,
-                        target: [0; 16],
-                        subject: [0; 16],
-                        budget,
-                        rights: 0,
-                        limit: 0,
-                        reason: 0,
-                        label: "agent/prompt",
-                        selectors: &selectors,
-                    }
-                    .encode(&mut wire)
+                    rights: 0,
+                    limit: 0,
+                    reason: 0,
+                    label: "agent/prompt",
+                    selectors: &[],
                 }
+                .encode(&mut wire),
                 BrokerPending::Create {
                     plan,
                     object,
@@ -1065,7 +1057,6 @@ impl InferenceBackend for DeterministicBackend {
             let mut fallback_object = None;
             let mut workspace_view = None;
             let mut executable = None;
-            let mut hello_executable = None;
             let mut useful_executables = [None; 12];
             let mut view = None;
             let mut agent = None;
@@ -1111,11 +1102,6 @@ impl InferenceBackend for DeterministicBackend {
                         if offer.permitted_ops != 0 && offer.max_uses != 0 =>
                     {
                         if executable.replace(offer.reference).is_some() {
-                            return Err(BackendError::InvalidEncoding);
-                        }
-                    }
-                    ("hello", BrokerOfferKind::Executable, "hello") => {
-                        if hello_executable.replace(offer.reference).is_some() {
                             return Err(BackendError::InvalidEncoding);
                         }
                     }
@@ -1165,7 +1151,6 @@ impl InferenceBackend for DeterministicBackend {
             Some(match planning.intent {
                 "hello" => BrokerPending::CreateConversation {
                     plan: planning.plan,
-                    executable: hello_executable.ok_or(BackendError::InvalidEncoding)?,
                     budget: TaskBudget {
                         tool_calls: 0,
                         ..planning.ceiling

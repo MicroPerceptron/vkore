@@ -1999,6 +1999,9 @@ fn agent_arguments_match(
     let Some(tool) = tools.find(command) else {
         return false;
     };
+    if tools.remaining_uses[tool] == 0 {
+        return false;
+    }
     let input = tools.inputs[tool];
     arguments.len() >= usize::from(input.minimum)
         && arguments.len() <= usize::from(input.maximum)
@@ -2390,11 +2393,15 @@ fn agent_json_schema(request: AgentLlamaRequest) -> Value {
         actions.push(broker_action_schema("completed", &[], vec![]));
     }
     for index in (0..usize::from(tools.count)).rev() {
+        if tools.remaining_uses[index] == 0 {
+            continue;
+        }
         let input = tools.inputs[index];
-        let accepted_kinds = input.kinds[..usize::from(input.maximum)]
+        let positional_items = input.kinds[..usize::from(input.maximum)]
             .iter()
             .copied()
-            .fold(0, |all, kinds| all | kinds);
+            .map(agent_argument_schema)
+            .collect::<Vec<_>>();
         actions.insert(
             1,
             broker_action_schema(
@@ -2408,7 +2415,7 @@ fn agent_json_schema(request: AgentLlamaRequest) -> Value {
                             "type": "array",
                             "minItems": input.minimum,
                             "maxItems": input.maximum,
-                            "items": agent_argument_schema(accepted_kinds),
+                            "prefixItems": positional_items,
                         }),
                     ),
                 ],
@@ -3289,6 +3296,82 @@ mod tests {
                 AgentLlamaRequest::UserText { tools },
             ),
             Err("agent action is unsupported or carries fields forbidden for that action")
+        );
+    }
+
+    #[test]
+    fn agent_schema_is_positional_and_omits_exhausted_tools() {
+        let tools = AgentTool::from_descriptors(
+            [
+                AgentToolDescriptor {
+                    name: "combine-q5",
+                    usage: "combine-q5 <number> <enabled>",
+                    summary: "Combine two typed values.",
+                    input: ToolInputSchema {
+                        minimum: 2,
+                        maximum: 2,
+                        kinds: [
+                            ToolArgumentKind::U64.mask(),
+                            ToolArgumentKind::Bool.mask(),
+                            0,
+                            0,
+                        ],
+                        whitespace: 0,
+                    },
+                    effects: TOOL_EFFECT_OBSERVE,
+                    result_sensitivity: TOOL_RESULT_PUBLIC,
+                    remaining_uses: 1,
+                },
+                AgentToolDescriptor {
+                    name: "spent-r2",
+                    usage: "spent-r2 /absolute/path",
+                    summary: "An exhausted tool must not remain callable.",
+                    input: ToolInputSchema {
+                        minimum: 1,
+                        maximum: 1,
+                        kinds: [ToolArgumentKind::Path.mask(), 0, 0, 0],
+                        whitespace: 0,
+                    },
+                    effects: TOOL_EFFECT_OBSERVE,
+                    result_sensitivity: TOOL_RESULT_PUBLIC,
+                    remaining_uses: 0,
+                },
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        let schema = agent_json_schema(AgentLlamaRequest::UserText { tools });
+        let actions = schema["oneOf"].as_array().unwrap();
+        let combine = actions
+            .iter()
+            .find(|action| action["properties"]["command"]["const"] == "combine-q5")
+            .unwrap();
+        let arguments = &combine["properties"]["arguments"];
+        assert_eq!(
+            arguments["prefixItems"][0]["properties"]["kind"]["const"],
+            "u64"
+        );
+        assert_eq!(
+            arguments["prefixItems"][1]["properties"]["kind"]["const"],
+            "bool"
+        );
+        assert!(arguments.get("items").is_none());
+        assert!(
+            actions
+                .iter()
+                .all(|action| action["properties"]["command"]["const"] != "spent-r2")
+        );
+
+        let mut state = LlamaSequence::new(BackendLimits::default());
+        assert!(
+            encode_agent_decision(
+                r#"{"action":"tool_call","command":"spent-r2","arguments":[{"kind":"path","value":"/notes"}]}"#,
+                1,
+                0,
+                &mut state,
+                AgentLlamaRequest::UserText { tools },
+            )
+            .is_err()
         );
     }
 

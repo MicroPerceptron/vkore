@@ -2574,7 +2574,7 @@ impl Model {
                                         if language.is_empty() {
                                             "Code"
                                         } else {
-                                        language
+                                            language
                                         },
                                         theme::TEXT_MUTED
                                     ),

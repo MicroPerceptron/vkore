@@ -17,14 +17,12 @@ use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Background, Border, Color, Element, Length, Size, Theme, alignment, border, keyboard, mouse,
+    Background, Border, Element, Length, Size, Theme, alignment, border, keyboard, mouse,
     renderer::{self, Scale},
     shell,
 };
 use iced_runtime::user_interface::{self, UserInterface};
-use iced_widget::{
-    button, column, container, row, scrollable, space, stack, text, text_editor, text_input,
-};
+use iced_widget::{button, column, container, row, scrollable, space, stack, text, text_editor};
 use iced_winit::{conversion, winit};
 use serde_json::{Value, json};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -66,14 +64,12 @@ fn native_renderer() -> AxRenderer<System> {
 enum Message {
     SelectProject(usize),
     NewProject,
-    EditProject,
+    OpenSettings,
+    CloseSettings,
     ChooseDefaultModel(String),
     ChooseBodyFont(String),
     ToggleShowWorking,
     ToggleWorkingExpanded,
-    ProjectNameChanged(String),
-    UseDefaultModelForProject,
-    SaveProject,
     ToggleSession,
     #[allow(dead_code)]
     CleanSession,
@@ -106,8 +102,6 @@ enum View {
     Agents,
     /// The workspace permission graph and its inspector.
     Filesystem,
-    /// Application defaults, appearance, interface preferences, and activity.
-    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +114,6 @@ enum RequestKind {
     SaveSettings,
     Activity,
     CreateProject,
-    SaveProject,
     StartSession,
     StopSession,
     SendPrompt,
@@ -131,14 +124,6 @@ enum RequestKind {
     ArchiveProject,
     DuplicateProject,
     PickWorkspace,
-}
-
-fn rgb(hex: u32) -> Color {
-    Color::from_rgb8(
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -890,52 +875,44 @@ fn divider_left(background: u32) -> iced_widget::container::Style {
         .border_sides(border::Sides::default().left(border::side(theme::rgb(theme::BORDER), 1.0)))
 }
 
-fn input_style(
-    _theme: &Theme,
-    status: iced_widget::text_input::Status,
-) -> iced_widget::text_input::Style {
-    let focused = matches!(status, iced_widget::text_input::Status::Focused { .. });
-    let disabled = status == iced_widget::text_input::Status::Disabled;
-    let dim = |mut color: Color| {
-        if disabled {
-            color.a *= 0.4;
-        }
-        color
-    };
-    iced_widget::text_input::Style {
-        background: Background::Color(theme::rgb(theme::BACKGROUND)),
-        border: Border {
-            color: dim(rgb(if focused { 0x596573 } else { 0x343b45 })),
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        placeholder: dim(theme::rgb(theme::BORDER_DIM)),
-        value: dim(theme::rgb(theme::TEXT)),
-        selection: theme::rgb(theme::MAGENTA),
-    }
+fn settings_section<'a>(title: &'static str, body: UiElement<'a>) -> UiElement<'a> {
+    column![widgets::display(title), body]
+        .spacing(theme::SPACE_2)
+        .width(Length::Fill)
+        .into()
 }
 
-fn settings_section<'a>(
-    title: &'static str,
-    description: &'static str,
-    body: UiElement<'a>,
+fn settings_row<'a>(
+    title: impl Into<String>,
+    description: impl Into<String>,
+    control: UiElement<'a>,
 ) -> UiElement<'a> {
-    container(
-        column![
-            widgets::display(title),
-            widgets::body(description, theme::SIZE_SM, theme::TEXT_MUTED),
-            container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
-                theme::BORDER,
-                None,
-                0.0
-            )),
-            body,
+    column![
+        row![
+            column![
+                widgets::body(title, theme::SIZE_SM, theme::TEXT),
+                widgets::body(description, theme::SIZE_SM, theme::TEXT_MUTED),
+            ]
+            .spacing(theme::SPACE_1)
+            .width(Length::Fill),
+            control,
         ]
-        .spacing(theme::SPACE_4),
-    )
-    .padding(theme::SPACE_6)
+        .spacing(theme::SPACE_6)
+        .align_y(alignment::Vertical::Center),
+        container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
+            theme::BORDER,
+            None,
+            0.0
+        )),
+    ]
+    .spacing(theme::SPACE_4)
+    .padding(iced_core::Padding {
+        top: theme::SPACE_4,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    })
     .width(Length::Fill)
-    .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG))
     .into()
 }
 
@@ -959,6 +936,16 @@ fn opens_settings(event: &iced_core::Event) -> bool {
             modifiers,
             ..
         }) if modifiers.control() && key == ","
+    )
+}
+
+fn closes_settings(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        })
     )
 }
 
@@ -1101,6 +1088,7 @@ struct Model {
     expanded_work: BTreeSet<String>,
     expanded_outputs: BTreeSet<String>,
     view: View,
+    settings_open: bool,
     topology: view::State,
     /// When the process started, so the splash knows how far along it is.
     booted_at: Option<Instant>,
@@ -1163,6 +1151,7 @@ impl Model {
             expanded_work: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
             view: View::Session,
+            settings_open: false,
             topology: view::State::default(),
             booted_at: Some(Instant::now()),
             topology_graph: model::Graph::default(),
@@ -1310,10 +1299,18 @@ impl Model {
                     body: Some(json!({"kind":"directory"})),
                 });
             }
-            Message::EditProject => {
-                if self.project().is_some() {
-                    self.view = View::Settings;
-                }
+            Message::OpenSettings => {
+                self.settings_open = true;
+                self.activity = None;
+                self.network.request(Request {
+                    kind: RequestKind::Activity,
+                    method: "GET",
+                    path: "/api/v1/activity".into(),
+                    body: None,
+                });
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
             }
             Message::ChooseDefaultModel(id) => {
                 self.save_settings(json!({"default_model_id": id}));
@@ -1330,35 +1327,6 @@ impl Model {
                     .as_bool()
                     .unwrap_or(false);
                 self.save_settings(json!({"working_expanded_default": expanded}));
-            }
-            Message::ProjectNameChanged(name) => {
-                if let Some(index) = self.selected
-                    && let Some(project) = self.projects.get_mut(index)
-                {
-                    project["name"] = Value::String(name);
-                }
-            }
-            Message::UseDefaultModelForProject => {
-                if let (Some(index), Some(inference)) = (
-                    self.selected,
-                    self.settings.get("default_inference").cloned(),
-                ) && let Some(project) = self.projects.get_mut(index)
-                {
-                    project["inference"] = inference;
-                }
-            }
-            Message::SaveProject => {
-                if self.session.is_none()
-                    && let Some(project) = self.project().cloned()
-                {
-                    self.busy = true;
-                    self.network.request(Request {
-                        kind: RequestKind::SaveProject,
-                        method: "POST",
-                        path: "/api/v1/projects".into(),
-                        body: Some(project),
-                    });
-                }
             }
             Message::ToggleSession => {
                 if let Some(session) = self.session.clone() {
@@ -1477,15 +1445,6 @@ impl Model {
                     self.topology.fitted = false;
                 }
                 self.view = value;
-                if value == View::Settings {
-                    self.activity = None;
-                    self.network.request(Request {
-                        kind: RequestKind::Activity,
-                        method: "GET",
-                        path: "/api/v1/activity".into(),
-                        body: None,
-                    });
-                }
             }
             Message::TopologySelectPath(index) => {
                 self.topology.selected = None;
@@ -1657,22 +1616,6 @@ impl Model {
                 }
             }
             (RequestKind::Approvals, Ok(value)) => self.approvals = value,
-            (RequestKind::SaveProject, Ok(value)) => {
-                self.busy = false;
-                let id = value["id"].as_str().unwrap_or_default();
-                if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
-                    self.projects[index] = value;
-                    self.selected = Some(index);
-                } else {
-                    self.projects.push(value);
-                    self.selected = Some(self.projects.len() - 1);
-                }
-                self.status = "Project settings saved.".into();
-                if self.session.is_some() {
-                    self.restart_after_stop = true;
-                    self.update(Message::ToggleSession);
-                }
-            }
             (RequestKind::CreateProject, Ok(value)) => {
                 self.busy = false;
                 let project = value["project"].clone();
@@ -2013,6 +1956,11 @@ impl Model {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
+        } else if self.settings_open {
+            stack![base, self.modal_layer(self.settings_panel())]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
         } else {
             base
         }
@@ -2107,7 +2055,6 @@ impl Model {
             );
         }
         let project_idle = self.project().is_some() && self.session.is_none();
-        let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
             button(widgets::nav(label))
                 .height(34)
@@ -2158,10 +2105,6 @@ impl Model {
             container(
                 column![
                     nav(
-                        "Project settings",
-                        project_editable.then_some(Message::EditProject)
-                    ),
-                    nav(
                         "Duplicate project",
                         project_idle.then_some(Message::DuplicateProject)
                     ),
@@ -2174,7 +2117,7 @@ impl Model {
                         project_idle.then_some(Message::ArchiveProject)
                     ),
                     nav("Transcript & audit", Some(Message::View(View::Session))),
-                    nav("Settings  Ctrl+,", Some(Message::View(View::Settings))),
+                    nav("Settings  Ctrl+,", Some(Message::OpenSettings)),
                 ]
                 .spacing(3)
             )
@@ -2193,33 +2136,25 @@ impl Model {
     }
 
     fn main_panel(&self, viewport: Size) -> UiElement<'_> {
-        let settings_view = self.view == View::Settings;
-        let project_name = if settings_view {
-            "Settings"
-        } else {
-            self.project()
-                .and_then(|p| p["name"].as_str())
-                .unwrap_or("No project open")
-        };
+        let project_name = self
+            .project()
+            .and_then(|p| p["name"].as_str())
+            .unwrap_or("No project open");
         // The subtitle carries what status chips used to: backend, workspace
         // root, and either the live session id or that the sandbox is stopped.
-        let subtitle = if settings_view {
-            "application defaults · appearance · interface · activity".to_owned()
-        } else {
-            match self.project() {
-                None => "create a project to begin".to_owned(),
-                Some(project) => {
-                    let backend = project["inference"]["backend"]
-                        .as_str()
-                        .unwrap_or("deterministic")
-                        .replace('_', " ");
-                    let root = project["workspace"]["root"]
-                        .as_str()
-                        .unwrap_or("no workspace");
-                    match self.session.as_deref() {
-                        Some(session) => format!("{backend} · {root} · {session}"),
-                        None => format!("{backend} · {root} · sandbox stopped"),
-                    }
+        let subtitle = match self.project() {
+            None => "create a project to begin".to_owned(),
+            Some(project) => {
+                let backend = project["inference"]["backend"]
+                    .as_str()
+                    .unwrap_or("deterministic")
+                    .replace('_', " ");
+                let root = project["workspace"]["root"]
+                    .as_str()
+                    .unwrap_or("no workspace");
+                match self.session.as_deref() {
+                    Some(session) => format!("{backend} · {root} · {session}"),
+                    None => format!("{backend} · {root} · sandbox stopped"),
                 }
             }
         };
@@ -2247,29 +2182,31 @@ impl Model {
         ]
         .spacing(6)
         .align_y(alignment::Vertical::Center);
-        if !settings_view {
-            top_content = top_content.push(view_button("Session", View::Session));
-            if self.viewport.width > 720.0 {
-                top_content = top_content
-                    .push(view_button("Agents", View::Agents))
-                    .push(view_button("Filesystem", View::Filesystem));
-            } else {
-                if self.project().is_none() {
-                    top_content = top_content.push(
-                        button(widgets::control_upper("New project"))
-                            .height(30)
-                            .padding([0, 12])
-                            .style(widgets::button_style(widgets::Button::Secondary))
-                            .on_press_maybe(
-                                new_project_selectable(self.session.as_deref(), self.busy)
-                                    .then_some(Message::NewProject),
-                            ),
-                    );
-                }
-                top_content = top_content.push(view_button("Settings", View::Settings));
+        top_content = top_content.push(view_button("Session", View::Session));
+        if self.viewport.width > 720.0 {
+            top_content = top_content
+                .push(view_button("Agents", View::Agents))
+                .push(view_button("Filesystem", View::Filesystem));
+        } else {
+            if self.project().is_none() {
+                top_content = top_content.push(
+                    button(widgets::control_upper("New project"))
+                        .height(30)
+                        .padding([0, 12])
+                        .style(widgets::button_style(widgets::Button::Secondary))
+                        .on_press_maybe(
+                            new_project_selectable(self.session.as_deref(), self.busy)
+                                .then_some(Message::NewProject),
+                        ),
+                );
             }
-        } else if self.viewport.width <= 720.0 {
-            top_content = top_content.push(view_button("Session", View::Session));
+            top_content = top_content.push(
+                button(widgets::control_upper("Settings"))
+                    .height(30)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Choice(false)))
+                    .on_press(Message::OpenSettings),
+            );
         }
         let top = container(top_content)
             .padding([0, 22])
@@ -2291,14 +2228,6 @@ impl Model {
             .width(Length::Fill)
             .align_y(alignment::Vertical::Center)
             .style(|_| divider_bottom(theme::BACKGROUND));
-
-        if settings_view {
-            return container(column![top, status_bar, self.settings_panel()])
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
-                .into();
-        }
 
         if self.view != View::Session {
             let graph = &self.topology_graph;
@@ -2916,7 +2845,7 @@ impl Model {
         let selected_model = self.settings["default_model_id"]
             .as_str()
             .unwrap_or("deterministic");
-        let mut model_choices = column![].spacing(theme::SPACE_2);
+        let mut model_choices = column![];
         if let Some(models) = self.settings["models"].as_array() {
             for model in models {
                 let id = model["id"].as_str().unwrap_or_default().to_owned();
@@ -2933,53 +2862,26 @@ impl Model {
                     .unwrap_or("Restore the model files or choose another installed model.");
                 let selected = id == selected_model;
                 let selectable = model_option_selectable(status, selected, self.busy);
-                let mut card = column![
-                    row![
-                        widgets::body(name, theme::SIZE_SM, theme::TEXT),
-                        space::horizontal(),
-                        widgets::label(
-                            if selected {
-                                "Default"
-                            } else if status == "installed" {
-                                "Available"
-                            } else {
-                                "Unavailable"
-                            },
-                            if status == "installed" {
-                                theme::SUCCESS
-                            } else {
-                                theme::ERROR
-                            },
-                        ),
-                    ]
-                    .align_y(alignment::Vertical::Center),
-                    widgets::mono(
-                        format!("{provider} · {backend} · {path}"),
-                        theme::TEXT_MUTED,
-                    ),
-                ]
-                .spacing(theme::SPACE_1);
-                if status != "installed" {
-                    card = card.push(widgets::body(
-                        detail.to_owned(),
-                        theme::SIZE_SM,
-                        theme::ERROR,
-                    ));
-                }
-                model_choices = model_choices.push(
-                    button(card)
-                        .padding([10, 12])
-                        .width(Length::Fill)
-                        .style(widgets::button_style(widgets::Button::Choice(selected)))
-                        .on_press_maybe(selectable.then_some(Message::ChooseDefaultModel(id))),
-                );
+                let description = if status == "installed" {
+                    format!("{provider} · {backend} · {path}")
+                } else {
+                    format!("{provider} · {backend} · {detail}")
+                };
+                let action = button(widgets::control(if selected {
+                    "Default"
+                } else if status == "installed" {
+                    "Use model"
+                } else {
+                    "Unavailable"
+                }))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Choice(selected)))
+                .on_press_maybe(selectable.then_some(Message::ChooseDefaultModel(id)));
+                model_choices = model_choices.push(settings_row(name, description, action.into()));
             }
         }
-        let general = settings_section(
-            "General / inference",
-            "The default model applies to new projects. Existing projects keep their override.",
-            model_choices.into(),
-        );
+        let general = settings_section("General", model_choices.into());
 
         let selected_font = self.settings["body_font"]
             .as_str()
@@ -3003,117 +2905,73 @@ impl Model {
         }
         let appearance = settings_section(
             "Appearance",
-            "Choose a registered application body face. Machine-shaped activity stays monospace.",
-            column![
-                font_choices,
-                container(
-                    column![
-                        widgets::label("Live preview", theme::TEXT_MUTED),
-                        widgets::body(
-                            "A clear project summary with readable body text.",
-                            theme::SIZE_MD,
-                            theme::TEXT,
-                        ),
-                        widgets::mono(
-                            "agent/prompt · workspace/src/main.rs · completed",
-                            theme::TEXT_SECONDARY,
-                        ),
-                    ]
-                    .spacing(theme::SPACE_2),
-                )
-                .padding(theme::SPACE_4)
-                .width(Length::Fill)
-                .style(|_| theme::panel(
-                    theme::BACKGROUND,
-                    Some(theme::BORDER),
-                    theme::RADIUS_MD,
-                )),
-            ]
-            .spacing(theme::SPACE_4)
-            .into(),
+            settings_row(
+                "Body font",
+                "Choose the application body face. Machine-shaped activity stays monospace.",
+                font_choices.into(),
+            ),
         );
 
         let show_working = self.settings["show_working"].as_bool().unwrap_or(true);
         let expanded = self.settings["working_expanded_default"]
             .as_bool()
             .unwrap_or(false);
+        let show_working_control = button(widgets::control(if show_working {
+            "Shown"
+        } else {
+            "Hidden"
+        }))
+        .height(theme::CONTROL_SM)
+        .padding([0, 12])
+        .style(widgets::button_style(widgets::Button::Choice(show_working)))
+        .on_press_maybe((!self.busy).then_some(Message::ToggleShowWorking));
+        let expanded_control = button(widgets::control(if expanded {
+            "Expanded"
+        } else {
+            "Collapsed"
+        }))
+        .height(theme::CONTROL_SM)
+        .padding([0, 12])
+        .style(widgets::button_style(widgets::Button::Choice(expanded)))
+        .on_press_maybe((show_working && !self.busy).then_some(Message::ToggleWorkingExpanded));
         let interface = settings_section(
             "Interface",
-            "Working is presentation-only. Hiding it never deletes transcript or audit data.",
             column![
-                button(
-                    row![
-                        widgets::body(
-                            "Show Working panel",
-                            theme::SIZE_SM,
-                            if show_working {
-                                theme::TEXT
-                            } else {
-                                theme::TEXT_SECONDARY
-                            },
-                        ),
-                        space::horizontal(),
-                        widgets::label(
-                            if show_working { "Shown" } else { "Hidden" },
-                            if show_working {
-                                theme::SUCCESS
-                            } else {
-                                theme::TEXT_MUTED
-                            },
-                        ),
-                    ]
-                    .align_y(alignment::Vertical::Center),
-                )
-                .padding([10, 12])
-                .width(Length::Fill)
-                .style(widgets::button_style(widgets::Button::Choice(show_working)))
-                .on_press_maybe((!self.busy).then_some(Message::ToggleShowWorking)),
-                button(
-                    row![
-                        widgets::body(
-                            "Expand Working by default",
-                            theme::SIZE_SM,
-                            theme::TEXT_SECONDARY,
-                        ),
-                        space::horizontal(),
-                        widgets::label(
-                            if expanded { "Expanded" } else { "Collapsed" },
-                            theme::TEXT_MUTED,
-                        ),
-                    ]
-                    .align_y(alignment::Vertical::Center),
-                )
-                .padding([10, 12])
-                .width(Length::Fill)
-                .style(widgets::button_style(widgets::Button::Choice(expanded)))
-                .on_press_maybe(
-                    (show_working && !self.busy).then_some(Message::ToggleWorkingExpanded),
+                settings_row(
+                    "Show Working panel",
+                    "Hiding Working changes presentation only; transcript and audit data remain intact.",
+                    show_working_control.into(),
+                ),
+                settings_row(
+                    "Expand Working by default",
+                    "Open the Working panel automatically when it is shown.",
+                    expanded_control.into(),
                 ),
             ]
-            .spacing(theme::SPACE_2)
             .into(),
         );
 
-        let mut activity_rows = column![].spacing(theme::SPACE_2);
+        let mut activity_rows = column![];
         match &self.activity {
             None => {
-                activity_rows = activity_rows.push(widgets::mono(
-                    "Loading recent local activity…",
-                    theme::TEXT_MUTED,
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
+                    "Loading bounded local activity summaries…",
+                    widgets::label("Loading", theme::TEXT_MUTED).into(),
                 ));
             }
             Some(Err(error)) => {
-                activity_rows = activity_rows.push(widgets::body(
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
                     format!("Activity unavailable: {error}"),
-                    theme::SIZE_SM,
-                    theme::ERROR,
+                    widgets::label("Unavailable", theme::ERROR).into(),
                 ));
             }
             Some(Ok(entries)) if entries.is_empty() => {
-                activity_rows = activity_rows.push(widgets::body(
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
                     "No local sessions have been recorded yet.",
-                    theme::SIZE_SM,
-                    theme::TEXT_MUTED,
+                    widgets::label("Empty", theme::TEXT_MUTED).into(),
                 ));
             }
             Some(Ok(entries)) => {
@@ -3129,166 +2987,66 @@ impl Model {
                         .as_u64()
                         .and_then(format_event_time)
                         .unwrap_or_else(|| "time unavailable".into());
-                    activity_rows = activity_rows.push(
-                        container(
-                            column![
-                                row![
-                                    widgets::body(
-                                        entry["project_name"]
-                                            .as_str()
-                                            .unwrap_or("Unknown project")
-                                            .to_owned(),
-                                        theme::SIZE_SM,
-                                        theme::TEXT,
-                                    ),
-                                    space::horizontal(),
-                                    widgets::label(status, color),
-                                ]
-                                .align_y(alignment::Vertical::Center),
-                                widgets::mono(
-                                    format!(
-                                        "{} · {} · {} prompt{}",
-                                        entry["model"].as_str().unwrap_or("Unavailable"),
-                                        time,
-                                        entry["prompts"].as_u64().unwrap_or_default(),
-                                        if entry["prompts"].as_u64() == Some(1) {
-                                            ""
-                                        } else {
-                                            "s"
-                                        },
-                                    ),
-                                    theme::TEXT_MUTED,
-                                ),
-                                widgets::mono(
-                                    format!(
-                                        "session {} · {} completed · {} cancelled · {} failed",
-                                        entry["session_id"].as_str().unwrap_or("unavailable"),
-                                        entry["completed"].as_u64().unwrap_or_default(),
-                                        entry["cancelled"].as_u64().unwrap_or_default(),
-                                        entry["failed"].as_u64().unwrap_or_default(),
-                                    ),
-                                    theme::TEXT_MUTED,
-                                ),
-                            ]
-                            .spacing(theme::SPACE_1),
-                        )
-                        .padding([10, 12])
-                        .width(Length::Fill)
-                        .style(|_| {
-                            theme::panel(theme::BACKGROUND, Some(theme::BORDER), theme::RADIUS_MD)
-                        }),
-                    );
+                    let prompts = entry["prompts"].as_u64().unwrap_or_default();
+                    activity_rows = activity_rows.push(settings_row(
+                        entry["project_name"]
+                            .as_str()
+                            .unwrap_or("Unknown project")
+                            .to_owned(),
+                        format!(
+                            "{} · {} · {} prompt{} · session {}",
+                            entry["model"].as_str().unwrap_or("Unavailable"),
+                            time,
+                            prompts,
+                            if prompts == 1 { "" } else { "s" },
+                            entry["session_id"].as_str().unwrap_or("unavailable"),
+                        ),
+                        widgets::label(status, color).into(),
+                    ));
                 }
             }
         }
-        let activity = settings_section(
-            "Activity",
-            "Bounded local summaries only—never prompts, raw model output, credentials, or capabilities.",
-            activity_rows.into(),
-        );
+        let activity = settings_section("Activity", activity_rows.into());
 
-        let project_settings = if let Some(project) = self.project() {
-            let name = project["name"].as_str().unwrap_or_default();
-            let uses_default = project["inference"] == self.settings["default_inference"];
-            settings_section(
-                "Current project",
-                "Project identity and model override. Workspace authority remains project-scoped.",
-                column![
-                    column![
-                        widgets::label("Project name", theme::TEXT_MUTED),
-                        text_input("Project name", name)
-                            .on_input_maybe(
-                                (self.session.is_none() && !self.busy)
-                                    .then_some(Message::ProjectNameChanged),
-                            )
-                            .padding([10, 10])
-                            .size(theme::SIZE_SM)
-                            .font(fonts::body())
-                            .style(input_style),
-                    ]
-                    .spacing(theme::SPACE_1),
-                    column![
-                        widgets::label("Workspace", theme::TEXT_MUTED),
-                        widgets::mono(
-                            project["workspace"]["root"]
-                                .as_str()
-                                .unwrap_or("Unavailable")
-                                .to_owned(),
-                            theme::TEXT_SECONDARY,
-                        ),
-                    ]
-                    .spacing(theme::SPACE_1),
-                    row![
-                        button(widgets::control(if uses_default {
-                            "Using application default"
-                        } else {
-                            "Use application default model"
-                        }))
-                        .height(theme::CONTROL_SM)
-                        .padding([0, 12])
-                        .style(widgets::button_style(widgets::Button::Secondary))
-                        .on_press_maybe(
-                            (!uses_default && self.session.is_none() && !self.busy)
-                                .then_some(Message::UseDefaultModelForProject),
-                        ),
-                        space::horizontal(),
-                        button(widgets::control("Save project settings"))
-                            .height(theme::CONTROL_SM)
-                            .padding([0, 12])
-                            .style(widgets::button_style(widgets::Button::Primary))
-                            .on_press_maybe(
-                                (self.session.is_none() && !self.busy && !name.trim().is_empty())
-                                    .then_some(Message::SaveProject),
-                            ),
-                    ]
-                    .spacing(theme::SPACE_2)
-                    .align_y(alignment::Vertical::Center),
-                    if self.session.is_some() {
-                        widgets::mono(
-                            "Stop the project before changing its persisted settings.",
-                            theme::WARNING,
-                        )
-                    } else {
-                        widgets::mono("Changes affect this project only.", theme::TEXT_MUTED)
-                    },
-                ]
-                .spacing(theme::SPACE_4)
-                .into(),
-            )
-        } else {
-            settings_section(
-                "Current project",
-                "Select a project to inspect or change its project-specific values.",
-                widgets::mono("No project selected.", theme::TEXT_MUTED).into(),
-            )
-        };
-
-        let content: UiElement<'_> = if self.viewport.width > 1_050.0 {
-            row![
-                column![general, interface].spacing(theme::SPACE_4),
-                column![appearance, project_settings, activity].spacing(theme::SPACE_4),
-            ]
-            .spacing(theme::SPACE_4)
-            .into()
-        } else {
-            column![general, appearance, interface, project_settings, activity]
-                .spacing(theme::SPACE_4)
-                .into()
-        };
-        container(
-            scrollable(
-                container(content)
-                    .padding(theme::SPACE_6)
-                    .width(Length::Fill),
-            )
-            .direction(scrollable::Direction::Vertical(
-                scrollable::Scrollbar::hidden(),
-            ))
-            .style(widgets::hidden_scrollbar),
+        let content = column![general, appearance, interface, activity,].spacing(theme::SPACE_8);
+        let modal_width = (self.viewport.width - 64.0).clamp(280.0, 920.0);
+        let modal_height = (self.viewport.height - 64.0).clamp(240.0, 720.0);
+        backdrop_filter(
+            container(column![
+                glass_header(
+                    "Settings",
+                    "application preferences",
+                    Some(Message::CloseSettings),
+                ),
+                container(widgets::mono(self.status.clone(), theme::TEXT_MUTED))
+                    .padding([0.0, theme::SPACE_8])
+                    .height(28)
+                    .width(Length::Fill)
+                    .align_y(alignment::Vertical::Center)
+                    .style(|_| glass_bottom_edge()),
+                scrollable(
+                    container(content)
+                        .padding(iced_core::Padding {
+                            top: theme::SPACE_6,
+                            right: theme::SPACE_8,
+                            bottom: theme::SPACE_8,
+                            left: theme::SPACE_8,
+                        })
+                        .width(Length::Fill),
+                )
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::hidden(),
+                ))
+                .style(widgets::hidden_scrollbar)
+                .height(Length::Fill),
+            ])
+            .width(modal_width)
+            .height(modal_height)
+            .style(|_| glass_surface())
+            .into(),
+            14.0,
+            theme::RADIUS_GLASS,
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
     }
 
     fn approval_panel(&self) -> UiElement<'_> {
@@ -3375,7 +3133,13 @@ impl App {
             return;
         }
         if self.events.iter().any(opens_settings) {
-            self.model.update(Message::View(View::Settings));
+            self.model.update(if self.model.settings_open {
+                Message::CloseSettings
+            } else {
+                Message::OpenSettings
+            });
+        } else if self.model.settings_open && self.events.iter().any(closes_settings) {
+            self.model.update(Message::CloseSettings);
         }
         let size = logical_size(window);
         self.model.fit_topology(size);
@@ -4306,16 +4070,16 @@ mod tests {
             model.view = match view.as_str() {
                 "agents" => View::Agents,
                 "filesystem" => View::Filesystem,
-                "settings" => View::Settings,
                 _ => View::Session,
             };
+            model.settings_open = view == "settings";
         }
         if let Ok(ms) = std::env::var("VKORE_UI_SPLASH") {
             let elapsed = std::time::Duration::from_millis(ms.parse().unwrap_or(0));
             model.booted_at = Instant::now().checked_sub(elapsed);
         }
         if std::env::var("VKORE_UI_SETTINGS").is_ok() {
-            model.view = View::Settings;
+            model.settings_open = true;
         }
         if std::env::var_os("VKORE_UI_APPROVAL").is_some() {
             model.approval = Some(json!({
@@ -4884,58 +4648,6 @@ mod tests {
     }
 
     #[test]
-    fn saving_an_open_project_restarts_its_chat_session() {
-        let (requests, request_receiver) = mpsc::channel();
-        let (sessions, _session_receiver) = mpsc::channel();
-        let mut model = Model::new(Network {
-            sender: requests,
-            session: sessions,
-        });
-        request_receiver.try_iter().for_each(drop);
-        model.projects = vec![json!({
-            "id":"saved-project",
-            "name":"Saved project",
-            "archived":false,
-            "addons":[],
-            "inference":{"backend":"deterministic"},
-        })];
-        model.selected = Some(0);
-        model.session = Some("old-session".into());
-
-        let saved = model.projects[0].clone();
-        model.response(
-            RequestKind::SaveProject,
-            Ok(ApiResponse {
-                content_type: "application/json".into(),
-                body: serde_json::to_vec(&saved).unwrap(),
-            }),
-        );
-
-        assert!(model.restart_after_stop);
-        let stop = request_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(stop.kind, RequestKind::StopSession);
-        assert_eq!(stop.path, "/api/v1/sessions/old-session");
-
-        model.response(
-            RequestKind::StopSession,
-            Ok(ApiResponse {
-                content_type: "application/json".into(),
-                body: br#"{"closed":true}"#.to_vec(),
-            }),
-        );
-
-        assert!(!model.restart_after_stop);
-        let start = request_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(start.kind, RequestKind::StartSession);
-        assert_eq!(start.path, "/api/v1/sessions");
-        assert_eq!(start.body.unwrap()["project_id"], "saved-project");
-    }
-
-    #[test]
     fn complete_shell_records_text_and_renders_directly() {
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
@@ -5042,7 +4754,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_screen_records_at_wide_and_narrow_widths() {
+    fn settings_modal_records_over_the_app_at_wide_and_narrow_widths() {
         fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
@@ -5050,7 +4762,8 @@ mod tests {
             sender: requests,
             session: sessions,
         });
-        model.view = View::Settings;
+        model.settings_open = true;
+        model.booted_at = None;
         model.activity = Some(Ok(vec![json!({
             "project_id":"project","project_name":"Project","session_id":"session",
             "model":"Deterministic security oracle","updated_at_unix_ms":1_750_000_000_000_u64,
@@ -5091,6 +4804,10 @@ mod tests {
             let stats =
                 render_test_frame(&frame, masks, &mut target, physical_width, physical_height);
             assert!(stats.pixels_written > 0);
+            assert!(
+                stats.scratch_high_water_pixels > 0,
+                "settings must render as a blurred modal over application content"
+            );
         }
     }
 
@@ -5142,7 +4859,7 @@ mod tests {
             sender: requests,
             session: sessions,
         });
-        model.view = View::Settings;
+        model.settings_open = true;
         model.booted_at = None;
         let states = [
             None,
@@ -5211,7 +4928,7 @@ mod tests {
     }
 
     #[test]
-    fn project_override_changes_only_after_explicit_use_default_and_save() {
+    fn settings_open_and_close_without_replacing_the_active_view() {
         let (requests, request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
@@ -5219,31 +4936,21 @@ mod tests {
             session: sessions,
         });
         request_receiver.try_iter().for_each(drop);
-        model.projects = vec![json!({
-            "id":"project","name":"Project","archived":false,"addons":[],
-            "workspace":{"root":"C:/workspace","state":"C:/state","access":"review_changes"},
-            "inference":{"backend":"llama_cpp","model":"legacy.gguf"}
-        })];
-        model.selected = Some(0);
-        let original = model.projects[0]["inference"].clone();
-        assert_ne!(original, model.settings["default_inference"]);
+        model.view = View::Filesystem;
 
-        model.update(Message::UseDefaultModelForProject);
-        assert_eq!(
-            model.projects[0]["inference"],
-            model.settings["default_inference"]
-        );
-        assert!(request_receiver.try_recv().is_err());
+        model.update(Message::OpenSettings);
 
-        model.update(Message::SaveProject);
-        let save = request_receiver
+        assert!(model.settings_open);
+        assert_eq!(model.view, View::Filesystem);
+        let activity = request_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        assert_eq!(save.kind, RequestKind::SaveProject);
-        assert_eq!(
-            save.body.unwrap()["inference"],
-            model.settings["default_inference"]
-        );
+        assert_eq!(activity.kind, RequestKind::Activity);
+        assert_eq!(activity.path, "/api/v1/activity");
+
+        model.update(Message::CloseSettings);
+        assert!(!model.settings_open);
+        assert_eq!(model.view, View::Filesystem);
     }
 
     #[test]
@@ -5269,6 +4976,17 @@ mod tests {
             repeat: false,
         });
         assert!(opens_settings(&shortcut));
+
+        let escape = iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        assert!(closes_settings(&escape));
     }
 
     #[test]

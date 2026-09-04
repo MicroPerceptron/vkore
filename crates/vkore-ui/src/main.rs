@@ -4,8 +4,13 @@ mod render_backend;
 mod splash;
 mod theme;
 mod topology;
+mod transcript;
 
 use crate::topology::{filesystem, inspector, layout, model, view};
+use crate::transcript::{
+    AssistantBlock, InlineMarkdownHighlighter, assistant_blocks, inline_markdown_format,
+    user_message_width,
+};
 mod widgets;
 
 use axgfx::Extent2d;
@@ -1681,13 +1686,13 @@ impl Model {
             if let Some(assistant) = prompt_events.iter().find(|event| {
                 event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
             }) {
-                desired.insert(
-                    format!("prompt:{prompt_id}:assistant"),
-                    assistant["payload"]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
+                let response = assistant["payload"]["text"].as_str().unwrap_or_default();
+                for (index, block) in assistant_blocks(response).into_iter().enumerate() {
+                    desired.insert(
+                        format!("prompt:{prompt_id}:assistant:{index}"),
+                        block.text().to_owned(),
+                    );
+                }
             }
         }
 
@@ -1745,6 +1750,51 @@ impl Model {
             .into()
     }
 
+    fn selectable_width<'a>(
+        &'a self,
+        key: &str,
+        width: f32,
+        size: f32,
+        color: u32,
+        face: iced_core::Font,
+    ) -> UiElement<'a> {
+        let key_owned = key.to_owned();
+        let content = self
+            .selectable_text
+            .get(key)
+            .expect("selectable conversation text must be synchronized");
+        text_editor(content)
+            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+            .padding(0)
+            .width(width)
+            .size(size)
+            .font(face)
+            .style(widgets::selectable(color))
+            .into()
+    }
+
+    fn selectable_markdown<'a>(
+        &'a self,
+        key: &str,
+        size: f32,
+        color: u32,
+        face: iced_core::Font,
+    ) -> UiElement<'a> {
+        let key_owned = key.to_owned();
+        let content = self
+            .selectable_text
+            .get(key)
+            .expect("selectable conversation text must be synchronized");
+        text_editor(content)
+            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+            .padding(0)
+            .size(size)
+            .font(face)
+            .highlight_with::<InlineMarkdownHighlighter>((), inline_markdown_format)
+            .style(widgets::selectable(color))
+            .into()
+    }
+
     fn apply_picker(&mut self, kind: RequestKind, path: &str) {
         let Some(editor) = self.editor.as_ref() else {
             return;
@@ -1771,13 +1821,13 @@ impl Model {
 
     fn view(&self, viewport: Size) -> UiElement<'_> {
         let base: UiElement<'_> = if viewport.width <= 720.0 {
-            self.main_panel()
+            self.main_panel(viewport)
         } else if viewport.width <= 1050.0 {
-            row![self.sidebar(210.0), self.main_panel()]
+            row![self.sidebar(210.0), self.main_panel(viewport)]
                 .height(Length::Fill)
                 .into()
         } else {
-            row![self.sidebar(248.0), self.main_panel()]
+            row![self.sidebar(248.0), self.main_panel(viewport)]
                 .height(Length::Fill)
                 .into()
         };
@@ -1972,7 +2022,7 @@ impl Model {
             .into()
     }
 
-    fn main_panel(&self) -> UiElement<'_> {
+    fn main_panel(&self, viewport: Size) -> UiElement<'_> {
         let project_name = self
             .project()
             .and_then(|p| p["name"].as_str())
@@ -2093,24 +2143,40 @@ impl Model {
                     .collect::<Vec<_>>();
                 let started_at = event_timestamp(user);
                 let user_key = format!("prompt:{prompt_id}:user");
+                let sidebar_width = if viewport.width <= 720.0 {
+                    0.0
+                } else if viewport.width <= 1050.0 {
+                    210.0
+                } else {
+                    248.0
+                };
+                let transcript_width = (viewport.width - sidebar_width - 80.0).max(160.0);
+                let bubble_width = user_message_width(
+                    user["payload"]["text"].as_str().unwrap_or_default(),
+                    transcript_width,
+                );
                 items = items.push(
-                    column![
-                        widgets::label(message_meta("You", user, None), theme::TEXT_MUTED),
-                        container(self.selectable(
-                            &user_key,
-                            theme::SIZE_SM,
-                            theme::TEXT,
-                            fonts::BODY
-                        ))
-                        .padding([13, 15])
-                        .width(Length::Fill)
-                        .style(|_| theme::panel(
-                            theme::PANEL,
-                            Some(theme::BORDER),
-                            theme::RADIUS_LG
-                        )),
-                    ]
-                    .spacing(theme::SPACE_2),
+                    container(
+                        column![
+                            widgets::label(message_meta("You", user, None), theme::TEXT_MUTED),
+                            container(self.selectable_width(
+                                &user_key,
+                                bubble_width - 30.0,
+                                theme::SIZE_SM,
+                                theme::TEXT,
+                                fonts::BODY
+                            ))
+                            .padding([13, 15])
+                            .style(|_| theme::panel(
+                                theme::PANEL,
+                                Some(theme::BORDER),
+                                theme::RADIUS_LG
+                            )),
+                        ]
+                        .spacing(theme::SPACE_2)
+                        .align_x(alignment::Horizontal::Right),
+                    )
+                    .align_right(Length::Fill),
                 );
 
                 let rows = work_rows(&prompt_events);
@@ -2210,15 +2276,8 @@ impl Model {
                                 ]
                                 .spacing(theme::SPACE_1),
                             )
-                            .padding([8, 10])
-                            .width(Length::Fill)
-                            .style(|_| {
-                                theme::panel(
-                                    theme::BACKGROUND,
-                                    Some(theme::BORDER),
-                                    theme::RADIUS_SM,
-                                )
-                            }),
+                            .padding([7, 10])
+                            .width(Length::Fill),
                         );
                     }
                     timeline = timeline.push(
@@ -2236,31 +2295,87 @@ impl Model {
                 if let Some(assistant) = prompt_events.iter().find(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
                 }) {
-                    let assistant_key = format!("prompt:{prompt_id}:assistant");
-                    items = items.push(
-                        column![
-                            widgets::label(
-                                message_meta("Validated assistant", assistant, started_at),
-                                theme::TEXT_MUTED
+                    let response = assistant["payload"]["text"].as_str().unwrap_or_default();
+                    let mut response_blocks = column![widgets::label(
+                        message_meta("Validated assistant", assistant, started_at),
+                        theme::TEXT_MUTED
+                    )]
+                    .spacing(theme::SPACE_4);
+                    for (index, block) in assistant_blocks(response).into_iter().enumerate() {
+                        let key = format!("prompt:{prompt_id}:assistant:{index}");
+                        let element: UiElement<'_> = match block {
+                            AssistantBlock::Heading { level, .. } => self.selectable(
+                                &key,
+                                if level <= 2 {
+                                    theme::SIZE_MD
+                                } else {
+                                    theme::SIZE_SM
+                                },
+                                theme::TEXT,
+                                fonts::BODY,
                             ),
-                            // The one magenta border in the turn: a validated
-                            // answer is the only thing that earns the accent.
-                            container(self.selectable(
-                                &assistant_key,
+                            AssistantBlock::Paragraph(_) => self.selectable_markdown(
+                                &key,
                                 theme::SIZE_SM,
                                 theme::TEXT,
-                                fonts::BODY
+                                fonts::BODY,
+                            ),
+                            AssistantBlock::List(_) => container(self.selectable_markdown(
+                                &key,
+                                theme::SIZE_SM,
+                                theme::TEXT,
+                                fonts::BODY,
                             ))
-                            .padding([13, 15])
+                            .padding(iced_core::Padding {
+                                top: 0.0,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: 12.0,
+                            })
+                            .into(),
+                            AssistantBlock::Quote(_) => container(self.selectable(
+                                &key,
+                                theme::SIZE_SM,
+                                theme::TEXT_SECONDARY,
+                                fonts::BODY,
+                            ))
+                            .padding(iced_core::Padding {
+                                top: 4.0,
+                                right: 0.0,
+                                bottom: 4.0,
+                                left: 12.0,
+                            })
+                            .style(|_| divider_left(theme::BACKGROUND))
+                            .into(),
+                            AssistantBlock::Code { language, .. } => container(
+                                column![
+                                    widgets::label(
+                                        if language.is_empty() {
+                                            "Code"
+                                        } else {
+                                            &language
+                                        },
+                                        theme::TEXT_MUTED
+                                    ),
+                                    self.selectable(
+                                        &key,
+                                        theme::SIZE_MONO,
+                                        theme::TEXT_SECONDARY,
+                                        fonts::MONO,
+                                    ),
+                                ]
+                                .spacing(theme::SPACE_2),
+                            )
+                            .padding([12, 14])
                             .width(Length::Fill)
-                            .style(|_| theme::panel(
-                                theme::PANEL,
-                                Some(theme::MAGENTA),
-                                theme::RADIUS_LG
-                            )),
-                        ]
-                        .spacing(theme::SPACE_2),
-                    );
+                            .style(|_| {
+                                theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_MD)
+                            })
+                            .into(),
+                        };
+                        response_blocks = response_blocks.push(element);
+                    }
+                    items = items.push(response_blocks);
                 }
             }
             container(
@@ -3601,7 +3716,7 @@ mod tests {
             json!({"kind":"inference","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_001_000_u64,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"Granting the exact read capability."}}),
             json!({"kind":"tool_call","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_002_000_u64,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
             json!({"kind":"tool_result","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_003_000_u64,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
-            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742. The read stayed inside the project workspace and used prompt-scoped authority."}}),
+            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"## Verification\n\nThe read stayed inside the project workspace and used `prompt-scoped` authority.\n\n```text\nMANIFOLD-ORANGE-742\n```"}}),
             json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
         ];
         // Events set directly bypass the update path that keeps the selectable
@@ -4426,6 +4541,76 @@ mod tests {
 
         assert!(metadata.starts_with("AGENT 1 · "));
         assert!(metadata.contains("responded in 2.5 s"));
+    }
+
+    #[test]
+    fn every_assistant_block_remains_selectable_and_read_only() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"Show code"}}),
+            json!({"kind":"assistant","prompt_id":"p","public":true,"payload":{"text":"Answer.\n\n```rs\nlet x = 1;\n```"}}),
+        ];
+        model.events_changed();
+
+        for key in ["prompt:p:assistant:0", "prompt:p:assistant:1"] {
+            let original = model.selectable_text[key].text();
+            model.update(Message::SelectText(
+                key.into(),
+                iced_core::text::editor::Action::SelectAll,
+            ));
+            assert_eq!(
+                model.selectable_text[key].selection(),
+                Some(original.clone())
+            );
+            model.update(Message::SelectText(
+                key.into(),
+                iced_core::text::editor::Action::Edit(iced_core::text::editor::Edit::Insert('!')),
+            ));
+            assert_eq!(model.selectable_text[key].text(), original);
+        }
+    }
+
+    #[test]
+    fn conversation_layout_records_at_narrow_wide_and_scaled_sizes() {
+        let mut model = populated_fixture_model();
+        model.events[0]["payload"]["text"] = Value::String(
+            "Explain how this deliberately long user request wraps without occupying the full transcript width on every display size."
+                .into(),
+        );
+        model.events_changed();
+
+        for (size, scale) in [
+            (Size::new(800.0, 600.0), 1.0),
+            (Size::new(1280.0, 800.0), 1.0),
+            (Size::new(800.0, 600.0), 1.5),
+        ] {
+            let mut renderer = native_renderer();
+            renderer.hint(Scale {
+                window: scale,
+                application: 1.0,
+            });
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().expect("conversation frame");
+            axgfx::frame_requirements(frame.view()).expect("supported conversation display list");
+            assert!(renderer.take_text_errors().is_empty());
+            assert!(frame.glyphs().len() > 30);
+        }
     }
 
     #[test]

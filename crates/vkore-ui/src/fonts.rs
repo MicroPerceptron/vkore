@@ -54,14 +54,18 @@ pub const DISPLAY: Font = face(
 pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
 pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
-/// JetBrains Mono 500 without tracking. Timestamps use the heavier face but
-/// keep the compact spacing of ordinary metadata.
-pub const MONO_MEDIUM: Font = face(theme::MONO_FAMILY, font::Weight::Medium, 0.0);
-/// JetBrains Mono 500. Uppercase labels, metadata, navigation.
-pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_LABEL);
+// The packaged Medium face reports the non-CSS numeric weight 436. Iced's
+// named `Medium` request is 500, so Cosmic Text skips that face and falls back
+// to a host font Axiom cannot reproduce. Use the registered regular face for
+// these handles until the frontend can request arbitrary numeric weights.
+/// JetBrains Mono without tracking. Timestamps keep the compact spacing of
+/// ordinary metadata.
+pub const MONO_MEDIUM: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
+/// JetBrains Mono. Uppercase labels, metadata, navigation.
+pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Normal, theme::TRACK_LABEL);
 
-/// JetBrains Mono 500, tracked for navigation.
-pub const MONO_NAV: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_NAV);
+/// JetBrains Mono, tracked for navigation.
+pub const MONO_NAV: Font = face(theme::MONO_FAMILY, font::Weight::Normal, theme::TRACK_NAV);
 
 /// Archivo 600, tracked for the splash wordmark.
 pub const SPLASH: Font = face(
@@ -117,7 +121,8 @@ mod tests {
         assert_eq!(BODY.family, font::Family::Name(theme::BODY_FAMILY));
         assert_eq!(MONO.family, font::Family::Name(theme::MONO_FAMILY));
         assert_eq!(MONO.weight, font::Weight::Normal);
-        assert_eq!(MONO_MEDIUM.weight, font::Weight::Medium);
-        assert_eq!(MONO_LABEL.weight, font::Weight::Medium);
+        assert_eq!(MONO_MEDIUM.weight, font::Weight::Normal);
+        assert_eq!(MONO_LABEL.weight, font::Weight::Normal);
+        assert_eq!(MONO_NAV.weight, font::Weight::Normal);
     }
 }

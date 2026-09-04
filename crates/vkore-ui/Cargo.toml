@@ -15,6 +15,7 @@ axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460b
 axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
+harper-core = "=0.40.0"
 # Parses the mark's SVG path data; already reached through the geometry lane.
 zeno = "0.3.3"
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["crisp"] }

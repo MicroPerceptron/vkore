@@ -108,20 +108,22 @@ The paved development workflow runs the native Windows UI while the harness,
 QEMU, Kore, and llama.cpp stay in WSL:
 
 ```powershell
-.\vkore-axiom.cmd --check
-.\vkore-axiom.cmd
+.\dev.cmd
 ```
 
-From WSL, use `./vkore-axiom`. The launcher expects the matching Kore checkout
-and prebuilt ISO, verifies their pinned commit and SHA-256, builds vKore, starts
-or reuses the loopback harness, and opens the requested persisted project. It
-never rebuilds Kore or silently substitutes an image. Override the conventional
-paths and project with `--kore-root`, `--state`, and `--project`.
+From WSL, use `make dev-real`; use `make dev-check` for a read-only preflight or
+`make dev-fast` to reuse already-built release vKore binaries. The checked-in
+real-stack lock pins the reviewed Kore commit and ISO SHA-256. The launcher
+also requires a llama.cpp project, validates its selected artifacts, and refuses
+to reuse an existing harness whose real-VM provenance cannot be established.
+It never changes a Kore worktree or silently substitutes deterministic
+inference. Override machine-local paths in an ignored `Makefile.local`, using
+`Makefile.local.example` as the template.
 
 For a terminal-only end-to-end run with timestamped evidence:
 
 ```powershell
-.\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
+wsl.exe --exec make -C /mnt/c/path/to/vkore dev-debug PROMPT="hello"
 ```
 
 Debug runs retain the launcher and harness logs, raw API events, process

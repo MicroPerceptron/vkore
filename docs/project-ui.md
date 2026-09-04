@@ -5,6 +5,22 @@ and agent UI. It uses the same versioned API as the `vkore chat` CLI. Project
 configuration and transcripts are stored below the directory given to
 `--state`.
 
+## Guaranteed real-stack developer launch
+
+The normal developer entry point is `make dev-real` from WSL or `.\dev.cmd`
+from PowerShell. It builds release vKore binaries and fails closed unless the
+selected project uses llama.cpp with existing runtime/model files and the exact
+reviewed Kore image. `make dev-check` performs the same preflight without
+starting anything; `make dev-fast` reuses already-built release vKore binaries;
+and `make dev-debug PROMPT="hello"` runs a terminal prompt with retained logs.
+
+The reviewed Kore commit and ISO digest live in
+`config/real-stack.lock.mk`. The launcher verifies both, but deliberately never
+runs `git checkout`: developers should create or select a dedicated Kore
+worktree at the pinned revision. `make artifacts` builds the ISO in that
+worktree and verifies its digest. Large ISO, llama.cpp, and GGUF artifacts stay
+outside Git; `Makefile.local` records only machine-local paths and identifiers.
+
 ## One-command launch
 
 On Windows with WSL, run `.\vkore-axiom.cmd` from the repository root. From

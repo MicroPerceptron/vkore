@@ -1,0 +1,6 @@
+# Copy this file to Makefile.local and change only paths/identifiers that are
+# local to your machine. Makefile.local is ignored by Git.
+KORE_ROOT := /home/colin/src/kore-issue-27
+VKORE_STATE := /home/colin/.local/state/vkore-issue27-test
+VKORE_PROJECT := qwen9b-issue27
+VKORE_LISTEN := 127.0.0.1:8787

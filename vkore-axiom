@@ -16,6 +16,8 @@ expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-cccf76da11fa397242c587817ec975dce529
 expected_iso=${VKORE_EXPECTED_ISO_SHA256:-b020d1effa66e7117194141f88a72a2ae831cd615f1977e1d6b34ac3a788e53c}
 check_only=0
 no_build=0
+require_real=0
+release=0
 debug=0
 debug_prompts=()
 debug_timeout=300
@@ -25,7 +27,8 @@ diagnostic_dir=
 usage() {
     cat <<'EOF'
 usage: ./vkore-axiom [--project ID] [--state PATH] [--listen 127.0.0.1:PORT]
-                     [--kore-root PATH] [--check] [--no-build]
+                     [--kore-root PATH] [--check] [--no-build] [--release]
+                     [--require-real]
                      [--debug [--prompt TEXT ...] [--timeout-seconds N]
                               [--delay-between-prompts-seconds N]]
 
@@ -38,6 +41,11 @@ of opening the UI. Repeat --prompt to test later chats against the same Kore VM.
 --delay-between-prompts-seconds reproduces an idle project between those chats.
 It timestamps every event and retains launcher, harness/llama.cpp, process,
 HostLink, QEMU serial, and raw UI-event logs under the diagnostics directory.
+
+--require-real fails closed unless the selected project uses llama.cpp, points
+at this exact verified Kore ISO, and names existing llama.cpp/model artifacts.
+It also refuses to reuse an already-running harness whose provenance cannot be
+attested by this launcher. --release builds and runs release vKore binaries.
 EOF
 }
 
@@ -49,6 +57,8 @@ while test $# -gt 0; do
         --kore-root) kore_root=${2:?missing --kore-root PATH}; shift 2 ;;
         --check) check_only=1; shift ;;
         --no-build) no_build=1; shift ;;
+        --require-real) require_real=1; shift ;;
+        --release) release=1; shift ;;
         --debug) debug=1; shift ;;
         --prompt) debug_prompts+=("${2:?missing --prompt text}"); shift 2 ;;
         --timeout-seconds) debug_timeout=${2:?missing --timeout-seconds}; shift 2 ;;
@@ -160,6 +170,48 @@ test -f "$ovmf_code" && test -f "$ovmf_vars" || {
     exit 2
 }
 
+validate_real_project() {
+    local project_file="$state/projects/$project.json"
+    test -f "$project_file" || {
+        echo "real-stack project is missing: $project_file" >&2
+        echo "Create it once in the UI, select llama.cpp, and configure the verified Kore ISO." >&2
+        return 2
+    }
+    python3 - "$project_file" "$iso" <<'PY'
+import json
+import os
+import sys
+
+project_file, verified_iso = sys.argv[1:]
+with open(project_file, encoding="utf-8") as stream:
+    project = json.load(stream)
+inference = project.get("inference") or {}
+problems = []
+if inference.get("backend") != "llama_cpp":
+    problems.append("inference.backend must be llama_cpp (deterministic is forbidden)")
+kore_image = inference.get("kore_image")
+if not kore_image or os.path.realpath(kore_image) != os.path.realpath(verified_iso):
+    problems.append(f"inference.kore_image must be the verified image {verified_iso}")
+llama_server = inference.get("llama_server")
+if not llama_server or not os.path.isfile(llama_server) or not os.access(llama_server, os.X_OK):
+    problems.append("inference.llama_server must name an executable llama.cpp server")
+model = inference.get("model")
+if not model or not os.path.isfile(model):
+    problems.append("inference.model must name an existing GGUF model")
+if problems:
+    for problem in problems:
+        print(f"real-stack refusal: {problem}", file=sys.stderr)
+    raise SystemExit(2)
+print(f"Inference: llama.cpp ({llama_server})")
+print(f"Model: {model}")
+print(f"Kore image: {verified_iso}")
+PY
+}
+
+if test "$require_real" = 1; then
+    validate_real_project
+fi
+
 if curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     harness_status=running
 elif test "$check_only" = 1; then
@@ -174,7 +226,16 @@ if test "$debug" = 1 && test "$harness_status" = running; then
     exit 2
 fi
 
-if test "$harness_status" != running; then
+if test "$require_real" = 1 && test "$harness_status" = running; then
+    echo "An existing harness is already listening at $listen." >&2
+    echo "Its guest and inference provenance cannot be proven, so --require-real will not reuse it." >&2
+    echo "Close the existing vKore launcher or select another --listen port." >&2
+    exit 2
+fi
+
+if test "$require_real" = 1; then
+    project_status=verified-local
+elif test "$harness_status" != running; then
     project_status=will-check-after-start
 elif curl -fsS --max-time 2 "$projects_url" 2>/dev/null | python3 -c '
 import json, sys
@@ -192,6 +253,8 @@ fi
 
 if test "$check_only" = 1; then
     printf 'vKore root: %s\n' "$vkore_root"
+    printf 'vKore profile: %s\n' "$(test "$release" = 1 && printf release || printf debug)"
+    test "$require_real" = 1 && printf 'Runtime policy: real-only (QEMU + Kore + llama.cpp)\n'
     printf 'Kore provenance: %s\n' "$actual_kore"
     printf 'ISO sha256: %s\n' "$actual_iso"
     printf 'Harness: %s\n' "$harness_status"
@@ -199,14 +262,23 @@ if test "$check_only" = 1; then
     exit 0
 fi
 
+build_flags=()
+profile_dir=debug
+if test "$release" = 1; then
+    build_flags+=(--release)
+    profile_dir=release
+fi
+
 if test "$no_build" != 1; then
     if test "$debug" = 1; then
-        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkored --bin vkore-harnessd --bin vkore
+        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+            -p vkored --bin vkore-harnessd --bin vkore
     else
-        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkored --bin vkore-harnessd
+        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+            -p vkored --bin vkore-harnessd
     fi
 fi
-harness="$vkore_root/target/debug/vkore-harnessd"
+harness="$vkore_root/target/$profile_dir/vkore-harnessd"
 test -x "$harness" || {
     echo "vKore harness is not built; rerun without --no-build" >&2
     exit 2
@@ -341,7 +413,7 @@ if not any(p.get("id") == wanted and not p.get("archived", False) for p in proje
 if test "$debug" = 1; then
     project_file="$state/projects/$project.json"
     test -f "$project_file" && cp -- "$project_file" "$runtime/project.json"
-    cli="$vkore_root/target/debug/vkore"
+    cli="$vkore_root/target/$profile_dir/vkore"
     test -x "$cli" || {
         echo "vKore CLI is not built; rerun without --no-build" >&2
         exit 2
@@ -370,14 +442,15 @@ if test -n "${WSL_DISTRO_NAME:-}" && command -v cargo.exe >/dev/null 2>&1; then
     if test "$no_build" != 1; then
         CARGO_TARGET_DIR="$windows_target" \
             WSLENV="${WSLENV:+$WSLENV:}CARGO_TARGET_DIR/p" \
-            cargo.exe build --manifest-path "$(wslpath -w "$vkore_root/Cargo.toml")" -p vkore-ui
+            cargo.exe build --manifest-path "$(wslpath -w "$vkore_root/Cargo.toml")" \
+                "${build_flags[@]}" -p vkore-ui
     fi
-    ui="$windows_target/debug/vkore-ui.exe"
+    ui="$windows_target/$profile_dir/vkore-ui.exe"
 else
     if test "$no_build" != 1; then
-        cargo build --manifest-path "$vkore_root/Cargo.toml" -p vkore-ui
+        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
     fi
-    ui="$vkore_root/target/debug/vkore-ui"
+    ui="$vkore_root/target/$profile_dir/vkore-ui"
 fi
 test -x "$ui" || {
     echo "Axiom UI is not built; rerun without --no-build" >&2

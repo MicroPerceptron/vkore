@@ -4,6 +4,7 @@ debug
 target
 # Runtime state and caller-selected artifacts are never source files.
 .vkore/
+Makefile.local
 *.gguf
 *.kws
 *.kwr

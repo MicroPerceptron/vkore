@@ -101,6 +101,33 @@ fn prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
 }
 
 #[test]
+fn conversational_prompt_founds_a_tool_inert_agent_and_answers_directly() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = HarnessService::start(
+        BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
+        temp.path(),
+    );
+    let handle = service.handle();
+    create(&handle, "conversation");
+    handle
+        .submit_prompt("conversation", prompt("hello", "hello"))
+        .unwrap();
+
+    let events = wait_terminal(&handle, "conversation", "hello");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == EventKind::Assistant)
+    );
+    assert!(events.iter().all(|event| event.kind != EventKind::ToolCall));
+    let installed = events
+        .iter()
+        .find(|event| event.kind == EventKind::Capability && event.payload["state"] == "installed")
+        .unwrap();
+    assert_eq!(installed.payload["tools"], serde_json::json!([]));
+}
+
+#[test]
 fn sequential_prompts_reuse_conversation_and_idempotent_retry_does_not_repeat() {
     let temp = tempfile::tempdir().unwrap();
     let service = HarnessService::start(

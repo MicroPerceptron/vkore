@@ -5,10 +5,11 @@ use crate::{
     ProjectConfig, ProjectStore, SequenceIdentity, SettingsStore, UiApprovalService,
 };
 use kore_hostlink::{
-    AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
-    BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId, TaskBudget,
-    TaskGeneration, TaskIntentRequest, ToolArgument, ToolResultKind, decode_agent_event,
-    decode_broker_reply,
+    AGENT_TEXT_MAX, AgentEventKind, AgentRequestKind, AgentRequestView, AgentToolDescriptor,
+    BrokerActionKind, BrokerOffer, BrokerOfferKind, InferenceRequestKind, InferenceRequestView,
+    RequestId, RouteId, TOOL_EFFECT_OBSERVE, TOOL_RESULT_WORKSPACE, TaskBudget, TaskGeneration,
+    TaskIntentRequest, ToolArgument, ToolArgumentKind, ToolInputSchema, ToolResultKind,
+    decode_agent_event, decode_broker_reply,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -653,7 +654,19 @@ pub struct BrokerDecision {
 pub struct GuestAgent {
     pub id: [u8; 16],
     pub generation: u64,
-    pub tools: Vec<String>,
+    pub tools: Vec<GuestTool>,
+    pub tool_calls: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct GuestTool {
+    pub name: String,
+    pub usage: String,
+    pub summary: String,
+    pub input: ToolInputSchema,
+    pub effects: u16,
+    pub result_sensitivity: u8,
+    pub remaining_uses: u32,
 }
 
 pub trait GuestBridge: Send + 'static {
@@ -679,6 +692,23 @@ pub enum OwnedArgument {
     Path(String),
     U64(u64),
     Bool(bool),
+}
+
+fn encode_guest_tools(tools: &[GuestTool], output: &mut [u8]) -> Option<usize> {
+    let mut length = 0;
+    for tool in tools {
+        length += (AgentToolDescriptor {
+            name: &tool.name,
+            usage: &tool.usage,
+            summary: &tool.summary,
+            input: tool.input,
+            effects: tool.effects,
+            result_sensitivity: tool.result_sensitivity,
+            remaining_uses: tool.remaining_uses,
+        })
+        .encode(output.get_mut(length..)?)?;
+    }
+    Some(length)
 }
 
 #[derive(Default)]
@@ -759,7 +789,7 @@ impl GuestBridge for DeterministicGuest {
         prompt: &PromptRequest,
         decision: &BrokerDecision,
     ) -> Result<GuestAgent, String> {
-        if decision.action != BrokerActionKind::CreateAgent || decision.selectors.is_empty() {
+        if decision.action != BrokerActionKind::CreateAgent {
             return Err("resident broker refused non-create deterministic plan".into());
         }
         let offered: BTreeSet<_> = self
@@ -774,7 +804,8 @@ impl GuestBridge for DeterministicGuest {
         {
             return Err("proposal selected a non-offered resource".into());
         }
-        if !decision.selectors.contains(&OFFER_CAT) {
+        let cat_selected = decision.selectors.contains(&OFFER_CAT);
+        if decision.budget.tool_calls != 0 && !cat_selected {
             return Err("proposal omitted the executable scope".into());
         }
         let mut paths = BTreeSet::new();
@@ -791,17 +822,38 @@ impl GuestBridge for DeterministicGuest {
             b"vkore.guest.agent",
             &[session.session_id.as_bytes(), prompt.prompt_id.as_bytes()],
         );
+        let tool_calls = u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX);
+        let tools = if cat_selected && tool_calls != 0 {
+            vec![GuestTool {
+                name: "cat".into(),
+                usage: "cat /absolute/path".into(),
+                summary: "Read one object from the installed filesystem view.".into(),
+                input: ToolInputSchema {
+                    minimum: 1,
+                    maximum: 1,
+                    kinds: [ToolArgumentKind::Path.mask(), 0, 0, 0],
+                    whitespace: 0,
+                },
+                effects: TOOL_EFFECT_OBSERVE,
+                result_sensitivity: TOOL_RESULT_WORKSPACE,
+                remaining_uses: tool_calls,
+            }]
+        } else {
+            Vec::new()
+        };
+        let installed_tools = tools.iter().map(|tool| tool.name.clone()).collect();
         let agent = GuestAgent {
             id,
             generation: session.generation,
-            tools: vec!["cat".into()],
+            tool_calls,
+            tools,
         };
         self.agents.insert(
             id,
             DeterministicAgent {
                 generation: agent.generation,
                 paths,
-                tools: ["cat".into()].into_iter().collect(),
+                tools: installed_tools,
             },
         );
         Ok(agent)
@@ -958,7 +1010,8 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
             false,
             json!({
                 "state":"installed", "agent":hex16(&guest_agent.id), "generation":guest_agent.generation,
-                "tools":guest_agent.tools, "committed_by":"resident_broker_bridge"
+                "tools":guest_agent.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                "committed_by":"resident_broker_bridge"
             }),
         );
         let agent_sequence = SequenceIdentity {
@@ -1065,7 +1118,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 PromptStatus::Failed
             };
         }
-        let (sequence, agent, incarnation, turn) = {
+        let (sequence, mut agent, incarnation, turn) = {
             let runtime = &self.sessions[&session.session_id];
             (
                 runtime.agent_sequence,
@@ -1082,14 +1135,23 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             );
             return PromptStatus::Failed;
         }
-        let tools = agent.tools.join("\0");
+        let mut tools = [0_u8; AGENT_TEXT_MAX];
+        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+            emit(
+                EventKind::Error,
+                true,
+                json!({"error":"agent tool catalog exceeded bounds"}),
+            );
+            return PromptStatus::Failed;
+        };
         let mut last_tool_result = None;
         let next = AgentRequestView {
             kind: AgentRequestKind::UserText,
             turn,
             call_id: 0,
             result: None,
-            tools: &tools,
+            tools: &tools[..tools_len],
+            resources: &[],
             text: &prompt.text,
         };
         {
@@ -1156,6 +1218,14 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             }
             match event.kind {
                 AgentEventKind::ToolCall => {
+                    if !consume_tool(&mut agent, event.command) {
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"error":"agent exceeded an installed tool-use limit"}),
+                        );
+                        return PromptStatus::Failed;
+                    }
                     let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                     emit(
                         EventKind::ToolCall,
@@ -1180,7 +1250,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                         emit,
                         cancelled,
                         sequence,
-                        &agent,
+                        &mut agent,
                         event.turn + 1,
                         event.call_id,
                         kind,
@@ -1244,20 +1314,26 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
     emit: &mut dyn FnMut(EventKind, bool, Value),
     cancelled: &dyn Fn() -> bool,
     sequence: SequenceIdentity,
-    agent: &GuestAgent,
+    agent: &mut GuestAgent,
     mut turn: u64,
     mut call_id: u64,
     mut result_kind: ToolResultKind,
     mut owned_text: String,
     last_tool_result: &mut Option<String>,
 ) -> PromptStatus {
-    for _ in 0..8 {
+    let mut remaining_tool_calls = agent.tool_calls.saturating_sub(1);
+    for _ in 0..agent.tool_calls {
+        let mut tools = [0_u8; AGENT_TEXT_MAX];
+        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+            return PromptStatus::Failed;
+        };
         let request_view = AgentRequestView {
             kind: AgentRequestKind::ToolResult,
             turn,
             call_id,
             result: Some(result_kind),
-            tools: "",
+            tools: &tools[..tools_len],
+            resources: &[],
             text: &owned_text,
         };
         let mut inner = [0u8; kore_hostlink::INFERENCE_PART_MAX];
@@ -1304,6 +1380,15 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         );
         match event.kind {
             AgentEventKind::ToolCall => {
+                if remaining_tool_calls == 0 || !consume_tool(agent, event.command) {
+                    emit(
+                        EventKind::Error,
+                        true,
+                        json!({"error":"agent exceeded an installed tool-use limit"}),
+                    );
+                    return PromptStatus::Failed;
+                }
+                remaining_tool_calls -= 1;
                 let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                 emit(
                     EventKind::ToolCall,
@@ -1352,6 +1437,17 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         json!({"error":"tool loop limit reached"}),
     );
     PromptStatus::Failed
+}
+
+fn consume_tool(agent: &mut GuestAgent, command: &str) -> bool {
+    let Some(tool) = agent.tools.iter_mut().find(|tool| tool.name == command) else {
+        return false;
+    };
+    if tool.remaining_uses == 0 {
+        return false;
+    }
+    tool.remaining_uses -= 1;
+    true
 }
 
 fn owned_argument(argument: ToolArgument<'_>) -> OwnedArgument {

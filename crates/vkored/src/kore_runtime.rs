@@ -188,10 +188,10 @@ impl ProjectRuntime {
     }
 
     fn stop_process(&mut self) {
-        if self.vm_suspended {
-            if let Some(process) = self.process.as_ref() {
-                let _ = process.resume();
-            }
+        if self.vm_suspended
+            && let Some(process) = self.process.as_ref()
+        {
+            let _ = process.resume();
         }
         self.active_model_turns = 0;
         self.vm_pause_due = None;

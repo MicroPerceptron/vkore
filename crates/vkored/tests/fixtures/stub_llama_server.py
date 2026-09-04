@@ -77,33 +77,27 @@ class Handler(BaseHTTPRequestHandler):
                 objects = [
                     offer
                     for offer in catalog
-                    if offer[1] in ("o", "v") and offer[2].lower() in intent
+                    if offer["kind"] in ("object", "view")
+                    and offer["label"].lower() in intent
                 ]
                 executables = [
                     offer
                     for offer in catalog
-                    if offer[1] == "x" and offer[2] == "cat"
-                ]
-                hello_executables = [
-                    offer
-                    for offer in catalog
-                    if offer[1] == "x" and offer[2] == "hello"
+                    if offer["kind"] == "executable" and offer["label"] == "cat"
                 ]
                 ceiling = {"tool_calls": 2}
-                selectors = planning.get("trusted_resolution", {}).get(
-                    "required_selector_indices"
+                selected_executables = (
+                    [executables[0]["index"]]
+                    if objects
+                    else []
                 )
-                if selectors is None:
-                    selectors = (
-                        [executables[0][0], objects[0][0]]
-                        if objects
-                        else [hello_executables[0][0]]
-                    )
+                selected_resources = [objects[0]["index"]] if objects else []
                 text = json.dumps(
                     {
                         "action": "create_agent",
                         "label": "agent/catalog-selection",
-                        "selectors": selectors,
+                        "executables": selected_executables,
+                        "resources": selected_resources,
                         "budget": {
                             "tool_calls": min(2, ceiling["tool_calls"])
                             if objects

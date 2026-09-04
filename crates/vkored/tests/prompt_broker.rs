@@ -3,9 +3,10 @@ use hostlinkd::{
     SequenceIdentity,
 };
 use kore_hostlink::{
-    AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
-    BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId, TaskBudget,
-    TaskGeneration, TaskIntentRequest, ToolArgument, ToolResultKind, decode_agent_event,
+    AgentEventKind, AgentRequestKind, AgentRequestView, AgentToolDescriptor, BrokerActionKind,
+    BrokerOffer, BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId,
+    TOOL_EFFECT_OBSERVE, TOOL_RESULT_WORKSPACE, TaskBudget, TaskGeneration, TaskIntentRequest,
+    ToolArgument, ToolArgumentKind, ToolInputSchema, ToolResultKind, decode_agent_event,
     decode_broker_reply,
 };
 
@@ -54,16 +55,34 @@ fn agent_request(
     text: &str,
 ) -> Vec<u8> {
     let mut inner = [0; kore_hostlink::INFERENCE_PART_MAX];
+    let mut tools = [0; 512];
+    let tools_len = if kind == AgentRequestKind::UserText {
+        AgentToolDescriptor {
+            name: "cat",
+            usage: "cat /absolute/path",
+            summary: "Read one object in the installed filesystem view.",
+            input: ToolInputSchema {
+                minimum: 1,
+                maximum: 1,
+                kinds: [ToolArgumentKind::Path.mask(), 0, 0, 0],
+                whitespace: 0,
+            },
+            effects: TOOL_EFFECT_OBSERVE,
+            result_sensitivity: TOOL_RESULT_WORKSPACE,
+            remaining_uses: 3,
+        }
+        .encode(&mut tools)
+        .unwrap()
+    } else {
+        0
+    };
     let len = AgentRequestView {
         kind,
         turn,
         call_id,
         result,
-        tools: if kind == AgentRequestKind::UserText {
-            "cat"
-        } else {
-            ""
-        },
+        tools: &tools[..tools_len],
+        resources: &[],
         text,
     }
     .encode(&mut inner)

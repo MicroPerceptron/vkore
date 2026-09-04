@@ -1074,10 +1074,9 @@ impl InferenceBackend for DeterministicBackend {
                     && offer.permitted_ops != 0
                     && offer.max_uses != 0
                     && let Some(index) = useful_tool_index(offer.label)
+                    && useful_executables[index].replace(offer.reference).is_some()
                 {
-                    if useful_executables[index].replace(offer.reference).is_some() {
-                        return Err(BackendError::InvalidEncoding);
-                    }
+                    return Err(BackendError::InvalidEncoding);
                 }
                 match (planning.intent, offer.kind, offer.label) {
                     ("read X", BrokerOfferKind::Object, "workspace/X")

@@ -31,7 +31,8 @@ fn request(
         turn,
         call_id,
         result,
-        tools: "",
+        tools: &[],
+        resources: &[],
         text,
     }
     .encode(&mut inner)

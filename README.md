@@ -224,6 +224,7 @@ the current end-to-end product gate.
 
 ## Documentation
 
+- [Generic capability-scoped agent loop](docs/generic-agents.md)
 - [Project and native harness UI](docs/project-ui.md)
 - [Interactive harness API](docs/harness-api.md)
 - [Approval and standing-policy model](docs/policy.md)

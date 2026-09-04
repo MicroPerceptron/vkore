@@ -5,10 +5,11 @@ use crate::{
     ProjectConfig, ProjectStore, SequenceIdentity, UiApprovalService,
 };
 use kore_hostlink::{
-    AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
-    BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId, TaskBudget,
-    TaskGeneration, TaskIntentRequest, ToolArgument, ToolResultKind, decode_agent_event,
-    decode_broker_reply,
+    AGENT_TEXT_MAX, AgentEventKind, AgentRequestKind, AgentRequestView, AgentToolDescriptor,
+    BrokerActionKind, BrokerOffer, BrokerOfferKind, InferenceRequestKind, InferenceRequestView,
+    RequestId, RouteId, TOOL_EFFECT_OBSERVE, TOOL_RESULT_WORKSPACE, TaskBudget, TaskGeneration,
+    TaskIntentRequest, ToolArgument, ToolArgumentKind, ToolInputSchema, ToolResultKind,
+    decode_agent_event, decode_broker_reply,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -653,7 +654,19 @@ pub struct BrokerDecision {
 pub struct GuestAgent {
     pub id: [u8; 16],
     pub generation: u64,
-    pub tools: Vec<String>,
+    pub tools: Vec<GuestTool>,
+    pub tool_calls: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct GuestTool {
+    pub name: String,
+    pub usage: String,
+    pub summary: String,
+    pub input: ToolInputSchema,
+    pub effects: u16,
+    pub result_sensitivity: u8,
+    pub remaining_uses: u32,
 }
 
 pub trait GuestBridge: Send + 'static {
@@ -679,6 +692,23 @@ pub enum OwnedArgument {
     Path(String),
     U64(u64),
     Bool(bool),
+}
+
+fn encode_guest_tools(tools: &[GuestTool], output: &mut [u8]) -> Option<usize> {
+    let mut length = 0;
+    for tool in tools {
+        length += (AgentToolDescriptor {
+            name: &tool.name,
+            usage: &tool.usage,
+            summary: &tool.summary,
+            input: tool.input,
+            effects: tool.effects,
+            result_sensitivity: tool.result_sensitivity,
+            remaining_uses: tool.remaining_uses,
+        })
+        .encode(output.get_mut(length..)?)?;
+    }
+    Some(length)
 }
 
 #[derive(Default)]
@@ -794,7 +824,21 @@ impl GuestBridge for DeterministicGuest {
         let agent = GuestAgent {
             id,
             generation: session.generation,
-            tools: vec!["cat".into()],
+            tool_calls: u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX),
+            tools: vec![GuestTool {
+                name: "cat".into(),
+                usage: "cat /absolute/path".into(),
+                summary: "Read one object from the installed filesystem view.".into(),
+                input: ToolInputSchema {
+                    minimum: 1,
+                    maximum: 1,
+                    kinds: [ToolArgumentKind::Path.mask(), 0, 0, 0],
+                    whitespace: 0,
+                },
+                effects: TOOL_EFFECT_OBSERVE,
+                result_sensitivity: TOOL_RESULT_WORKSPACE,
+                remaining_uses: u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX),
+            }],
         };
         self.agents.insert(
             id,
@@ -958,7 +1002,8 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
             false,
             json!({
                 "state":"installed", "agent":hex16(&guest_agent.id), "generation":guest_agent.generation,
-                "tools":guest_agent.tools, "committed_by":"resident_broker_bridge"
+                "tools":guest_agent.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                "committed_by":"resident_broker_bridge"
             }),
         );
         let agent_sequence = SequenceIdentity {
@@ -1082,14 +1127,23 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             );
             return PromptStatus::Failed;
         }
-        let tools = agent.tools.join("\0");
+        let mut tools = [0_u8; AGENT_TEXT_MAX];
+        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+            emit(
+                EventKind::Error,
+                true,
+                json!({"error":"agent tool catalog exceeded bounds"}),
+            );
+            return PromptStatus::Failed;
+        };
         let mut last_tool_result = None;
         let next = AgentRequestView {
             kind: AgentRequestKind::UserText,
             turn,
             call_id: 0,
             result: None,
-            tools: &tools,
+            tools: &tools[..tools_len],
+            resources: &[],
             text: &prompt.text,
         };
         {
@@ -1251,13 +1305,18 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
     mut owned_text: String,
     last_tool_result: &mut Option<String>,
 ) -> PromptStatus {
-    for _ in 0..8 {
+    for _ in 0..agent.tool_calls.saturating_add(1) {
+        let mut tools = [0_u8; AGENT_TEXT_MAX];
+        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+            return PromptStatus::Failed;
+        };
         let request_view = AgentRequestView {
             kind: AgentRequestKind::ToolResult,
             turn,
             call_id,
             result: Some(result_kind),
-            tools: "",
+            tools: &tools[..tools_len],
+            resources: &[],
             text: &owned_text,
         };
         let mut inner = [0u8; kore_hostlink::INFERENCE_PART_MAX];

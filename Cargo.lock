@@ -1664,6 +1664,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-hostlink"
+version = "0.0.0"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2#fd383fb8705e63400e7b78762185f3208ee355c2"
+dependencies = [
+ "blake3",
+ "heapless",
+ "zerocopy",
+]
+
+[[package]]
 name = "kore-hostlink-shmem"
 version = "0.0.0"
 source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
@@ -1756,7 +1766,7 @@ dependencies = [
  "kore-block",
  "kore-collections",
  "kore-driver",
- "kore-hostlink",
+ "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e)",
  "kore-nvme",
  "kore-ring",
  "kore-rt",
@@ -1776,7 +1786,7 @@ dependencies = [
  "heapless",
  "kore-abi",
  "kore-driver",
- "kore-hostlink",
+ "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e)",
  "kore-hostlink-shmem",
  "kore-rt",
  "kore-svc-device",
@@ -3153,7 +3163,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.52.0",
@@ -3499,7 +3509,7 @@ name = "vkore-hostlink-ab"
 version = "0.0.0"
 dependencies = [
  "blake3",
- "kore-hostlink",
+ "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2)",
  "kore-hostlink-shmem",
  "libc",
  "serde",
@@ -3595,7 +3605,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "httparse",
- "kore-hostlink",
+ "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2)",
  "kore-hostlink-shmem",
  "kore-workspace-sync",
  "memmap2",

@@ -3142,7 +3142,7 @@ mod tests {
         let length = kore_hostlink::FrontendResult {
             intent_id: next_intent_id,
             kind: FrontendResultKind::Completed,
-            text: "hello".into(),
+            text: "hello",
         }
         .encode(&mut inner)
         .unwrap();
@@ -3475,42 +3475,43 @@ mod tests {
             stream_parts: Vec::new(),
         });
 
-        let mut offers = Vec::new();
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [1; 16],
-            kind: kore_hostlink::BrokerOfferKind::Object,
-            permitted_ops: 1,
-            max_uses: 0,
-            label: "workspace/X",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [2; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "ls",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [3; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "find",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [4; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "stat",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [5; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "cat",
-        });
+        let mut offers = vec![
+            kore_hostlink::BrokerOffer {
+                reference: [1; 16],
+                kind: kore_hostlink::BrokerOfferKind::Object,
+                permitted_ops: 1,
+                max_uses: 0,
+                label: "workspace/X",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [2; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "ls",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [3; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "find",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [4; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "stat",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [5; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "cat",
+            },
+        ];
         for reference in 6..=15 {
             offers.push(kore_hostlink::BrokerOffer {
                 reference: [reference; 16],

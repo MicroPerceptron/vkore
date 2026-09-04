@@ -27,7 +27,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
 kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "fd383fb8705e63400e7b78762185f3208ee355c2" }
 kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
 kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
 kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }

@@ -402,6 +402,9 @@ fn fresh_grant_id(snapshot: [u8; 32]) -> [u8; 16] {
 }
 
 impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        self.inference.set_conversation_context(context)
+    }
     fn reset(&mut self) {
         self.inference.reset();
         self.workspace_route = None;
@@ -576,9 +579,20 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
                 // transaction retry succeeds after its staging blob has been
                 // retired, while a new transaction with a missing blob still
                 // fails closed during content validation.
+                // Guest counters restart with a new route. Scope durable
+                // replay identity to that authenticated route and standing
+                // grant, so a new prompt cannot collide with an older VM's
+                // completed or interrupted transaction. Wire receipts still
+                // echo the exact caller-supplied transaction id.
+                let mut identity = blake3::Hasher::new();
+                identity.update(b"vkore.workspace.transaction.v2\0");
+                identity.update(&route.0);
+                identity.update(&transaction.grant);
+                identity.update(&transaction.id);
+                let journal_transaction = *identity.finalize().as_bytes();
                 let outcome = self
                     .workspace
-                    .apply_transaction(transaction.id, &transaction.changes, &contents, grant, tick)
+                    .apply_transaction(journal_transaction, &transaction.changes, &contents, grant, tick)
                     .unwrap_or(TransactionOutcome::Refused);
                 let (status, snapshot, applied) = match outcome {
                     TransactionOutcome::Applied { snapshot } => (

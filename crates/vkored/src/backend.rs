@@ -247,6 +247,11 @@ pub enum BackendError {
 }
 
 pub trait InferenceBackend {
+    /// Host-owned conversation facts, never transferable capabilities. The
+    /// runtime replaces this bounded context at each serialized prompt boundary.
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        if context.is_empty() { Ok(()) } else { Err(BackendError::InvalidRole) }
+    }
     fn reset(&mut self);
     fn open(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError>;
     fn close(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError>;
@@ -289,6 +294,9 @@ pub trait InferenceBackend {
 }
 
 impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        (**self).set_conversation_context(context)
+    }
     fn reset(&mut self) {
         (**self).reset();
     }

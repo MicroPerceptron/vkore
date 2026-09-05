@@ -10,13 +10,13 @@ kore_root=${KORE_ROOT:-"$vkore_root/../kore-722-interactive-ingress"}
 state=${VKORE_STATE:-"${XDG_STATE_HOME:-$HOME/.local/state}/vkore-chat"}
 listen=${VKORE_LISTEN:-127.0.0.1:8787}
 project=${VKORE_PROJECT:-qwen9b-live-kore}
-make_command=${MAKE:-make}
+make_command=${VKORE_MAKE:-${MAKE:-$(command -v gmake || command -v make)}}
 qemu=${QEMU:-$(command -v qemu-system-x86_64 || true)}
 expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-cccf76da11fa397242c587817ec975dce529f40e}
 expected_iso=${VKORE_EXPECTED_ISO_SHA256:-b020d1effa66e7117194141f88a72a2ae831cd615f1977e1d6b34ac3a788e53c}
 check_only=0
 no_build=0
-require_real=0
+require_real=1
 release=0
 debug=0
 debug_prompts=()
@@ -42,7 +42,8 @@ of opening the UI. Repeat --prompt to test later chats against the same Kore VM.
 It timestamps every event and retains launcher, harness/llama.cpp, process,
 HostLink, QEMU serial, and raw UI-event logs under the diagnostics directory.
 
---require-real fails closed unless the selected project uses llama.cpp, points
+Live-only execution is mandatory (--require-real remains a compatibility flag).
+Startup fails closed unless the selected project uses llama.cpp, points
 at this exact verified Kore ISO, and names existing llama.cpp/model artifacts.
 It also refuses to reuse an already-running harness whose provenance cannot be
 attested by this launcher. --release builds and runs release vKore binaries.
@@ -78,9 +79,17 @@ health_url="http://$listen/api/v1/health"
 projects_url="http://$listen/api/v1/projects"
 
 timestamp_stream() {
-    while IFS= read -r line || test -n "$line"; do
-        printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" "$line"
-    done
+    python3 -u -c '
+import datetime
+import sys
+for line in sys.stdin:
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+    print(f"[{stamp}] {line.rstrip(chr(10))}", flush=True)
+'
+}
+
+utc_timestamp() {
+    python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))'
 }
 
 if test "$debug" = 1; then
@@ -111,7 +120,6 @@ require cargo
 require python3
 require sha256sum
 require qemu-img
-require setsid
 require "$make_command"
 test -x "$qemu" || { echo "QEMU executable not found: $qemu" >&2; exit 2; }
 test -f "$kore_root/Cargo.toml" || {
@@ -139,6 +147,13 @@ test "$actual_kore" = "$expected_kore" || {
     echo "The launcher will not rebuild or guess which ISO to use." >&2
     exit 2
 }
+if test -n "${VKORE_EXPECTED_KORE_DIFF_SHA256:-}"; then
+    actual_kore_diff=$(git -C "$kore_root" diff --binary HEAD -- | sha256sum | awk '{print $1}')
+    test "$actual_kore_diff" = "$VKORE_EXPECTED_KORE_DIFF_SHA256" || {
+        echo "Kore local build inputs differ from the validated source/artifact manifest" >&2
+        exit 2
+    }
+fi
 
 make_value() {
     local name=$1
@@ -189,6 +204,8 @@ inference = project.get("inference") or {}
 problems = []
 if inference.get("backend") != "llama_cpp":
     problems.append("inference.backend must be llama_cpp (deterministic is forbidden)")
+if project.get("archived", False):
+    problems.append("the selected project is archived")
 kore_image = inference.get("kore_image")
 if not kore_image or os.path.realpath(kore_image) != os.path.realpath(verified_iso):
     problems.append(f"inference.kore_image must be the verified image {verified_iso}")
@@ -270,13 +287,8 @@ if test "$release" = 1; then
 fi
 
 if test "$no_build" != 1; then
-    if test "$debug" = 1; then
-        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
-            -p vkored --bin vkore-harnessd --bin vkore
-    else
-        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
-            -p vkored --bin vkore-harnessd
-    fi
+    cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+        -p vkored --bin vkore-harnessd --bin vkore
 fi
 harness="$vkore_root/target/$profile_dir/vkore-harnessd"
 test -x "$harness" || {
@@ -331,9 +343,26 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     qemu-img create -f raw "$usb" 16M >/dev/null
     cp -- "$ovmf_vars" "$vars"
 
+    # Kore's NUMA memory objects and CPU assignments must agree with the
+    # project limits which the daemon applies to -m and -smp.
+    resource_arguments=()
+    if test -f "$state/projects/$project.json"; then
+        project_resources=$(python3 -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    resources = json.load(stream)["resources"]
+cpus, memory = resources["virtual_cpus"], resources["memory_mib"]
+if type(cpus) is not int or type(memory) is not int or cpus < 1 or memory < 1:
+    raise SystemExit("project CPU and memory limits must be positive integers")
+print(cpus, memory)
+' "$state/projects/$project.json")
+        read -r project_cpus project_memory <<<"$project_resources"
+        resource_arguments=("CPUS=$project_cpus" "MEM=$project_memory")
+    fi
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
+        "${resource_arguments[@]}" \
         NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \
         QEMU_X86_HOSTLINK= \
         --eval '.PHONY: _print_vkore_runtime' \
@@ -348,21 +377,24 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
         -serial "file:$serial_log"
     )
     command=("$harness" --listen "$listen" --state "$state" --qemu "$qemu")
+    if test "$require_real" = 1; then
+        command+=(--require-real)
+    fi
     for argument in "${qemu_array[@]}"; do
         command+=(--qemu-arg "$argument")
     done
     if test "$debug" = 1; then
         VKORE_HOSTLINK_TRACE=1 VKORE_LLAMA_TRACE=1 \
-            setsid "${command[@]}" > >(timestamp_stream >"$harness_log") 2>&1 &
+            python3 "$vkore_root/scripts/launch-session.py" "${command[@]}" > >(timestamp_stream >"$harness_log") 2>&1 &
     else
-        VKORE_HOSTLINK_TRACE=1 setsid "${command[@]}" >"$harness_log" 2>&1 &
+        VKORE_HOSTLINK_TRACE=1 python3 "$vkore_root/scripts/launch-session.py" "${command[@]}" >"$harness_log" 2>&1 &
     fi
     harness_pid=$!
 
     if test "$debug" = 1; then
         {
             echo "diagnostic_dir=$diagnostic_dir"
-            echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+            echo "started_utc=$(utc_timestamp)"
             echo "project=$project"
             echo "listen=$listen"
             echo "kore_commit=$actual_kore"
@@ -372,7 +404,7 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
         } >"$runtime/manifest.txt"
         (
             while kill -0 "$harness_pid" 2>/dev/null; do
-                printf '[%s]\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+                printf '[%s]\n' "$(utc_timestamp)"
                 ps -eo pid,ppid,pcpu,pmem,rss,etime,stat,comm | \
                     grep -E 'PID|[v]kore-harnessd|[q]emu-system|[l]lama-server'
                 sleep 1

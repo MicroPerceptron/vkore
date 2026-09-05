@@ -21,6 +21,38 @@ worktree at the pinned revision. `make artifacts` builds the ISO in that
 worktree and verifies its digest. Large ISO, llama.cpp, and GGUF artifacts stay
 outside Git; `Makefile.local` records only machine-local paths and identifiers.
 
+On macOS, install QEMU (including its EDK2 firmware), GNU Make (`gmake`),
+Python 3, and the pinned Rust toolchain. The launcher uses Python's POSIX
+session API to own and clean up the real harness, QEMU, and llama.cpp process
+group; a separate `setsid` utility is not required. `VKORE_MAKE` selects GNU
+Make for the Kore recipes (`gmake` is preferred when installed).
+
+The selected project must be active and explicitly name an executable
+llama-server, a GGUF model, and the pinned Kore ISO. vKore starts llama-server
+itself. `--require-real` is also passed to the daemon, which refuses simulated
+guests and deterministic project inference. On Apple Silicon, the x86 Kore
+guest executes through QEMU TCG; model inference can use llama.cpp's Metal
+backend. TCG executes the actual guest kernel and services.
+
+The upstream ISO digest identifies one exact build, not every build from the
+same source commit. Cross-host compiler metadata and ISO timestamps can change
+the bytes. For an independently built and validated image, `Makefile.local`
+can select a separate `VKORE_REAL_STACK_LOCK` containing its source commit,
+ISO SHA-256, and relative image path. Keep the upstream lock unchanged and
+record the build and production-boot evidence beside the local lock. A local
+lock still requires an exact source revision and image digest at every launch;
+it does not disable verification or enable a fallback runtime.
+If the native build regenerates tracked guest binaries and boot measurements,
+also pin `VKORE_EXPECTED_KORE_DIFF_SHA256` to the SHA-256 of
+`git diff --binary HEAD --` in that Kore worktree. This binds the recorded
+local build to its regenerated artifacts and rejects later tracked changes.
+
+`scripts/reproducible-iso.py` can be selected through `VKORE_XORRISO` for local
+builds. It uses the pinned source commit's timestamp and identity for ISO
+metadata. It does not alter kernel/service payloads, establish their trust, or
+update any digest automatically. Build and validate the production guest
+before recording a new local artifact pin.
+
 ## One-command launch
 
 On Windows with WSL, run `.\vkore-axiom.cmd` from the repository root. From
@@ -52,17 +84,16 @@ The printed diagnostics directory contains `launcher.log`, `harness.log`, raw
 `manifest.txt`. All artifacts are retained after the launcher stops its
 harness, llama.cpp, QEMU, and helper processes.
 
-## Start with the deterministic backend
+## Start the live app
 
 From the vKore repository:
 
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state .vkore-state
+```sh
+make dev-check
+make dev-real
 ```
 
-Then launch
-`cargo run --release -p vkore-ui -- --server 127.0.0.1:8787 --project PROJECT_ID`.
+The launcher starts the native UI together with the real harness.
 The named persisted project opens directly and its sandbox starts without the
 project modal. If the daemon has exactly one active project, `--project` may be
 omitted and that project opens automatically. There is no login, token, or
@@ -89,25 +120,14 @@ Workspace byte-count and file-count quotas are not configurable or enforced.
 Legacy `max_write_bytes` and `max_write_files` keys are removed when an older
 project is loaded; a legacy zero never disables writes.
 
-The deterministic backend is explicitly labeled as a test oracle. It drives the
-broker/agent/tool protocol and is useful for UI, policy, and
-capability-flow tests, but it is not a substitute for a booted Kore VM.
+The production harness requires QEMU and live llama.cpp inference. It has no
+test-model choice, simulated-guest mode, or automatic fallback. Older test-model
+defaults migrate to an unconfigured live model; users must configure real
+artifacts before starting. Existing live model settings are preserved.
+Deterministic protocol fixtures remain available to automated tests only.
 
-## Real inference without a VM
-
-Start the harness with caller-selected artifacts:
-
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state .vkore-state `
-  --llama-server C:\path\to\llama-server.exe `
-  --llama-model C:\path\to\model.gguf
-```
-
-Use repeated `--llama-arg` values for backend-specific options. For example,
-`--llama-arg --device --llama-arg none` forces CPU inference when an installed
-accelerator backend is unavailable. The same values can be recorded in a
-project-specific runtime configuration.
+Backend-specific llama.cpp arguments belong in the project's inference
+configuration (`extra_args`), not in a separate simulated-guest launcher mode.
 
 The UI records the Kore image, llama.cpp runtime, and model paths, and refuses
 missing files during preflight. It never downloads a selected model implicitly.
@@ -144,12 +164,29 @@ and release-mode timing method is recorded in
 
 ## Real Kore VM
 
+The configured project directory is the host filesystem boundary. New projects
+default to automatic writeback. Settings → Workspace → Apply file changes
+automatically changes this per project, effective after closing and reopening
+the project. Turning it off currently blocks host writes; a complete interactive
+review/apply workflow is not implemented. Existing saved project preferences
+are preserved.
+
+In the local Kore project-authority implementation, the live broker selects
+executables, not a separate filesystem object/view offer. Kore bundles the
+selected commands' minimum filesystem rights into a revocable grant of the
+imported project root: read for `cat`/`ls`, read + namespace mutation for `touch`,
+and read + write for `write`. This does not grant access to other host paths or
+administrative sharing rights. Task-private Kore homes remain outside the
+imported project. The explicit object/view offers used by boot witnesses are
+test-only and are not enabled for frontend prompts.
+
 Start `vkore-harnessd` with `--qemu PATH` and the repeated base QEMU arguments
 needed by the selected Kore image. In this mode the project supplies the Kore
 image, workspace, backend, llama.cpp runtime, model, and resource limits. vKore
 adds loopback HostLink devices and starts one supervised VM for the open
 project. The trusted broker, its revocation face, HostLink epoch, and inference
-backend remain resident between prompts. Every prompt gets a fresh agent task,
+backend remain resident between prompts when the guest supports the resident
+frontend idle protocol. Every prompt gets a fresh agent task,
 route generation, model context, budget, mappings, and capability grants. Kore
 revokes and reclaims that prompt authority before admitting the next intent, so
 conversation continuity does not silently preserve an earlier prompt's file or
@@ -158,7 +195,9 @@ tool access.
 A submitted prompt is not reported as successful until the resident broker
 claims that exact intent, founds a scoped agent, the agent claims
 the same intent on its generation-bound route, and its terminal result returns
-to the harness. After the result, the resident broker closes the route, stops
+to the harness. The harness persists and exposes exactly one final response
+before acknowledging that result to the guest. Receiving the result alone is
+not permission to tear down. After this acknowledgement, the resident broker closes the route, stops
 the agent, and revokes its grants while retaining only the project-level
 revocation pivot needed to create the next isolated agent. vKore continues
 driving the VM and does not emit terminal completion until Kore's agent-teardown
@@ -166,8 +205,27 @@ observation arrives and the resident broker parks its next-intent poll. These
 two barriers let vKore freeze QEMU between prompts before the guest-side poll
 deadline advances. The next intent is queued before vKore resumes QEMU, so an
 idle UI cannot strand cleanup or leave a stale cancellation between chats.
+For single-prompt guests such as PR909, if the worker is confirmed reclaimed
+but no next-intent poll arrives within two seconds, vKore retires that VM and
+boots a fresh real guest for the next prompt; inference remains resident.
+This fallback never invents an idle or reclamation observation.
+If a worker exits before answering, only its claiming broker may report its
+failure through the result channel. That error is published before cleanup
+and appears in the Working disclosure. Cancellation, transport failure, and
+timeout report a host error before forced shutdown; a disconnected client or
+failed transcript write cannot guarantee delivery.
+After a failed response, missing guest reclamation confirmation is reported
+as a diagnostic and the real VM is forcibly shut down after five seconds.
+It is not reported as a successful guest teardown.
 Capability, tool-call, and tool-result observations stream into the existing UI
-while the prompt runs.
+while the prompt runs. Authority updates append to one block per prompt;
+later cleanup diagnostics do not generate a second public final response.
+
+Structured broker and agent replies are validated before they reach Kore. An
+invalid candidate is recorded in the inference audit and gets at most one
+correction attempt from the configured model, sharing the original token and
+output-byte budget. Only an accepted candidate is forwarded; a second rejection
+fails the turn. This does not rewrite arguments or expand capability grants.
 
 ## Settings, defaults, and activity
 
@@ -207,9 +265,8 @@ establishes only a project ceiling.
 On sandbox start, the UI submits the exact tool request through `vkore-policy`.
 The approval dialog is an authenticated user action; model or transcript text
 cannot create it. Candidate authority and committed grants are rendered in
-separate panels. Test mode uses the deterministic resident-broker adapter. A
-production Kore connection must replace it with the live HostLink authority
-transaction.
+separate panels. Production uses the live HostLink authority transaction;
+deterministic adapters are restricted to automated tests.
 
 Policy keys and the authenticated audit chain are stored in the application
 state area, never in portable project JSON. Project JSON contains no OAuth token,

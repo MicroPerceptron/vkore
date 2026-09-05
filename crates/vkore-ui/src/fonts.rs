@@ -102,6 +102,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shaping_selects_the_registered_faces() {
+        let faces = register().unwrap();
+        let mut system = iced_graphics::text::font_system().write().unwrap();
+        for (family, weight, resource) in [
+            (theme::DISPLAY_FAMILY, 600, faces.display),
+            (theme::BODY_FAMILY, 400, faces.body),
+            (theme::MONO_FAMILY, 400, faces.mono),
+            (theme::MONO_FAMILY, 500, faces.mono_label),
+        ] {
+            let selected = system.raw().db().query(&cosmic_text::fontdb::Query {
+                families: &[cosmic_text::fontdb::Family::Name(family)],
+                weight: cosmic_text::fontdb::Weight(weight),
+                ..Default::default()
+            });
+            let registered = axui_iced::font_face(resource);
+            assert_eq!(selected, registered, "{family} {weight}");
+            assert_eq!(
+                system.raw().db().face(selected.unwrap()).unwrap().weight.0,
+                weight
+            );
+            let mut buffer =
+                cosmic_text::Buffer::new(system.raw(), cosmic_text::Metrics::new(14.0, 20.0));
+            buffer.set_text(
+                "SESSION",
+                &cosmic_text::Attrs::new()
+                    .family(cosmic_text::Family::Name(family))
+                    .weight(cosmic_text::Weight(weight)),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(system.raw(), false);
+            let mut glyph_count = 0;
+            for run in buffer.layout_runs() {
+                for glyph in run.glyphs {
+                    assert_eq!(Some(glyph.font_id), registered, "shaped {family} {weight}");
+                    glyph_count += 1;
+                }
+            }
+            assert_eq!(glyph_count, 7, "{family} {weight} must shape SESSION");
+        }
+    }
+
+    #[test]
     fn registration_is_idempotent_and_gives_each_weight_its_own_identity() {
         let first = register().expect("faces register");
         let second = register().expect("faces register twice");

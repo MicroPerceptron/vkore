@@ -6,7 +6,7 @@
 
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::mpsc::{Receiver, TryRecvError, channel},
 };
@@ -16,9 +16,9 @@ use cap_std::{
     fs::{Dir, File, OpenOptions},
 };
 use kore_workspace_sync::{
-    CanonicalPath, ChangeKind, ChangeSet, DeltaOp, EntryKind, Manifest, Policy, RangeProof,
-    RangeRequestV1, SourceCorrelation, StandingGrant, TopologyDelta, TransactionOutcome,
-    bounds::MAX_TRANSACTION_RESULTS, build_range_proof, range_root,
+    CanonicalPath, ChangeKind, ChangeSet, ChangeSetBuilder, DeltaOp, EntryKind, Manifest, Policy,
+    RangeProof, RangeRequestV1, SourceCorrelation, StandingGrant, TopologyDelta,
+    TransactionOutcome, bounds::MAX_TRANSACTION_RESULTS, build_range_proof, range_root,
 };
 
 use crate::{
@@ -76,70 +76,64 @@ impl TransactionJournal {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(Error::InvalidArtifact);
         }
-        let maximum = MAX_TRANSACTION_RESULTS
-            .checked_mul(2)
-            .and_then(|records| records.checked_mul(JOURNAL_RECORD_BYTES))
-            .ok_or(Error::Bounds)?;
-        if metadata.len() > maximum as u64 {
-            return Err(Error::Bounds);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.read_to_end(&mut bytes)?;
-        if bytes.len() % JOURNAL_RECORD_BYTES != 0 {
+        if metadata.len() % JOURNAL_RECORD_BYTES as u64 != 0 {
             return Err(Error::InvalidArtifact);
         }
+        // The guest's bounded result cache is not a host lifetime quota.
+        // Validate the append-only history with fixed-size reads and retain
+        // only recent identities; older retries are resolved from disk.
+        let mut recent = Vec::with_capacity(MAX_TRANSACTION_RESULTS);
+        for _ in 0..metadata.len() / JOURNAL_RECORD_BYTES as u64 {
+            let mut bytes = [0; JOURNAL_RECORD_BYTES];
+            file.read_exact(&mut bytes)?;
+            let (transaction, _, _) = decode_journal_record(&bytes)?;
+            if let Some(index) = recent.iter().position(|id| *id == transaction) {
+                recent.remove(index);
+            } else if recent.len() == MAX_TRANSACTION_RESULTS {
+                recent.remove(0);
+            }
+            recent.push(transaction);
+        }
+        let mut journal = Self { file };
         let mut records = Vec::with_capacity(MAX_TRANSACTION_RESULTS);
-        let mut prepared = BTreeMap::<[u8; 32], ([u8; 32], bool)>::new();
-        for record in bytes.as_chunks::<JOURNAL_RECORD_BYTES>().0 {
-            let (transaction, changes, outcome) = decode_journal_record(record)?;
+        for transaction in recent {
+            records.push(journal.lookup(transaction)?.ok_or(Error::InvalidArtifact)?);
+        }
+        Ok((journal, records))
+    }
+
+    fn lookup(&mut self, transaction: [u8; 32]) -> Result<Option<ApplyRecord>, Error> {
+        let length = self.file.metadata()?.len();
+        if length % JOURNAL_RECORD_BYTES as u64 != 0 {
+            return Err(Error::InvalidArtifact);
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut found: Option<([u8; 32], Option<TransactionOutcome>)> = None;
+        for _ in 0..length / JOURNAL_RECORD_BYTES as u64 {
+            let mut bytes = [0; JOURNAL_RECORD_BYTES];
+            self.file.read_exact(&mut bytes)?;
+            let (id, changes, outcome) = decode_journal_record(&bytes)?;
+            if id != transaction {
+                continue;
+            }
             match outcome {
-                JournalOutcome::Prepared => {
-                    if prepared.insert(transaction, (changes, false)).is_some()
-                        || records
-                            .iter()
-                            .any(|known: &ApplyRecord| known.transaction == transaction)
-                    {
-                        return Err(Error::InvalidArtifact);
-                    }
+                JournalOutcome::Prepared if found.is_none() => found = Some((changes, None)),
+                JournalOutcome::Terminal(outcome)
+                    if found.is_none_or(|(expected, terminal)| {
+                        expected == changes && terminal.is_none()
+                    }) =>
+                {
+                    found = Some((changes, Some(outcome)));
                 }
-                JournalOutcome::Terminal(outcome) => {
-                    if let Some((prepared_changes, terminal)) = prepared.get_mut(&transaction) {
-                        if *prepared_changes != changes || *terminal {
-                            return Err(Error::InvalidArtifact);
-                        }
-                        *terminal = true;
-                    } else if records
-                        .iter()
-                        .any(|known: &ApplyRecord| known.transaction == transaction)
-                    {
-                        return Err(Error::InvalidArtifact);
-                    }
-                    if records.len() == MAX_TRANSACTION_RESULTS {
-                        return Err(Error::Bounds);
-                    }
-                    records.push(ApplyRecord {
-                        transaction,
-                        changes,
-                        outcome,
-                    });
-                }
+                _ => return Err(Error::InvalidArtifact),
             }
         }
-        for (transaction, (changes, terminal)) in prepared {
-            if !terminal {
-                if records.len() == MAX_TRANSACTION_RESULTS {
-                    return Err(Error::Bounds);
-                }
-                // A crash after the prepare sync may have applied any prefix.
-                // Never infer success from the filesystem after restart.
-                records.push(ApplyRecord {
-                    transaction,
-                    changes,
-                    outcome: TransactionOutcome::Partial { applied: 0 },
-                });
-            }
-        }
-        Ok((Self { file }, records))
+        Ok(found.map(|(changes, outcome)| ApplyRecord {
+            transaction,
+            changes,
+            // An interrupted prepare never becomes an inferred success.
+            outcome: outcome.unwrap_or(TransactionOutcome::Partial { applied: 0 }),
+        }))
     }
 
     fn append(
@@ -387,6 +381,18 @@ impl LiveRoot {
                 Err(Error::ApprovalMismatch)
             };
         }
+        if let Some(journal) = self.journal.as_mut() {
+            if let Some(record) = journal.lookup(transaction)? {
+                return if record.changes == changes.id {
+                    Ok(record.outcome)
+                } else {
+                    Err(Error::ApprovalMismatch)
+                };
+            }
+        } else if self.results.len() == MAX_TRANSACTION_RESULTS {
+            // Without durable history, refuse BEFORE the first host effect.
+            return Err(Error::Bounds);
+        }
         if grant.authorize(changes, now).is_err() {
             return self.remember(transaction, changes.id, TransactionOutcome::Refused);
         }
@@ -418,6 +424,30 @@ impl LiveRoot {
         {
             return self.remember(transaction, changes.id, TransactionOutcome::Conflict);
         }
+
+        // A normal write can finish with Resize(current_length), or replace
+        // bytes with identical bytes. Those are authorized, preconditioned
+        // operations, but they produce no content diff. Compare the observed
+        // tree against only their effective changes, while journaling and
+        // acknowledging the original exact transaction. Otherwise a no-op
+        // is incorrectly reported as a partial write after reaching the host.
+        let mut effective = ChangeSetBuilder::new(changes.base);
+        for change in changes.changes() {
+            let unchanged = change.kind == ChangeKind::ModifyFile
+                && change.expected == change.replacement
+                && self.manifest.entries().iter().any(|entry| {
+                    entry.path == change.path
+                        && entry.kind == EntryKind::File
+                        && entry.content_len == change.replacement_len
+                        && entry.flags.executable() == change.executable
+                });
+            if !unchanged {
+                effective
+                    .push(change.clone())
+                    .map_err(|_| Error::InvalidArtifact)?;
+            }
+        }
+        let effective = effective.finish().map_err(|_| Error::InvalidArtifact)?;
 
         if let Some(journal) = self.journal.as_mut() {
             journal.append(transaction, changes.id, JournalOutcome::Prepared)?;
@@ -494,7 +524,7 @@ impl LiveRoot {
 
         let observed = Artifact::scan_cap(&self.root, changes.base)?;
         let observed_plan = ExportPlan::between(&base, &observed)?;
-        if observed_plan.id() != changes.id {
+        if observed_plan.id() != effective.id {
             return self.remember(
                 transaction,
                 changes.id,
@@ -520,11 +550,14 @@ impl LiveRoot {
         changes: [u8; 32],
         outcome: TransactionOutcome,
     ) -> Result<TransactionOutcome, Error> {
-        if self.results.len() == MAX_TRANSACTION_RESULTS {
+        if self.journal.is_none() && self.results.len() == MAX_TRANSACTION_RESULTS {
             return Err(Error::Bounds);
         }
         if let Some(journal) = self.journal.as_mut() {
             journal.append(transaction, changes, JournalOutcome::Terminal(outcome))?;
+        }
+        if self.results.len() == MAX_TRANSACTION_RESULTS {
+            self.results.remove(0);
         }
         self.results.push(ApplyRecord {
             transaction,
@@ -605,6 +638,114 @@ fn source_map(manifest: &Manifest) -> Result<BTreeMap<SourceCorrelation, Canonic
 mod tests {
     use super::*;
     use kore_workspace_sync::{Change, ChangeSetBuilder, GrantOperations, RANGE_REQUEST_MAGIC};
+
+    #[test]
+    fn durable_history_outlives_the_cache_and_replays_old_results_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a"), b"initial").unwrap();
+        let mut live = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        let mut grant = StandingGrant::new(
+            [1; 16],
+            live.manifest().snapshot_id(),
+            GrantOperations::ALL,
+            4,
+            4096,
+            0,
+            &[],
+        )
+        .unwrap();
+        let mut first = None;
+        for nonce in 1..=32u8 {
+            let content = format!("value-{nonce}").into_bytes();
+            let entry = live.manifest().entries()[0].clone();
+            let mut builder = ChangeSetBuilder::new(live.manifest().snapshot_id());
+            builder
+                .push(Change {
+                    kind: ChangeKind::ModifyFile,
+                    path: entry.path.clone(),
+                    target: None,
+                    expected: entry.digest,
+                    replacement: *blake3::hash(&content).as_bytes(),
+                    replacement_len: content.len() as u32,
+                    executable: false,
+                })
+                .unwrap();
+            let changes = builder.finish().unwrap();
+            let contents = BTreeMap::from([(entry.path, content)]);
+            let outcome = live
+                .apply_transaction([nonce; 32], &changes, &contents, &mut grant, 1)
+                .unwrap();
+            assert!(matches!(outcome, TransactionOutcome::Applied { .. }));
+            assert!(live.results.len() <= MAX_TRANSACTION_RESULTS);
+            if first.is_none() {
+                first = Some((changes, contents, outcome));
+            }
+        }
+        let (changes, contents, expected) = first.unwrap();
+        assert_eq!(
+            live.apply_transaction([1; 32], &changes, &contents, &mut grant, 1)
+                .unwrap(),
+            expected
+        );
+        drop(live);
+        let mut reopened = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        assert!(reopened.results.len() <= MAX_TRANSACTION_RESULTS);
+        assert_eq!(
+            reopened
+                .apply_transaction([1; 32], &changes, &contents, &mut grant, 1)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(std::fs::read(root.path().join("a")).unwrap(), b"value-32");
+    }
+
+    #[test]
+    fn identical_replacement_is_applied_and_does_not_poison_the_next_write() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a"), b"same").unwrap();
+        let mut live = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        let mut grant = StandingGrant::new(
+            [1; 16],
+            live.manifest().snapshot_id(),
+            GrantOperations::ALL,
+            4,
+            4096,
+            0,
+            &[],
+        )
+        .unwrap();
+        for (nonce, replacement) in [
+            (1, b"same".as_slice()),
+            (2, b"same".as_slice()),
+            (3, b"changed".as_slice()),
+        ] {
+            let entry = live.manifest().entries()[0].clone();
+            let mut builder = ChangeSetBuilder::new(live.manifest().snapshot_id());
+            builder
+                .push(Change {
+                    kind: ChangeKind::ModifyFile,
+                    path: entry.path.clone(),
+                    target: None,
+                    expected: entry.digest,
+                    replacement: *blake3::hash(replacement).as_bytes(),
+                    replacement_len: replacement.len() as u32,
+                    executable: false,
+                })
+                .unwrap();
+            let changes = builder.finish().unwrap();
+            let contents = BTreeMap::from([(entry.path, replacement.to_vec())]);
+            let outcome = live
+                .apply_transaction([nonce; 32], &changes, &contents, &mut grant, 1)
+                .unwrap();
+            assert!(
+                matches!(outcome, TransactionOutcome::Applied { .. }),
+                "{outcome:?}"
+            );
+            assert_eq!(std::fs::read(root.path().join("a")).unwrap(), replacement);
+        }
+    }
     use zerocopy::byteorder::little_endian::{U16, U32};
 
     fn request(root: &LiveRoot, path: &str, offset: u32, length: u16) -> RangeRequestV1 {

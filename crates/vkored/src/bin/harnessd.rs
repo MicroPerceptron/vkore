@@ -1,7 +1,5 @@
 use hostlinkd::{
-    BackendHarness, BackendLimits, DeterministicBackend, DeterministicGuest, HarnessHttpServer,
-    HarnessService, KoreVmRuntime, KoreVmRuntimeConfig, LlamaServerBackend, LlamaServerConfig,
-    TaskRuntime,
+    HarnessHttpServer, HarnessService, KoreVmRuntime, KoreVmRuntimeConfig, TaskRuntime,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,10 +15,6 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut listen: SocketAddr = "127.0.0.1:8787".parse().unwrap();
     let mut state = PathBuf::from(".vkore-state");
-    let mut llama_server = None;
-    let mut llama_model = None;
-    let mut llama_port = 8_189u16;
-    let mut llama_args = Vec::new();
     let mut qemu = None;
     let mut qemu_args = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -28,65 +22,26 @@ fn run() -> Result<(), String> {
         match arg.as_str() {
             "--listen" => listen = args.next().and_then(|value| value.parse().ok()).ok_or("invalid --listen")?,
             "--state" => state = PathBuf::from(args.next().ok_or("missing --state")?),
-            "--llama-server" => llama_server = Some(PathBuf::from(args.next().ok_or("missing --llama-server")?)),
-            "--llama-model" => llama_model = Some(PathBuf::from(args.next().ok_or("missing --llama-model")?)),
-            "--llama-port" => llama_port = args.next().and_then(|value| value.parse().ok()).ok_or("invalid --llama-port")?,
-            "--llama-arg" => llama_args.push(args.next().ok_or("missing --llama-arg")?.into()),
+            "--llama-server" | "--llama-model" | "--llama-port" | "--llama-arg" => return Err("configure llama.cpp in the selected project; the production harness requires real Kore via --qemu".into()),
             "--qemu" => qemu = Some(PathBuf::from(args.next().ok_or("missing --qemu")?)),
+            "--require-real" => {}, // Compatibility: real execution is now unconditional.
             "--qemu-arg" => qemu_args.push(args.next().ok_or("missing --qemu-arg")?.into()),
-            _ => return Err("usage: vkore-harnessd [--listen 127.0.0.1:8787] [--state PATH] [--qemu PATH [--qemu-arg ARG]...] [--llama-server PATH --llama-model PATH [--llama-port N] [--llama-arg ARG]...]".into()),
+            _ => return Err("usage: vkore-harnessd --qemu PATH [--listen 127.0.0.1:8787] [--state PATH] [--qemu-arg ARG]...".into()),
         }
     }
-    if let Some(qemu_executable) = qemu {
-        if llama_server.is_some() || llama_model.is_some() || !llama_args.is_empty() {
-            return Err("real Kore mode reads llama.cpp settings from the selected project".into());
-        }
-        let runtime = KoreVmRuntime::new(KoreVmRuntimeConfig {
-            qemu_executable,
-            qemu_arguments: qemu_args,
-            project_root: state.join("projects"),
-        })?;
-        return run_server(listen, state, runtime, "real Kore VM over HostLink");
-    }
-    match (llama_server, llama_model) {
-        (None, None) => run_server(
-            listen,
-            state,
-            BackendHarness::new(DeterministicBackend::new(2), DeterministicGuest::new()),
-            "deterministic Kore security oracle",
-        ),
-        (Some(executable), Some(model)) => {
-            let limits = BackendLimits {
-                sequences: 3,
-                brokers: 1,
-                agents: 2,
-                max_output_tokens: 512,
-                ..BackendLimits::default()
-            };
-            let backend = LlamaServerBackend::start(LlamaServerConfig {
-                executable,
-                executable_args: llama_args,
-                model,
-                port: llama_port,
-                total_context_tokens: 32_768,
-                threads: std::thread::available_parallelism()
-                    .map_or(1, usize::from)
-                    .min(u16::MAX as usize) as u16,
-                startup_timeout: Duration::from_secs(600),
-                io_timeout: Duration::from_millis(25),
-                limits,
-                trace: false,
-            })
-            .map_err(|error| format!("llama-server startup failed: {error:?}"))?;
-            run_server(
-                listen,
-                state,
-                BackendHarness::new(backend, DeterministicGuest::new()),
-                "caller-supplied llama.cpp",
-            )
-        }
-        _ => Err("--llama-server and --llama-model must be supplied together".into()),
-    }
+    let qemu_executable = qemu.ok_or("--qemu is required; simulated guests are forbidden")?;
+    let runtime = KoreVmRuntime::new(KoreVmRuntimeConfig {
+        qemu_executable,
+        qemu_arguments: qemu_args,
+        project_root: state.join("projects"),
+        require_real: true,
+    })?;
+    run_server(
+        listen,
+        state,
+        runtime,
+        "real Kore VM over HostLink + live llama.cpp",
+    )
 }
 
 fn run_server(

@@ -4,3 +4,10 @@ KORE_ROOT := /home/colin/src/kore-issue-27
 VKORE_STATE := /home/colin/.local/state/vkore-issue27-test
 VKORE_PROJECT := qwen9b-issue27
 VKORE_LISTEN := 127.0.0.1:8787
+
+# macOS: select Homebrew GNU Make if it is not already on PATH.
+# VKORE_MAKE := /opt/homebrew/bin/gmake
+# A separately validated local image may use its own exact provenance lock.
+# VKORE_REAL_STACK_LOCK := /absolute/path/to/validated-real-stack.lock.mk
+# Reproducible packaging for a local build (does not update the lock).
+# VKORE_XORRISO := python3 /absolute/path/to/vkore/scripts/reproducible-iso.py

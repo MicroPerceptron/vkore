@@ -27,17 +27,17 @@ agent, and tool activity separate from validated assistant output._
 - **Kore guest bridge.** A supervised QEMU guest receives prompt-scoped intent
   through HostLink. vKore waits for guest-side agent teardown before completing
   a prompt and retires its inference state when the route closes.
-- **Local inference.** One caller-supplied llama.cpp server can continuously
-  batch bounded broker and worker slots. A deterministic backend exercises the
-  protocol without downloading a model or starting a VM.
+- **Live local inference.** One caller-supplied llama.cpp server continuously
+  batches bounded broker and worker slots. Production requires real model
+  artifacts and a real Kore guest; missing configuration fails explicitly.
 - **Scoped workspaces.** Host directories are opened as capabilities, imported
   into Kore, and optionally written back through exact, bounded change sets.
 - **Product security services.** The workspace contains authenticated approval
   and revocation policy, capability-scoped host/guest/split add-ons, signed
   content-addressed package management, rollback, and audit records.
 
-The repository is under active development. The deterministic backend is a
-security and UI test oracle; it is not a substitute for a booted Kore guest.
+The repository is under active development. Deterministic protocol fixtures
+exist only for automated tests, not as an app model or runtime fallback.
 
 ## Runtime shape
 

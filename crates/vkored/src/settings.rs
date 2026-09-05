@@ -42,7 +42,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
-            default_inference: deterministic_inference(),
+            default_inference: unconfigured_live_inference(),
             body_font: BodyFont::DesignDefault,
             show_working: true,
             working_expanded_default: false,
@@ -353,13 +353,13 @@ fn model_candidates(
     settings: &AppSettings,
     projects: &ProjectStore,
 ) -> Vec<(InferenceConfig, ModelOption)> {
-    let mut candidates = vec![
-        deterministic_inference(),
-        settings.default_inference.clone(),
-    ];
+    let mut candidates = vec![settings.default_inference.clone()];
     candidates.extend(projects.list().into_iter().map(|project| project.inference));
     let mut unique = BTreeMap::new();
     for inference in candidates {
+        if inference.backend != RuntimeBackend::LlamaCpp {
+            continue;
+        }
         unique.entry(model_id(&inference)).or_insert(inference);
     }
     unique
@@ -376,12 +376,12 @@ fn model_option(inference: &InferenceConfig) -> ModelOption {
     match inference.backend {
         RuntimeBackend::Deterministic => ModelOption {
             id: model_id(inference),
-            display_name: "Deterministic security oracle".into(),
+            display_name: "Legacy test backend (disabled)".into(),
             backend: "deterministic".into(),
             provider: "vKore".into(),
             path: None,
-            status: "installed",
-            detail: "Built-in protocol and security test model".into(),
+            status: "unavailable",
+            detail: "Live llama.cpp inference is required".into(),
         },
         RuntimeBackend::LlamaCpp => {
             let path = inference.model.clone();
@@ -429,7 +429,7 @@ pub fn model_id(inference: &InferenceConfig) -> String {
 
 fn model_display_name(inference: &InferenceConfig) -> String {
     match inference.backend {
-        RuntimeBackend::Deterministic => "Deterministic security oracle".into(),
+        RuntimeBackend::Deterministic => "Legacy test backend (disabled)".into(),
         RuntimeBackend::LlamaCpp => inference
             .model
             .as_deref()
@@ -442,7 +442,7 @@ fn model_display_name(inference: &InferenceConfig) -> String {
 
 fn inference_available(inference: &InferenceConfig) -> bool {
     match inference.backend {
-        RuntimeBackend::Deterministic => true,
+        RuntimeBackend::Deterministic => false,
         RuntimeBackend::LlamaCpp => {
             inference
                 .llama_server
@@ -455,14 +455,14 @@ fn inference_available(inference: &InferenceConfig) -> bool {
                 && inference
                     .kore_image
                     .as_deref()
-                    .is_none_or(|path| path.is_file())
+                    .is_some_and(|path| path.is_file())
         }
     }
 }
 
-fn deterministic_inference() -> InferenceConfig {
+fn unconfigured_live_inference() -> InferenceConfig {
     InferenceConfig {
-        backend: RuntimeBackend::Deterministic,
+        backend: RuntimeBackend::LlamaCpp,
         kore_image: None,
         llama_server: None,
         model: None,
@@ -478,15 +478,21 @@ fn deterministic_inference() -> InferenceConfig {
 
 fn migrate(value: Value) -> (AppSettings, bool) {
     if value["schema_version"].as_u64() == Some(u64::from(SETTINGS_SCHEMA_VERSION))
-        && let Ok(settings) = serde_json::from_value::<AppSettings>(value.clone())
+        && let Ok(mut settings) = serde_json::from_value::<AppSettings>(value.clone())
     {
+        if settings.default_inference.backend != RuntimeBackend::LlamaCpp {
+            settings.default_inference = unconfigured_live_inference();
+            return (settings, true);
+        }
         return (settings, false);
     }
     let mut settings = AppSettings::default();
     if let Ok(inference) =
         serde_json::from_value::<InferenceConfig>(value["default_inference"].clone())
     {
-        settings.default_inference = inference;
+        if inference.backend == RuntimeBackend::LlamaCpp {
+            settings.default_inference = inference;
+        }
     }
     if let Some(font) = value["body_font"]
         .as_str()
@@ -751,6 +757,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_test_default_is_disabled_without_losing_preferences() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("settings.json");
+        let mut old = AppSettings::default();
+        old.default_inference.backend = RuntimeBackend::Deterministic;
+        old.body_font = BodyFont::Archivo;
+        old.show_working = false;
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let store = SettingsStore::open(&path).unwrap();
+        let projects = ProjectStore::open(temporary.path().join("projects")).unwrap();
+        let migrated = store.get().unwrap();
+        assert_eq!(migrated.default_inference.backend, RuntimeBackend::LlamaCpp);
+        assert_eq!(migrated.body_font, BodyFont::Archivo);
+        assert!(!migrated.show_working);
+        assert_eq!(
+            store.default_inference(&projects),
+            Err(SettingsError::UnavailableModel)
+        );
+        let view = store.view(&projects).unwrap();
+        assert!(
+            view["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|model| model["backend"] == "llama_cpp" && model["status"] == "unavailable")
+        );
+        assert_eq!(
+            store.update(&json!({"default_model_id":"deterministic"}), &projects),
+            Err(SettingsError::UnavailableModel)
+        );
+        assert_eq!(SettingsStore::open(&path).unwrap().get().unwrap(), migrated);
+    }
+
+    #[test]
     fn application_default_applies_only_to_projects_created_after_the_change() {
         let temporary = tempfile::tempdir().unwrap();
         let projects = ProjectStore::open(temporary.path().join("projects")).unwrap();
@@ -760,7 +800,8 @@ mod tests {
         for workspace in [&existing_workspace, &catalog_workspace, &new_workspace] {
             fs::create_dir(workspace).unwrap();
         }
-        let original = deterministic_inference();
+        let mut original = unconfigured_live_inference();
+        original.backend = RuntimeBackend::Deterministic;
         projects
             .save(project_config(
                 "existing",
@@ -774,8 +815,10 @@ mod tests {
         let model = temporary.path().join("model.gguf");
         fs::write(&runtime, b"runtime").unwrap();
         fs::write(&model, b"model").unwrap();
-        let mut local = deterministic_inference();
-        local.backend = RuntimeBackend::LlamaCpp;
+        let image = temporary.path().join("kore.iso");
+        fs::write(&image, b"test image").unwrap();
+        let mut local = unconfigured_live_inference();
+        local.kore_image = Some(image);
         local.llama_server = Some(runtime);
         local.model = Some(model);
         projects

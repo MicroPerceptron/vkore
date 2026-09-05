@@ -42,6 +42,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/slots/") and self.path.endswith("?action=erase"):
             self.send_json({"success": True, "n_erased": 1})
             return
+        if self.path == "/apply-template":
+            # Protocol fixture only. Production uses the actual model template.
+            messages = json.loads(body)["messages"]
+            prompt = "\n".join(
+                ("Assistant: " if message["role"] == "assistant" else "User: " if message["role"] == "user" else "")
+                + message["content"] for message in messages
+            ) + "\nAssistant: "
+            self.send_json({"prompt": prompt})
+            return
         if self.path != "/completion":
             self.send_json({"error": "unknown"}, 404)
             return
@@ -70,6 +79,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             slot = int(request.get("id_slot", -1))
             marker = prompt.rsplit("User: ", 1)[-1].split("\nAssistant:", 1)[0]
+            if marker.startswith("Validation correction:"):
+                marker = prompt.rsplit("\nUser: Validation correction:", 1)[0].rsplit("User: ", 1)[-1].split("\nAssistant:", 1)[0]
             if '"authenticated_task_intent"' in marker:
                 planning = json.loads(marker)
                 intent = planning["authenticated_task_intent"].lower()

@@ -1,7 +1,7 @@
 //! Interactive harness runtime backed by a real Kore VM and HostLink.
 
 use crate::{
-    BackendLimits, DeterministicBackend, EventKind, HostLinkDaemon, InferenceBackend,
+    BackendLimits, EventKind, HostLinkDaemon, InferenceBackend,
     LlamaServerBackend, LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest,
     PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
     interactive::emit_inference_observation,
@@ -30,12 +30,15 @@ pub struct KoreVmRuntimeConfig {
     pub qemu_executable: PathBuf,
     pub qemu_arguments: Vec<OsString>,
     pub project_root: PathBuf,
+    /// Compatibility flag; live inference is mandatory even when false.
+    pub require_real: bool,
 }
 
 pub struct KoreVmRuntime {
     config: KoreVmRuntimeConfig,
     runtimes: BTreeMap<String, ProjectRuntime>,
     incarnation: u64,
+    conversations: BTreeMap<(String, String), Vec<(bool, String)>>,
 }
 
 struct ProjectRuntime {
@@ -64,6 +67,7 @@ impl KoreVmRuntime {
             config,
             runtimes: BTreeMap::new(),
             incarnation: 1,
+            conversations: BTreeMap::new(),
         })
     }
 
@@ -96,7 +100,9 @@ impl KoreVmRuntime {
 impl ProjectRuntime {
     fn start(runtime: &KoreVmRuntimeConfig, config: ProjectConfig) -> Result<Self, String> {
         let inference: Box<dyn InferenceBackend + Send> = match config.inference.backend {
-            RuntimeBackend::Deterministic => Box::new(DeterministicBackend::new(2)),
+            RuntimeBackend::Deterministic => return Err(
+                "real-only runtime requires llama.cpp; deterministic inference is forbidden".into(),
+            ),
             RuntimeBackend::LlamaCpp => {
                 let executable = config
                     .inference
@@ -475,13 +481,15 @@ impl Drop for ProjectRuntime {
     }
 }
 
-impl TaskRuntime for KoreVmRuntime {
-    fn run_prompt(
+impl KoreVmRuntime {
+    fn run_prompt_inner(
         &mut self,
         session: &SessionState,
         prompt: &PromptRequest,
         emit: &mut dyn FnMut(EventKind, bool, Value),
         cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
+        context: &[(bool, String)],
     ) -> PromptStatus {
         let runtime = match self.ensure_project(&session.project_id) {
             Ok(runtime) => runtime,
@@ -493,6 +501,10 @@ impl TaskRuntime for KoreVmRuntime {
         if runtime.session_id.as_deref() != Some(&session.session_id) {
             runtime.stop();
             runtime.session_id = Some(session.session_id.clone());
+        }
+        if let Err(error) = runtime.daemon.set_conversation_context(context) {
+            emit(EventKind::Error, true, json!({"message": format!("conversation context refused: {error:?}")}));
+            return PromptStatus::Failed;
         }
         let intent_id = match runtime.daemon.queue_frontend_intent(prompt.text.clone()) {
             Ok(intent_id) => intent_id,
@@ -541,20 +553,27 @@ impl TaskRuntime for KoreVmRuntime {
         let teardown_target = runtime.completed_frontend_teardowns.saturating_add(1);
         let idle_barrier_target = runtime.completed_frontend_idle_barriers.saturating_add(1);
         let mut pending_terminal = None;
+        let mut reclaimed_at = None;
+        let mut response_at = None;
         loop {
             if cancelled() {
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"message": "Prompt cancelled", "stage": "agent_failure"}),
+                );
                 runtime.daemon.cancel_frontend_intent(intent_id);
                 runtime.stop();
                 return PromptStatus::Cancelled;
             }
             if Instant::now() >= deadline {
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
                 emit(
                     EventKind::Error,
                     true,
-                    json!({"message": "Kore prompt timed out"}),
+                    json!({"message": "Kore prompt timed out", "stage": "agent_failure"}),
                 );
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop();
                 return PromptStatus::Failed;
             }
             let tick_result = if runtime.vm_suspended {
@@ -563,13 +582,13 @@ impl TaskRuntime for KoreVmRuntime {
                 runtime.daemon.tick()
             };
             if let Err(error) = tick_result {
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
                 emit(
                     EventKind::Error,
                     true,
                     json!({"message": format!("HostLink failed: {error:?}")}),
                 );
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop();
                 return PromptStatus::Failed;
             }
             runtime.drain_events(emit);
@@ -600,13 +619,13 @@ impl TaskRuntime for KoreVmRuntime {
                 next_progress = now + PROMPT_PROGRESS_INTERVAL;
             }
             if let Some(failure) = runtime.backend_failure.take() {
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
                 emit(
                     EventKind::Error,
                     true,
                     json!({"message": format!("host inference failed: {failure}")}),
                 );
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop();
                 return PromptStatus::Failed;
             }
             if let Some(marker) = runtime.boot_failure() {
@@ -663,29 +682,91 @@ impl TaskRuntime for KoreVmRuntime {
                         );
                         PromptStatus::Completed
                     }
-                    FrontendResultKind::Cancelled => PromptStatus::Cancelled,
+                    FrontendResultKind::Cancelled => {
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"message": result.text, "stage": "agent_failure", "source": "kore_guest"}),
+                        );
+                        PromptStatus::Cancelled
+                    }
                     FrontendResultKind::Refused | FrontendResultKind::Failed => {
-                        emit(EventKind::Error, true, json!({"message": result.text}));
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"message": result.text, "stage": "agent_failure", "source": "kore_guest"}),
+                        );
                         PromptStatus::Failed
                     }
                 };
                 pending_terminal = Some(status);
             }
-            if let Some(status) = terminal_after_reclaim_and_idle(
-                pending_terminal,
-                runtime.completed_frontend_broker_decisions,
-                broker_decision_target,
-                runtime.completed_frontend_teardowns,
-                teardown_target,
-                runtime.completed_frontend_idle_barriers,
-                idle_barrier_target,
-            ) {
+            if pending_terminal.is_some() && response_published() {
+                response_at.get_or_insert_with(Instant::now);
+                // The result is durable and available to the client event
+                // stream. Only now may the guest release the prompt's worker.
+                runtime.daemon.acknowledge_frontend_result(intent_id);
+            }
+            if response_published()
+                && let Some(status) = terminal_after_reclaim_and_idle(
+                    pending_terminal,
+                    runtime.completed_frontend_broker_decisions,
+                    broker_decision_target,
+                    runtime.completed_frontend_teardowns,
+                    teardown_target,
+                    runtime.completed_frontend_idle_barriers,
+                    idle_barrier_target,
+                )
+            {
                 if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
                     runtime.stop();
                     emit(EventKind::Error, true, json!({"message": error}));
                     return PromptStatus::Failed;
                 }
                 return status;
+            }
+            if let Some(status) = pending_terminal
+                && response_published()
+                && runtime.completed_frontend_teardowns >= teardown_target
+            {
+                // Single-prompt guests (including PR909) never issue another
+                // BrokerNext poll. Do not manufacture an idle barrier or hang
+                // a completed prompt: retire the real VM after confirmed
+                // worker reclamation and boot a fresh one for the next prompt.
+                let reclaimed = reclaimed_at.get_or_insert_with(Instant::now);
+                if reclaimed.elapsed() >= Duration::from_secs(2) {
+                    emit(
+                        EventKind::Validation,
+                        false,
+                        json!({"stage": "guest_retired_after_reclaim", "reason": "guest did not return to frontend idle"}),
+                    );
+                    runtime.stop();
+                    return status;
+                }
+            }
+            if unconfirmed_cleanup_timed_out(
+                pending_terminal,
+                response_published(),
+                runtime.completed_frontend_teardowns,
+                teardown_target,
+                response_at.map(|at: Instant| at.elapsed()),
+            ) {
+                // Reclamation can fail after any response, not only an
+                // explicit worker failure. Never strand a published final,
+                // or pretend the guest confirmed cleanup: report a failed
+                // cleanup and terminate the actual VM after publication.
+                emit(
+                    EventKind::Error,
+                    false,
+                    json!({"message": "Agent cleanup was not confirmed after its response; the Kore VM was stopped.", "stage": "agent_cleanup_failed"}),
+                );
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({"stage": "failed_guest_shutdown", "reason": "no guest reclamation confirmation after published response"}),
+                );
+                runtime.stop();
+                return PromptStatus::Failed;
             }
             let exited = runtime
                 .process
@@ -706,11 +787,39 @@ impl TaskRuntime for KoreVmRuntime {
         }
     }
 
+}
+
+impl TaskRuntime for KoreVmRuntime {
+    fn run_prompt(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
+    ) -> PromptStatus {
+        let key = (session.project_id.clone(), session.session_id.clone());
+        let context = self.conversations.get(&key).cloned().unwrap_or_default();
+        let mut response = None;
+        let status = self.run_prompt_inner(session, prompt, &mut |kind, public, payload| {
+            if kind == EventKind::Assistant && public {
+                response = payload.get("text").and_then(Value::as_str).map(str::to_owned);
+            }
+            emit(kind, public, payload);
+        }, cancelled, response_published, &context);
+        if response_published() && let Some(response) = response {
+            remember_exchange(self.conversations.entry(key).or_default(), &prompt.text, &response);
+        }
+        status
+    }
+
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        self.conversations.remove(&(session.project_id.clone(), session.session_id.clone()));
         if let Some(runtime) = self.runtimes.get_mut(&session.project_id)
             && runtime.session_id.as_deref() == Some(&session.session_id)
         {
             runtime.stop();
+            let _ = runtime.daemon.set_conversation_context(&[]);
         }
         emit(
             EventKind::Capability,
@@ -721,6 +830,16 @@ impl TaskRuntime for KoreVmRuntime {
 
     fn backend_incarnation(&self) -> u64 {
         self.incarnation
+    }
+}
+
+fn remember_exchange(history: &mut Vec<(bool, String)>, user: &str, assistant: &str) {
+    // Retain whole exchanges only. No tool grants, hidden reasoning, or
+    // rejected model output survive a prompt-scoped authority teardown.
+    history.push((false, user.to_owned()));
+    history.push((true, assistant.to_owned()));
+    while history.len() > 32 || history.iter().map(|(_, text)| text.len()).sum::<usize>() > 16 * 1024 {
+        history.drain(..2);
     }
 }
 
@@ -744,6 +863,19 @@ fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
         .last()
         .unwrap_or(0);
     format!("{}…", &value[..boundary])
+}
+
+fn unconfirmed_cleanup_timed_out(
+    pending: Option<PromptStatus>,
+    published: bool,
+    observed_teardowns: u64,
+    teardown_target: u64,
+    response_age: Option<Duration>,
+) -> bool {
+    pending.is_some()
+        && published
+        && observed_teardowns < teardown_target
+        && response_age.is_some_and(|age| age >= Duration::from_secs(5))
 }
 
 fn terminal_after_reclaim_and_idle(
@@ -832,12 +964,38 @@ fn read_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_memory_keeps_bounded_whole_exchanges() {
+        let mut history = Vec::new();
+        for index in 0..20 {
+            super::remember_exchange(&mut history, &format!("user-{index}"), &format!("answer-{index}"));
+        }
+        assert_eq!(history.len(), 32);
+        assert_eq!(history[0], (false, "user-4".to_owned()));
+        assert_eq!(history[31], (true, "answer-19".to_owned()));
+        super::remember_exchange(&mut history, &"x".repeat(16 * 1024), "answer");
+        assert!(history.is_empty());
+    }
     use super::{
         qemu_serial_log, read_tail, terminal_after_reclaim_and_idle,
         without_qemu_resource_arguments,
     };
     use crate::PromptStatus;
     use std::ffi::OsString;
+
+    #[test]
+    fn cleanup_timeout_never_precedes_response_publication() {
+        use std::time::Duration;
+        let check = super::unconfirmed_cleanup_timed_out;
+        for status in [PromptStatus::Completed, PromptStatus::Failed, PromptStatus::Cancelled] {
+            assert!(!check(Some(status), false, 0, 1, Some(Duration::from_secs(60))));
+            assert!(!check(Some(status), true, 0, 1, Some(Duration::from_secs(4))));
+            assert!(check(Some(status), true, 0, 1, Some(Duration::from_secs(5))));
+            assert!(!check(Some(status), true, 1, 1, Some(Duration::from_secs(60))));
+        }
+        assert!(!check(None, true, 0, 1, Some(Duration::from_secs(60))));
+        assert!(!check(Some(PromptStatus::Completed), true, 0, 1, None));
+    }
 
     #[test]
     fn project_resource_limits_replace_caller_qemu_values() {

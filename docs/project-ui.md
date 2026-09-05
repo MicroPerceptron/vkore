@@ -192,6 +192,32 @@ revokes and reclaims that prompt authority before admitting the next intent, so
 conversation continuity does not silently preserve an earlier prompt's file or
 tool access.
 
+For single-prompt guests such as the locally built PR909 image, vKore retires
+the real VM after confirmed reclamation and boots another real VM for the next
+prompt. The logical chat remains the same. The host retains up to 16 completed
+user/assistant exchanges (16 KiB total), scoped by project and session; it
+replays those conversation facts into fresh broker and worker requests. It
+does not retain old grants, rejected outputs, or private reasoning. Closing the
+session clears this in-memory context; it is not restored across harness restarts.
+
+Structured generation uses llama.cpp's `/apply-template` endpoint with the
+configured model's template, then `/completion` with both a visible JSON schema
+and constrained decoding. All results still pass the strict wire decoder.
+After tools, the model must author a response rather than emit a bare completion.
+One bounded live correction may follow a rejected candidate; there is no canned
+answer or deterministic inference fallback.
+The worker is instructed to follow requested step order and ground external
+claims in observed tool results; validation does not prove semantic task
+completion. A live test must inspect the actual calls and effects as well as
+the final answer. VM pause/resume follows pending backend requests, not the
+number of diagnostic prompt events (a correction emits another prompt for the
+same request).
+
+The current Kore task-intent wire format limits each prompt to 128 UTF-8 bytes.
+Oversized prompts are rejected explicitly, never shortened silently. The
+terminal client keeps the session open after a rejection or a failed turn so
+the user can continue; batch runs still exit nonzero if any turn failed.
+
 A submitted prompt is not reported as successful until the resident broker
 claims that exact intent, founds a scoped agent, the agent claims
 the same intent on its generation-bound route, and its terminal result returns

@@ -1495,6 +1495,7 @@ struct Model {
     auto_open_pending: bool,
     session: Option<String>,
     prompt_id: Option<String>,
+    submitted_prompt: Option<String>,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
@@ -1561,6 +1562,7 @@ impl Model {
             auto_open_pending: true,
             session: None,
             prompt_id: None,
+            submitted_prompt: None,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
@@ -2020,6 +2022,7 @@ impl Model {
             self.expanded_work.insert(prompt_id.clone());
         }
         self.prompt_id = Some(prompt_id.clone());
+        self.submitted_prompt = Some(self.prompt.text());
         self.busy = true;
         self.network.poll(Some(session.clone()), true);
         self.network.request(Request {
@@ -2033,7 +2036,6 @@ impl Model {
                 "text":text
             })),
         });
-        self.prompt = text_editor::Content::new();
     }
 
     fn select_workspace(&mut self, path: &Path) {
@@ -2205,6 +2207,9 @@ impl Model {
                 }
             }
             (RequestKind::SendPrompt, Ok(_)) => {
+                if self.submitted_prompt.take().as_deref() == Some(self.prompt.text().as_str()) {
+                    self.prompt = text_editor::Content::new();
+                }
                 self.busy = false;
                 self.status = "Broker selecting capabilities…".into();
             }
@@ -2260,6 +2265,7 @@ impl Model {
                     self.activity = Some(Err(error.clone()));
                 }
                 if kind == RequestKind::SendPrompt {
+                    self.submitted_prompt = None;
                     self.prompt_id = None;
                     self.network.poll(self.session.clone(), false);
                 }
@@ -4274,6 +4280,29 @@ mod tests {
     use hostlinkd::{
         BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer, HarnessService,
     };
+
+    #[test]
+    fn rejected_submission_preserves_draft_and_admission_does_not_erase_new_edits() {
+        let mut model = populated_fixture_model();
+        model.session = Some("draft-test".into());
+        model.prompt_id = None;
+        let draft = "a".repeat(134);
+        model.prompt = text_editor::Content::with_text(&draft);
+        model.send_prompt();
+        assert_eq!(model.prompt.text(), draft);
+        model.response(RequestKind::SendPrompt, Err("Prompt must contain 1–128 UTF-8 bytes".into()));
+        assert_eq!(model.prompt.text(), draft);
+        assert!(model.prompt_id.is_none());
+        model.prompt = text_editor::Content::with_text("Hello");
+        model.send_prompt();
+        model.prompt = text_editor::Content::with_text("My next draft");
+        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        assert_eq!(model.prompt.text(), "My next draft");
+        model.prompt_id = None;
+        model.send_prompt();
+        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        assert!(model.prompt.text().is_empty());
+    }
 
     fn populated_fixture_model() -> Model {
         let (requests, _request_receiver) = mpsc::channel();

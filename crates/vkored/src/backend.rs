@@ -250,7 +250,11 @@ pub trait InferenceBackend {
     /// Host-owned conversation facts, never transferable capabilities. The
     /// runtime replaces this bounded context at each serialized prompt boundary.
     fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
-        if context.is_empty() { Ok(()) } else { Err(BackendError::InvalidRole) }
+        if context.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::InvalidRole)
+        }
     }
     fn reset(&mut self);
     fn open(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError>;

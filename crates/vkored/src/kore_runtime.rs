@@ -1,9 +1,9 @@
 //! Interactive harness runtime backed by a real Kore VM and HostLink.
 
 use crate::{
-    BackendLimits, EventKind, HostLinkDaemon, InferenceBackend,
-    LlamaServerBackend, LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest,
-    PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
+    BackendLimits, EventKind, HostLinkDaemon, InferenceBackend, LlamaServerBackend,
+    LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest, PromptStatus, RuntimeBackend,
+    SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
     interactive::emit_inference_observation,
 };
 use kore_hostlink::{AuthorityKind, AuthorityState, FrontendIntentId, FrontendResultKind};
@@ -99,51 +99,53 @@ impl KoreVmRuntime {
 
 impl ProjectRuntime {
     fn start(runtime: &KoreVmRuntimeConfig, config: ProjectConfig) -> Result<Self, String> {
-        let inference: Box<dyn InferenceBackend + Send> = match config.inference.backend {
-            RuntimeBackend::Deterministic => return Err(
-                "real-only runtime requires llama.cpp; deterministic inference is forbidden".into(),
-            ),
-            RuntimeBackend::LlamaCpp => {
-                let executable = config
-                    .inference
-                    .llama_server
-                    .clone()
-                    .ok_or("project has no llama.cpp server")?;
-                let model = config
-                    .inference
-                    .model
-                    .clone()
-                    .ok_or("project has no model")?;
-                let slots = usize::from(config.inference.slots).max(2);
-                let limits = BackendLimits {
-                    sequences: slots,
-                    brokers: 1,
-                    agents: slots.saturating_sub(1),
-                    max_output_tokens: config.inference.output_tokens,
-                    ..BackendLimits::default()
-                };
-                Box::new(
-                    LlamaServerBackend::start(LlamaServerConfig {
-                        executable,
-                        executable_args: config
-                            .inference
-                            .extra_args
-                            .iter()
-                            .map(OsString::from)
-                            .collect(),
-                        model,
-                        port: reserve_loopback_port()?,
-                        total_context_tokens: config.inference.context_tokens,
-                        threads: config.inference.threads,
-                        startup_timeout: Duration::from_secs(600),
-                        io_timeout: Duration::from_millis(25),
-                        limits,
-                        trace: std::env::var_os("VKORE_LLAMA_TRACE").is_some(),
-                    })
-                    .map_err(|error| format!("llama.cpp startup failed: {error:?}"))?,
-                )
-            }
-        };
+        let inference: Box<dyn InferenceBackend + Send> =
+            match config.inference.backend {
+                RuntimeBackend::Deterministic => return Err(
+                    "real-only runtime requires llama.cpp; deterministic inference is forbidden"
+                        .into(),
+                ),
+                RuntimeBackend::LlamaCpp => {
+                    let executable = config
+                        .inference
+                        .llama_server
+                        .clone()
+                        .ok_or("project has no llama.cpp server")?;
+                    let model = config
+                        .inference
+                        .model
+                        .clone()
+                        .ok_or("project has no model")?;
+                    let slots = usize::from(config.inference.slots).max(2);
+                    let limits = BackendLimits {
+                        sequences: slots,
+                        brokers: 1,
+                        agents: slots.saturating_sub(1),
+                        max_output_tokens: config.inference.output_tokens,
+                        ..BackendLimits::default()
+                    };
+                    Box::new(
+                        LlamaServerBackend::start(LlamaServerConfig {
+                            executable,
+                            executable_args: config
+                                .inference
+                                .extra_args
+                                .iter()
+                                .map(OsString::from)
+                                .collect(),
+                            model,
+                            port: reserve_loopback_port()?,
+                            total_context_tokens: config.inference.context_tokens,
+                            threads: config.inference.threads,
+                            startup_timeout: Duration::from_secs(600),
+                            io_timeout: Duration::from_millis(25),
+                            limits,
+                            trace: std::env::var_os("VKORE_LLAMA_TRACE").is_some(),
+                        })
+                        .map_err(|error| format!("llama.cpp startup failed: {error:?}"))?,
+                    )
+                }
+            };
         let allow_writeback = config.workspace.access == WorkspaceAccess::AutomaticWriteback;
         let backend = WorkspaceBackend::open_with_inference(
             &config.workspace.root,
@@ -213,7 +215,8 @@ impl ProjectRuntime {
 
     fn stop(&mut self) {
         self.stop_process();
-        self.session_id = None;
+        // Retiring the VM is not closing the logical conversation. Retain
+        // ownership so an explicit session close can clear its model context.
         self.boot_attempt = 0;
     }
 
@@ -294,7 +297,6 @@ impl ProjectRuntime {
     }
 
     fn model_turn_started(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        self.active_model_turns = self.active_model_turns.saturating_add(1);
         if self.vm_suspended || self.vm_pause_due.is_some() {
             return;
         }
@@ -347,7 +349,6 @@ impl ProjectRuntime {
     }
 
     fn model_turn_finished(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        self.active_model_turns = self.active_model_turns.saturating_sub(1);
         if self.active_model_turns == 0 {
             self.vm_pause_due = None;
         }
@@ -427,22 +428,12 @@ impl ProjectRuntime {
                     }),
                 );
             }
-            if message.starts_with("completed role=Broker ")
-                || message.starts_with("completed role=Agent ")
-                || message.starts_with("backend failed ")
-                || message == "cancelled"
-            {
-                self.model_turn_finished(emit);
-            }
             if let Some(failure) = message.strip_prefix("backend failed ") {
                 self.backend_failure = Some(failure.to_owned());
             }
         }
         self.hostlink_trace_cursor = transcript.len();
         while let Some(observation) = self.daemon.take_inference_observation() {
-            if observation.kind == crate::ObservationKind::ModelPrompt {
-                self.model_turn_started(emit);
-            }
             if observation.role == crate::BackendRole::Broker
                 && observation.kind == crate::ObservationKind::BrokerProposal
             {
@@ -471,6 +462,15 @@ impl ProjectRuntime {
                     "label": observation.label,
                 }),
             );
+        }
+        // Runtime ownership, not telemetry, drives the VM pause barrier.
+        // One pending request may emit several templated prompts during a
+        // correction; workspace traffic is excluded by WorkspaceBackend.
+        self.active_model_turns = self.daemon.core().backend_metrics().pending;
+        if self.active_model_turns == 0 {
+            self.model_turn_finished(emit);
+        } else {
+            self.model_turn_started(emit);
         }
     }
 }
@@ -503,7 +503,11 @@ impl KoreVmRuntime {
             runtime.session_id = Some(session.session_id.clone());
         }
         if let Err(error) = runtime.daemon.set_conversation_context(context) {
-            emit(EventKind::Error, true, json!({"message": format!("conversation context refused: {error:?}")}));
+            emit(
+                EventKind::Error,
+                true,
+                json!({"message": format!("conversation context refused: {error:?}")}),
+            );
             return PromptStatus::Failed;
         }
         let intent_id = match runtime.daemon.queue_frontend_intent(prompt.text.clone()) {
@@ -786,7 +790,6 @@ impl KoreVmRuntime {
             std::thread::sleep(tick_interval);
         }
     }
-
 }
 
 impl TaskRuntime for KoreVmRuntime {
@@ -801,25 +804,43 @@ impl TaskRuntime for KoreVmRuntime {
         let key = (session.project_id.clone(), session.session_id.clone());
         let context = self.conversations.get(&key).cloned().unwrap_or_default();
         let mut response = None;
-        let status = self.run_prompt_inner(session, prompt, &mut |kind, public, payload| {
-            if kind == EventKind::Assistant && public {
-                response = payload.get("text").and_then(Value::as_str).map(str::to_owned);
-            }
-            emit(kind, public, payload);
-        }, cancelled, response_published, &context);
-        if response_published() && let Some(response) = response {
-            remember_exchange(self.conversations.entry(key).or_default(), &prompt.text, &response);
+        let status = self.run_prompt_inner(
+            session,
+            prompt,
+            &mut |kind, public, payload| {
+                if kind == EventKind::Assistant && public {
+                    response = payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                emit(kind, public, payload);
+            },
+            cancelled,
+            response_published,
+            &context,
+        );
+        if response_published()
+            && let Some(response) = response
+        {
+            remember_exchange(
+                self.conversations.entry(key).or_default(),
+                &prompt.text,
+                &response,
+            );
         }
         status
     }
 
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        self.conversations.remove(&(session.project_id.clone(), session.session_id.clone()));
+        self.conversations
+            .remove(&(session.project_id.clone(), session.session_id.clone()));
         if let Some(runtime) = self.runtimes.get_mut(&session.project_id)
             && runtime.session_id.as_deref() == Some(&session.session_id)
         {
             runtime.stop();
             let _ = runtime.daemon.set_conversation_context(&[]);
+            runtime.session_id = None;
         }
         emit(
             EventKind::Capability,
@@ -838,7 +859,9 @@ fn remember_exchange(history: &mut Vec<(bool, String)>, user: &str, assistant: &
     // rejected model output survive a prompt-scoped authority teardown.
     history.push((false, user.to_owned()));
     history.push((true, assistant.to_owned()));
-    while history.len() > 32 || history.iter().map(|(_, text)| text.len()).sum::<usize>() > 16 * 1024 {
+    while history.len() > 32
+        || history.iter().map(|(_, text)| text.len()).sum::<usize>() > 16 * 1024
+    {
         history.drain(..2);
     }
 }
@@ -968,7 +991,11 @@ mod tests {
     fn session_memory_keeps_bounded_whole_exchanges() {
         let mut history = Vec::new();
         for index in 0..20 {
-            super::remember_exchange(&mut history, &format!("user-{index}"), &format!("answer-{index}"));
+            super::remember_exchange(
+                &mut history,
+                &format!("user-{index}"),
+                &format!("answer-{index}"),
+            );
         }
         assert_eq!(history.len(), 32);
         assert_eq!(history[0], (false, "user-4".to_owned()));
@@ -987,11 +1014,39 @@ mod tests {
     fn cleanup_timeout_never_precedes_response_publication() {
         use std::time::Duration;
         let check = super::unconfirmed_cleanup_timed_out;
-        for status in [PromptStatus::Completed, PromptStatus::Failed, PromptStatus::Cancelled] {
-            assert!(!check(Some(status), false, 0, 1, Some(Duration::from_secs(60))));
-            assert!(!check(Some(status), true, 0, 1, Some(Duration::from_secs(4))));
-            assert!(check(Some(status), true, 0, 1, Some(Duration::from_secs(5))));
-            assert!(!check(Some(status), true, 1, 1, Some(Duration::from_secs(60))));
+        for status in [
+            PromptStatus::Completed,
+            PromptStatus::Failed,
+            PromptStatus::Cancelled,
+        ] {
+            assert!(!check(
+                Some(status),
+                false,
+                0,
+                1,
+                Some(Duration::from_secs(60))
+            ));
+            assert!(!check(
+                Some(status),
+                true,
+                0,
+                1,
+                Some(Duration::from_secs(4))
+            ));
+            assert!(check(
+                Some(status),
+                true,
+                0,
+                1,
+                Some(Duration::from_secs(5))
+            ));
+            assert!(!check(
+                Some(status),
+                true,
+                1,
+                1,
+                Some(Duration::from_secs(60))
+            ));
         }
         assert!(!check(None, true, 0, 1, Some(Duration::from_secs(60))));
         assert!(!check(Some(PromptStatus::Completed), true, 0, 1, None));

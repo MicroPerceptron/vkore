@@ -161,7 +161,10 @@ pub enum HarnessError {
 
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::PromptTooLarge => write!(f, "Prompt must contain 1–{PROMPT_BYTES_MAX} UTF-8 bytes; shorten it or split it into separate chat turns."),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 
@@ -1719,7 +1722,7 @@ impl HarnessHttpServer {
                 (
                     status,
                     "application/json",
-                    serde_json::to_vec(&json!({"error":format!("{error:?}")})).unwrap_or_default(),
+                    serde_json::to_vec(&json!({"error":error.to_string()})).unwrap_or_default(),
                 )
             }
         };

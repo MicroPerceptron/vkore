@@ -110,7 +110,7 @@ impl Graph {
         let references: Vec<&Value> = events.iter().collect();
         let catalog = crate::broker_catalog(&references);
         let offered: Vec<String> = catalog.values().map(|entry| entry.label.clone()).collect();
-        if events.is_empty() {
+        if catalog.is_empty() && !events.iter().any(worker_evidence) {
             return Self::default();
         }
 
@@ -135,13 +135,16 @@ impl Graph {
         let mut workers: BTreeMap<u64, usize> = BTreeMap::new();
         let mut calls: BTreeMap<(u64, u64), (usize, usize)> = BTreeMap::new();
         for event in events {
+            if !worker_evidence(event) && event["kind"] != "error" {
+                continue;
+            }
             let Some(generation) = event["generation"]
                 .as_u64()
                 .or_else(|| event["payload"]["generation"].as_u64())
             else {
                 continue;
             };
-            if generation == 0 {
+            if generation == 0 || (event["kind"] == "error" && !workers.contains_key(&generation)) {
                 continue;
             }
             let index = *workers.entry(generation).or_insert_with(|| {
@@ -228,7 +231,14 @@ impl Graph {
         }
 
         // The newest generation is the live one while the session runs.
-        if session_live && let Some(last) = agents.iter_mut().skip(1).next_back() {
+        let latest_lifecycle = events.iter().rev().find(|event| {
+            worker_evidence(event) || matches!(event["kind"].as_str(), Some("prompt_terminal" | "conversation_closed"))
+        });
+        let retired = latest_lifecycle.is_some_and(|event| {
+            matches!(event["kind"].as_str(), Some("prompt_terminal" | "conversation_closed"))
+                || event["payload"]["state"].as_str().is_some_and(|state| state.eq_ignore_ascii_case("teardown"))
+        });
+        if session_live && !retired && let Some(last) = agents.iter_mut().skip(1).next_back() {
             last.live = true;
         }
         Self { agents }
@@ -243,6 +253,11 @@ impl Graph {
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.agents.iter().position(|agent| agent.id == id)
     }
+}
+
+// Session generation and readiness metadata do not prove that a worker exists.
+fn worker_evidence(event: &Value) -> bool {
+    matches!(event["kind"].as_str(), Some("broker_proposal" | "capability" | "tool_call" | "tool_result"))
 }
 
 /// Marks `label` held, adding it when the catalog never offered it.
@@ -351,6 +366,23 @@ mod tests {
     #[test]
     fn an_empty_stream_has_no_graph() {
         assert_eq!(Graph::from_events(&[], false), Graph::default());
+    }
+
+    #[test]
+    fn session_metadata_does_not_invent_agents_and_terminal_retires_the_worker() {
+        let metadata = [
+            json!({"kind":"session_opened","generation":1,"payload":{}}),
+            json!({"kind":"user_prompt","generation":1,"payload":{"text":"hello"}}),
+            json!({"kind":"validation","generation":1,"payload":{"stage":"model_server_starting"}}),
+        ];
+        assert_eq!(Graph::from_events(&metadata, true), Graph::default());
+        let events = [
+            json!({"kind":"tool_call","generation":1,"payload":{"tool":"cat"}}),
+            json!({"kind":"prompt_terminal","generation":1,"payload":{"status":"completed"}}),
+        ];
+        let graph = Graph::from_events(&events, true);
+        assert_eq!(graph.agents.len(), 2);
+        assert!(!graph.agents[1].live);
     }
 
     #[test]

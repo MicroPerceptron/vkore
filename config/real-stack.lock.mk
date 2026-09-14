@@ -1,9 +1,8 @@
-# Reviewed provenance for the real Kore developer stack.
-#
-# Updating either value is a security-sensitive compatibility change. Build the
-# ISO from the reviewed commit, verify the resulting image, and commit both
-# updates together. The developer launcher never checks out this revision or
-# changes a Kore worktree automatically.
-VKORE_EXPECTED_KORE_COMMIT := fd383fb8705e63400e7b78762185f3208ee355c2
-VKORE_EXPECTED_ISO_SHA256 := 0595467d973e59e14104923fb4df7b57f9bbe631c046e290973c36f556bb11bf
+# PR #39 / Kore PR #933 canonical development artifact.
+# Userland source: 2db155cfb9ac6621bfdd723966157c22022fae4d.
+# Download kore-x86-release.iso from Kore release vkore-pr39-20260914.
+# Rebuilding requires revalidation and a new digest; do not bypass these checks.
+VKORE_EXPECTED_KORE_COMMIT := 2b1307786a0a354864a14b98578f73e413cae208
+VKORE_EXPECTED_KORE_DIFF_SHA256 := e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+VKORE_EXPECTED_ISO_SHA256 := 7dec906af7a1ddffb6a5fdd3e3b4dbde37ac9951bd3d0ebf8286c4b50526fdfd
 VKORE_KORE_ISO_RELATIVE := target/kore-x86-release.iso

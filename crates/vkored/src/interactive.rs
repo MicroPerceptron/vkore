@@ -118,6 +118,9 @@ fn inference_observation_payload(observation: &InferenceObservation) -> Value {
         "role": format!("{:?}", observation.role),
         "kind": format!("{:?}", observation.kind),
         "turn": observation.turn,
+        "route": format!("{:?}", observation.route),
+        "generation": observation.generation.get(),
+        "request": format!("{:?}", observation.request),
         "payload": observation.payload,
         "accepted": observation.accepted,
         "detail": observation.detail,
@@ -162,7 +165,10 @@ pub enum HarnessError {
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PromptTooLarge => write!(f, "Prompt must contain 1–{PROMPT_BYTES_MAX} UTF-8 bytes; shorten it or split it into separate chat turns."),
+            Self::PromptTooLarge => write!(
+                f,
+                "Prompt must contain 1–{PROMPT_BYTES_MAX} UTF-8 bytes; shorten it or split it into separate chat turns."
+            ),
             _ => write!(f, "{self:?}"),
         }
     }

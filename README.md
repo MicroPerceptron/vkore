@@ -102,6 +102,9 @@ cargo run -p vkored --bin vkore -- chat `
   --project PROJECT_ID
 ```
 
+For the Linux development snapshot, repositories, exact ISO download, model,
+and first-time setup, follow [the Linux setup guide](docs/linux-setup.md).
+
 ## Run the full Windows + WSL stack
 
 The paved development workflow runs the native Windows UI while the harness,

@@ -83,7 +83,10 @@ fn run() -> Result<(), String> {
             continue;
         }
         if let Err(error) = validate_prompt_text(&text) {
-            eprintln!("[{}] Prompt rejected: {error}. The session is still open.", unix_ms());
+            eprintln!(
+                "[{}] Prompt rejected: {error}. The session is still open.",
+                unix_ms()
+            );
             had_prompt_failure = true;
             continue;
         }
@@ -91,6 +94,7 @@ fn run() -> Result<(), String> {
             std::thread::sleep(prompt_delay);
         }
         let prompt = format!("prompt-{}", index + 1);
+        let started = Instant::now();
         if let Err(error) = request(&server, "POST", &format!("/api/v1/sessions/{session}/prompts"), &json!({
             "api_version":1,"prompt_id":prompt,"idempotency_key":format!("cli-{}",index + 1),"text":text
         }).to_string()) {
@@ -98,10 +102,14 @@ fn run() -> Result<(), String> {
             had_prompt_failure = true;
             continue;
         }
-        let started = Instant::now();
         loop {
             if started.elapsed() >= timeout {
-                let _ = request(&server, "DELETE", &format!("/api/v1/sessions/{session}"), "");
+                let _ = request(
+                    &server,
+                    "DELETE",
+                    &format!("/api/v1/sessions/{session}"),
+                    "",
+                );
                 return Err(format!(
                     "prompt {prompt} timed out after {} ms",
                     started.elapsed().as_millis()
@@ -116,9 +124,12 @@ fn run() -> Result<(), String> {
             )?;
             let mut terminal = None;
             for line in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
-                let event: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+                let mut event: Value =
+                    serde_json::from_str(line).map_err(|error| error.to_string())?;
+                event["client_elapsed_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
+                event["client_received_unix_ms"] = json!(unix_ms());
                 if let Some(output) = trace_output.as_mut() {
-                    writeln!(output, "{line}").map_err(|error| error.to_string())?;
+                    writeln!(output, "{event}").map_err(|error| error.to_string())?;
                     output.flush().map_err(|error| error.to_string())?;
                 }
                 cursor = cursor.max(event["sequence"].as_u64().unwrap_or(0));
@@ -146,7 +157,10 @@ fn run() -> Result<(), String> {
             }
             if let Some(result) = terminal {
                 if let Err(error) = result {
-                    eprintln!("[{}] Prompt {prompt}: {error}. The session is still open.", unix_ms());
+                    eprintln!(
+                        "[{}] Prompt {prompt}: {error}. The session is still open.",
+                        unix_ms()
+                    );
                     had_prompt_failure = true;
                 }
                 completed_prompts += 1;
@@ -160,14 +174,24 @@ fn run() -> Result<(), String> {
         &format!("/api/v1/sessions/{session}"),
         "",
     );
-    if had_prompt_failure { Err("one or more prompts failed or were rejected; see the transcript".into()) } else { Ok(()) }
+    if had_prompt_failure {
+        Err("one or more prompts failed or were rejected; see the transcript".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_prompt_text(text: &str) -> Result<(), String> {
     if text.len() > kore_hostlink::TASK_INTENT_MAX {
-        return Err(format!("Kore accepts at most {} UTF-8 bytes per prompt (received {})", kore_hostlink::TASK_INTENT_MAX, text.len()));
+        return Err(format!(
+            "Kore accepts at most {} UTF-8 bytes per prompt (received {})",
+            kore_hostlink::TASK_INTENT_MAX,
+            text.len()
+        ));
     }
-    if text.as_bytes().contains(&0) { return Err("prompts cannot contain NUL bytes".into()); }
+    if text.as_bytes().contains(&0) {
+        return Err("prompts cannot contain NUL bytes".into());
+    }
     Ok(())
 }
 
@@ -211,8 +235,12 @@ fn preview(value: &str, max_bytes: usize) -> String {
 
 fn request(server: &str, method: &str, path: &str, body: &str) -> Result<String, String> {
     let mut stream = TcpStream::connect(server).map_err(|error| error.to_string())?;
-    stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
-    stream.set_write_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
     write!(stream, "{method} {path} HTTP/1.1\r\nHost: {server}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|error| error.to_string())?;
     let mut response = String::new();
     stream
@@ -278,8 +306,16 @@ mod tests {
     #[test]
     fn prompt_bound_counts_utf8_bytes_without_truncation() {
         assert!(super::validate_prompt_text(&"a".repeat(128)).is_ok());
-        assert!(super::validate_prompt_text(&"a".repeat(129)).unwrap_err().contains("129"));
-        assert!(super::validate_prompt_text(&"💡".repeat(33)).unwrap_err().contains("132"));
+        assert!(
+            super::validate_prompt_text(&"a".repeat(129))
+                .unwrap_err()
+                .contains("129")
+        );
+        assert!(
+            super::validate_prompt_text(&"💡".repeat(33))
+                .unwrap_err()
+                .contains("132")
+        );
         assert!(super::validate_prompt_text("a\0b").is_err());
     }
 

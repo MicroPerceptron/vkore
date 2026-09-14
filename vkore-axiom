@@ -168,6 +168,11 @@ make_value() {
 iso_relative=$(make_value BOOT_X86_ISO)
 ovmf_code=$(make_value OVMF_CODE)
 ovmf_vars=$(make_value OVMF_VARS)
+ovmf_format=$(make_value OVMF_FMT)
+case "$ovmf_format" in
+    raw|qcow2) ;;
+    *) echo "unsupported OVMF firmware format: $ovmf_format" >&2; exit 2 ;;
+esac
 iso="$kore_root/$iso_relative"
 test -f "$iso" || {
     echo "Kore ISO is missing: $iso" >&2
@@ -372,8 +377,8 @@ print(cpus, memory)
     qemu_array+=(
         -device pcie-root-port,id=rp_fb,bus=pxb1,chassis=8,slot=4
         -device bochs-display,bus=rp_fb
-        -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
-        -drive "if=pflash,format=raw,file=$vars"
+        -drive "if=pflash,format=$ovmf_format,readonly=on,file=$ovmf_code"
+        -drive "if=pflash,format=$ovmf_format,file=$vars"
         -serial "file:$serial_log"
     )
     command=("$harness" --listen "$listen" --state "$state" --qemu "$qemu")
@@ -465,6 +470,12 @@ if test "$debug" = 1; then
         --delay-between-prompts-seconds "$debug_prompt_delay"
     cli_status=${PIPESTATUS[1]}
     set -e
+    if python3 "$vkore_root/scripts/report-timings.py" "$runtime/events.jsonl" \
+        --markdown "$runtime/timings.md" --json "$runtime/timings.json"; then
+        echo "Timing report: $runtime/timings.md"
+    else
+        echo "Timing report generation failed; raw events remain at $runtime/events.jsonl" >&2
+    fi
     echo "Terminal diagnostic completed with status $cli_status"
     exit "$cli_status"
 fi

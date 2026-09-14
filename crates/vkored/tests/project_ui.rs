@@ -105,10 +105,11 @@ fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() 
         &|| true,
     );
     assert_eq!(result, PromptStatus::Failed);
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].0, EventKind::Error);
+    let errors: Vec<_> = events.iter().filter(|(kind, _)| *kind == EventKind::Error).collect();
+    assert_eq!(errors.len(), 1);
+    assert!(events.iter().all(|(_, payload)| payload["stage"] != "model_server_starting"));
     assert!(
-        events[0].1["message"]
+        errors[0].1["message"]
             .as_str()
             .unwrap()
             .contains("deterministic inference is forbidden")
@@ -309,7 +310,11 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
         std::fs::write(&path, b"catalog test fixture").unwrap();
         *destination = Some(path);
     }
-    std::fs::write(temp.path().join("settings.json"), serde_json::to_vec(&settings).unwrap()).unwrap();
+    std::fs::write(
+        temp.path().join("settings.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
         temp.path().join("transcripts"),
@@ -362,7 +367,13 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
             .iter()
             .all(|model| model["backend"] == "llama_cpp")
     );
-    assert!(catalog["backends"].as_array().unwrap().iter().all(|backend| backend["real_inference"] == true));
+    assert!(
+        catalog["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|backend| backend["real_inference"] == true)
+    );
 
     let origin = format!("http://{address}");
     let changed = transact(
@@ -392,7 +403,10 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     let created: Value = serde_json::from_str(created.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(created["created"], true);
     assert_eq!(created["project"]["name"], "folder-first");
-    assert_eq!(created["project"]["workspace"]["access"], "automatic_writeback");
+    assert_eq!(
+        created["project"]["workspace"]["access"],
+        "automatic_writeback"
+    );
     assert!(
         created["project"]["workspace"]
             .get("max_write_bytes")

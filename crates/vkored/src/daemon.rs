@@ -178,6 +178,8 @@ pub enum FrontendQueueError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendResultOwned {
+    /// Authenticated source; never inferred from model text.
+    pub source_role: BackendRole,
     pub intent_id: FrontendIntentId,
     pub kind: FrontendResultKind,
     pub text: String,
@@ -1017,6 +1019,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             let result = decode_frontend_result(request.input)
                 .expect("frontend result was validated before request admission");
             self.frontend_results.push_back(FrontendResultOwned {
+                source_role: identity.role,
                 intent_id: result.intent_id,
                 kind: result.kind,
                 text: result.text.to_owned(),
@@ -2710,7 +2713,10 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
         self.core.queue_frontend_intent(text)
     }
 
-    pub fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+    pub fn set_conversation_context(
+        &mut self,
+        context: &[(bool, String)],
+    ) -> Result<(), BackendError> {
         self.core.backend.set_conversation_context(context)
     }
 
@@ -3083,7 +3089,8 @@ mod tests {
             assert_eq!(core.frontend_results.len(), usize::from(accepted));
             if accepted {
                 assert!(core.control_out.frames.is_empty());
-                core.pop_frontend_result().unwrap();
+                let failure = core.pop_frontend_result().unwrap();
+                assert_eq!(failure.source_role, BackendRole::Broker);
                 // A duplicate failure cannot produce a second final response.
                 core.receive(
                     SocketPlane::Control,
@@ -3219,6 +3226,7 @@ mod tests {
         assert_eq!(
             core.pop_frontend_result(),
             Some(FrontendResultOwned {
+                source_role: BackendRole::Agent,
                 intent_id,
                 kind: FrontendResultKind::Completed,
                 text: "ordinary X content".into(),
@@ -3339,6 +3347,7 @@ mod tests {
         assert_eq!(
             core.pop_frontend_result(),
             Some(FrontendResultOwned {
+                source_role: BackendRole::Agent,
                 intent_id: next_intent_id,
                 kind: FrontendResultKind::Completed,
                 text: "hello".into(),

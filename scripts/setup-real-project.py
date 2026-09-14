@@ -51,6 +51,7 @@ def main():
     project["workspace"].update(root=str(workspace), state=str(state / "workspaces" / project["id"]))
     project["inference"].update(kore_image=str(iso), llama_server=str(server),
                                 model=str(model), extra_args=["--n-gpu-layers", str(args.gpu_layers)])
+    (state / "workspaces" / project["id"]).mkdir(parents=True, exist_ok=True)
     project_path.parent.mkdir(parents=True, exist_ok=True)
     with project_path.open("x") as stream:
         stream.write(json.dumps(project, indent=2) + "\n")

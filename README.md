@@ -1,8 +1,7 @@
 # vKore
 
 vKore is the open-source host control plane for running
-[Kore](https://github.com/MicroPerceptron/kore) as a local, project-oriented
-agent system.
+[Kore](https://github.com/MicroPerceptron/kore) as a local personal assistant with optional projects.
 
 It owns the desktop experience and the host-side runtime: projects, VM and
 llama.cpp supervision, HostLink transport, capability-rooted workspace access,
@@ -17,14 +16,15 @@ agent, and tool activity separate from validated assistant output._
 
 ## What is here
 
-- **Native project UI.** Create a project by selecting one workspace folder,
-  manage application defaults and project overrides in Settings, chat with an
-  agent, inspect the agent/filesystem topology, review approvals, and open the
+- **Native project UI.** Create projects with optional focus folders, configure
+  the application model and authorized search folders in Settings, chat with
+  scoped workers, inspect their granted files, review approvals, and open the
   append-only transcript.
 - **Interactive runtime.** `vkore-harnessd` exposes the same loopback-only,
   versioned API to the desktop UI, the headless client, integration tests, and
   other local clients.
-- **Kore guest bridge.** A supervised QEMU guest receives prompt-scoped intent
+- **Kore guest bridge.** One application-owned QEMU guest and resident broker
+  prepare at app launch and receive prompt-scoped intent
   through HostLink. vKore waits for guest-side agent teardown before completing
   a prompt and retires its inference state when the route closes.
 - **Live local inference.** One caller-supplied llama.cpp server continuously
@@ -72,27 +72,21 @@ and raw protocol records remain in the audit transcript.
 
 ## Try the harness locally
 
-The deterministic runtime is the shortest contributor path. It needs no Kore
-image, QEMU installation, llama.cpp binary, or model.
+Follow [the Linux setup guide](docs/linux-setup.md) for repository revisions,
+the exact headless Kore ISO, model download and machine-local configuration.
+Then run from this repository:
 
-Start the harness:
-
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state C:\path\outside\your\workspace\vkore-state
+```sh
+make dev-check
+make dev-real
 ```
 
-In another terminal, start the native client:
-
-```powershell
-cargo run --release -p vkore-ui -- --server 127.0.0.1:8787
-```
-
-Keep the state directory outside any workspace you plan to open. Choose **New
-project**, then select one narrow workspace directory in the trusted native
-folder picker. vKore derives the name, identity, application-owned state, and
-current application model default before opening the project. For an existing
-project, open it directly with `--project PROJECT_ID`.
+The native app prepares one VM, one model server and one resident broker.
+Select or create a project with an optional focus folder. Settings → Document
+access authorizes read-only discovery folders; only effective worker grants
+appear in the task filesystem. Readiness remains visible after the fixed native
+launch animation. See [ADR 24](docs/adr/0024-shared-assistant.md) for scheduling,
+context isolation, migration and recovery.
 
 You can also use the terminal client against the same harness:
 
@@ -117,7 +111,7 @@ QEMU, Kore, and llama.cpp stay in WSL:
 From WSL, use `make dev-real`; use `make dev-check` for a read-only preflight or
 `make dev-fast` to reuse already-built release vKore binaries. The checked-in
 real-stack lock pins the reviewed Kore commit and ISO SHA-256. The launcher
-also requires a llama.cpp project, validates its selected artifacts, and refuses
+also requires an application llama.cpp configuration, validates its artifacts, and refuses
 to reuse an existing harness whose real-VM provenance cannot be established.
 It never changes a Kore worktree or silently substitutes deterministic
 inference. Override machine-local paths in an ignored `Makefile.local`, using
@@ -139,20 +133,12 @@ project settings, real inference, VM lifecycle, and diagnostics.
 
 ## Bring your own llama.cpp runtime
 
-The harness never downloads or guesses a model. Supply both artifacts:
-
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state C:\path\to\vkore-state `
-  --llama-server C:\path\to\llama-server.exe `
-  --llama-model C:\path\to\model.gguf
-```
-
-Repeated `--llama-arg` values pass backend-specific options. Application
-Settings owns the default model used by newly created projects; changing it
-does not replace an existing project's model override. Project configuration
-records the selected runtime plus project-scoped workspace, policy, and
-retention preferences.
+The harness never downloads or guesses a model. Supply the llama-server binary,
+GGUF model and pinned Kore image through the setup helper in the Linux guide.
+Application Settings owns the active inference profile. Changing models
+explicitly restarts the one shared runtime; switching projects does not. Legacy
+project profiles remain model catalog inputs. Project settings retain focus
+folders, writeback policies, prompt budgets and retention preferences.
 
 ## Security boundary
 

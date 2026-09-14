@@ -836,12 +836,27 @@ fn shared_failure_invalidates_other_queued_generations_before_running_them() {
 fn app_shutdown_cancels_preparation_and_terminalizes_queued_work() {
     struct Starting(mpsc::Sender<()>);
     impl TaskRuntime for Starting {
-        fn prepare(&mut self, _: &mut dyn FnMut(Value), cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+        fn prepare(
+            &mut self,
+            _: &mut dyn FnMut(Value),
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
             self.0.send(()).unwrap();
-            while !cancelled() { thread::sleep(Duration::from_millis(1)); }
+            while !cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
             Err("startup cancelled".into())
         }
-        fn run_prompt(&mut self, _: &SessionState, _: &PromptRequest, _: &mut dyn FnMut(EventKind, bool, Value), _: &dyn Fn() -> bool, _: &dyn Fn() -> bool) -> PromptStatus { panic!("shutdown must not run queued work"); }
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            panic!("shutdown must not run queued work");
+        }
         fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
     }
     let temp = tempfile::tempdir().unwrap();
@@ -851,10 +866,23 @@ fn app_shutdown_cancels_preparation_and_terminalizes_queued_work() {
     wait.recv_timeout(Duration::from_secs(2)).unwrap();
     create(&handle, "queued");
     for index in 0..32 {
-        handle.submit_prompt("queued", prompt(&format!("p{index}"), "hello")).unwrap();
+        handle
+            .submit_prompt("queued", prompt(&format!("p{index}"), "hello"))
+            .unwrap();
     }
     handle.close_session("queued").unwrap();
     service.shutdown();
-    assert_eq!(handle.state("queued").unwrap().prompts["p0"], PromptStatus::Cancelled);
-    assert_eq!(handle.events("queued", 0).unwrap().iter().filter(|e| e.kind == EventKind::PromptTerminal).count(), 32);
+    assert_eq!(
+        handle.state("queued").unwrap().prompts["p0"],
+        PromptStatus::Cancelled
+    );
+    assert_eq!(
+        handle
+            .events("queued", 0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::PromptTerminal)
+            .count(),
+        32
+    );
 }

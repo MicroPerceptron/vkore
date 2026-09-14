@@ -1675,7 +1675,14 @@ impl Model {
                 .iter()
                 .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                 .collect::<Vec<_>>();
-            self.status = if broker_selection_pending(&prompt_events) {
+            self.status = if prompt_events.iter().all(|event| {
+                matches!(
+                    event["kind"].as_str(),
+                    Some("user_prompt" | "session_opened")
+                )
+            }) {
+                "Task queued for the shared assistant…".into()
+            } else if broker_selection_pending(&prompt_events) {
                 "Broker selecting capabilities…".into()
             } else {
                 "Agent working with Kore-provided capabilities…".into()
@@ -2371,7 +2378,7 @@ impl Model {
                     self.prompt = text_editor::Content::new();
                 }
                 self.busy = false;
-                self.status = "Broker selecting capabilities…".into();
+                self.status = "Task queued for the shared assistant…".into();
             }
             (RequestKind::CancelPrompt, Ok(_)) => {
                 self.status = "Cancellation requested.".into();

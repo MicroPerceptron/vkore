@@ -12,8 +12,8 @@ listen=${VKORE_LISTEN:-127.0.0.1:8787}
 project=${VKORE_PROJECT:-qwen9b-live-kore}
 make_command=${VKORE_MAKE:-${MAKE:-$(command -v gmake || command -v make)}}
 qemu=${QEMU:-$(command -v qemu-system-x86_64 || true)}
-expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-458c5c9a74e14ab805b304a946262b841d0ee144}
-expected_iso=${VKORE_EXPECTED_ISO_SHA256:-32f4067f88b156fea71b6ac67aadc779695783a55f5418863b733c4dd06fda6e}
+expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-3fca0fe1f8578d59c16c465089967ecb268b7f79}
+expected_iso=${VKORE_EXPECTED_ISO_SHA256:-6ae17033d2fca456567c35626618fcf18d60106e401e60276863b4a2df570aa0}
 check_only=0
 no_build=0
 require_real=1
@@ -155,10 +155,12 @@ if test -n "${VKORE_EXPECTED_KORE_DIFF_SHA256:-}"; then
     }
 fi
 
+kore_boot_features=${VKORE_KORE_BOOT_FEATURES:-boot-vkore-headless}
+
 make_value() {
     local name=$1
     "$make_command" -C "$kore_root" --no-print-directory -s \
-        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         --eval '.PHONY: _print_vkore_runtime' \
         --eval "_print_vkore_runtime: ; \$(info \$($name))" \
@@ -353,7 +355,7 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     read -r application_cpus application_memory <<<"$application_resources"
     resource_arguments=("CPUS=$application_cpus" "MEM=$application_memory")
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
-        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         "${resource_arguments[@]}" \
         NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \

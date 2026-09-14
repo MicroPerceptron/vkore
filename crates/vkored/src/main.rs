@@ -1,8 +1,8 @@
 #[cfg(unix)]
 use hostlinkd::Config;
 use hostlinkd::{
-    BackendLimits, DeterministicBackend, HostLinkDaemon, InferenceBackend, LlamaServerBackend,
-    LlamaServerConfig, TcpConfig, WorkspaceBackend,
+    BackendLimits, HostLinkDaemon, InferenceBackend, LlamaServerBackend, LlamaServerConfig,
+    TcpConfig, WorkspaceBackend,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -192,19 +192,7 @@ fn run() -> Result<(), String> {
                 listener, backend, transcript, ui_listen, tick_ms, max_ticks, vm,
             )
         } else {
-            if llama_model.is_some() {
-                return Err("--llama-model requires --llama-server".into());
-            }
-            let backend = WorkspaceBackend::open_with_writeback(
-                &root,
-                workspace_state.as_deref(),
-                2,
-                workspace_write,
-            )
-            .map_err(|error| format!("{error:?}"))?;
-            serve(
-                listener, backend, transcript, ui_listen, tick_ms, max_ticks, vm,
-            )
+            Err("live inference requires --llama-server and --llama-model; no test backend is available".into())
         }
     } else if let Some(executable) = llama_server {
         if workspace_write || workspace_state.is_some() {
@@ -232,15 +220,7 @@ fn run() -> Result<(), String> {
         if llama_model.is_some() {
             return Err("--llama-model requires --llama-server".into());
         }
-        serve(
-            listener,
-            DeterministicBackend::new(2),
-            transcript,
-            ui_listen,
-            tick_ms,
-            max_ticks,
-            vm,
-        )
+        Err("live inference requires --llama-server and --llama-model; no test backend is available".into())
     }
 }
 

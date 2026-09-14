@@ -161,7 +161,10 @@ pub enum HarnessError {
 
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::PromptTooLarge => write!(f, "Prompt must contain 1–{PROMPT_BYTES_MAX} UTF-8 bytes; shorten it or split it into separate chat turns."),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 
@@ -215,12 +218,12 @@ impl Shared {
             .next_sequence
             .checked_add(1)
             .ok_or(HarnessError::Backpressure)?;
+        append_transcript(&self.transcript_root, &event)?;
         if session.events.len() == EVENTS_MAX {
             session.events.pop_front();
         }
         session.state.last_event_sequence = event.sequence;
         session.events.push_back(event.clone());
-        append_transcript(&self.transcript_root, &event)?;
         Ok(event)
     }
 }
@@ -257,6 +260,7 @@ pub trait TaskRuntime: Send + 'static {
         prompt: &PromptRequest,
         emit: &mut dyn FnMut(EventKind, bool, Value),
         cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
     ) -> PromptStatus;
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value));
     fn backend_incarnation(&self) -> u64 {
@@ -336,9 +340,20 @@ fn worker_loop(
                 let shared_emit = Arc::clone(&shared);
                 let session_id = session.session_id.clone();
                 let prompt_id = prompt.prompt_id.clone();
+                let response_published = std::cell::Cell::new(false);
                 let mut emit = |kind, public, payload| {
                     if let Ok(mut shared) = shared_emit.lock() {
-                        let _ = shared.emit(&session_id, Some(&prompt_id), kind, public, payload);
+                        let response =
+                            public && matches!(kind, EventKind::Assistant | EventKind::Error);
+                        // Cleanup diagnostics remain visible in Working, but
+                        // must not become a second final response.
+                        let public = public && !(response && response_published.get());
+                        let published = shared
+                            .emit(&session_id, Some(&prompt_id), kind, public, payload)
+                            .is_ok();
+                        if response && public {
+                            response_published.set(published);
+                        }
                     }
                 };
                 let cancel_shared = Arc::clone(&shared);
@@ -356,7 +371,9 @@ fn worker_loop(
                         })
                         .unwrap_or(true)
                 };
-                let status = runtime.run_prompt(&session, &prompt, &mut emit, &cancelled);
+                let status = runtime.run_prompt(&session, &prompt, &mut emit, &cancelled, &|| {
+                    response_published.get()
+                });
                 let backend_incarnation = runtime.backend_incarnation();
                 if let Ok(mut shared) = shared.lock() {
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
@@ -1151,6 +1168,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
         prompt: &PromptRequest,
         emit: &mut dyn FnMut(EventKind, bool, Value),
         cancelled: &dyn Fn() -> bool,
+        _response_published: &dyn Fn() -> bool,
     ) -> PromptStatus {
         if !self.sessions.contains_key(&session.session_id)
             && let Err(error) = self.open_session(session)
@@ -1624,16 +1642,10 @@ impl HarnessHttpServer {
         let state_root = project_root.parent().unwrap_or(&project_root).to_path_buf();
         let server = tiny_http::Server::http(address)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
-        #[allow(clippy::infallible_destructuring_match)]
-        let address = match server.server_addr() {
-            tiny_http::ListenAddr::IP(address) => address,
-            #[cfg(unix)]
-            tiny_http::ListenAddr::Unix(_) => {
-                return Err(HarnessError::Http(
-                    "TCP harness unexpectedly bound a Unix socket".into(),
-                ));
-            }
-        };
+        let address = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| HarnessError::Http("HTTP server did not bind an IP address".into()))?;
         Ok(Self {
             server,
             handle,
@@ -1710,7 +1722,7 @@ impl HarnessHttpServer {
                 (
                     status,
                     "application/json",
-                    serde_json::to_vec(&json!({"error":format!("{error:?}")})).unwrap_or_default(),
+                    serde_json::to_vec(&json!({"error":error.to_string()})).unwrap_or_default(),
                 )
             }
         };
@@ -1749,7 +1761,8 @@ fn route_http(
         settings,
         transcript_root,
     } = state;
-    if method == "GET" && url == "/" {
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    if method == "GET" && path == "/" {
         return Ok((
             "application/json",
             serde_json::to_vec(&json!({
@@ -1761,19 +1774,17 @@ fn route_http(
             .unwrap(),
         ));
     }
-    if method == "GET" && url == "/api/v1/health" {
+    if method == "GET" && path == "/api/v1/health" {
         return Ok((
             "application/json",
             serde_json::to_vec(&json!({"ok":true,"api_version":HARNESS_API_VERSION})).unwrap(),
         ));
     }
-    let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let value = match (method, segments.as_slice()) {
         ("GET", ["api", "v1", "catalog"]) => json!({
             "api_version": HARNESS_API_VERSION,
             "backends": [
-                {"id":"deterministic","name":"Deterministic security oracle","real_inference":false,"status":"installed"},
                 {"id":"llama_cpp","name":"llama.cpp","real_inference":true,"status":"caller_supplied"}
             ],
             "addons": [

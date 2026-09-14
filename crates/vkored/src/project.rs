@@ -319,7 +319,7 @@ impl ProjectStore {
                 state,
                 // A project can make useful edits, but every write remains in
                 // the explicit review/approval path by default.
-                access: WorkspaceAccess::ReviewChanges,
+                access: WorkspaceAccess::AutomaticWriteback,
                 exclusions: vec![".git/objects".into()],
             },
             inference,
@@ -480,7 +480,7 @@ pub fn preflight(config: &ProjectConfig) -> Result<WorkspacePreflight, ProjectEr
         symlinks,
         unsupported_entries,
         estimated_workspace_bytes,
-        writeback_confirmation_required: config.workspace.access != WorkspaceAccess::ReadOnly,
+        writeback_confirmation_required: config.workspace.access == WorkspaceAccess::ReviewChanges,
         ready: true,
     })
 }

@@ -56,6 +56,66 @@ fn config(root: &Path, state: &Path) -> ProjectConfig {
 }
 
 #[test]
+fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() {
+    use hostlinkd::{
+        EventKind, KoreVmRuntime, KoreVmRuntimeConfig, PromptRequest, PromptStatus, SessionState,
+        SessionStatus, TaskRuntime,
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let projects = temporary.path().join("projects");
+    ProjectStore::open(&projects)
+        .unwrap()
+        .save(config(
+            &workspace,
+            &temporary.path().join("workspace-state"),
+        ))
+        .unwrap();
+    let mut runtime = KoreVmRuntime::new(KoreVmRuntimeConfig {
+        qemu_executable: "qemu-system-x86_64".into(),
+        qemu_arguments: Vec::new(),
+        project_root: projects,
+        require_real: false, // Legacy flag cannot re-enable a test backend.
+    })
+    .unwrap();
+    let session = SessionState {
+        api_version: 1,
+        project_id: "secure-project".into(),
+        session_id: "real-only-session".into(),
+        status: SessionStatus::Open,
+        generation: 1,
+        backend_incarnation: 1,
+        last_event_sequence: 0,
+        prompts: Default::default(),
+    };
+    let prompt = PromptRequest {
+        api_version: 1,
+        prompt_id: "real-only-prompt".into(),
+        idempotency_key: "real-only-prompt".into(),
+        text: "hello".into(),
+    };
+    let mut events = Vec::new();
+    let result = runtime.run_prompt(
+        &session,
+        &prompt,
+        &mut |kind, _, payload| events.push((kind, payload)),
+        &|| false,
+        &|| true,
+    );
+    assert_eq!(result, PromptStatus::Failed);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, EventKind::Error);
+    assert!(
+        events[0].1["message"]
+            .as_str()
+            .unwrap()
+            .contains("deterministic inference is forbidden")
+    );
+}
+
+#[test]
 fn project_persists_without_credentials_or_capabilities_and_reopens() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -122,8 +182,9 @@ fn folder_first_project_creation_derives_identity_defaults_and_reuses_the_worksp
     assert!(created.project.id.starts_with("my-workspace-"));
     assert_eq!(
         created.project.workspace.access,
-        WorkspaceAccess::ReviewChanges
+        WorkspaceAccess::AutomaticWriteback
     );
+    assert!(!created.preflight.writeback_confirmation_required);
     assert_eq!(created.project.inference, inference);
     assert!(!created.project.workspace.state.starts_with(&workspace));
     assert!(created.preflight.ready);
@@ -237,6 +298,18 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
+    // Catalog fixtures only: this API test does not run inference or a guest.
+    let mut settings = hostlinkd::AppSettings::default();
+    for (name, destination) in [
+        ("llama-server", &mut settings.default_inference.llama_server),
+        ("model.gguf", &mut settings.default_inference.model),
+        ("kore.iso", &mut settings.default_inference.kore_image),
+    ] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, b"catalog test fixture").unwrap();
+        *destination = Some(path);
+    }
+    std::fs::write(temp.path().join("settings.json"), serde_json::to_vec(&settings).unwrap()).unwrap();
     let service = HarnessService::start(
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
         temp.path().join("transcripts"),
@@ -258,6 +331,16 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     assert!(!discovery.contains("launchToken"));
     assert!(!discovery.contains("Authorization"));
 
+    let discovery_with_query = transact(&server, address, "GET", "/?demo=1", "", &[]);
+    assert!(discovery_with_query.starts_with("HTTP/1.1 200"));
+    assert!(discovery_with_query.contains("vkore-ui"));
+    assert!(!discovery_with_query.contains("text/html"));
+
+    let health = transact(&server, address, "GET", "/api/v1/health?check=1", "", &[]);
+    assert!(health.starts_with("HTTP/1.1 200"));
+    let health: Value = serde_json::from_str(health.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(health["ok"], true);
+
     let catalog = transact(&server, address, "GET", "/api/v1/catalog", "", &[]);
     let catalog: Value = serde_json::from_str(catalog.split_once("\r\n\r\n").unwrap().1).unwrap();
     let addons = catalog["addons"].as_array().unwrap();
@@ -270,15 +353,16 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
 
     let settings = transact(&server, address, "GET", "/api/v1/settings", "", &[]);
     let settings: Value = serde_json::from_str(settings.split_once("\r\n\r\n").unwrap().1).unwrap();
-    assert_eq!(settings["default_model_id"], "deterministic");
+    assert_eq!(settings["default_inference"]["backend"], "llama_cpp");
     assert_eq!(settings["show_working"], true);
     assert!(
         settings["models"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|model| model["id"] == "deterministic")
+            .all(|model| model["backend"] == "llama_cpp")
     );
+    assert!(catalog["backends"].as_array().unwrap().iter().all(|backend| backend["real_inference"] == true));
 
     let origin = format!("http://{address}");
     let changed = transact(
@@ -308,7 +392,7 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     let created: Value = serde_json::from_str(created.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(created["created"], true);
     assert_eq!(created["project"]["name"], "folder-first");
-    assert_eq!(created["project"]["workspace"]["access"], "review_changes");
+    assert_eq!(created["project"]["workspace"]["access"], "automatic_writeback");
     assert!(
         created["project"]["workspace"]
             .get("max_write_bytes")

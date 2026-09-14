@@ -58,6 +58,9 @@ const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 fn native_renderer() -> AxRenderer<System> {
+    // Register before shaping, not only when constructing the presentation
+    // backend. Headless callers use the same font resources as the app.
+    fonts::register().expect("register native UI fonts");
     AxRenderer::new_in(renderer::Settings::default(), System)
 }
 
@@ -74,6 +77,7 @@ enum Message {
     ChooseBodyFont(String),
     ToggleShowWorking,
     ToggleWorkingExpanded,
+    ToggleAutomaticWriteback,
     ToggleSession,
     #[allow(dead_code)]
     CleanSession,
@@ -116,6 +120,7 @@ enum RequestKind {
     Approvals,
     Settings,
     SaveSettings,
+    SaveProjectSettings,
     Activity,
     CreateProject,
     StartSession,
@@ -890,7 +895,8 @@ fn meaningful_error(event: &Value) -> String {
 
 fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
     let catalog = broker_catalog(events);
-    let mut rows = Vec::new();
+    let mut rows: Vec<WorkRow> = Vec::new();
+    let mut authority_blocks = BTreeMap::<String, usize>::new();
     let has_validated_raw_broker_proposal = events.iter().enumerate().any(|(index, event)| {
         raw_model_proposal(event, &catalog).is_some()
             && broker_validation_status(events, index) == Some(true)
@@ -900,6 +906,19 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
     let mut seen_tool_calls: BTreeMap<(String, String), Option<u64>> = BTreeMap::new();
     for (event_index, event) in events.iter().enumerate() {
         let event_kind = event["kind"].as_str().unwrap_or("event");
+        if event_kind == "capability" {
+            let mut row = capability_row(event);
+            let prompt = event["prompt_id"].as_str().unwrap_or_default().to_owned();
+            if let Some(index) = authority_blocks.get(&prompt) {
+                rows[*index].body.push('\n');
+                rows[*index].body.push_str(&row.body);
+            } else {
+                row.context = Some("Broker capability management".into());
+                authority_blocks.insert(prompt, rows.len());
+                rows.push(row);
+            }
+            continue;
+        }
         let row = (broker_validation_status(events, event_index) == Some(true))
             .then(|| raw_model_proposal(event, &catalog))
             .flatten()
@@ -913,7 +932,6 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                         kind: "decision".into(),
                         output: None,
                     }),
-                "capability" => Some(capability_row(event)),
                 "tool_call" => decision_payload(event).and_then(|call| {
                     let agent = agent_name(event);
                     let body = format_agent_tool_call(&call).unwrap_or_else(|| "tool".into());
@@ -997,7 +1015,11 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                     })
                 }
                 "error" => Some(WorkRow {
-                    speaker: "Denied".into(),
+                    speaker: if event["payload"]["stage"] == "agent_failure" {
+                        "Agent failed".into()
+                    } else {
+                        "Error".into()
+                    },
                     context: None,
                     body: meaningful_error(event),
                     kind: "error".into(),
@@ -1212,6 +1234,29 @@ fn glass_header<'a>(
         .into()
 }
 
+fn settings_header<'a>() -> UiElement<'a> {
+    container(
+        row![
+            text("Settings")
+                .font(fonts::DISPLAY)
+                .size(theme::SIZE_DISPLAY)
+                .line_height(iced_core::text::LineHeight::Relative(1.25))
+                .color(theme::rgb(theme::TEXT)),
+            space::horizontal(),
+            button(widgets::control("x"))
+                .height(26)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Ghost))
+                .on_press(Message::CloseSettings),
+        ]
+        .align_y(alignment::Vertical::Center),
+    )
+    .padding([14, 20])
+    .width(Length::Fill)
+    .style(|_| glass_bottom_edge())
+    .into()
+}
+
 fn divider_right(background: u32) -> iced_widget::container::Style {
     theme::panel(background, None, 0.0)
         .border_sides(border::Sides::default().right(border::side(theme::rgb(theme::BORDER), 1.0)))
@@ -1228,10 +1273,17 @@ fn divider_left(background: u32) -> iced_widget::container::Style {
 }
 
 fn settings_section<'a>(title: &'static str, body: UiElement<'a>) -> UiElement<'a> {
-    column![widgets::display(title), body]
-        .spacing(theme::SPACE_2)
-        .width(Length::Fill)
-        .into()
+    column![
+        text(title)
+            .font(fonts::DISPLAY)
+            .size(theme::SIZE_MD)
+            .line_height(iced_core::text::LineHeight::Relative(1.25))
+            .color(theme::rgb(theme::TEXT)),
+        body,
+    ]
+    .spacing(theme::SPACE_2)
+    .width(Length::Fill)
+    .into()
 }
 
 fn settings_row<'a>(
@@ -1443,6 +1495,7 @@ struct Model {
     auto_open_pending: bool,
     session: Option<String>,
     prompt_id: Option<String>,
+    submitted_prompt: Option<String>,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
@@ -1476,18 +1529,18 @@ impl Model {
         model.settings_loaded = true;
         model.settings = json!({
             "schema_version":1,
-            "default_model_id":"deterministic",
+            "default_model_id":"llama_cpp:fixture",
             "default_inference":{
-                "backend":"deterministic","kore_image":null,"llama_server":null,
-                "model":null,"extra_args":[],"context_tokens":32768,
+                "backend":"llama_cpp","kore_image":"/fixture/kore.iso","llama_server":"/fixture/llama-server",
+                "model":"/fixture/Qwen3.5-9B-Q4_K_M.gguf","extra_args":[],"context_tokens":32768,
                 "output_tokens":512,"threads":2,"slots":3
             },
             "body_font":"design_default",
             "show_working":true,
             "working_expanded_default":false,
             "models":[{
-                "id":"deterministic","display_name":"Deterministic security oracle",
-                "backend":"deterministic","provider":"vKore","path":null,
+                "id":"llama_cpp:fixture","display_name":"Qwen3.5-9B-Q4_K_M.gguf",
+                "backend":"llama_cpp","provider":"llama.cpp","path":"/fixture/Qwen3.5-9B-Q4_K_M.gguf",
                 "status":"installed"
             }]
         });
@@ -1509,6 +1562,7 @@ impl Model {
             auto_open_pending: true,
             session: None,
             prompt_id: None,
+            submitted_prompt: None,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
@@ -1736,6 +1790,27 @@ impl Model {
                     .unwrap_or(false);
                 self.save_settings(json!({"working_expanded_default": expanded}));
             }
+            Message::ToggleAutomaticWriteback => {
+                if self.busy {
+                    return;
+                }
+                let Some(mut project) = self.project().cloned() else {
+                    return;
+                };
+                let automatic = project["workspace"]["access"] == "automatic_writeback";
+                project["workspace"]["access"] = json!(if automatic {
+                    "review_changes"
+                } else {
+                    "automatic_writeback"
+                });
+                self.busy = true;
+                self.network.request(Request {
+                    kind: RequestKind::SaveProjectSettings,
+                    method: "POST",
+                    path: "/api/v1/projects".into(),
+                    body: Some(project),
+                });
+            }
             Message::ToggleSession => {
                 if let Some(session) = self.session.clone() {
                     self.busy = true;
@@ -1947,6 +2022,7 @@ impl Model {
             self.expanded_work.insert(prompt_id.clone());
         }
         self.prompt_id = Some(prompt_id.clone());
+        self.submitted_prompt = Some(self.prompt.text());
         self.busy = true;
         self.network.poll(Some(session.clone()), true);
         self.network.request(Request {
@@ -1960,7 +2036,6 @@ impl Model {
                 "text":text
             })),
         });
-        self.prompt = text_editor::Content::new();
     }
 
     fn select_workspace(&mut self, path: &Path) {
@@ -2012,6 +2087,19 @@ impl Model {
             }
             (RequestKind::Activity, Ok(Value::Array(activity))) => {
                 self.activity = Some(Ok(activity));
+            }
+            (RequestKind::SaveProjectSettings, Ok(project)) => {
+                self.busy = false;
+                if let Some(index) = self
+                    .projects
+                    .iter()
+                    .position(|saved| saved["id"] == project["id"])
+                {
+                    self.projects[index] = project;
+                }
+                self.status =
+                    "Workspace writeback setting saved. Close and reopen the project to apply it."
+                        .into();
             }
             (RequestKind::Projects, Ok(Value::Array(projects))) => {
                 self.projects = projects;
@@ -2119,6 +2207,9 @@ impl Model {
                 }
             }
             (RequestKind::SendPrompt, Ok(_)) => {
+                if self.submitted_prompt.take().as_deref() == Some(self.prompt.text().as_str()) {
+                    self.prompt = text_editor::Content::new();
+                }
                 self.busy = false;
                 self.status = "Broker selecting capabilities…".into();
             }
@@ -2174,6 +2265,7 @@ impl Model {
                     self.activity = Some(Err(error.clone()));
                 }
                 if kind == RequestKind::SendPrompt {
+                    self.submitted_prompt = None;
                     self.prompt_id = None;
                     self.network.poll(self.session.clone(), false);
                 }
@@ -2454,7 +2546,7 @@ impl Model {
             let active = self.selected == Some(index);
             let backend = project["inference"]["backend"]
                 .as_str()
-                .unwrap_or("deterministic")
+                .unwrap_or("unconfigured")
                 .replace('_', " ");
             let access = project["workspace"]["access"]
                 .as_str()
@@ -2591,7 +2683,7 @@ impl Model {
             Some(project) => {
                 let backend = project["inference"]["backend"]
                     .as_str()
-                    .unwrap_or("deterministic")
+                    .unwrap_or("unconfigured")
                     .replace('_', " ");
                 let root = project["workspace"]["root"]
                     .as_str()
@@ -2789,7 +2881,7 @@ impl Model {
                     "Working…".to_owned()
                 } else if failed {
                     format!(
-                        "Stopped after {}",
+                        "Failed after {}",
                         format_elapsed(
                             ended_at
                                 .unwrap_or_default()
@@ -3292,7 +3384,7 @@ impl Model {
     fn settings_panel(&self) -> UiElement<'_> {
         let selected_model = self.settings["default_model_id"]
             .as_str()
-            .unwrap_or("deterministic");
+            .unwrap_or("");
         let mut model_choices = column![];
         if let Some(models) = self.settings["models"].as_array() {
             for model in models {
@@ -3330,6 +3422,25 @@ impl Model {
             }
         }
         let general = settings_section("General", model_choices.into());
+        let automatic = self
+            .project()
+            .is_some_and(|project| project["workspace"]["access"] == "automatic_writeback");
+        let workspace = settings_section(
+            "Workspace",
+            settings_row(
+                "Apply file changes automatically",
+                "Current project only. Off blocks host writeback; an interactive review/apply workflow is not yet available. Changes take effect when the project is reopened.",
+                button(widgets::control(if automatic { "On" } else { "Off" }))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Choice(automatic)))
+                    .on_press_maybe(
+                        (self.project().is_some() && !self.busy)
+                            .then_some(Message::ToggleAutomaticWriteback),
+                    )
+                    .into(),
+            ),
+        );
 
         let selected_font = self.settings["body_font"]
             .as_str()
@@ -3456,22 +3567,13 @@ impl Model {
         }
         let activity = settings_section("Activity", activity_rows.into());
 
-        let content = column![general, appearance, interface, activity,].spacing(theme::SPACE_8);
+        let content =
+            column![general, workspace, appearance, interface, activity,].spacing(theme::SPACE_8);
         let modal_width = (self.viewport.width - 64.0).clamp(280.0, 920.0);
         let modal_height = (self.viewport.height - 64.0).clamp(240.0, 720.0);
         backdrop_filter(
             container(column![
-                glass_header(
-                    "Settings",
-                    "application preferences",
-                    Some(Message::CloseSettings),
-                ),
-                container(widgets::mono(self.status.clone(), theme::TEXT_MUTED))
-                    .padding([0.0, theme::SPACE_8])
-                    .height(28)
-                    .width(Length::Fill)
-                    .align_y(alignment::Vertical::Center)
-                    .style(|_| glass_bottom_edge()),
+                settings_header(),
                 scrollable(
                     container(content)
                         .padding(iced_core::Padding {
@@ -3652,6 +3754,7 @@ struct App {
     redraw_requested: bool,
     last_frame: Option<Instant>,
     profile: bool,
+    render_error: Option<String>,
 }
 
 impl App {
@@ -3757,13 +3860,17 @@ impl App {
             &mut self.renderer,
             &mut messages,
         );
-        let animate = matches!(
-            state,
-            user_interface::State::Updated {
-                redraw_request: iced_core::window::RedrawRequest::NextFrame,
-                ..
-            }
-        );
+        let animate = self
+            .model
+            .booted_at
+            .is_some_and(|at| at.elapsed() < splash::LENGTH)
+            || matches!(
+                state,
+                user_interface::State::Updated {
+                    redraw_request: iced_core::window::RedrawRequest::NextFrame,
+                    ..
+                }
+            );
         interface.draw(
             &mut self.renderer,
             &Theme::Dark,
@@ -3931,7 +4038,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.redraw
                     && let Err(error) = self.draw(&window)
                 {
-                    self.model.status = format!("Axiom render failed: {error}");
+                    // A message inside the broken renderer cannot report its
+                    // own failure. Stop instead of spinning on the last frame.
+                    eprintln!("vkore-ui: Axiom render failed: {error}");
+                    self.render_error = Some(error);
+                    self.redraw = false;
+                    event_loop.exit();
                 }
                 return;
             }
@@ -4121,17 +4233,76 @@ fn main() {
         redraw_requested: false,
         last_frame: None,
         profile: std::env::var_os("VKORE_UI_PROFILE").is_some(),
+        render_error: None,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
+    if app.render_error.is_some() {
+        std::process::exit(2);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authority_updates_expand_one_block_and_worker_failure_is_visible() {
+        let events = vec![
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Agent","label":"agent/prompt"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Budget","label":"budget/prompt"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Executable","label":"touch"}}),
+            json!({"kind":"error","prompt_id":"p","payload":{"stage":"agent_failure","message":"Agent failed before responding: RunnerExited(41)"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Teardown","kind":"Agent","label":"agent/frontend"}}),
+        ];
+        for count in 1..=events.len() {
+            let refs = events[..count].iter().collect::<Vec<_>>();
+            let rows = work_rows(&refs);
+            assert_eq!(
+                rows.iter().filter(|row| row.speaker == "Authority").count(),
+                1
+            );
+            let lines = rows[0].body.lines().count();
+            assert_eq!(
+                lines,
+                events[..count]
+                    .iter()
+                    .filter(|event| event["kind"] == "capability")
+                    .count()
+            );
+            if count >= 4 {
+                assert_eq!(rows[1].speaker, "Agent failed");
+                assert_eq!(rows[1].kind, "error");
+                assert!(rows[1].body.contains("RunnerExited(41)"));
+            }
+        }
+    }
     use hostlinkd::{
         BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer, HarnessService,
     };
+
+    #[test]
+    fn rejected_submission_preserves_draft_and_admission_does_not_erase_new_edits() {
+        let mut model = populated_fixture_model();
+        model.session = Some("draft-test".into());
+        model.prompt_id = None;
+        let draft = "a".repeat(134);
+        model.prompt = text_editor::Content::with_text(&draft);
+        model.send_prompt();
+        assert_eq!(model.prompt.text(), draft);
+        model.response(RequestKind::SendPrompt, Err("Prompt must contain 1–128 UTF-8 bytes".into()));
+        assert_eq!(model.prompt.text(), draft);
+        assert!(model.prompt_id.is_none());
+        model.prompt = text_editor::Content::with_text("Hello");
+        model.send_prompt();
+        model.prompt = text_editor::Content::with_text("My next draft");
+        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        assert_eq!(model.prompt.text(), "My next draft");
+        model.prompt_id = None;
+        model.send_prompt();
+        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        assert!(model.prompt.text().is_empty());
+    }
 
     fn populated_fixture_model() -> Model {
         let (requests, _request_receiver) = mpsc::channel();
@@ -4571,6 +4742,8 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().expect("a control frame");
+            let errors = renderer.take_text_errors();
+            assert!(errors.is_empty(), "control text errors: {errors:?}");
             let quad = frame.quads().first().expect("the button shape");
             let label = frame.glyph_runs().first().expect("the button label");
             let shape_center = quad.bounds.y + quad.bounds.height / 2.0;
@@ -5174,7 +5347,8 @@ mod tests {
             );
             let frame = renderer.take_frame().expect("conversation frame");
             axgfx::frame_requirements(frame.view()).expect("supported conversation display list");
-            assert!(renderer.take_text_errors().is_empty());
+            let errors = renderer.take_text_errors();
+            assert!(errors.is_empty(), "conversation text errors: {errors:?}");
             assert!(frame.glyphs().len() > 30);
         }
     }
@@ -5390,7 +5564,11 @@ mod tests {
 
         let frame = renderer.take_frame().expect("workspace selector frame");
         axgfx::frame_requirements(frame.view()).expect("supported workspace selector display list");
-        assert!(renderer.take_text_errors().is_empty());
+        let errors = renderer.take_text_errors();
+        assert!(
+            errors.is_empty(),
+            "workspace selector text errors: {errors:?}"
+        );
         assert!(renderer.take_geometry_errors().is_empty());
         assert!(frame.glyphs().len() > 20);
     }
@@ -5461,7 +5639,7 @@ mod tests {
         model.booted_at = None;
         model.activity = Some(Ok(vec![json!({
             "project_id":"project","project_name":"Project","session_id":"session",
-            "model":"Deterministic security oracle","updated_at_unix_ms":1_750_000_000_000_u64,
+            "model":"Qwen3.5-9B-Q4_K_M.gguf","updated_at_unix_ms":1_750_000_000_000_u64,
             "status":"completed","prompts":1
         })]));
 
@@ -5546,6 +5724,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_writeback_toggle_saves_only_the_selected_project() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.projects = vec![
+            json!({"id":"project-a","workspace":{"root":"/project-a","access":"automatic_writeback"}}),
+        ];
+        model.selected = Some(0);
+        while receiver.try_recv().is_ok() {}
+        model.update(Message::ToggleAutomaticWriteback);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.kind, RequestKind::SaveProjectSettings);
+        assert_eq!(request.path, "/api/v1/projects");
+        let body = request.body.unwrap();
+        assert_eq!(body["workspace"]["root"], "/project-a");
+        assert_eq!(body["workspace"]["access"], "review_changes");
+        assert_eq!(
+            model.projects[0]["workspace"]["access"], "automatic_writeback",
+            "wait for server confirmation"
+        );
+    }
+
+    #[test]
     fn activity_loading_empty_error_and_populated_states_render() {
         fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
@@ -5561,7 +5765,7 @@ mod tests {
             Some(Ok(Vec::new())),
             Some(Err("transcript directory unavailable".into())),
             Some(Ok(vec![json!({
-                "project_name":"Project","model":"Deterministic security oracle",
+                "project_name":"Project","model":"Qwen3.5-9B-Q4_K_M.gguf",
                 "updated_at_unix_ms":1_750_000_000_000_u64,"status":"completed",
                 "prompts":1
             })])),
@@ -5646,6 +5850,41 @@ mod tests {
         model.update(Message::CloseSettings);
         assert!(!model.settings_open);
         assert_eq!(model.view, View::Filesystem);
+    }
+
+    #[test]
+    fn settings_modal_does_not_render_unrelated_application_status() {
+        fonts::register().unwrap();
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.viewport = Size::new(920.0, 720.0);
+        model.activity = Some(Ok(Vec::new()));
+        let glyph_count = |model: &Model| {
+            let mut renderer = native_renderer();
+            let mut interface = UserInterface::build(
+                model.settings_panel(),
+                model.viewport,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            renderer.take_frame().unwrap().glyphs().len()
+        };
+
+        model.status = "Cancellation requested.".into();
+        let cancellation = glyph_count(&model);
+        model.status = "An unrelated project status with a very different length.".into();
+
+        assert_eq!(cancellation, glyph_count(&model));
     }
 
     #[test]

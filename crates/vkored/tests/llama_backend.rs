@@ -380,7 +380,12 @@ fn broker_retries_one_invalid_plan_before_completing() {
     let mut tick = 0;
     while Instant::now() < deadline {
         tick += 1;
-        match backend.poll(tick) {
+        let event = backend.poll(tick);
+        assert!(
+            backend.metrics().pending <= 1,
+            "a correction is not another pending request"
+        );
+        match event {
             Some(BackendEvent::Completed { payload, .. }) => {
                 let reply = decode_broker_reply(&payload).unwrap();
                 assert_eq!(reply.action, BrokerActionKind::CreateAgent);
@@ -389,6 +394,14 @@ fn broker_retries_one_invalid_plan_before_completing() {
                     vec![[5; 16], [2; 16]]
                 );
                 assert_eq!(backend.metrics().restarts, 0);
+                assert_eq!(backend.metrics().pending, 0);
+                let prompt_count = std::iter::from_fn(|| backend.take_observation())
+                    .filter(|event| event.kind == ObservationKind::ModelPrompt)
+                    .count();
+                assert_eq!(
+                    prompt_count, 2,
+                    "both real generation attempts are observable"
+                );
                 return;
             }
             Some(BackendEvent::Chunk { .. }) => panic!("untrusted broker text escaped"),
@@ -579,32 +592,17 @@ fn supervised_stub_broker_creates_a_tool_inert_conversational_agent() {
 }
 
 #[test]
-fn supervised_llama_preserves_the_exact_legacy_kore_boot_probe() {
+fn supervised_llama_never_fabricates_a_legacy_boot_probe_reply() {
     let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
     let agent = boot_agent_identity(2);
     backend.open(agent).unwrap();
-    backend
-        .submit(agent, RequestId(*b"kore-shell-probe"), b"seat-a", 0)
-        .unwrap();
-
-    let event = (1..=4)
-        .find_map(|tick| backend.poll(tick))
-        .expect("the deterministic boot probe completes without model inference");
-    let BackendEvent::Completed {
-        payload,
-        turn,
-        usage,
-        ..
-    } = event
-    else {
-        panic!("unexpected boot-probe event: {event:?}");
-    };
-    assert_eq!(turn, 0);
-    assert_eq!(payload.len(), 74);
-    assert_eq!(payload[0], 1);
-    assert_eq!(&payload[2..10], &1_u64.to_le_bytes());
-    assert_eq!(usage.prompt_tokens, 2);
-    assert_eq!(usage.completion_tokens, 19);
+    assert!(
+        backend
+            .submit(agent, RequestId(*b"kore-shell-probe"), b"seat-a", 0)
+            .is_err(),
+        "legacy raw probes must satisfy the real inference protocol too"
+    );
+    assert!((1..=4).all(|tick| backend.poll(tick).is_none()));
 }
 
 #[test]
@@ -978,6 +976,70 @@ fn stub_config() -> LlamaServerConfig {
         limits: limits(),
         trace: false,
     }
+}
+
+#[test]
+fn conversation_context_survives_route_retirement_but_is_replaceable_and_bounded() {
+    let mut config = stub_config();
+    config.limits.request_timeout_ticks = 120_000;
+    let mut backend = LlamaServerBackend::start(config).unwrap();
+    let history = vec![
+        (false, "session-only-fact-47".to_owned()),
+        (true, "Noted.".to_owned()),
+    ];
+    backend.set_conversation_context(&history).unwrap();
+    for index in 1..=3 {
+        if index == 2 {
+            backend.reset();
+        }
+        if index == 3 {
+            backend.set_conversation_context(&[]).unwrap();
+        }
+        let agent = identity(index, BackendRole::Agent);
+        backend.open(agent).unwrap();
+        backend
+            .submit(
+                agent,
+                RequestId(id(index + 50)),
+                &agent_request_with_catalog(1, AgentRequestKind::UserText, 0, None, "Hello", &[]),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            backend.set_conversation_context(&[]),
+            Err(BackendError::OutOfOrder)
+        );
+        let mut completed = false;
+        for tick in 1..500 {
+            match backend.poll(tick) {
+                Some(BackendEvent::Completed { .. }) => {
+                    completed = true;
+                    break;
+                }
+                Some(other) => panic!("unexpected {other:?}"),
+                None => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(completed);
+        let prompts = std::iter::from_fn(|| backend.take_observation())
+            .filter(|event| event.kind == ObservationKind::ModelPrompt)
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(
+            prompts[0].payload.contains("session-only-fact-47"),
+            index != 3
+        );
+        assert!(prompts[0].payload.contains("Output JSON Schema"));
+        backend.close(agent).unwrap();
+    }
+    assert_eq!(
+        backend.set_conversation_context(&vec![(false, "x".into()); 33]),
+        Err(BackendError::ContextLimit)
+    );
+    assert_eq!(
+        backend.set_conversation_context(&[(false, "x".repeat(16 * 1024 + 1))]),
+        Err(BackendError::ContextLimit)
+    );
 }
 
 fn open_three(backend: &mut LlamaServerBackend) -> [SequenceIdentity; 3] {

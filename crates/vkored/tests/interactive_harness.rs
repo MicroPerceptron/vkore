@@ -51,6 +51,68 @@ fn wait_terminal(
 }
 
 #[test]
+fn response_is_published_before_reclaim_and_cleanup_cannot_reply_twice() {
+    // Harness contract test, not a substitute for the real Kore/Qwen test.
+    struct ResponseLifecycle;
+    impl TaskRuntime for ResponseLifecycle {
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            emit: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            response_published: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            assert!(!response_published());
+            emit(
+                EventKind::Error,
+                true,
+                serde_json::json!({"message": "worker exited", "stage": "agent_failure"}),
+            );
+            assert!(response_published());
+            emit(
+                EventKind::Capability,
+                false,
+                serde_json::json!({"state": "Teardown"}),
+            );
+            emit(
+                EventKind::Error,
+                true,
+                serde_json::json!({"message": "cleanup diagnostic"}),
+            );
+            assert!(response_published());
+            PromptStatus::Failed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let service = HarnessService::start(ResponseLifecycle, temp.path());
+    let handle = service.handle();
+    create(&handle, "receipt-session");
+    handle
+        .submit_prompt("receipt-session", prompt("p1", "hello"))
+        .unwrap();
+    let events = wait_terminal(&handle, "receipt-session", "p1");
+    let finals = events
+        .iter()
+        .filter(|event| {
+            event.public && matches!(event.kind, EventKind::Error | EventKind::Assistant)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finals.len(), 1);
+    let reclaim = events
+        .iter()
+        .find(|event| event.kind == EventKind::Capability)
+        .unwrap();
+    assert!(finals[0].sequence < reclaim.sequence);
+    assert!(
+        events
+            .iter()
+            .any(|event| !event.public && event.payload["message"] == "cleanup diagnostic")
+    );
+}
+
+#[test]
 fn prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = BackendHarness::new(DeterministicBackend::new(2), DeterministicGuest::new());
@@ -415,6 +477,7 @@ fn cancellation_close_and_backend_restart_retire_live_work() {
         &prompt("p1", "read X"),
         &mut |kind, _, _| events.push(kind),
         &|| false,
+        &|| true,
     );
     assert_eq!(status, PromptStatus::Completed);
     runtime.reset_backend();
@@ -423,6 +486,7 @@ fn cancellation_close_and_backend_restart_retire_live_work() {
         &prompt("p2", "read X"),
         &mut |kind, _, _| events.push(kind),
         &|| false,
+        &|| true,
     );
     assert_eq!(status, PromptStatus::Failed);
     assert!(events.contains(&EventKind::Error));
@@ -434,6 +498,7 @@ fn cancellation_close_and_backend_restart_retire_live_work() {
         },
         &prompt("cancel", "read X"),
         &mut |_, _, _| {},
+        &|| true,
         &|| true,
     );
     assert_eq!(cancelled, PromptStatus::Cancelled);
@@ -477,7 +542,12 @@ fn loopback_http_api_returns_sse_events_and_reconnect_state() {
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
         temp.path(),
     );
-    let server = HarnessHttpServer::bind("127.0.0.1:0".parse().unwrap(), service.handle()).unwrap();
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        service.handle(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
     let address = server.local_addr();
     let (tx, rx) = mpsc::channel();
     let client = thread::spawn(move || {
@@ -524,7 +594,12 @@ fn loopback_http_api_accepts_host_headers_without_ports() {
         BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
         temp.path(),
     );
-    let server = HarnessHttpServer::bind("127.0.0.1:0".parse().unwrap(), service.handle()).unwrap();
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        service.handle(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
     let address = server.local_addr();
 
     for host in ["127.0.0.1", "localhost", "LOCALHOST", "[::1]"] {

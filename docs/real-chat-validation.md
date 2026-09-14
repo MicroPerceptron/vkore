@@ -4,6 +4,12 @@ PR #39 cleanup is ready for review. Issue #24 owns the subsequent application-wi
 
 ## Live acceptance
 
+The six-prompt sequence used the first rebuilt image (Kore commit
+`2b1307786a0a354864a14b98578f73e413cae208`, image SHA-256
+`7dec906af7a1ddffb6a5fdd3e3b4dbde37ac9951bd3d0ebf8286c4b50526fdfd`).
+The final image adds public nonzero-exit reporting and documents the `hello`
+witness exit convention; its targeted live checks are recorded below.
+
 The native host harness used real QEMU/Kore and Qwen3.5-9B-Q4_K_M through
 llama.cpp. Six prompts ran sequentially in one conversation. All six completed
 with model-authored answers; no host-authored substitute answer was used.
@@ -29,10 +35,27 @@ This PR still retires single-prompt guests after completion; VM/server reuse,
 prewarming, and global broker ownership are issue #24. See
 [performance timing](performance-timing.md) for the measurement boundaries.
 
+## Final-image negative and executable checks
+
+The revision-2 image was tested with an explicitly unavailable executable,
+followed by `hello` in the same conversation. The first request produced one
+authenticated broker refusal and an explicit failed-guest shutdown 4.179 ms
+after the error; there was no unconfirmed-cleanup timeout. The next request
+founded and ran `hello`, observed its intentional exit status 42, and returned:
+“The hello executable exited with status 42 and produced no output.”
+The worker response preceded confirmed teardown. The batch exited 2 because
+its first request intentionally failed; both expected outcomes were verified.
+
+This also verifies the executable-layout transfer fix with a tool whose
+segment layout differs from the runner. Nonzero public tool exits are no
+longer mislabeled as filesystem permission failures. The host suites,
+architecture checks, kernel boot test, and two-CPU production gate were
+repeated successfully for this final image.
+
 ## Validation
 
 - Full vKore workspace suite: 292 tests passed, 3 ignored. Subsequent native UI
-  suite: 114 passed, 1 ignored, including the new metadata/worker regression.
+  suite: 115 passed, 1 ignored, including the new metadata/worker regression.
 - Python timing/process tests: 5 passed. Real-only launcher tests: 2 passed.
 - Native release build and `make dev-check` passed. The Linux setup helper
   creates the workspace state directory and refuses to overwrite existing setup.
@@ -52,17 +75,17 @@ prewarming, and global broker ownership are issue #24. See
 
 [Kore PR #933](https://github.com/MicroPerceptron/kore/pull/933), stacked on
 Kore PR #909, contains the matching guest changes. The packaged commit is
-`2b1307786a0a354864a14b98578f73e413cae208`; its tracked userland artifacts were
-rebuilt from source `2db155cfb9ac6621bfdd723966157c22022fae4d` and carry that
+`458c5c9a74e14ab805b304a946262b841d0ee144`; its tracked userland artifacts were
+rebuilt from source `4827379f36b0112a8978d00d7f832be119c72719` and carry that
 shell build stamp. Packaging derives ISO metadata from the packaged commit.
 The tracked Kore tree is clean.
 
 Download the exact image from
-[vkore-pr39-20260914](https://github.com/MicroPerceptron/kore/releases/tag/vkore-pr39-20260914).
+[vkore-pr39-20260914-r2](https://github.com/MicroPerceptron/kore/releases/tag/vkore-pr39-20260914-r2).
 ISO SHA-256:
 
 ```text
-7dec906af7a1ddffb6a5fdd3e3b4dbde37ac9951bd3d0ebf8286c4b50526fdfd
+32f4067f88b156fea71b6ac67aadc779695783a55f5418863b733c4dd06fda6e
 ```
 
 The launcher defaults, `config/real-stack.lock.mk`, and

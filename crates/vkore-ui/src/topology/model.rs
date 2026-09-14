@@ -257,7 +257,15 @@ impl Graph {
 
 // Session generation and readiness metadata do not prove that a worker exists.
 fn worker_evidence(event: &Value) -> bool {
-    matches!(event["kind"].as_str(), Some("broker_proposal" | "capability" | "tool_call" | "tool_result"))
+    match event["kind"].as_str() {
+        Some("broker_proposal") => crate::decision_payload(event).is_some_and(|proposal| {
+            proposal["action"].as_str().is_some_and(|action| {
+                action.eq_ignore_ascii_case("CreateAgent") || action == "create_agent"
+            })
+        }),
+        Some("capability" | "tool_call" | "tool_result") => true,
+        _ => false,
+    }
 }
 
 /// Marks `label` held, adding it when the catalog never offered it.
@@ -383,6 +391,17 @@ mod tests {
         let graph = Graph::from_events(&events, true);
         assert_eq!(graph.agents.len(), 2);
         assert!(!graph.agents[1].live);
+    }
+
+    #[test]
+    fn a_broker_refusal_does_not_create_a_worker() {
+        let graph = Graph::from_events(&[
+            catalog_event(),
+            json!({"kind":"broker_proposal","generation":1,"payload":{"action":"refused","reason":"unavailable"}}),
+            json!({"kind":"error","generation":1,"payload":{"stage":"agent_failure"}}),
+        ], true);
+        assert_eq!(graph.agents.len(), 1);
+        assert_eq!(graph.agents[0].role, Role::Broker);
     }
 
     #[test]

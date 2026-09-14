@@ -18,7 +18,7 @@ cd "$HOME/src"
 gh repo clone MicroPerceptron/vkore vkore -- --branch codex/wip-live-chat-session-fixes
 gh repo clone MicroPerceptron/kore kore-vkore-real -- --branch codex/frontend-response-lifecycle
 gh repo clone MicroPerceptron/llama.cpp llama.cpp -- --branch codex/harness-implemenation
-git -C kore-vkore-real checkout --detach 2b1307786a0a354864a14b98578f73e413cae208
+git -C kore-vkore-real checkout --detach 458c5c9a74e14ab805b304a946262b841d0ee144
 git -C llama.cpp checkout --detach 0b953005451976d78c8227b16ad3d42a07c2053b
 ```
 
@@ -70,13 +70,13 @@ and qcow2 firmware formats.
 ## Download the exact ISO
 
 Use the asset **kore-x86-release.iso** from the Kore development prerelease
-**vkore-pr39-20260914**. Do not use an older Kore release or run `make artifacts`
+**vkore-pr39-20260914-r2**. Do not use an older Kore release or run `make artifacts`
 for this handoff: rebuilding changes packaging metadata and can change the hash.
 
 ```sh
 cd "$HOME/src"
 mkdir -p kore-vkore-real/target
-gh release download vkore-pr39-20260914 --repo MicroPerceptron/kore \
+gh release download vkore-pr39-20260914-r2 --repo MicroPerceptron/kore \
   --pattern kore-x86-release.iso --pattern SHA256SUMS \
   --dir kore-vkore-real/target
 (cd kore-vkore-real/target && sha256sum -c SHA256SUMS)
@@ -85,12 +85,12 @@ gh release download vkore-pr39-20260914 --repo MicroPerceptron/kore \
 Expected ISO SHA-256:
 
 ```text
-7dec906af7a1ddffb6a5fdd3e3b4dbde37ac9951bd3d0ebf8286c4b50526fdfd
+32f4067f88b156fea71b6ac67aadc779695783a55f5418863b733c4dd06fda6e
 ```
 
-The ISO is packaged from Kore commit `2b1307786a0a354864a14b98578f73e413cae208`. Its
+The ISO is packaged from Kore commit `458c5c9a74e14ab805b304a946262b841d0ee144`. Its
 tracked x86 userland artifacts were rebuilt from source commit
-`2db155cfb9ac6621bfdd723966157c22022fae4d`; the shell build stamp identifies
+`4827379f36b0112a8978d00d7f832be119c72719`; the shell build stamp identifies
 that source revision. `config/real-stack.lock.mk` binds the packaged commit to
 the exact ISO bytes and requires a clean tracked Kore worktree.
 

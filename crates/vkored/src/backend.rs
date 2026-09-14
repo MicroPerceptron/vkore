@@ -394,6 +394,8 @@ pub enum ObservationKind {
     ModelOutputChunk,
     RawModelCompletion,
     ReturnedModelFields,
+    /// Compact final server timings, retained independently of verbose SSE capture.
+    ModelTiming,
     Validation,
     AssistantMessage,
     ToolCall,

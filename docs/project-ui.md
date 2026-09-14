@@ -334,3 +334,17 @@ Run `scripts/kore-interactive-gate.sh` from Linux or WSL with `KORE_ROOT` set to
 the matching Kore checkout. It creates a project and prompt through the same API
 used by the UI, then requires a real capability-scoped guest tool result to
 return before it passes.
+
+### Model speed
+
+Expand a chat turn's **Worked for…** / **Working…** disclosure to see **Model speed**.
+Each completed broker or worker call reports input processing (prefill) and output
+generation separately: tokens/second, token count, measured seconds, and reused
+input tokens. These are llama.cpp server measurements, not whole-chat throughput;
+queueing, VM startup, authority and delivery remain part of the overall elapsed
+chat time. Measurements appear when a model call completes. Missing measurements
+show as unavailable; partial streaming rates are not presented as final rates.
+Older transcripts are supported when their retained SSE record contains final
+server timings. New compact `ModelTiming` observations preserve those metrics
+independently of the bounded verbose capture. Duplicate records for one call do
+not duplicate its displayed measurements.

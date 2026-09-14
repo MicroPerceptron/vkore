@@ -329,6 +329,7 @@ enum WorkerMessage {
         usage: RequestUsage,
         returned_fields: String,
         returned_fields_truncated: bool,
+        timing: Option<Value>,
     },
     Cancelled {
         stamp: u64,
@@ -935,6 +936,7 @@ impl LlamaServerBackend {
                     usage,
                     returned_fields,
                     returned_fields_truncated,
+                    timing,
                     ..
                 } => {
                     if part != active.next_part {
@@ -1027,6 +1029,22 @@ impl LlamaServerBackend {
                             },
                         },
                     );
+                    if let Some(timing) = timing {
+                        push_observation(
+                            &mut self.observations,
+                            InferenceObservation {
+                                role: identity.role,
+                                route: identity.route,
+                                generation: identity.generation,
+                                request,
+                                turn,
+                                kind: ObservationKind::ModelTiming,
+                                payload: timing.to_string(),
+                                accepted: None,
+                                detail: "final llama.cpp server timings; input and output measured separately".into(),
+                            },
+                        );
+                    }
                     self.metrics.prompt_tokens =
                         self.metrics.prompt_tokens.saturating_add(prompt_tokens);
                     self.metrics.completion_tokens = self
@@ -2989,6 +3007,7 @@ fn run_completion(
             usage: completion.usage,
             returned_fields: completion.returned_fields,
             returned_fields_truncated: completion.returned_fields_truncated,
+            timing: completion.timing,
         });
         return;
     }
@@ -3067,6 +3086,7 @@ struct StreamCompletion {
     usage: RequestUsage,
     returned_fields: String,
     returned_fields_truncated: bool,
+    timing: Option<Value>,
     output: String,
 }
 
@@ -3122,6 +3142,7 @@ fn stream_completion(
     let mut stopped = false;
     let mut returned_fields = String::new();
     let mut returned_fields_truncated = false;
+    let mut timing = None;
     let mut output = String::with_capacity(output_limit.min(4096));
     let watchdog_disarmed = Arc::new(AtomicBool::new(false));
     let watchdog_fired = Arc::new(AtomicBool::new(false));
@@ -3179,6 +3200,9 @@ fn stream_completion(
             append_observation_text(&mut returned_fields, "\n", &mut returned_fields_truncated);
             let value: Value = serde_json::from_str(data_text)
                 .map_err(|_| WorkerFailure::Backend(BackendFailure::MalformedResponse))?;
+            if let Some(final_timing) = final_server_timing(&value) {
+                timing = Some(final_timing);
+            }
             let content = value.get("content").and_then(Value::as_str).unwrap_or("");
             let tokens = value.get("tokens").and_then(Value::as_array).map_or_else(
                 || estimate_tokens(content.len()),
@@ -3242,8 +3266,34 @@ fn stream_completion(
         },
         returned_fields,
         returned_fields_truncated,
+        timing,
         output,
     })
+}
+
+// Keep final measurements even when the verbose per-token capture fills up.
+fn final_server_timing(value: &Value) -> Option<Value> {
+    if value["stop"] != true {
+        return None;
+    }
+    let timing = value.get("timings")?.as_object()?;
+    let fields: serde_json::Map<String, Value> = [
+        "cache_n",
+        "prompt_n",
+        "prompt_ms",
+        "prompt_per_second",
+        "predicted_n",
+        "predicted_ms",
+        "predicted_per_second",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let value = timing.get(key)?;
+        let number = value.as_f64()?;
+        (number.is_finite() && number >= 0.0).then(|| (key.to_owned(), value.clone()))
+    })
+    .collect();
+    (!fields.is_empty()).then_some(Value::Object(fields))
 }
 
 fn structured_json_complete(output: &str) -> bool {
@@ -3513,7 +3563,7 @@ mod tests {
         AGENT_SYSTEM_PROMPT, AGENT_TOOLS_MAX, AgentLlamaRequest, AgentTool, BROKER_OFFERS_MAX,
         BROKER_SYSTEM_PROMPT, BrokerLlamaOffer, BrokerLlamaPlan, EMPTY_AGENT_TOOL_CATALOG,
         EMPTY_BROKER_LLAMA_OFFER, LlamaSequence, agent_json_schema, broker_json_schema,
-        encode_agent_decision, encode_broker_plan,
+        encode_agent_decision, encode_broker_plan, final_server_timing,
     };
     use crate::backend::BackendLimits;
     use kore_hostlink::{
@@ -3558,6 +3608,26 @@ mod tests {
             offers,
             offer_count: 4,
         }
+    }
+
+    #[test]
+    fn compact_timings_keep_only_final_numeric_server_measurements() {
+        let value = json!({"stop":true,"timings":{
+            "prompt_n":1999,"prompt_ms":20833.997,"predicted_n":27,
+            "predicted_ms":3156.977,"cache_n":0,"prompt_per_second":95.94894,
+            "predicted_per_second":8.55248,"prompt":"must not be retained"
+        }});
+        let timing = final_server_timing(&value).unwrap();
+        assert_eq!(timing["prompt_n"], 1999);
+        assert_eq!(timing["predicted_per_second"], 8.55248);
+        assert!(timing.get("prompt").is_none());
+        assert!(final_server_timing(&json!({"stop":false,"timings":value["timings"]})).is_none());
+        assert!(
+            final_server_timing(
+                &json!({"stop":true,"timings":{"prompt_ms":-1,"cache_n":"unknown"}})
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3728,7 +3798,7 @@ mod tests {
                     }
                     let sse = format!(
                         "data: {}\n\n",
-                        json!({"content": answer, "stop":true, "tokens":[1,2]})
+                        json!({"content": answer, "stop":true, "tokens":[1,2], "timings":{"prompt_n":10,"prompt_ms":100,"predicted_n":2,"predicted_ms":200,"cache_n":0}})
                     );
                     write!(
                         reader.get_mut(),
@@ -3786,7 +3856,7 @@ mod tests {
             if succeeds {
                 assert_eq!(chunks, vec![VALID.as_bytes()]);
                 assert!(
-                    matches!(messages.last(), Some(super::WorkerMessage::Done { usage, .. }) if usage.completion_tokens == 4)
+                    matches!(messages.last(), Some(super::WorkerMessage::Done { usage, timing: Some(timing), .. }) if usage.completion_tokens == 4 && timing["prompt_n"] == 10 && timing["predicted_ms"] == 200)
                 );
             } else {
                 assert!(chunks.is_empty());

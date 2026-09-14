@@ -67,6 +67,7 @@ impl LiveUi {
             ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
+            ObservationKind::ModelTiming => "model_timing",
             ObservationKind::Validation => "validation",
             ObservationKind::AssistantMessage => "assistant_message",
             ObservationKind::ToolCall => "tool_call",

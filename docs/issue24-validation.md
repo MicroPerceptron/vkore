@@ -204,3 +204,21 @@ a story request in the pre-final investigation was refused by the broker;
 no canned answer was substituted. Passing transport, isolation and lifecycle
 checks does not prove arbitrary task semantics. The live checks inspect actual
 files, tool observations and process identities as well as final answers.
+
+## Model-speed display follow-up
+
+The native Working disclosure now shows separate input/output throughput,
+tokens, elapsed model time and cached input for each completed broker/worker
+call. Rates use final server measurements, with token-count/duration fallback
+when the server omits a rate. Partial, missing and zero-duration records do not
+invent throughput. Compact final measurements are independent of verbose trace
+retention; legacy raw records still render and are deduplicated per call.
+
+UI and vkored suites: 247 passed, 3 ignored. The final UI cache/capture change
+was rechecked with 124 UI tests passing, 1 ignored. The real `make dev-debug
+PROMPT=hello` run completed, emitted exactly two compact timing observations
+(Broker and Agent), and cleaned up its processes. The broker measured 96.9
+input tok/s and 9.4 output tok/s; the worker measured 94.2 and 9.5 respectively.
+Actual trace replay captures at 1182 and 700 pixels wide were visually checked
+([captures](../artifacts/issue24/model-speed/README.md)). The 58-second overall
+elapsed label in this cold run includes startup; it is not a model-only timer.

@@ -1,5 +1,6 @@
 mod fonts;
 mod logo;
+mod model_timing;
 mod render_backend;
 mod splash;
 mod theme;
@@ -1527,6 +1528,7 @@ struct Model {
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
     assistant_blocks: BTreeMap<String, Vec<AssistantBlock>>,
+    model_timings: BTreeMap<String, Vec<model_timing::CallTiming>>,
     expanded_work: BTreeSet<String>,
     expanded_outputs: BTreeSet<String>,
     view: View,
@@ -1596,6 +1598,7 @@ impl Model {
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
             assistant_blocks: BTreeMap::new(),
+            model_timings: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
             expanded_outputs: BTreeSet::new(),
             view: View::Session,
@@ -2490,6 +2493,7 @@ impl Model {
     fn sync_selectable_text(&mut self) {
         let mut desired = BTreeMap::new();
         let mut assistant_blocks_by_prompt = BTreeMap::new();
+        let mut model_timings = BTreeMap::new();
         for user in self
             .events
             .iter()
@@ -2510,6 +2514,7 @@ impl Model {
                 .iter()
                 .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                 .collect::<Vec<_>>();
+            model_timings.insert(prompt_id.to_owned(), model_timing::calls(&prompt_events));
             for (index, row) in work_rows(&prompt_events).into_iter().enumerate() {
                 // The speaker is drawn as its own label above the body so it
                 // can carry the row's colour; only the body is selectable.
@@ -2563,6 +2568,7 @@ impl Model {
             }
         }
         self.assistant_blocks = assistant_blocks_by_prompt;
+        self.model_timings = model_timings;
     }
 
     /// Read-only conversation text the reader can select and copy.
@@ -3163,6 +3169,43 @@ impl Model {
                 let mut timeline = column![work_header].spacing(12);
                 if expanded {
                     let mut details = column![].spacing(10);
+                    let timings = self
+                        .model_timings
+                        .get(prompt_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !timings.is_empty() {
+                        details = details.push(widgets::body(
+                            "Model speed",
+                            theme::SIZE_SM,
+                            theme::TEXT_SECONDARY,
+                        ));
+                        details = details.push(widgets::mono(
+                            "Completed calls · input processing and output generation",
+                            theme::TEXT_MUTED,
+                        ));
+                        for timing in timings {
+                            details = details.push(
+                                column![
+                                    widgets::body(
+                                        timing.role.clone(),
+                                        theme::SIZE_SM,
+                                        theme::TEXT_SECONDARY
+                                    ),
+                                    widgets::mono(
+                                        format!("Input (prefill): {}", timing.input),
+                                        theme::TEXT_MUTED
+                                    ),
+                                    widgets::mono(
+                                        format!("Output: {}", timing.output),
+                                        theme::TEXT_MUTED
+                                    ),
+                                    widgets::mono(timing.cached.clone(), theme::TEXT_MUTED),
+                                ]
+                                .spacing(4),
+                            );
+                        }
+                    }
                     if rows.is_empty() {
                         let phase = if broker_selection_pending(&prompt_events) {
                             "Broker selecting capabilities…"
@@ -5132,6 +5175,28 @@ mod tests {
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
+        if let Ok(path) = std::env::var("VKORE_UI_TRACE") {
+            model.events = std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            model.session = model
+                .events
+                .first()
+                .and_then(|event| event["session_id"].as_str())
+                .map(str::to_owned);
+            model.projects = vec![
+                json!({"id":"trace-replay","name":"Recorded chat","inference":{"backend":"llama_cpp"},"workspace":{"virtual_only":true}}),
+            ];
+            model.expanded_work = model
+                .events
+                .iter()
+                .filter_map(|event| event["prompt_id"].as_str().map(str::to_owned))
+                .collect();
+            model.status = "Recorded trace preview".into();
+            model.events_changed();
+        }
         if std::env::var_os("VKORE_UI_EMPTY").is_some() {
             model.events.clear();
             model.selectable_text.clear();

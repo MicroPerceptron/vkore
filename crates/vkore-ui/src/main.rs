@@ -1789,7 +1789,7 @@ impl Model {
                     self.prompt = text_editor::Content::with_text(&chat.draft);
                     self.events = chat.events.clone();
                     self.network.poll(self.session.clone(), false);
-                    self.status = "Chat restored. The shared assistant remains ready.".into();
+                    self.status = "Chat restored.".into();
                     self.events_changed();
                 } else {
                     self.session = None;
@@ -2340,7 +2340,7 @@ impl Model {
                 self.expanded_outputs.clear();
                 self.selectable_text.clear();
                 self.assistant_blocks.clear();
-                self.status = "Chat closed. The assistant remains available.".into();
+                self.status = "Chat closed.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
                     .into_iter()

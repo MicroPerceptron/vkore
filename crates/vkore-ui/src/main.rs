@@ -1331,8 +1331,8 @@ fn model_option_selectable(status: &str, selected: bool, busy: bool) -> bool {
     status == "installed" && !selected && !busy
 }
 
-fn new_project_selectable(session: Option<&str>, busy: bool) -> bool {
-    session.is_none() && !busy
+fn new_project_selectable(active_prompt: Option<&str>, busy: bool) -> bool {
+    active_prompt.is_none() && !busy
 }
 
 fn working_panel_visible(settings: &Value) -> bool {
@@ -1500,6 +1500,12 @@ impl Network {
     }
 }
 
+struct CachedProjectChat {
+    session: String,
+    draft: String,
+    events: Vec<Value>,
+}
+
 struct Model {
     network: Network,
     connected: bool,
@@ -1540,6 +1546,7 @@ struct Model {
     status: String,
     busy: bool,
     restart_after_stop: bool,
+    project_chats: BTreeMap<String, CachedProjectChat>,
 }
 
 impl Model {
@@ -1607,9 +1614,33 @@ impl Model {
             status: "Connecting to the vKore daemon…".into(),
             busy: false,
             restart_after_stop: false,
+            project_chats: BTreeMap::new(),
         };
         model.reload();
         model
+    }
+
+    fn remember_current_chat(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(id) = self
+            .project()
+            .and_then(|p| p["id"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let mut events: Vec<_> = self.events.iter().rev().take(512).cloned().collect();
+        events.reverse();
+        self.project_chats.insert(
+            id,
+            CachedProjectChat {
+                session,
+                draft: self.prompt.text(),
+                events,
+            },
+        );
     }
 
     fn reload(&self) {
@@ -1738,21 +1769,40 @@ impl Model {
                 body: None,
             }),
             Message::SelectProject(index) => {
-                if self.session.is_none() {
-                    self.selected = Some(index);
-                    self.events.clear();
-                    self.expanded_work.clear();
-                    self.expanded_outputs.clear();
-                    self.selectable_text.clear();
-                    self.assistant_blocks.clear();
-                    self.status = "Opening a fresh isolated Kore sandbox…".into();
+                if self.busy || self.prompt_id.is_some() || index >= self.projects.len() {
+                    return;
+                }
+                if self.selected == Some(index) && self.session.is_some() {
+                    return;
+                }
+                self.remember_current_chat();
+                self.selected = Some(index);
+                self.events.clear();
+                self.expanded_work.clear();
+                self.expanded_outputs.clear();
+                self.selectable_text.clear();
+                self.assistant_blocks.clear();
+                self.submitted_prompt = None;
+                let project_id = self.projects[index]["id"].as_str().unwrap_or_default();
+                if let Some(chat) = self.project_chats.get(project_id) {
+                    self.session = Some(chat.session.clone());
+                    self.prompt = text_editor::Content::with_text(&chat.draft);
+                    self.events = chat.events.clone();
+                    self.network.poll(self.session.clone(), false);
+                    self.status = "Chat restored. The shared assistant remains ready.".into();
+                    self.events_changed();
+                } else {
+                    self.session = None;
+                    self.prompt = text_editor::Content::new();
+                    self.events_changed();
+                    self.status = "Opening a chat in the shared assistant…".into();
                     self.update(Message::ToggleSession);
                 }
             }
             Message::NewProject => {
-                if self.session.is_some() {
+                if self.busy || self.prompt_id.is_some() {
                     self.status =
-                        "Close the current project before choosing another workspace.".into();
+                        "Finish or cancel the current task before creating a project.".into();
                     return;
                 }
                 self.workspace_selection_open = true;
@@ -2189,13 +2239,13 @@ impl Model {
                         .into();
             }
             (RequestKind::Projects, Ok(Value::Array(projects))) => {
+                let selected_id = self
+                    .project()
+                    .and_then(|p| p["id"].as_str())
+                    .map(str::to_owned);
                 self.projects = projects;
-                if self
-                    .selected
-                    .is_some_and(|index| index >= self.projects.len())
-                {
-                    self.selected = None;
-                }
+                self.selected =
+                    selected_id.and_then(|id| self.projects.iter().position(|p| p["id"] == id));
                 if self.auto_open_pending {
                     self.auto_open_pending = false;
                     let requested = self.launch_project.take();
@@ -2244,20 +2294,21 @@ impl Model {
                 self.workspace_error = None;
                 let project = value["project"].clone();
                 let id = project["id"].as_str().unwrap_or_default();
-                if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
-                    self.projects[index] = project;
-                    self.selected = Some(index);
-                } else {
-                    self.projects.push(project);
-                    self.selected = Some(self.projects.len() - 1);
-                }
+                let index =
+                    if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
+                        self.projects[index] = project;
+                        index
+                    } else {
+                        self.projects.push(project);
+                        self.projects.len() - 1
+                    };
                 self.status = if value["created"].as_bool().unwrap_or(false) {
                     "Project created and opened.".into()
                 } else {
                     "This workspace already has a project. Opening it instead.".into()
                 };
                 self.view = View::Session;
-                self.update(Message::ToggleSession);
+                self.update(Message::SelectProject(index));
             }
             (RequestKind::StartSession, Ok(value)) => {
                 self.busy = false;
@@ -2275,6 +2326,12 @@ impl Model {
                 self.status = "Chat opened. Messages use the shared assistant runtime.".into();
             }
             (RequestKind::StopSession, Ok(_)) => {
+                let closed_project = self
+                    .project()
+                    .and_then(|p| p["id"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                self.project_chats.remove(&closed_project);
                 self.busy = false;
                 self.network.poll(None, false);
                 self.session = None;
@@ -2283,12 +2340,15 @@ impl Model {
                 self.expanded_outputs.clear();
                 self.selectable_text.clear();
                 self.assistant_blocks.clear();
-                self.status = "Routes retired and session KV erased.".into();
+                self.status = "Chat closed. The assistant remains available.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|grant| grant["committed"].as_bool().unwrap_or(false))
+                    .filter(|grant| {
+                        grant["committed"].as_bool().unwrap_or(false)
+                            && grant["agent"]["id"] == format!("worker-{closed_project}")
+                    })
                 {
                     if let Some(id) = grant["id"].as_str() {
                         self.network.request(Request {
@@ -2382,6 +2442,14 @@ impl Model {
                     if event["session_id"]
                         .as_str()
                         .is_some_and(|id| Some(id) != self.session.as_deref())
+                    {
+                        continue;
+                    }
+                    if let Some(sequence) = event["sequence"].as_u64()
+                        && self.events.iter().any(|prior| {
+                            prior["sequence"].as_u64() == Some(sequence)
+                                && prior["session_id"] == event["session_id"]
+                        })
                     {
                         continue;
                     }
@@ -2740,7 +2808,7 @@ impl Model {
                 .padding([0, 10])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press_maybe(
-                    new_project_selectable(self.session.as_deref(), self.busy)
+                    new_project_selectable(self.prompt_id.as_deref(), self.busy)
                         .then_some(Message::NewProject),
                 )
             )
@@ -2752,6 +2820,11 @@ impl Model {
             )),
             container(
                 column![
+                    nav(
+                        "Close chat",
+                        (self.session.is_some() && !self.busy && self.prompt_id.is_none())
+                            .then_some(Message::ToggleSession)
+                    ),
                     nav(
                         "Duplicate project",
                         project_idle.then_some(Message::DuplicateProject)
@@ -2806,7 +2879,7 @@ impl Model {
                 };
                 match self.session.as_deref() {
                     Some(session) => format!("{backend} · {root} · {session}"),
-                    None => format!("{backend} · {root} · sandbox stopped"),
+                    None => format!("{backend} · {root} · No chat open"),
                 }
             }
         };
@@ -2834,6 +2907,17 @@ impl Model {
         ]
         .spacing(6)
         .align_y(alignment::Vertical::Center);
+        if self.project().is_some() {
+            top_content = top_content.push(
+                button(widgets::control("New chat"))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press_maybe(
+                        (!self.busy && self.prompt_id.is_none()).then_some(Message::CleanSession),
+                    ),
+            );
+        }
         top_content = top_content.push(view_button("Session", View::Session));
         if self.viewport.width > 720.0 {
             top_content = top_content
@@ -2847,7 +2931,7 @@ impl Model {
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press_maybe(
-                            new_project_selectable(self.session.as_deref(), self.busy)
+                            new_project_selectable(self.prompt_id.as_deref(), self.busy)
                                 .then_some(Message::NewProject),
                         ),
                 );
@@ -6378,7 +6462,7 @@ mod tests {
     }
 
     #[test]
-    fn new_project_is_disabled_while_a_project_session_is_live() {
+    fn new_project_is_disabled_while_a_prompt_is_active() {
         let (requests, request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
@@ -6387,11 +6471,119 @@ mod tests {
         });
         request_receiver.try_iter().for_each(drop);
         model.session = Some("session-live".into());
+        model.prompt_id = Some("running-prompt".into());
 
         model.update(Message::NewProject);
 
         assert!(request_receiver.try_recv().is_err());
-        assert!(model.status.contains("Close the current project"));
+        assert!(model.status.contains("Finish or cancel"));
+    }
+
+    #[test]
+    fn idle_project_switch_preserves_chat_draft_and_replay_without_closing_it() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.prompt = text_editor::Content::with_text("unsent A");
+        model.events = vec![
+            json!({"session_id":"chat-a","sequence":1,"kind":"assistant","payload":{"text":"answer A"}}),
+        ];
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                session: "chat-b".into(),
+                draft: "unsent B".into(),
+                events: vec![],
+            },
+        );
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.session.as_deref(), Some("chat-b"));
+        assert_eq!(model.prompt.text(), "unsent B");
+        assert!(model.events.is_empty());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.session.as_deref(), Some("chat-a"));
+        assert_eq!(model.prompt.text(), "unsent A");
+        let event = model.events[0].clone();
+        model.poll_result(Ok(vec![event]));
+        assert_eq!(model.events.len(), 1);
+        assert!(
+            receiver.try_recv().is_err(),
+            "switching must not send close/start"
+        );
+        model.update(Message::NewProject);
+        assert!(model.workspace_selection_open);
+        assert_eq!(model.session.as_deref(), Some("chat-a"));
+        model.response(
+            RequestKind::CreateProject,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: br#"{"created":true,"project":{"id":"c"}}"#.to_vec(),
+            }),
+        );
+        assert_eq!(model.project_chats["a"].session, "chat-a");
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.kind, RequestKind::StartSession);
+        assert_eq!(request.body.unwrap()["project_id"], "c");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn close_chat_revokes_only_that_projects_approvals() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.approvals = json!({"grants":[
+            {"id":"grant-a","committed":true,"agent":{"id":"worker-a"}},
+            {"id":"grant-b","committed":true,"agent":{"id":"worker-b"}}
+        ]});
+        model.response(
+            RequestKind::StopSession,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        let revoked: Vec<_> = receiver
+            .try_iter()
+            .filter(|r| r.kind == RequestKind::RevokeGrant)
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(revoked, vec!["/api/v1/grants/grant-a/revoke"]);
+    }
+
+    #[test]
+    fn reordered_project_catalog_retains_selection_by_identity() {
+        let (requests, _) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.auto_open_pending = false;
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.response(
+            RequestKind::Projects,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!([{"id":"b"},{"id":"a"}])).unwrap(),
+            }),
+        );
+        assert_eq!(model.project().unwrap()["id"], "a");
     }
 
     #[test]

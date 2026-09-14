@@ -171,10 +171,10 @@ parked broker call after service and executable-store initialization. Old
 single-prompt guest images are incompatible and fail visibly; prompt submission
 never silently boots a replacement VM.
 
-The sidebar switches between idle project chats while preserving drafts and
+The sidebar switches between project chats while preserving drafts and
 chat identity. **New chat** starts a fresh conversation for the selected
 project; **Close chat** retires it without stopping the assistant. Active work
-must finish or be cancelled before changing projects.
+continues when changing projects; returning replays the result in its original chat.
 
 Projects are optional organizational contexts. A focus folder offers task
 resources; Settings → Document access authorizes independent read-only host

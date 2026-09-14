@@ -1331,8 +1331,8 @@ fn model_option_selectable(status: &str, selected: bool, busy: bool) -> bool {
     status == "installed" && !selected && !busy
 }
 
-fn new_project_selectable(active_prompt: Option<&str>, busy: bool) -> bool {
-    active_prompt.is_none() && !busy
+fn new_project_selectable(busy: bool) -> bool {
+    !busy
 }
 
 fn working_panel_visible(settings: &Value) -> bool {
@@ -1502,6 +1502,7 @@ impl Network {
 
 struct CachedProjectChat {
     session: String,
+    prompt_id: Option<String>,
     draft: String,
     events: Vec<Value>,
 }
@@ -1637,6 +1638,7 @@ impl Model {
             id,
             CachedProjectChat {
                 session,
+                prompt_id: self.prompt_id.clone(),
                 draft: self.prompt.text(),
                 events,
             },
@@ -1776,7 +1778,7 @@ impl Model {
                 body: None,
             }),
             Message::SelectProject(index) => {
-                if self.busy || self.prompt_id.is_some() || index >= self.projects.len() {
+                if self.busy || index >= self.projects.len() {
                     return;
                 }
                 if self.selected == Some(index) && self.session.is_some() {
@@ -1790,12 +1792,15 @@ impl Model {
                 self.selectable_text.clear();
                 self.assistant_blocks.clear();
                 self.submitted_prompt = None;
+                self.prompt_id = None;
                 let project_id = self.projects[index]["id"].as_str().unwrap_or_default();
                 if let Some(chat) = self.project_chats.get(project_id) {
                     self.session = Some(chat.session.clone());
+                    self.prompt_id = chat.prompt_id.clone();
                     self.prompt = text_editor::Content::with_text(&chat.draft);
                     self.events = chat.events.clone();
-                    self.network.poll(self.session.clone(), false);
+                    self.network
+                        .poll(self.session.clone(), self.prompt_id.is_some());
                     self.status = "Chat restored.".into();
                     self.events_changed();
                 } else {
@@ -1807,9 +1812,7 @@ impl Model {
                 }
             }
             Message::NewProject => {
-                if self.busy || self.prompt_id.is_some() {
-                    self.status =
-                        "Finish or cancel the current task before creating a project.".into();
+                if self.busy {
                     return;
                 }
                 self.workspace_selection_open = true;
@@ -2814,10 +2817,7 @@ impl Model {
                 .height(theme::CONTROL_SM)
                 .padding([0, 10])
                 .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press_maybe(
-                    new_project_selectable(self.prompt_id.as_deref(), self.busy)
-                        .then_some(Message::NewProject),
-                )
+                .on_press_maybe(new_project_selectable(self.busy).then_some(Message::NewProject),)
             )
             .padding(10),
             container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
@@ -2938,8 +2938,7 @@ impl Model {
                         .padding([0, 12])
                         .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press_maybe(
-                            new_project_selectable(self.prompt_id.as_deref(), self.busy)
-                                .then_some(Message::NewProject),
+                            new_project_selectable(self.busy).then_some(Message::NewProject),
                         ),
                 );
             }
@@ -6261,9 +6260,8 @@ mod tests {
         assert!(!model_option_selectable("installed", true, false));
         assert!(!model_option_selectable("installed", false, true));
         assert!(model_option_selectable("installed", false, false));
-        assert!(!new_project_selectable(Some("live-session"), false));
-        assert!(!new_project_selectable(None, true));
-        assert!(new_project_selectable(None, false));
+        assert!(!new_project_selectable(true));
+        assert!(new_project_selectable(false));
     }
 
     #[test]
@@ -6469,7 +6467,7 @@ mod tests {
     }
 
     #[test]
-    fn new_project_is_disabled_while_a_prompt_is_active() {
+    fn new_project_can_open_while_a_prompt_continues() {
         let (requests, request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
@@ -6483,7 +6481,8 @@ mod tests {
         model.update(Message::NewProject);
 
         assert!(request_receiver.try_recv().is_err());
-        assert!(model.status.contains("Finish or cancel"));
+        assert!(model.workspace_selection_open);
+        assert_eq!(model.prompt_id.as_deref(), Some("running-prompt"));
     }
 
     #[test]
@@ -6506,6 +6505,7 @@ mod tests {
             "b".into(),
             CachedProjectChat {
                 session: "chat-b".into(),
+                prompt_id: None,
                 draft: "unsent B".into(),
                 events: vec![],
             },
@@ -6538,6 +6538,92 @@ mod tests {
         let request = receiver.try_recv().unwrap();
         assert_eq!(request.kind, RequestKind::StartSession);
         assert_eq!(request.body.unwrap()["project_id"], "c");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn working_chat_survives_switching_and_replays_completion_in_its_own_scope() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, polling) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.prompt_id = Some("prompt-a".into());
+        model.prompt = text_editor::Content::with_text("A next draft");
+        model.events = vec![
+            json!({"session_id":"chat-a","sequence":1,"kind":"user_prompt","prompt_id":"prompt-a","payload":{"text":"hello"}}),
+        ];
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                session: "chat-b".into(),
+                prompt_id: None,
+                draft: "hello B".into(),
+                events: vec![],
+            },
+        );
+
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.session.as_deref(), Some("chat-b"));
+        assert!(model.prompt_id.is_none());
+        assert_eq!(
+            model.project_chats["a"].prompt_id.as_deref(),
+            Some("prompt-a")
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "navigation must not close or cancel A"
+        );
+        model.update(Message::SendPrompt);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.path, "/api/v1/sessions/chat-b/prompts");
+        let prompt_b = model.prompt_id.clone();
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        let answer = json!({"session_id":"chat-a","sequence":2,"kind":"assistant","prompt_id":"prompt-a","payload":{"text":"Hello A"}});
+        let terminal = json!({"session_id":"chat-a","sequence":3,"kind":"prompt_terminal","prompt_id":"prompt-a","payload":{"status":"completed"}});
+        // A's in-flight poll may arrive after navigation. It cannot finish B.
+        model.poll_result(Ok(vec![answer.clone(), terminal.clone()]));
+        assert_eq!(model.prompt_id, prompt_b);
+        assert!(model.events.is_empty());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.prompt_id.as_deref(), Some("prompt-a"));
+        assert_eq!(model.prompt.text(), "A next draft");
+        let target = polling.try_iter().last().unwrap();
+        assert_eq!(target.session.as_deref(), Some("chat-a"));
+        assert!(target.active);
+        // Returning resets the network cursor and replays durable session events.
+        model.poll_result(Ok(vec![
+            model.events[0].clone(),
+            answer.clone(),
+            terminal.clone(),
+        ]));
+        assert!(model.prompt_id.is_none());
+        assert_eq!(model.status, "Task completed.");
+        assert_eq!(model.events.len(), 3);
+        model.poll_result(Ok(vec![answer, terminal]));
+        assert_eq!(model.events.len(), 3);
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.prompt_id, prompt_b);
+        model.update(Message::CancelPrompt);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(
+            request.path,
+            format!(
+                "/api/v1/sessions/chat-b/prompts/{}/cancel",
+                prompt_b.unwrap()
+            )
+        );
         assert!(receiver.try_recv().is_err());
     }
 

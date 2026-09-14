@@ -78,9 +78,11 @@ at each authenticated intent; worker slots are erased at retirement. Shared
 model weights do not share conversation history or filesystem authority. No
 cross-chat personal-memory store is introduced by this change. The native UI
 retains each opened project’s current chat, unsent draft and up to 512 replay
-events when switching between idle projects. It does not close that chat or
+events and active prompt identity when switching between projects. It does not close that chat or
 recreate its backend. New chat and Close chat explicitly retire only the
-selected scope; active work must finish or be cancelled before navigation.
+selected scope. Navigation leaves active work running in the backend; returning
+to a chat resumes event replay and restores its answer and cancellation target.
+Only a short outstanding UI mutation blocks navigation until its acknowledgement.
 
 ## Discovery and task filesystems
 

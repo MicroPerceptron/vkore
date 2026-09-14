@@ -137,6 +137,22 @@ network events. Ten release captures cover 0, 950, 1500, 2100 and 2300 ms at
 1x and 2x; mark, wordmark alignment, flicker/fade and the final application view
 were visually checked ([captures](../artifacts/issue24/splash/README.md)). Animation completion does not imply broker readiness.
 
+## Background chat navigation follow-up
+
+Active work no longer blocks switching projects or creating another project.
+The UI caches the active prompt ID with its chat/draft/events, then resumes
+that chat's replay when selected again. Backend execution continues without
+navigation sending close or cancel. Late poll events from a different chat
+cannot finish the selected chat's prompt or change its cancellation target.
+A short outstanding UI mutation still waits for its acknowledgement.
+
+The native test submitted hello in A, switched to B while A was working, and
+submitted hello in B. Returning to A showed its completed answer while B
+continued. Returning to B then replayed its own completed answer. Both used the already running QEMU 17901 and model server 17851.
+The UI suite passed 122 tests (1 ignored), including active switching, late
+terminal events, replay deduplication, separate cancellation targets, and new
+project creation during a request.
+
 ## Timings and interpretation
 
 `GET /api/v1/runtime` includes a bounded startup history. Kernel-entry and

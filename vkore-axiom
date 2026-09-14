@@ -192,25 +192,24 @@ test -f "$ovmf_code" && test -f "$ovmf_vars" || {
 
 validate_real_project() {
     local project_file="$state/projects/$project.json"
-    test -f "$project_file" || {
-        echo "real-stack project is missing: $project_file" >&2
-        echo "Create it once in the UI, select llama.cpp, and configure the verified Kore ISO." >&2
-        return 2
-    }
-    python3 - "$project_file" "$iso" <<'PY'
+    python3 - "$project_file" "$iso" "$state/settings.json" <<'PY'
 import json
 import os
 import sys
 
-project_file, verified_iso = sys.argv[1:]
-with open(project_file, encoding="utf-8") as stream:
-    project = json.load(stream)
-inference = project.get("inference") or {}
+project_file, verified_iso, settings_file = sys.argv[1:]
+project = {}
+if os.path.isfile(project_file):
+    with open(project_file, encoding="utf-8") as stream:
+        project = json.load(stream)
+settings = {}
+if os.path.isfile(settings_file):
+    with open(settings_file, encoding="utf-8") as stream:
+        settings = json.load(stream)
+inference = settings.get("default_inference") or project.get("inference") or {}
 problems = []
 if inference.get("backend") != "llama_cpp":
     problems.append("inference.backend must be llama_cpp (deterministic is forbidden)")
-if project.get("archived", False):
-    problems.append("the selected project is archived")
 kore_image = inference.get("kore_image")
 if not kore_image or os.path.realpath(kore_image) != os.path.realpath(verified_iso):
     problems.append(f"inference.kore_image must be the verified image {verified_iso}")
@@ -348,22 +347,11 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     qemu-img create -f raw "$usb" 16M >/dev/null
     cp -- "$ovmf_vars" "$vars"
 
-    # Kore's NUMA memory objects and CPU assignments must agree with the
-    # project limits which the daemon applies to -m and -smp.
-    resource_arguments=()
-    if test -f "$state/projects/$project.json"; then
-        project_resources=$(python3 -c '
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as stream:
-    resources = json.load(stream)["resources"]
-cpus, memory = resources["virtual_cpus"], resources["memory_mib"]
-if type(cpus) is not int or type(memory) is not int or cpus < 1 or memory < 1:
-    raise SystemExit("project CPU and memory limits must be positive integers")
-print(cpus, memory)
-' "$state/projects/$project.json")
-        read -r project_cpus project_memory <<<"$project_resources"
-        resource_arguments=("CPUS=$project_cpus" "MEM=$project_memory")
-    fi
+    # Resolve the application resource profile before constructing NUMA nodes.
+    # This matches the daemon's one-time migration of unanimous legacy limits.
+    application_resources=$(python3 "$vkore_root/scripts/runtime-resources.py" "$state")
+    read -r application_cpus application_memory <<<"$application_resources"
+    resource_arguments=("CPUS=$application_cpus" "MEM=$application_memory")
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
@@ -439,13 +427,15 @@ print(cpus, memory)
     done
 fi
 
-curl -fsS --max-time 2 "$projects_url" | python3 -c '
+# A project is optional for native startup; diagnostics need an exact target.
+project_available=$(curl -fsS --max-time 2 "$projects_url" | python3 -c '
 import json, sys
-wanted = sys.argv[1]
-projects = json.load(sys.stdin)
-if not any(p.get("id") == wanted and not p.get("archived", False) for p in projects):
-    raise SystemExit(f"project {wanted!r} is not available; create it once in the project picker")
-' "$project"
+print("yes" if any(p.get("id") == sys.argv[1] and not p.get("archived", False) for p in json.load(sys.stdin)) else "no")
+' "$project")
+if test "$debug" = 1 && test "$project_available" != yes; then
+    echo "Diagnostic project $project is unavailable" >&2
+    exit 2
+fi
 
 if test "$debug" = 1; then
     project_file="$state/projects/$project.json"
@@ -502,4 +492,6 @@ test -x "$ui" || {
 
 echo "Opening vKore · Axiom for project $project"
 echo "Kore $actual_kore · ISO sha256 $actual_iso"
-"$ui" --server "$listen" --project "$project"
+ui_arguments=(--server "$listen")
+if test "$project_available" = yes; then ui_arguments+=(--project "$project"); fi
+"$ui" "${ui_arguments[@]}"

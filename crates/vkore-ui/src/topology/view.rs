@@ -741,7 +741,7 @@ fn path_node<'a>(
                 .wrapping(iced_core::text::Wrapping::None)
                 .ellipsis(iced_core::text::Ellipsis::End),
             space::horizontal(),
-            scaled_label(node.kind.label(), theme::TEXT_MUTED, 12.0 * scale),
+            scaled_label(node.object_kind.label(), theme::TEXT_MUTED, 12.0 * scale),
         ]
         .spacing(theme::SPACE_2 * scale)
         .align_y(alignment::Vertical::Center),
@@ -856,6 +856,9 @@ pub fn filesystem_layer<'a>(
     ];
     let chosen = state.selected.as_deref().and_then(|id| graph.index_of(id));
     for (index, agent) in graph.agents.iter().enumerate() {
+        if agent.role == super::model::Role::Broker {
+            continue;
+        }
         let Some(placement) = agents.get(index) else {
             continue;
         };

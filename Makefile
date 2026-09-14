@@ -11,6 +11,8 @@ VKORE_PROJECT ?= qwen9b-issue27
 VKORE_LISTEN ?= 127.0.0.1:8787
 VKORE_MAKE ?= $(shell command -v gmake 2>/dev/null || command -v make)
 VKORE_XORRISO ?= xorriso
+VKORE_KORE_BOOT_FEATURES ?= boot
+VKORE_EXPECTED_KORE_SOURCE_COMMIT ?= $(VKORE_EXPECTED_KORE_COMMIT)
 PROMPT ?= hello
 TIMEOUT_SECONDS ?= 900
 
@@ -66,6 +68,7 @@ artifacts:
 	}
 	$(VKORE_MAKE) -C "$(KORE_ROOT)" iso-boot-x86 \
 	  PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+	  BOOT_FEATURES="$(VKORE_KORE_BOOT_FEATURES)" KORE_GIT_HEAD="$(VKORE_EXPECTED_KORE_SOURCE_COMMIT)" \
 	  MODE=release CARGO_FLAGS=--release OUT_DIR=release XORRISO="$(VKORE_XORRISO)"
 	@printf '%s  %s\n' "$(VKORE_EXPECTED_ISO_SHA256)" \
 	  "$(KORE_ROOT)/$(VKORE_KORE_ISO_RELATIVE)" | sha256sum -c -

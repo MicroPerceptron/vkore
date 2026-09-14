@@ -22,8 +22,14 @@ const VM_PAUSE_DRAIN: Duration = Duration::from_millis(500);
 const BOOT_LOG_GRACE: Duration = Duration::from_secs(1);
 const BOOT_LOG_POLL: Duration = Duration::from_millis(250);
 const PROMPT_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_BOOT_ATTEMPTS: u8 = 3;
 const BOOT_LOG_TAIL_BYTES: u64 = 128 * 1024;
+const CONVERSATIONS_MAX: usize = 32;
+const CONVERSATION_IDLE: Duration = Duration::from_secs(30 * 60);
+
+struct ConversationContext {
+    exchanges: Vec<(bool, String)>,
+    last_used: Instant,
+}
 
 #[derive(Clone, Debug)]
 pub struct KoreVmRuntimeConfig {
@@ -36,14 +42,14 @@ pub struct KoreVmRuntimeConfig {
 
 pub struct KoreVmRuntime {
     config: KoreVmRuntimeConfig,
-    runtimes: BTreeMap<String, ProjectRuntime>,
+    runtime: Option<ProjectRuntime>,
     incarnation: u64,
-    conversations: BTreeMap<(String, String), Vec<(bool, String)>>,
+    conversations: BTreeMap<(String, String), ConversationContext>,
 }
 
 struct ProjectRuntime {
     config: ProjectConfig,
-    daemon: HostLinkDaemon<Box<dyn InferenceBackend + Send>>,
+    daemon: HostLinkDaemon<WorkspaceBackend<Box<dyn InferenceBackend + Send>>>,
     qemu: QemuConfig,
     process: Option<QemuProcess>,
     session_id: Option<String>,
@@ -58,14 +64,28 @@ struct ProjectRuntime {
     completed_frontend_broker_decisions: u64,
     completed_frontend_teardowns: u64,
     completed_frontend_idle_barriers: u64,
+    resource_identities: BTreeMap<String, PathBuf>,
+    task_catalog: Vec<(String, bool)>,
+    focus_attached: bool,
 }
 
 impl KoreVmRuntime {
     pub fn new(config: KoreVmRuntimeConfig) -> Result<Self, String> {
-        ProjectStore::open(&config.project_root).map_err(|error| error.to_string())?;
+        let projects =
+            ProjectStore::open(&config.project_root).map_err(|error| error.to_string())?;
+        crate::SettingsStore::open(
+            config
+                .project_root
+                .parent()
+                .unwrap_or(&config.project_root)
+                .join("settings.json"),
+        )
+        .map_err(|error| error.to_string())?
+        .migrate_runtime(&projects)
+        .map_err(|error| error.to_string())?;
         Ok(Self {
             config,
-            runtimes: BTreeMap::new(),
+            runtime: None,
             incarnation: 1,
             conversations: BTreeMap::new(),
         })
@@ -74,30 +94,137 @@ impl KoreVmRuntime {
     fn ensure_project(
         &mut self,
         project_id: &str,
+        query: &str,
         emit: &mut dyn FnMut(EventKind, bool, Value),
     ) -> Result<&mut ProjectRuntime, String> {
         // The HTTP project API owns a separate store instance. Reload its
         // atomic JSON files here so newly created or edited projects become
         // effective without restarting the harness daemon.
-        let project = ProjectStore::open(&self.config.project_root)
+        let mut project = ProjectStore::open(&self.config.project_root)
             .map_err(|error| error.to_string())?
             .get(project_id)
             .map_err(|error| error.to_string())?;
-        let stale = self
-            .runtimes
-            .get(project_id)
-            .is_some_and(|runtime| runtime.config != project);
-        if stale {
-            self.runtimes.remove(project_id);
-            self.incarnation = self.incarnation.saturating_add(1);
+        if project.inference.backend == RuntimeBackend::Deterministic {
+            return Err(
+                "real-only runtime requires llama.cpp; deterministic inference is forbidden".into(),
+            );
         }
-        if !self.runtimes.contains_key(project_id) {
-            let runtime = ProjectRuntime::start(&self.config, project, emit)?;
-            self.runtimes.insert(project_id.to_owned(), runtime);
+        if self.runtime.is_none() {
+            return Err(
+                "Assistant runtime is unavailable. Wait for preparation or use Retry.".into(),
+            );
         }
-        self.runtimes
-            .get_mut(project_id)
-            .ok_or_else(|| "project runtime disappeared".into())
+        let state = self
+            .config
+            .project_root
+            .parent()
+            .unwrap_or(&self.config.project_root);
+        let settings = crate::SettingsStore::open(state.join("settings.json"))
+            .map_err(|e| e.to_string())?
+            .get()
+            .map_err(|e| e.to_string())?;
+        let discovery_started = Instant::now();
+        let discovery = crate::personal::search(query, &settings.authorized_locations)?;
+        emit(
+            EventKind::Validation,
+            false,
+            json!({"stage":"personal_discovery_completed",
+            "elapsed_ms":discovery_started.elapsed().as_millis(), "entries_scanned":discovery.scanned,
+            "candidate_count":discovery.files.len(), "bounded":discovery.bounded}),
+        );
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or("Application runtime is not prepared")?;
+        if runtime.config.inference != settings.default_inference {
+            return Err("The application model changed. Restart the shared assistant from Settings before sending another message.".into());
+        }
+        // Legacy project model settings remain discoverable migration inputs;
+        // execution uses the one explicitly selected application profile.
+        project.inference = runtime.config.inference.clone();
+        runtime.focus_attached = discovery.files.is_empty() && !project.workspace.virtual_only;
+        runtime.resource_identities = discovery.identities.into_iter().collect();
+        runtime
+            .daemon
+            .with_idle_backend(|backend| {
+                if discovery.files.is_empty() {
+                    backend.attach_task_root(
+                        &project.workspace.root,
+                        &project.workspace.state,
+                        project.workspace.access == WorkspaceAccess::AutomaticWriteback,
+                    )
+                } else {
+                    backend.attach_selected(&state.join("runtime/empty"), discovery.files)
+                }
+            })
+            .map_err(|error| format!("Task attachment requires reclaimed broker idle: {error:?}"))?
+            .map_err(|error| format!("Task filesystem attachment failed: {error:?}"))?;
+        runtime.task_catalog = runtime
+            .daemon
+            .with_idle_backend(|backend| backend.task_catalog())
+            .map_err(|error| format!("Task catalog attachment failed: {error:?}"))?;
+        if runtime.focus_attached {
+            runtime
+                .resource_identities
+                .insert("root".into(), project.workspace.root.clone());
+            for (path, _) in &runtime.task_catalog {
+                runtime
+                    .resource_identities
+                    .insert(path.clone(), project.workspace.root.join(path));
+            }
+        }
+        timing_marker(emit, "task_resources_attached");
+        runtime.config = project;
+        Ok(runtime)
+    }
+
+    fn application_profile(&self) -> Result<ProjectConfig, String> {
+        use crate::project::*;
+        let state = self
+            .config
+            .project_root
+            .parent()
+            .unwrap_or(&self.config.project_root);
+        let settings = crate::SettingsStore::open(state.join("settings.json"))
+            .map_err(|e| e.to_string())?
+            .get()
+            .map_err(|e| e.to_string())?;
+        let empty = state.join("runtime/empty");
+        let journal = state.join("runtime/empty-state");
+        std::fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&journal).map_err(|e| e.to_string())?;
+        Ok(ProjectConfig {
+            schema_version: PROJECT_SCHEMA_VERSION,
+            id: "application".into(),
+            name: "Assistant".into(),
+            workspace: WorkspaceConfig {
+                virtual_only: false,
+                root: empty,
+                state: journal,
+                access: WorkspaceAccess::ReadOnly,
+                exclusions: vec![],
+            },
+            inference: settings.default_inference,
+            addons: vec![],
+            approvals: ApprovalProfile {
+                default_scope: "once".into(),
+                confirm_external_writes: true,
+                confirm_destructive: true,
+                standing_policy_enabled: false,
+            },
+            retention: RetentionConfig {
+                transcript_days: 30,
+                clean_kv_on_close: true,
+                retain_raw_model_output: false,
+            },
+            resources: ResourceLimits {
+                memory_mib: settings.runtime.memory_mib,
+                virtual_cpus: settings.runtime.virtual_cpus,
+                prompt_seconds: 300,
+                agent_limit: 1,
+            },
+            archived: false,
+        })
     }
 }
 
@@ -106,6 +233,7 @@ impl ProjectRuntime {
         runtime: &KoreVmRuntimeConfig,
         config: ProjectConfig,
         emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, String> {
         let inference: Box<dyn InferenceBackend + Send> =
             match config.inference.backend {
@@ -118,12 +246,12 @@ impl ProjectRuntime {
                         .inference
                         .llama_server
                         .clone()
-                        .ok_or("project has no llama.cpp server")?;
+                        .ok_or("Configure the application llama.cpp server in Settings")?;
                     let model = config
                         .inference
                         .model
                         .clone()
-                        .ok_or("project has no model")?;
+                        .ok_or("Choose an installed application model in Settings")?;
                     let slots = usize::from(config.inference.slots).max(2);
                     let limits = BackendLimits {
                         sequences: slots,
@@ -134,23 +262,26 @@ impl ProjectRuntime {
                     };
                     timing_marker(emit, "model_server_starting");
                     Box::new(
-                        LlamaServerBackend::start(LlamaServerConfig {
-                            executable,
-                            executable_args: config
-                                .inference
-                                .extra_args
-                                .iter()
-                                .map(OsString::from)
-                                .collect(),
-                            model,
-                            port: reserve_loopback_port()?,
-                            total_context_tokens: config.inference.context_tokens,
-                            threads: config.inference.threads,
-                            startup_timeout: Duration::from_secs(600),
-                            io_timeout: Duration::from_millis(25),
-                            limits,
-                            trace: std::env::var_os("VKORE_LLAMA_TRACE").is_some(),
-                        })
+                        LlamaServerBackend::start_cancellable(
+                            LlamaServerConfig {
+                                executable,
+                                executable_args: config
+                                    .inference
+                                    .extra_args
+                                    .iter()
+                                    .map(OsString::from)
+                                    .collect(),
+                                model,
+                                port: reserve_loopback_port()?,
+                                total_context_tokens: config.inference.context_tokens,
+                                threads: config.inference.threads,
+                                startup_timeout: Duration::from_secs(600),
+                                io_timeout: Duration::from_millis(25),
+                                limits,
+                                trace: std::env::var_os("VKORE_LLAMA_TRACE").is_some(),
+                            },
+                            cancelled,
+                        )
                         .map_err(|error| format!("llama.cpp startup failed: {error:?}"))?,
                     )
                 }
@@ -167,7 +298,6 @@ impl ProjectRuntime {
         .map_err(|error| format!("workspace backend failed: {error:?}"))?;
         timing_marker(emit, "workspace_open_ready");
         timing_marker(emit, "hostlink_bind_starting");
-        let backend: Box<dyn InferenceBackend + Send> = Box::new(backend);
         let (daemon, hostlink) = HostLinkDaemon::bind_dynamic_tcp(backend, ())
             .map_err(|error| format!("HostLink bind failed: {error:?}"))?;
         timing_marker(emit, "hostlink_bind_ready");
@@ -175,7 +305,7 @@ impl ProjectRuntime {
             .inference
             .kore_image
             .clone()
-            .ok_or("project has no Kore image")?;
+            .ok_or("Configure the headless Kore image in application settings")?;
         let serial_log = qemu_serial_log(&runtime.qemu_arguments);
         let mut arguments = without_qemu_resource_arguments(&runtime.qemu_arguments)?;
         arguments.extend([
@@ -208,6 +338,9 @@ impl ProjectRuntime {
             completed_frontend_broker_decisions: 0,
             completed_frontend_teardowns: 0,
             completed_frontend_idle_barriers: 0,
+            resource_identities: BTreeMap::new(),
+            task_catalog: Vec::new(),
+            focus_attached: false,
         })
     }
 
@@ -467,15 +600,35 @@ impl ProjectRuntime {
                 self.completed_frontend_teardowns =
                     self.completed_frontend_teardowns.saturating_add(1);
             }
+            let alias = observation.label.strip_prefix("workspace/");
+            let mut directory_contents = Vec::new();
+            if observation.kind == AuthorityKind::View
+                && let Some(alias) = alias
+            {
+                for (path, directory) in &self.task_catalog {
+                    if alias == "root"
+                        || path
+                            .strip_prefix(alias)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                    {
+                        directory_contents.push(json!({"kind":if *directory { "directory" } else { "file" },
+                            "path":format!("workspace/{path}"), "backing_path":self.resource_identities.get(path),
+                            "rights":observation.rights, "inherited":true}));
+                    }
+                }
+            }
             emit(
                 EventKind::Capability,
                 false,
                 json!({
+                    "capabilities": directory_contents,
                     "state": format!("{:?}", observation.state),
                     "kind": format!("{:?}", observation.kind),
                     "agent_slot": observation.agent_slot,
                     "generation": observation.generation,
                     "rights": observation.rights,
+                    "backing_path": observation.label.strip_prefix("workspace/")
+                        .and_then(|alias| self.resource_identities.get(alias)),
                     "label": observation.label,
                 }),
             );
@@ -509,7 +662,7 @@ impl KoreVmRuntime {
         context: &[(bool, String)],
     ) -> PromptStatus {
         timing_marker(emit, "runtime_lookup_starting");
-        let runtime = match self.ensure_project(&session.project_id, emit) {
+        let runtime = match self.ensure_project(&session.project_id, &prompt.text, emit) {
             Ok(runtime) => runtime,
             Err(error) => {
                 emit(EventKind::Error, true, json!({"message": error}));
@@ -518,7 +671,6 @@ impl KoreVmRuntime {
         };
         timing_marker(emit, "runtime_ready");
         if runtime.session_id.as_deref() != Some(&session.session_id) {
-            runtime.stop();
             runtime.session_id = Some(session.session_id.clone());
         }
         if let Err(error) = runtime.daemon.set_conversation_context(context) {
@@ -544,15 +696,15 @@ impl KoreVmRuntime {
         let mut boot_timing =
             BootTiming::new(runtime.serial_log.clone(), runtime.process.is_none());
         if runtime.process.is_none() {
-            timing_marker(emit, "vm_spawn_starting");
-            runtime.boot_attempt = 0;
-            if let Err(error) = runtime.spawn_vm() {
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                emit(EventKind::Error, true, json!({"message": error}));
-                return PromptStatus::Failed;
-            }
-            timing_marker(emit, "vm_process_spawned");
-        } else if let Err(error) = runtime.resume_vm_for_prompt(emit) {
+            runtime.daemon.cancel_frontend_intent(intent_id);
+            emit(
+                EventKind::Error,
+                true,
+                json!({"message":"Shared VM is unavailable; use Retry to restart the assistant"}),
+            );
+            return PromptStatus::Failed;
+        }
+        if let Err(error) = runtime.resume_vm_for_prompt(emit) {
             runtime.daemon.cancel_frontend_intent(intent_id);
             runtime.stop();
             emit(EventKind::Error, true, json!({"message": error}));
@@ -580,22 +732,32 @@ impl KoreVmRuntime {
         let teardown_target = runtime.completed_frontend_teardowns.saturating_add(1);
         let idle_barrier_target = runtime.completed_frontend_idle_barriers.saturating_add(1);
         let mut pending_terminal = None;
+        let mut cancellation_started = None;
+        let mut cancellation_requested = false;
         let mut broker_reported_failure = false;
         let mut reclaimed_at = None;
         let mut response_at = None;
         let mut loop_timing = LoopTiming::default();
         loop {
             boot_timing.poll(emit);
-            if cancelled() {
+            if cancelled() && pending_terminal.is_none() {
+                cancellation_requested = true;
+                cancellation_started.get_or_insert_with(Instant::now);
+                runtime.daemon.cancel_frontend_work(intent_id);
+                if runtime.vm_suspended {
+                    let _ = runtime.resume_vm_for_prompt(emit);
+                }
+            }
+            if cancellation_started
+                .is_some_and(|started: Instant| started.elapsed() > Duration::from_secs(30))
+            {
+                runtime.stop();
                 emit(
                     EventKind::Error,
                     true,
-                    json!({"message": "Prompt cancelled", "stage": "agent_failure"}),
+                    json!({"message":"Guest cancellation did not reclaim its resources; the shared runtime requires recovery", "stage":"runtime_failed"}),
                 );
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
-                loop_timing.report(emit, true);
-                return PromptStatus::Cancelled;
+                return PromptStatus::Failed;
             }
             if Instant::now() >= deadline {
                 emit(
@@ -665,29 +827,6 @@ impl KoreVmRuntime {
                 return PromptStatus::Failed;
             }
             if let Some(marker) = runtime.boot_failure() {
-                if runtime.boot_attempt < MAX_BOOT_ATTEMPTS {
-                    let failed_attempt = runtime.boot_attempt;
-                    runtime.stop_process();
-                    emit(
-                        EventKind::Validation,
-                        false,
-                        json!({
-                            "stage": "kore_boot_retry",
-                            "attempt": failed_attempt,
-                            "reason": marker,
-                        }),
-                    );
-                    timing_marker(emit, "vm_spawn_starting");
-                    boot_timing = BootTiming::new(runtime.serial_log.clone(), true);
-                    if let Err(error) = runtime.spawn_vm() {
-                        runtime.daemon.cancel_frontend_intent(intent_id);
-                        emit(EventKind::Error, true, json!({"message": error}));
-                        loop_timing.report(emit, true);
-                        return PromptStatus::Failed;
-                    }
-                    timing_marker(emit, "vm_process_spawned");
-                    continue;
-                }
                 let attempts = runtime.boot_attempt;
                 let serial_log = runtime.serial_log.clone();
                 runtime.daemon.cancel_frontend_intent(intent_id);
@@ -697,7 +836,7 @@ impl KoreVmRuntime {
                     true,
                     json!({
                         "message": format!(
-                            "Kore boot failed after {attempts} attempts ({marker}){}",
+                            "Shared Kore runtime failed ({marker}, boot {attempts}); use Retry{}",
                             serial_log.as_deref().map_or_else(String::new, |path| format!(
                                 "; serial log: {}",
                                 path.display()
@@ -741,7 +880,11 @@ impl KoreVmRuntime {
                         PromptStatus::Failed
                     }
                 };
-                pending_terminal = Some(status);
+                pending_terminal = Some(if cancellation_requested {
+                    PromptStatus::Cancelled
+                } else {
+                    status
+                });
             }
             if pending_terminal.is_some() && response_published() {
                 response_at.get_or_insert_with(Instant::now);
@@ -749,21 +892,23 @@ impl KoreVmRuntime {
                 // stream. Only now may the guest release the prompt's worker.
                 runtime.daemon.acknowledge_frontend_result(intent_id);
             }
-            if broker_reported_failure && pending_terminal.is_some() && response_published() {
-                // A broker startup failure cannot promise a worker teardown.
-                // Retire the failed guest explicitly after durable publication;
-                // do not wait for, or manufacture, a reclamation acknowledgement.
-                emit(
-                    EventKind::Validation,
-                    false,
-                    json!({
-                        "stage": "failed_guest_shutdown",
-                        "reason": "broker reported worker startup failure"
-                    }),
-                );
-                runtime.stop();
+            if broker_reported_failure
+                && pending_terminal.is_some()
+                && response_published()
+                && runtime.completed_frontend_idle_barriers >= idle_barrier_target
+            {
+                // The retained broker returned to its trusted idle poll after
+                // refusing construction. No worker teardown is invented.
+                if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
+                    runtime.stop();
+                    emit(EventKind::Error, true, json!({"message": error}));
+                }
                 loop_timing.report(emit, true);
-                return PromptStatus::Failed;
+                return if cancellation_requested {
+                    PromptStatus::Cancelled
+                } else {
+                    PromptStatus::Failed
+                };
             }
             if response_published()
                 && let Some(status) = terminal_after_reclaim_and_idle(
@@ -785,24 +930,22 @@ impl KoreVmRuntime {
                 loop_timing.report(emit, true);
                 return status;
             }
-            if let Some(status) = pending_terminal
+            if pending_terminal.is_some()
                 && response_published()
                 && runtime.completed_frontend_teardowns >= teardown_target
             {
-                // Single-prompt guests (including PR909) never issue another
-                // BrokerNext poll. Do not manufacture an idle barrier or hang
-                // a completed prompt: retire the real VM after confirmed
-                // worker reclamation and boot a fresh one for the next prompt.
+                // A reusable guest must return to its authenticated idle
+                // barrier. A missing barrier is a shared-runtime failure.
                 let reclaimed = reclaimed_at.get_or_insert_with(Instant::now);
                 if reclaimed.elapsed() >= Duration::from_secs(2) {
                     emit(
                         EventKind::Validation,
                         false,
-                        json!({"stage": "guest_retired_after_reclaim", "reason": "guest did not return to frontend idle"}),
+                        json!({"stage": "runtime_failed", "reason": "guest did not return to frontend idle; explicit recovery required"}),
                     );
                     runtime.stop();
                     loop_timing.report(emit, true);
-                    return status;
+                    return PromptStatus::Failed;
                 }
             }
             if unconfirmed_cleanup_timed_out(
@@ -857,6 +1000,103 @@ impl KoreVmRuntime {
 }
 
 impl TaskRuntime for KoreVmRuntime {
+    fn prepare(
+        &mut self,
+        status: &mut dyn FnMut(Value),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        let profile = self.application_profile()?;
+        let _ = self.runtime_status();
+        if let Some(runtime) = self.runtime.as_ref()
+            && runtime.config.inference == profile.inference
+            && runtime.daemon.broker_idle()
+        {
+            status(
+                json!({"phase":"broker_ready","incarnation":self.incarnation,
+                "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
+                "ai_server_pid":runtime.daemon.core().backend_metrics().process_id}),
+            );
+            return Ok(());
+        }
+        if self.runtime.take().is_some() {
+            self.incarnation = self
+                .incarnation
+                .checked_add(1)
+                .ok_or("Runtime generation exhausted")?;
+            self.conversations.clear();
+            status(json!({"phase":"preparing","restart":true,"incarnation":self.incarnation}));
+        }
+        let started = Instant::now();
+        let mut runtime = ProjectRuntime::start(
+            &self.config,
+            profile,
+            &mut |_, _, payload| {
+                let phase = match payload["stage"].as_str() {
+                    Some("model_server_starting") => "model_starting",
+                    Some("model_server_ready") => "model_ready",
+                    _ => "preparing",
+                };
+                status(
+                    json!({"phase":phase,"detail":payload,"elapsed_ms":started.elapsed().as_millis()}),
+                );
+            },
+            cancelled,
+        )?;
+        status(json!({"phase":"vm_booting","elapsed_ms":started.elapsed().as_millis()}));
+        runtime.spawn_vm()?;
+        let mut boot_timing = BootTiming::new(runtime.serial_log.clone(), true);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut connected = false;
+        while !runtime.daemon.broker_idle() {
+            if cancelled() {
+                return Err("Assistant startup cancelled".into());
+            }
+            runtime
+                .daemon
+                .tick()
+                .map_err(|e| format!("HostLink preparation failed: {e:?}"))?;
+            boot_timing.poll(&mut |_, _, detail| {
+                status(json!({
+                    "phase": if connected { "hostlink_connected" } else { "vm_booting" },
+                    "detail": detail,
+                    "elapsed_ms": started.elapsed().as_millis(),
+                }));
+            });
+            if !connected && runtime.daemon.core().epoch().is_some() {
+                connected = true;
+                status(
+                    json!({"phase":"hostlink_connected","elapsed_ms":started.elapsed().as_millis()}),
+                );
+            }
+            if runtime
+                .process
+                .as_mut()
+                .and_then(|p| p.try_wait().ok().flatten())
+                .is_some()
+            {
+                return Err("Kore exited during application startup".into());
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "Kore did not reach resident broker readiness; verify the headless guest image"
+                        .into(),
+                );
+            }
+            std::thread::sleep(DEFAULT_TICK);
+        }
+        status(json!({"phase":"bootstrap_ready","elapsed_ms":started.elapsed().as_millis()}));
+        runtime.drain_events(&mut |_, _, _| {});
+        let pid = runtime.process.as_ref().map(QemuProcess::id);
+        let ai_server_pid = runtime.daemon.core().backend_metrics().process_id;
+        runtime.suspend_vm_between_prompts(&mut |_, _, _| {})?;
+        self.runtime = Some(runtime);
+        status(
+            json!({"phase":"broker_ready","incarnation":self.incarnation,"qemu_pid":pid,"ai_server_pid":ai_server_pid,
+            "elapsed_ms":started.elapsed().as_millis()}),
+        );
+        Ok(())
+    }
+
     fn run_prompt(
         &mut self,
         session: &SessionState,
@@ -882,7 +1122,13 @@ impl TaskRuntime for KoreVmRuntime {
         };
         timing_marker(&mut timed_emit, "runtime_prompt_started");
         let key = (session.project_id.clone(), session.session_id.clone());
-        let context = self.conversations.get(&key).cloned().unwrap_or_default();
+        self.conversations
+            .retain(|_, context| context.last_used.elapsed() < CONVERSATION_IDLE);
+        let context = self
+            .conversations
+            .get(&key)
+            .map(|c| c.exchanges.clone())
+            .unwrap_or_default();
         let mut response = None;
         let status = self.run_prompt_inner(
             session,
@@ -915,11 +1161,27 @@ impl TaskRuntime for KoreVmRuntime {
         if response_published()
             && let Some(response) = response
         {
-            remember_exchange(
-                self.conversations.entry(key).or_default(),
-                &prompt.text,
-                &response,
-            );
+            if !self.conversations.contains_key(&key)
+                && self.conversations.len() >= CONVERSATIONS_MAX
+            {
+                if let Some(oldest) = self
+                    .conversations
+                    .iter()
+                    .min_by_key(|(_, context)| context.last_used)
+                    .map(|(key, _)| key.clone())
+                {
+                    self.conversations.remove(&oldest);
+                }
+            }
+            let context = self
+                .conversations
+                .entry(key)
+                .or_insert_with(|| ConversationContext {
+                    exchanges: Vec::new(),
+                    last_used: Instant::now(),
+                });
+            context.last_used = Instant::now();
+            remember_exchange(&mut context.exchanges, &prompt.text, &response);
         }
         status
     }
@@ -927,10 +1189,9 @@ impl TaskRuntime for KoreVmRuntime {
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
         self.conversations
             .remove(&(session.project_id.clone(), session.session_id.clone()));
-        if let Some(runtime) = self.runtimes.get_mut(&session.project_id)
+        if let Some(runtime) = self.runtime.as_mut()
             && runtime.session_id.as_deref() == Some(&session.session_id)
         {
-            runtime.stop();
             let _ = runtime.daemon.set_conversation_context(&[]);
             runtime.session_id = None;
         }
@@ -939,6 +1200,31 @@ impl TaskRuntime for KoreVmRuntime {
             false,
             json!({"state": "teardown", "project": session.project_id}),
         );
+    }
+
+    fn runtime_status(&mut self) -> Option<Value> {
+        let runtime = self.runtime.as_mut()?;
+        let alive = runtime
+            .process
+            .as_mut()
+            .is_some_and(|process| matches!(process.try_wait(), Ok(None)));
+        let healthy = alive
+            && runtime
+                .daemon
+                .with_idle_backend(|backend| backend.healthy())
+                .unwrap_or(false);
+        if !healthy {
+            self.runtime.take();
+            self.incarnation = self.incarnation.saturating_add(1);
+            self.conversations.clear();
+            return Some(json!({"phase":"failed", "incarnation":self.incarnation,
+                "message":"Shared assistant runtime lost readiness. Retry restarts it and clears affected task contexts."}));
+        }
+        Some(
+            json!({"phase":"broker_ready", "incarnation":self.incarnation,
+            "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
+            "ai_server_pid":runtime.daemon.core().backend_metrics().process_id}),
+        )
     }
 
     fn backend_incarnation(&self) -> u64 {

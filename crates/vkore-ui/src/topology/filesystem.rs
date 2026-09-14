@@ -7,8 +7,8 @@
 //! it, which is why selecting an agent lights more than the paths it was
 //! granted directly.
 //!
-//! Paths are discovered from explicit resource leases and typed tool-call
-//! arguments. Nothing is assumed to exist because a workspace usually has it.
+//! Paths come only from effective resource grants. Search results, proposals,
+//! and attempted tool calls are not evidence of access.
 
 use crate::topology::layout::Placement;
 use crate::topology::model::Graph;
@@ -58,6 +58,8 @@ pub struct PathNode {
     pub name: String,
     /// What it is.
     pub kind: Kind,
+    /// File/directory type, independent of the external-location layout band.
+    pub object_kind: Kind,
     /// Containing path, when one is also present.
     pub parent: Option<usize>,
 }
@@ -85,38 +87,72 @@ pub struct Filesystem {
 impl Filesystem {
     /// Builds the permission graph the events describe.
     pub fn from_events(events: &[Value], graph: &Graph) -> Self {
-        let mut filesystem = Self::default();
+        // Replay effective authority first. Proposed resources and attempted
+        // tool arguments are never evidence of current filesystem access.
+        let mut live = std::collections::BTreeMap::new();
         for event in events {
-            let generation = event["generation"]
-                .as_u64()
-                .or_else(|| event["payload"]["generation"].as_u64())
-                .unwrap_or_default();
+            if event["kind"] == "conversation_closed" {
+                live.clear();
+                continue;
+            }
+            let identity = super::model::worker_identity(event);
             let Some(agent) = graph
-                .agents
-                .iter()
-                .position(|agent| agent.generation == generation)
+                .index_of(&identity)
+                .filter(|index| graph.agents[*index].role != super::model::Role::Broker)
             else {
                 continue;
             };
-            match event["kind"].as_str() {
-                Some("capability") => {
-                    for (path, rights) in leased_paths(event) {
-                        filesystem.grant(agent, &path, &rights);
-                    }
-                }
-                Some("tool_call") => {
-                    let Some(call) = crate::decision_payload(event) else {
-                        continue;
-                    };
-                    let rights = call["tool"]
+            let payload = &event["payload"];
+            let state = payload["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if event["kind"] == "prompt_terminal"
+                || (event["kind"] == "capability"
+                    && state == "teardown"
+                    && payload["kind"]
                         .as_str()
-                        .or_else(|| call["command"].as_str())
-                        .unwrap_or("access");
-                    for path in crate::call_path_arguments(&call) {
-                        filesystem.grant(agent, &path, rights);
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("agent")))
+            {
+                live.retain(|(holder, _), _| *holder != agent);
+                continue;
+            }
+            if event["kind"] != "capability" {
+                continue;
+            }
+            for (path, rights, kind) in resource_paths(event) {
+                let key = (agent, normalize_path(&path));
+                match state.as_str() {
+                    "installed" | "granted" | "active" | "narrowed" => {
+                        live.insert(key, (rights, kind));
                     }
+                    "revoked" | "teardown" => {
+                        live.remove(&key);
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+        let mut filesystem = Self::default();
+        for ((agent, path), (rights, kind)) in live {
+            filesystem.grant(agent, &path, &rights);
+            if let Some(node) = filesystem.paths.iter_mut().find(|node| node.path == path) {
+                node.object_kind = kind;
+                if node.kind != Kind::External {
+                    node.kind = kind;
+                }
+            }
+        }
+        // Link only directories actually present in this task view. Absolute
+        // backing paths must not synthesize a tree of the host's ancestors.
+        for index in 0..filesystem.paths.len() {
+            if filesystem.paths[index].kind != Kind::External {
+                continue;
+            }
+            if let Some((parent, _)) = filesystem.paths[index].path.rsplit_once('/') {
+                filesystem.paths[index].parent = filesystem.paths[..index]
+                    .iter()
+                    .position(|node| node.path == parent && node.object_kind == Kind::Directory);
             }
         }
         filesystem
@@ -153,7 +189,11 @@ impl Filesystem {
             None => (None, path),
         };
         // An ancestor must exist before the child that names it.
-        let parent = parent_path.map(|head| self.intern(head));
+        let parent = parent_path.map(|head| {
+            let index = self.intern(head);
+            self.paths[index].kind = Kind::Directory;
+            index
+        });
         self.paths.push(PathNode {
             path: path.to_owned(),
             name: name.to_owned(),
@@ -164,6 +204,7 @@ impl Filesystem {
             } else {
                 Kind::Directory
             },
+            object_kind: Kind::Directory,
             parent: parent.filter(|_| !external),
         });
         self.paths.len() - 1
@@ -321,7 +362,16 @@ impl Filesystem {
 
         let mut agents = Vec::with_capacity(graph.agents.len());
         let worker_offset = (content_width - worker_width) / 2.0;
-        for (index, _) in graph.agents.iter().enumerate() {
+        for (index, agent) in graph.agents.iter().enumerate() {
+            if agent.role == super::model::Role::Broker {
+                agents.push(Placement {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                });
+                continue;
+            }
             agents.push(Placement {
                 x: if index == 0 {
                     (content_width - AGENT_WIDTH) / 2.0
@@ -345,41 +395,35 @@ fn normalize_path(path: &str) -> String {
         .to_owned()
 }
 
-fn leased_paths(event: &Value) -> Vec<(String, String)> {
+fn resource_paths(event: &Value) -> Vec<(String, String, Kind)> {
     let payload = &event["payload"];
-    if !matches!(
-        payload["state"]
-            .as_str()
-            .unwrap_or("installed")
-            .to_ascii_lowercase()
-            .as_str(),
-        "installed" | "granted" | "active"
-    ) {
-        return Vec::new();
-    }
-    let mut paths = payload["capabilities"]
+    let mut resources: Vec<&Value> = payload["capabilities"]
         .as_array()
+        .map(|entries| entries.iter().collect())
+        .unwrap_or_default();
+    resources.push(payload);
+    resources
         .into_iter()
-        .flatten()
-        .filter_map(|capability| {
-            let kind = capability["kind"].as_str()?;
-            if !matches!(kind.to_ascii_lowercase().as_str(), "object" | "view") {
-                return None;
-            }
-            Some((capability["label"].as_str()?.to_owned(), kind.to_owned()))
+        .filter_map(|resource| {
+            let kind = match resource["kind"].as_str()?.to_ascii_lowercase().as_str() {
+                "object" | "file" => Kind::File,
+                "view" | "directory" => Kind::Directory,
+                _ => return None,
+            };
+            let path = resource["backing_path"]
+                .as_str()
+                .or_else(|| resource["path"].as_str())
+                .or_else(|| resource["label"].as_str())?;
+            let rights = match resource["rights"].as_u64() {
+                Some(bits) => format!("rights 0x{bits:x}"),
+                None => resource["rights"]
+                    .as_str()
+                    .unwrap_or("unspecified")
+                    .to_owned(),
+            };
+            Some((path.to_owned(), rights, kind))
         })
-        .collect::<Vec<_>>();
-    if payload["kind"]
-        .as_str()
-        .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "object" | "view"))
-        && let Some(path) = payload["label"].as_str()
-    {
-        paths.push((
-            path.to_owned(),
-            payload["kind"].as_str().unwrap_or("access").to_owned(),
-        ));
-    }
-    paths
+        .collect()
 }
 
 /// The design's node width: wide enough for the name, floored at 120.
@@ -394,9 +438,9 @@ mod tests {
 
     fn events() -> Vec<Value> {
         vec![
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read_workspace", "path": "src/main.rs"}}),
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read_workspace", "path": "src/lib.rs"}}),
-            json!({"kind": "tool_call", "generation": 2, "payload": {"tool": "read", "path": "~/.cargo/registry"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"object","label":"src/main.rs","rights":"read"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"object","label":"src/lib.rs","rights":"read"}}),
+            json!({"kind":"capability","generation":2,"payload":{"state":"installed","kind":"view","label":"~/.cargo/registry","rights":"read"}}),
         ]
     }
 
@@ -430,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_resource_leases_and_typed_path_arguments_enter_the_graph() {
+    fn only_effective_resources_enter_the_graph() {
         let events = vec![
             json!({"kind":"capability","generation":4,"payload":{"state":"installed","capabilities":[
                 {"kind":"view","label":"workspace/releases"},
@@ -449,15 +493,14 @@ mod tests {
             .iter()
             .position(|path| path.path == "releases")
             .unwrap();
-        let manifest = filesystem
-            .paths
-            .iter()
-            .position(|path| path.path == "releases/v1/manifest.json")
-            .unwrap();
-
         assert!(filesystem.covers(worker, releases));
-        assert!(filesystem.covers(worker, manifest));
-        assert_eq!(filesystem.grants.len(), 2);
+        assert!(
+            !filesystem
+                .paths
+                .iter()
+                .any(|path| path.path.ends_with("manifest.json"))
+        );
+        assert_eq!(filesystem.grants.len(), 1);
         assert!(
             filesystem
                 .paths
@@ -495,8 +538,8 @@ mod tests {
     #[test]
     fn a_grant_on_a_directory_covers_what_is_beneath_it() {
         let events = vec![
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
-            json!({"kind": "tool_call", "generation": 2, "payload": {"tool": "read", "path": "src/deep/file.rs"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"view","label":"src","rights":"read"}}),
+            json!({"kind":"capability","generation":2,"payload":{"state":"installed","kind":"object","label":"src/deep/file.rs","rights":"read"}}),
         ];
         let graph = Graph::from_events(&events, false);
         let filesystem = Filesystem::from_events(&events, &graph);
@@ -521,7 +564,7 @@ mod tests {
     #[test]
     fn coverage_does_not_flow_upwards() {
         let events = vec![
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src/main.rs"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"object","label":"src/main.rs","rights":"read"}}),
         ];
         let graph = Graph::from_events(&events, false);
         let filesystem = Filesystem::from_events(&events, &graph);
@@ -539,8 +582,8 @@ mod tests {
     #[test]
     fn holders_report_direct_authority_before_inherited() {
         let events = vec![
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
-            json!({"kind": "tool_call", "generation": 2, "payload": {"tool": "read", "path": "src/main.rs"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"view","label":"src","rights":"read"}}),
+            json!({"kind":"capability","generation":2,"payload":{"state":"installed","kind":"object","label":"src/main.rs","rights":"read"}}),
         ];
         let graph = Graph::from_events(&events, false);
         let filesystem = Filesystem::from_events(&events, &graph);
@@ -557,10 +600,10 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_call_does_not_duplicate_a_grant() {
+    fn a_repeated_install_does_not_duplicate_a_grant() {
         let events = vec![
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"view","label":"src","rights":"read"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"view","label":"src","rights":"read"}}),
         ];
         let graph = Graph::from_events(&events, false);
         let filesystem = Filesystem::from_events(&events, &graph);
@@ -574,7 +617,10 @@ mod tests {
 
         assert_eq!(agents.len(), graph.agents.len());
         assert_eq!(paths.len(), filesystem.paths.len());
-        assert_eq!(agents[0].y, 0.0, "the broker leads");
+        assert_eq!(
+            agents[0].width, 0.0,
+            "the global broker has no filesystem node"
+        );
         assert!(agents[1..].iter().all(|a| a.y == BAND_WORKERS));
         let external = filesystem
             .paths
@@ -594,5 +640,70 @@ mod tests {
     fn a_node_is_never_narrower_than_the_floor() {
         assert_eq!(node_width("a"), 120.0 + 42.0);
         assert!(node_width("a-very-long-path-segment-indeed") > 200.0);
+    }
+    #[test]
+    fn backing_identity_preserves_file_type_and_only_granted_directory_containment() {
+        let events = vec![
+            json!({"kind":"capability","generation":1,"prompt_id":"read","payload":{
+            "state":"installed","capabilities":[
+                {"kind":"view","backing_path":"/authorized/one","rights":1},
+                {"kind":"object","backing_path":"/authorized/one/slides.pptx","rights":1},
+                {"kind":"object","backing_path":"/authorized/two/slides.pptx","rights":1}
+            ]}}),
+        ];
+        let graph = Graph::from_events(&events, true);
+        let fs = Filesystem::from_events(&events, &graph);
+        assert_eq!(fs.paths.len(), 3);
+        let one = fs
+            .paths
+            .iter()
+            .position(|n| n.path == "/authorized/one")
+            .unwrap();
+        for node in fs.paths.iter().filter(|n| n.name == "slides.pptx") {
+            assert_eq!(node.object_kind, Kind::File);
+            assert_eq!(
+                node.parent,
+                if node.path.contains("/one/") {
+                    Some(one)
+                } else {
+                    None
+                }
+            );
+        }
+        assert!(!fs.paths.iter().any(|n| n.path == "/authorized"));
+        assert_eq!(fs.grants.len(), 3);
+    }
+
+    #[test]
+    fn task_grants_narrow_revoke_and_teardown_without_exposing_broker() {
+        let mut events = vec![
+            json!({"kind":"capability","generation":0,"payload":{"state":"installed","kind":"view","label":"/"}}),
+            json!({"kind":"capability","generation":1,"prompt_id":"a","payload":{"state":"installed","kind":"object","path":"one/slides.pptx","rights":3}}),
+            json!({"kind":"capability","generation":1,"prompt_id":"b","payload":{"state":"installed","kind":"object","path":"two/slides.pptx","rights":1}}),
+            json!({"kind":"tool_call","generation":1,"prompt_id":"a","payload":{"tool":"cat","path":"secret.txt"}}),
+            json!({"kind":"capability","generation":1,"prompt_id":"a","payload":{"state":"proposed","kind":"object","path":"candidate.txt"}}),
+        ];
+        let build = |events: &[Value]| {
+            let graph = Graph::from_events(events, true);
+            let fs = Filesystem::from_events(events, &graph);
+            (graph, fs)
+        };
+        let (graph, fs) = build(&events);
+        assert_eq!(fs.grants.len(), 2);
+        assert!(
+            !fs.paths
+                .iter()
+                .any(|node| matches!(node.path.as_str(), "/" | "secret.txt" | "candidate.txt"))
+        );
+        assert_ne!(graph.index_of("task-a"), graph.index_of("task-b"));
+        events.push(json!({"kind":"capability","generation":1,"prompt_id":"a","payload":{"state":"narrowed","kind":"object","path":"one/slides.pptx","rights":1}}));
+        let (_, fs) = build(&events);
+        assert!(fs.grants.iter().all(|grant| grant.rights == "rights 0x1"));
+        events.push(json!({"kind":"capability","generation":1,"prompt_id":"a","payload":{"state":"revoked","kind":"object","path":"one/slides.pptx"}}));
+        let (_, fs) = build(&events);
+        assert_eq!(fs.grants.len(), 1);
+        events.push(json!({"kind":"capability","generation":1,"prompt_id":"b","payload":{"state":"teardown","kind":"agent"}}));
+        let (_, fs) = build(&events);
+        assert!(fs.paths.is_empty());
     }
 }

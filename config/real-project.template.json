@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "qwen9b-q4km-real",
   "name": "Qwen 9B Q4_K_M - real Kore",
   "workspace": {

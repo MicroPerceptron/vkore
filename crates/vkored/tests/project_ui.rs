@@ -13,10 +13,11 @@ use std::time::Duration;
 
 fn config(root: &Path, state: &Path) -> ProjectConfig {
     ProjectConfig {
-        schema_version: 1,
+        schema_version: hostlinkd::project::PROJECT_SCHEMA_VERSION,
         id: "secure-project".into(),
         name: "Secure project".into(),
         workspace: WorkspaceConfig {
+            virtual_only: false,
             root: root.into(),
             state: state.into(),
             access: WorkspaceAccess::ReadOnly,
@@ -105,9 +106,16 @@ fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() 
         &|| true,
     );
     assert_eq!(result, PromptStatus::Failed);
-    let errors: Vec<_> = events.iter().filter(|(kind, _)| *kind == EventKind::Error).collect();
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|(kind, _)| *kind == EventKind::Error)
+        .collect();
     assert_eq!(errors.len(), 1);
-    assert!(events.iter().all(|(_, payload)| payload["stage"] != "model_server_starting"));
+    assert!(
+        events
+            .iter()
+            .all(|(_, payload)| payload["stage"] != "model_server_starting")
+    );
     assert!(
         errors[0].1["message"]
             .as_str()
@@ -150,6 +158,11 @@ fn legacy_workspace_quotas_are_removed_without_disabling_writes() {
         &temporary.path().join("workspace-state"),
     ))
     .unwrap();
+    legacy["schema_version"] = Value::from(1);
+    legacy["workspace"]
+        .as_object_mut()
+        .unwrap()
+        .remove("virtual_only");
     legacy["workspace"]["access"] = Value::String("review_changes".into());
     legacy["workspace"]["max_write_bytes"] = Value::from(0);
     legacy["workspace"]["max_write_files"] = Value::from(0);
@@ -162,6 +175,11 @@ fn legacy_workspace_quotas_are_removed_without_disabling_writes() {
     let store = ProjectStore::open(&projects).unwrap();
     let migrated = store.get("secure-project").unwrap();
     assert_eq!(migrated.workspace.access, WorkspaceAccess::ReviewChanges);
+    assert_eq!(
+        migrated.schema_version,
+        hostlinkd::project::PROJECT_SCHEMA_VERSION
+    );
+    assert!(!migrated.workspace.virtual_only);
     let serialized = std::fs::read_to_string(projects.join("secure-project.json")).unwrap();
     assert!(!serialized.contains("max_write_bytes"));
     assert!(!serialized.contains("max_write_files"));

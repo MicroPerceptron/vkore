@@ -127,6 +127,65 @@ impl<B> WorkspaceBackend<B> {
         })
     }
 
+    /// Called only at the daemon's authenticated, fully reclaimed broker idle
+    /// barrier. No model state is reset and no worker can retain the old root.
+    pub(crate) fn attach_task_root(
+        &mut self,
+        root: &Path,
+        state: &Path,
+        allow_writeback: bool,
+    ) -> Result<(), WorkspaceBackendError> {
+        let workspace = LiveRoot::open_with_state(root, [0; 32], state)?;
+        let grant = if allow_writeback {
+            Some(
+                StandingGrant::new(
+                    fresh_grant_id(workspace.manifest().snapshot_id()),
+                    workspace.manifest().snapshot_id(),
+                    GrantOperations::ALL,
+                    kore_workspace_sync::bounds::MAX_CHANGES as u16,
+                    kore_workspace_sync::bounds::MAX_OVERLAY_BYTES,
+                    0,
+                    &[],
+                )
+                .expect("bounded write grant geometry"),
+            )
+        } else {
+            None
+        };
+        self.workspace = workspace;
+        self.grant = grant;
+        self.pending_delta = None;
+        self.blobs.clear();
+        Ok(())
+    }
+
+    pub(crate) fn task_catalog(&self) -> Vec<(String, bool)> {
+        self.workspace
+            .manifest()
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.as_str().to_owned(),
+                    entry.kind == kore_workspace_sync::EntryKind::Directory,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn attach_selected(
+        &mut self,
+        empty: &Path,
+        files: Vec<workspacectl::SelectedFile>,
+    ) -> Result<(), WorkspaceBackendError> {
+        let workspace = LiveRoot::open_selected(empty, files)?;
+        self.workspace = workspace;
+        self.grant = None;
+        self.pending_delta = None;
+        self.blobs.clear();
+        Ok(())
+    }
+
     fn enqueue(&mut self, event: BackendEvent) -> Result<(), BackendError> {
         if self.events.len() == EVENTS_MAX {
             return Err(BackendError::Full);
@@ -592,7 +651,13 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
                 let journal_transaction = *identity.finalize().as_bytes();
                 let outcome = self
                     .workspace
-                    .apply_transaction(journal_transaction, &transaction.changes, &contents, grant, tick)
+                    .apply_transaction(
+                        journal_transaction,
+                        &transaction.changes,
+                        &contents,
+                        grant,
+                        tick,
+                    )
                     .unwrap_or(TransactionOutcome::Refused);
                 let (status, snapshot, applied) = match outcome {
                     TransactionOutcome::Applied { snapshot } => (
@@ -675,6 +740,10 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
         self.events
             .pop_front()
             .or_else(|| self.inference.poll(tick))
+    }
+
+    fn healthy(&mut self) -> bool {
+        self.inference.healthy()
     }
 
     fn metrics(&self) -> BackendMetrics {

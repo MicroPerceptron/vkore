@@ -201,6 +201,7 @@ pub struct SequenceMetrics {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendMetrics {
+    pub process_id: Option<u32>,
     pub incarnation: u64,
     pub restarts: u64,
     pub stale_events: u64,
@@ -288,6 +289,9 @@ pub trait InferenceBackend {
     ) -> Result<BackendEvent, BackendError>;
     fn poll(&mut self, tick: u64) -> Option<BackendEvent>;
     fn metrics(&self) -> BackendMetrics;
+    fn healthy(&mut self) -> bool {
+        true
+    }
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics>;
     /// Pop one bounded, non-authoritative observation produced by the real
     /// backend path. Implementations that do not expose model internals keep
@@ -350,6 +354,9 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
 
     fn metrics(&self) -> BackendMetrics {
         (**self).metrics()
+    }
+    fn healthy(&mut self) -> bool {
+        (**self).healthy()
     }
 
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics> {

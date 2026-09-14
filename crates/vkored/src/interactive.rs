@@ -24,7 +24,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const HARNESS_API_VERSION: u16 = 1;
-const EVENTS_MAX: usize = 4096;
+const EVENTS_MAX: usize = 512;
+const SESSIONS_MAX: usize = 64;
+const PROMPTS_PER_SESSION_MAX: usize = 4096;
 const PROMPT_BYTES_MAX: usize = kore_hostlink::TASK_INTENT_MAX;
 const PENDING_MAX: usize = 32;
 const POLL_TICKS_MAX: u64 = 30_000;
@@ -184,13 +186,69 @@ struct SessionData {
 }
 
 struct Shared {
+    shutting_down: bool,
+    runtime_status: Value,
     sessions: BTreeMap<String, SessionData>,
     next_sequence: u64,
+    next_generation: u64,
     queued: usize,
     transcript_root: PathBuf,
 }
 
 impl Shared {
+    fn publish_runtime(&mut self, mut status: Value) {
+        let mut history = self.runtime_status["startup_history"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if status["phase"] != self.runtime_status["phase"]
+            || status["detail"]["stage"] != self.runtime_status["detail"]["stage"]
+            || status["detail"]["detail"] != self.runtime_status["detail"]["detail"]
+            || status["restart"] == true
+        {
+            let mut checkpoint = status.clone();
+            checkpoint["timestamp_unix_ms"] = json!(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+            history.push(checkpoint);
+            if history.len() > 64 {
+                history.remove(0);
+            }
+        }
+        status["startup_history"] = json!(history);
+        self.runtime_status = status;
+    }
+
+    fn new_generation(&mut self) -> Result<u64, HarnessError> {
+        let next = self.next_generation;
+        self.next_generation = next.checked_add(1).ok_or(HarnessError::Backpressure)?;
+        Ok(next)
+    }
+
+    fn invalidate_runtime(&mut self, incarnation: u64) {
+        let ids: Vec<_> = self.sessions.keys().cloned().collect();
+        for id in ids {
+            let Ok(generation) = self.new_generation() else {
+                self.shutting_down = true;
+                return;
+            };
+            if let Some(data) = self.sessions.get_mut(&id) {
+                data.state.generation = generation;
+                data.state.backend_incarnation = incarnation;
+            }
+            let _ = self.emit(
+                &id,
+                None,
+                EventKind::Validation,
+                false,
+                json!({"stage":"runtime_generation_invalidated", "incarnation":incarnation}),
+            );
+        }
+    }
+
     fn emit(
         &mut self,
         session_id: &str,
@@ -256,10 +314,18 @@ enum Command {
     Close {
         session: SessionState,
     },
+    Prepare,
     Shutdown,
 }
 
 pub trait TaskRuntime: Send + 'static {
+    fn prepare(
+        &mut self,
+        _status: &mut dyn FnMut(Value),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn run_prompt(
         &mut self,
         session: &SessionState,
@@ -271,6 +337,9 @@ pub trait TaskRuntime: Send + 'static {
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value));
     fn backend_incarnation(&self) -> u64 {
         0
+    }
+    fn runtime_status(&mut self) -> Option<Value> {
+        None
     }
 }
 
@@ -288,12 +357,15 @@ pub struct HarnessHandle {
 impl HarnessService {
     pub fn start(runtime: impl TaskRuntime, transcript_root: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
+            shutting_down: false,
+            runtime_status: json!({"phase":"preparing"}),
             sessions: BTreeMap::new(),
             next_sequence: 1,
+            next_generation: 1,
             queued: 0,
             transcript_root: transcript_root.into(),
         }));
-        let (commands, receiver) = mpsc::sync_channel(PENDING_MAX);
+        let (commands, receiver) = mpsc::sync_channel(PENDING_MAX + SESSIONS_MAX + 1);
         let handle = HarnessHandle {
             shared: Arc::clone(&shared),
             commands,
@@ -310,6 +382,9 @@ impl HarnessService {
     }
 
     pub fn shutdown(mut self) {
+        if let Ok(mut shared) = self.handle.shared.lock() {
+            shared.shutting_down = true;
+        }
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -319,6 +394,9 @@ impl HarnessService {
 
 impl Drop for HarnessService {
     fn drop(&mut self) {
+        if let Ok(mut shared) = self.handle.shared.lock() {
+            shared.shutting_down = true;
+        }
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -331,18 +409,109 @@ fn worker_loop(
     shared: Arc<Mutex<Shared>>,
     receiver: mpsc::Receiver<Command>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    let prepare = |runtime: &mut _, shared: &Arc<Mutex<Shared>>| {
+        let mut publish = |status| {
+            if let Ok(mut shared) = shared.lock() {
+                shared.publish_runtime(status);
+            }
+        };
+        if let Err(error) = TaskRuntime::prepare(runtime, &mut publish, &|| {
+            shared.lock().map_or(true, |state| state.shutting_down)
+        }) {
+            publish(json!({"phase":"failed","message":error}));
+        }
+    };
+    prepare(&mut runtime, &shared);
+    let maintain = |runtime: &mut _, shared: &Arc<Mutex<Shared>>| {
+        let before = TaskRuntime::backend_incarnation(runtime);
+        let status = TaskRuntime::runtime_status(runtime);
+        let incarnation = TaskRuntime::backend_incarnation(runtime);
+        if let Ok(mut shared) = shared.lock() {
+            if let Some(status) = status {
+                shared.publish_runtime(status);
+            }
+            if before != incarnation {
+                shared.invalidate_runtime(incarnation);
+            }
+        }
+    };
+    let mut pending = VecDeque::new();
+    let mut last_project: Option<String> = None;
+    loop {
+        if pending.is_empty() {
+            match receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(command) => pending.push_back(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    maintain(&mut runtime, &shared);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while pending.len() < PENDING_MAX {
+            match receiver.try_recv() {
+                Ok(command) => pending.push_back(command),
+                Err(_) => break,
+            }
+        }
+        // Control actions retire stale queued generations before more work.
+        // Ready projects take round-robin turns through one bounded worker slot.
+        let index = pending
+            .iter()
+            .position(|command| !matches!(command, Command::Prompt { .. }))
+            .or_else(|| {
+                pending.iter().position(|command| {
+                    matches!(command, Command::Prompt { session, .. }
+                if Some(&session.project_id) != last_project.as_ref())
+                })
+            })
+            .unwrap_or(0);
+        let command = pending.remove(index).expect("nonempty bounded queue");
         match command {
             Command::Prompt { session, prompt } => {
-                if let Ok(mut shared) = shared.lock() {
+                let valid = if let Ok(mut shared) = shared.lock() {
                     shared.queued = shared.queued.saturating_sub(1);
+                    let valid = shared
+                        .sessions
+                        .get(&session.session_id)
+                        .is_some_and(|data| {
+                            data.state.generation == session.generation
+                                && !matches!(
+                                    data.state.status,
+                                    SessionStatus::Closing | SessionStatus::Closed
+                                )
+                                && !data.cancellations.contains(&prompt.prompt_id)
+                        });
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
-                        data.state.status = SessionStatus::Busy;
-                        data.state
-                            .prompts
-                            .insert(prompt.prompt_id.clone(), PromptStatus::Running);
+                        data.state.prompts.insert(
+                            prompt.prompt_id.clone(),
+                            if valid {
+                                PromptStatus::Running
+                            } else {
+                                PromptStatus::Cancelled
+                            },
+                        );
+                        if valid {
+                            data.state.status = SessionStatus::Busy;
+                        }
                     }
+                    if !valid {
+                        let _ = shared.emit(
+                            &session.session_id,
+                            Some(&prompt.prompt_id),
+                            EventKind::PromptTerminal,
+                            true,
+                            json!({"status":"cancelled","reason":"queued task scope retired"}),
+                        );
+                    }
+                    valid
+                } else {
+                    false
+                };
+                if !valid {
+                    continue;
                 }
+                last_project = Some(session.project_id.clone());
                 let shared_emit = Arc::clone(&shared);
                 let session_id = session.session_id.clone();
                 let prompt_id = prompt.prompt_id.clone();
@@ -370,16 +539,17 @@ fn worker_loop(
                         .lock()
                         .ok()
                         .and_then(|shared| {
-                            shared
-                                .sessions
-                                .get(&cancel_session)
-                                .map(|session| session.cancellations.contains(&cancel_prompt))
+                            shared.sessions.get(&cancel_session).map(|session| {
+                                shared.shutting_down
+                                    || session.cancellations.contains(&cancel_prompt)
+                            })
                         })
                         .unwrap_or(true)
                 };
                 let status = runtime.run_prompt(&session, &prompt, &mut emit, &cancelled, &|| {
                     response_published.get()
                 });
+                maintain(&mut runtime, &shared);
                 let backend_incarnation = runtime.backend_incarnation();
                 if let Ok(mut shared) = shared.lock() {
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
@@ -412,9 +582,10 @@ fn worker_loop(
                 };
                 runtime.close(&session, &mut emit);
                 if let Ok(mut shared) = shared.lock() {
+                    let generation = shared.new_generation().unwrap_or(u64::MAX);
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
                         data.state.status = SessionStatus::Closed;
-                        data.state.generation = data.state.generation.saturating_add(1);
+                        data.state.generation = generation;
                     }
                     let _ = shared.emit(
                         &session.session_id,
@@ -425,7 +596,39 @@ fn worker_loop(
                     );
                 }
             }
-            Command::Shutdown => break,
+            Command::Prepare => {
+                let before = runtime.backend_incarnation();
+                prepare(&mut runtime, &shared);
+                if runtime.backend_incarnation() != before
+                    && let Ok(mut shared) = shared.lock()
+                {
+                    shared.invalidate_runtime(runtime.backend_incarnation());
+                }
+            }
+            Command::Shutdown => {
+                if let Ok(mut state) = shared.lock() {
+                    let mut cancelled = Vec::new();
+                    for (id, data) in &mut state.sessions {
+                        for (prompt, status) in &mut data.state.prompts {
+                            if matches!(status, PromptStatus::Queued | PromptStatus::Running) {
+                                *status = PromptStatus::Cancelled;
+                                cancelled.push((id.clone(), prompt.clone()));
+                            }
+                        }
+                    }
+                    for (id, prompt) in cancelled {
+                        let _ = state.emit(
+                            &id,
+                            Some(&prompt),
+                            EventKind::PromptTerminal,
+                            true,
+                            json!({"status":"cancelled", "reason":"application shutdown"}),
+                        );
+                    }
+                    state.queued = 0;
+                }
+                break;
+            }
         }
     }
 }
@@ -448,12 +651,26 @@ impl HarnessHandle {
             }
             return Err(HarnessError::DuplicatePrompt);
         }
+        if shared.sessions.len() >= SESSIONS_MAX {
+            let retired = shared
+                .sessions
+                .iter()
+                .filter(|(_, data)| data.state.status == SessionStatus::Closed)
+                .min_by_key(|(_, data)| data.state.last_event_sequence)
+                .map(|(id, _)| id.clone());
+            if let Some(retired) = retired {
+                shared.sessions.remove(&retired);
+            } else {
+                return Err(HarnessError::Backpressure);
+            }
+        }
+        let generation = shared.new_generation()?;
         let state = SessionState {
             api_version: HARNESS_API_VERSION,
             project_id: request.project_id,
             session_id: request.session_id.clone(),
             status: SessionStatus::Open,
-            generation: 1,
+            generation,
             backend_incarnation: 0,
             last_event_sequence: 0,
             prompts: BTreeMap::new(),
@@ -524,6 +741,9 @@ impl HarnessHandle {
         }
         if data.state.prompts.contains_key(&prompt.prompt_id) {
             return Err(HarnessError::DuplicatePrompt);
+        }
+        if data.state.prompts.len() >= PROMPTS_PER_SESSION_MAX {
+            return Err(HarnessError::Backpressure);
         }
         data.idempotency.insert(
             prompt.idempotency_key.clone(),
@@ -597,14 +817,16 @@ impl HarnessHandle {
         if data.state.status == SessionStatus::Closed {
             return Ok(());
         }
+        let session = data.state.clone();
+        self.commands
+            .try_send(Command::Close { session })
+            .map_err(|_| HarnessError::Backpressure)?;
+        // The worker needs this same mutex, so it cannot consume Close before
+        // the accepted command and its cancellation state become visible.
         data.state.status = SessionStatus::Closing;
         data.cancellations
             .extend(data.state.prompts.keys().cloned());
-        let session = data.state.clone();
-        drop(shared);
-        self.commands
-            .try_send(Command::Close { session })
-            .map_err(|_| HarnessError::Backpressure)
+        Ok(())
     }
 
     pub fn state(&self, session_id: &str) -> Result<SessionState, HarnessError> {
@@ -1786,6 +2008,23 @@ fn route_http(
             serde_json::to_vec(&json!({"ok":true,"api_version":HARNESS_API_VERSION})).unwrap(),
         ));
     }
+    if path == "/api/v1/runtime" && method == "GET" {
+        let shared = handle
+            .shared
+            .lock()
+            .map_err(|_| HarnessError::Runtime("state poisoned".into()))?;
+        return Ok((
+            "application/json",
+            serde_json::to_vec(&shared.runtime_status).unwrap(),
+        ));
+    }
+    if path == "/api/v1/runtime/retry" && method == "POST" {
+        handle
+            .commands
+            .try_send(Command::Prepare)
+            .map_err(|_| HarnessError::Backpressure)?;
+        return Ok(("application/json", b"{\"accepted\":true}".to_vec()));
+    }
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let value = match (method, segments.as_slice()) {
         ("GET", ["api", "v1", "catalog"]) => json!({
@@ -1819,7 +2058,20 @@ fn route_http(
         ("GET", ["api", "v1", "settings"]) => settings.view(projects).map_err(settings_error)?,
         ("POST", ["api", "v1", "settings"]) => {
             let patch: Value = serde_json::from_slice(body).map_err(http_json)?;
-            settings.update(&patch, projects).map_err(settings_error)?
+            let previous = settings.get().map_err(settings_error)?.default_inference;
+            let updated = settings.update(&patch, projects).map_err(settings_error)?;
+            if settings.get().map_err(settings_error)?.default_inference != previous {
+                handle
+                    .commands
+                    .try_send(Command::Prepare)
+                    .map_err(|_| HarnessError::Backpressure)?;
+                if let Ok(mut shared) = handle.shared.lock() {
+                    shared.publish_runtime(
+                        json!({"phase":"preparing", "reason":"application model changed"}),
+                    );
+                }
+            }
+            updated
         }
         ("GET", ["api", "v1", "activity"]) => serde_json::to_value(
             crate::settings::recent_activity(transcript_root, projects).map_err(settings_error)?,
@@ -1875,6 +2127,18 @@ fn route_http(
                 config.workspace.state = projects.derived_state(&config.id, &config.workspace.root);
             }
             serde_json::to_value(projects.save(config).map_err(project_error)?).unwrap()
+        }
+        ("POST", ["api", "v1", "projects", "virtual"]) => {
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let inference = settings
+                .default_inference(projects)
+                .map_err(settings_error)?;
+            serde_json::to_value(
+                projects
+                    .create_virtual(value["name"].as_str().unwrap_or("New project"), inference)
+                    .map_err(project_error)?,
+            )
+            .unwrap()
         }
         ("POST", ["api", "v1", "projects", "from-workspace"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;

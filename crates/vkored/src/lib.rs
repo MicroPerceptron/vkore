@@ -52,3 +52,5 @@ pub use settings::{
 };
 pub use ui::{LiveUi, LiveUiError};
 pub use workspace::{WorkspaceBackend, WorkspaceBackendError};
+
+mod personal;

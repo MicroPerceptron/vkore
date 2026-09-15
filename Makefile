@@ -22,6 +22,7 @@ export VKORE_MAKE
 export VKORE_EXPECTED_KORE_COMMIT
 export VKORE_EXPECTED_ISO_SHA256
 export VKORE_EXPECTED_KORE_DIFF_SHA256
+export VKORE_CARGO_CONFIG
 
 .DEFAULT_GOAL := help
 
@@ -71,4 +72,4 @@ artifacts:
 	  "$(KORE_ROOT)/$(VKORE_KORE_ISO_RELATIVE)" | sha256sum -c -
 
 test:
-	cargo test --workspace
+	cargo $(if $(VKORE_CARGO_CONFIG),--config "$(VKORE_CARGO_CONFIG)") test --workspace

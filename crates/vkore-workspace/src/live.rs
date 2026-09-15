@@ -16,9 +16,10 @@ use cap_std::{
     fs::{Dir, File, OpenOptions},
 };
 use kore_workspace_sync::{
-    CanonicalPath, ChangeKind, ChangeSet, ChangeSetBuilder, DeltaOp, EntryKind, Manifest, Policy,
-    RangeProof, RangeRequestV1, SourceCorrelation, StandingGrant, TopologyDelta,
-    TransactionOutcome, bounds::MAX_TRANSACTION_RESULTS, build_range_proof, range_root,
+    CanonicalPath, ChangeKind, ChangeSet, ChangeSetBuilder, DeltaOp, Entry, EntryKind, Manifest,
+    ManifestBuilder, Policy, RangeProof, RangeRequestV1, SourceCorrelation, StandingGrant,
+    TopologyDelta, TransactionOutcome, bounds::MAX_TRANSACTION_RESULTS, build_range_proof,
+    range_root,
 };
 
 use crate::{
@@ -399,6 +400,39 @@ impl LiveRoot {
         if changes.base != self.manifest.snapshot_id() {
             return self.remember(transaction, changes.id, TransactionOutcome::Conflict);
         }
+        // A directory rename carries every descendant with it. Check the
+        // standing grant for each affected source and destination path too;
+        // authorizing only the top-level label would bypass nested exclusions.
+        for change in changes
+            .changes()
+            .iter()
+            .filter(|change| change.kind == ChangeKind::Rename)
+        {
+            let target = change.target.as_ref().ok_or(Error::InvalidArtifact)?;
+            for entry in self
+                .manifest
+                .entries()
+                .iter()
+                .filter(|entry| entry.path.is_within(&change.path))
+            {
+                let mut path = target.as_bytes().to_vec();
+                path.extend_from_slice(&entry.path.as_bytes()[change.path.as_bytes().len()..]);
+                let mut probe = ChangeSetBuilder::new(changes.base);
+                probe.push(kore_workspace_sync::Change {
+                    path: entry.path.clone(),
+                    target: Some(CanonicalPath::new(&path).map_err(|_| Error::InvalidArtifact)?),
+                    expected: entry.digest,
+                    ..change.clone()
+                })?;
+                if grant.authorize(&probe.finish()?, now).is_err() {
+                    return self.remember(transaction, changes.id, TransactionOutcome::Refused);
+                }
+            }
+        }
+        let actual = Artifact::scan_cap(&self.root, self.manifest.header().parent_snapshot)?;
+        if actual.manifest.snapshot_id() != self.manifest.snapshot_id() {
+            return self.remember(transaction, changes.id, TransactionOutcome::Conflict);
+        }
         for change in changes.changes() {
             if matches!(change.kind, ChangeKind::CreateFile | ChangeKind::ModifyFile) {
                 let Some(content) = contents.get(&change.path) else {
@@ -425,29 +459,14 @@ impl LiveRoot {
             return self.remember(transaction, changes.id, TransactionOutcome::Conflict);
         }
 
-        // A normal write can finish with Resize(current_length), or replace
-        // bytes with identical bytes. Those are authorized, preconditioned
-        // operations, but they produce no content diff. Compare the observed
-        // tree against only their effective changes, while journaling and
-        // acknowledging the original exact transaction. Otherwise a no-op
-        // is incorrectly reported as a partial write after reaching the host.
-        let mut effective = ChangeSetBuilder::new(changes.base);
-        for change in changes.changes() {
-            let unchanged = change.kind == ChangeKind::ModifyFile
-                && change.expected == change.replacement
-                && self.manifest.entries().iter().any(|entry| {
-                    entry.path == change.path
-                        && entry.kind == EntryKind::File
-                        && entry.content_len == change.replacement_len
-                        && entry.flags.executable() == change.executable
-                });
-            if !unchanged {
-                effective
-                    .push(change.clone())
-                    .map_err(|_| Error::InvalidArtifact)?;
-            }
-        }
-        let effective = effective.finish().map_err(|_| Error::InvalidArtifact)?;
+        // Compare the complete requested result with the observed tree. A
+        // reverse diff guesses renames from unique file contents; it cannot
+        // faithfully verify an explicit directory rename or equal-content
+        // files whose identities the caller selected through real handles.
+        let desired = match expected_manifest(&self.manifest, changes, contents) {
+            Ok(manifest) => manifest,
+            Err(_) => return self.remember(transaction, changes.id, TransactionOutcome::Conflict),
+        };
 
         if let Some(journal) = self.journal.as_mut() {
             journal.append(transaction, changes.id, JournalOutcome::Prepared)?;
@@ -523,8 +542,7 @@ impl LiveRoot {
         }
 
         let observed = Artifact::scan_cap(&self.root, changes.base)?;
-        let observed_plan = ExportPlan::between(&base, &observed)?;
-        if observed_plan.id() != effective.id {
+        if observed.manifest.snapshot_id() != desired.snapshot_id() {
             return self.remember(
                 transaction,
                 changes.id,
@@ -634,10 +652,401 @@ fn source_map(manifest: &Manifest) -> Result<BTreeMap<SourceCorrelation, Canonic
     Ok(sources)
 }
 
+/// Apply the submitted operations in the same order as the capability-rooted
+/// host adapter, solely to derive the expected canonical namespace. Source
+/// correlations are observations and are excluded from snapshot identity.
+fn expected_manifest(
+    base: &Manifest,
+    changes: &ChangeSet,
+    contents: &BTreeMap<CanonicalPath, Vec<u8>>,
+) -> Result<Manifest, Error> {
+    let mut entries = base
+        .entries()
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for change in changes
+        .changes()
+        .iter()
+        .filter(|change| change.kind == ChangeKind::CreateDirectory)
+    {
+        if entries
+            .insert(
+                change.path.clone(),
+                Entry::directory(change.path.clone(), [0; 16]),
+            )
+            .is_some()
+        {
+            return Err(Error::Conflict);
+        }
+    }
+    for change in changes
+        .changes()
+        .iter()
+        .filter(|change| change.kind == ChangeKind::Rename)
+    {
+        let target = change.target.as_ref().ok_or(Error::InvalidArtifact)?;
+        if !entries.contains_key(&change.path)
+            || entries.contains_key(target)
+            || target.is_within(&change.path)
+        {
+            return Err(Error::Conflict);
+        }
+        let moved = entries
+            .values()
+            .filter(|entry| entry.path.is_within(&change.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        for mut entry in moved {
+            entries.remove(&entry.path);
+            let mut path = target.as_bytes().to_vec();
+            path.extend_from_slice(&entry.path.as_bytes()[change.path.as_bytes().len()..]);
+            entry.path = CanonicalPath::new(&path).map_err(|_| Error::InvalidArtifact)?;
+            if entries.insert(entry.path.clone(), entry).is_some() {
+                return Err(Error::Conflict);
+            }
+        }
+    }
+    for change in changes
+        .changes()
+        .iter()
+        .filter(|change| matches!(change.kind, ChangeKind::CreateFile | ChangeKind::ModifyFile))
+    {
+        if (change.kind == ChangeKind::CreateFile) == entries.contains_key(&change.path) {
+            return Err(Error::Conflict);
+        }
+        let bytes = contents.get(&change.path).ok_or(Error::InvalidArtifact)?;
+        let entry = Entry::file_with_range_root(
+            change.path.clone(),
+            change.executable,
+            change.replacement_len,
+            change.replacement,
+            range_root(bytes).ok_or(Error::InvalidArtifact)?,
+            [0; 16],
+        )
+        .map_err(|_| Error::InvalidArtifact)?;
+        entries.insert(change.path.clone(), entry);
+    }
+    for change in changes
+        .changes()
+        .iter()
+        .rev()
+        .filter(|change| change.kind == ChangeKind::Delete)
+    {
+        // Deleting an entire subtree requires explicit child operations, so
+        // the standing grant checks exclusions for every affected path.
+        if entries
+            .keys()
+            .any(|path| path != &change.path && path.is_within(&change.path))
+        {
+            return Err(Error::Conflict);
+        }
+        if entries.remove(&change.path).is_none() {
+            return Err(Error::Conflict);
+        }
+    }
+    let mut builder = ManifestBuilder::new(changes.base, Policy::default());
+    for entry in entries.into_values() {
+        builder.push(entry).map_err(|_| Error::InvalidArtifact)?;
+    }
+    builder.finish().map_err(|_| Error::InvalidArtifact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kore_workspace_sync::{Change, ChangeSetBuilder, GrantOperations, RANGE_REQUEST_MAGIC};
+
+    fn namespace_change(live: &LiveRoot, path: &str, target: Option<&str>) -> Change {
+        let entry = live
+            .manifest()
+            .entries()
+            .iter()
+            .find(|entry| entry.path.as_str() == path)
+            .unwrap();
+        Change {
+            kind: if target.is_some() {
+                ChangeKind::Rename
+            } else {
+                ChangeKind::Delete
+            },
+            path: entry.path.clone(),
+            target: target.map(|path| CanonicalPath::new(path.as_bytes()).unwrap()),
+            expected: entry.digest,
+            replacement: [0; 32],
+            replacement_len: 0,
+            executable: false,
+        }
+    }
+
+    fn namespace_changes(live: &LiveRoot, changes: impl IntoIterator<Item = Change>) -> ChangeSet {
+        let mut builder = ChangeSetBuilder::new(live.manifest().snapshot_id());
+        for change in changes {
+            builder.push(change).unwrap();
+        }
+        builder.finish().unwrap()
+    }
+
+    fn namespace_grant(live: &LiveRoot, exclusions: &[CanonicalPath]) -> StandingGrant {
+        StandingGrant::new(
+            [1; 16],
+            live.manifest().snapshot_id(),
+            GrantOperations::ALL,
+            16,
+            4096,
+            0,
+            exclusions,
+        )
+        .unwrap()
+    }
+
+    fn namespace_tree() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src/private")).unwrap();
+        std::fs::write(root.path().join("src/main"), b"same").unwrap();
+        std::fs::write(root.path().join("src/private/data"), b"secret").unwrap();
+        std::fs::write(root.path().join("other"), b"same").unwrap();
+        root
+    }
+
+    #[test]
+    fn created_directory_and_file_accept_later_content_without_changing_siblings() {
+        let root = namespace_tree();
+        let state = tempfile::tempdir().unwrap();
+        let mut live = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        let mut grant = namespace_grant(&live, &[]);
+        for (nonce, kind, path, content) in [
+            (21, ChangeKind::CreateDirectory, "new", None),
+            (22, ChangeKind::CreateFile, "new/file", Some(b"".as_slice())),
+            (
+                23,
+                ChangeKind::ModifyFile,
+                "new/file",
+                Some(b"created".as_slice()),
+            ),
+        ] {
+            let path = CanonicalPath::new(path.as_bytes()).unwrap();
+            let expected = if kind == ChangeKind::ModifyFile {
+                live.manifest()
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap()
+                    .digest
+            } else {
+                [0; 32]
+            };
+            let changes = namespace_changes(
+                &live,
+                [Change {
+                    kind,
+                    path: path.clone(),
+                    target: None,
+                    expected,
+                    replacement: content.map_or([0; 32], |bytes| *blake3::hash(bytes).as_bytes()),
+                    replacement_len: content.map_or(0, |bytes| bytes.len() as u32),
+                    executable: false,
+                }],
+            );
+            let contents = content.map_or_else(BTreeMap::new, |bytes| {
+                BTreeMap::from([(path, bytes.to_vec())])
+            });
+            let outcome = live
+                .apply_transaction([nonce; 32], &changes, &contents, &mut grant, 1)
+                .unwrap();
+            assert!(
+                matches!(outcome, TransactionOutcome::Applied { .. }),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                live.apply_transaction([nonce; 32], &changes, &contents, &mut grant, 2)
+                    .unwrap(),
+                outcome
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("new/file")).unwrap(),
+            b"created"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("src/main")).unwrap(),
+            b"same"
+        );
+        let query = request(&live, "new/file", 0, 7);
+        assert_eq!(live.read_range(&query).unwrap().bytes, b"created");
+    }
+
+    #[test]
+    fn explicit_directory_rename_is_applied_and_replayed_after_restart() {
+        let root = namespace_tree();
+        let state = tempfile::tempdir().unwrap();
+        let mut live = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        let changes = namespace_changes(&live, [namespace_change(&live, "src", Some("lib"))]);
+        let mut grant = namespace_grant(&live, &[]);
+        let outcome = live
+            .apply_transaction([11; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+            .unwrap();
+        assert!(
+            matches!(outcome, TransactionOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+        assert!(!root.path().join("src").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("lib/main")).unwrap(),
+            b"same"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("lib/private/data")).unwrap(),
+            b"secret"
+        );
+        assert_eq!(std::fs::read(root.path().join("other")).unwrap(), b"same");
+        assert_eq!(
+            live.apply_transaction([11; 32], &changes, &BTreeMap::new(), &mut grant, 2)
+                .unwrap(),
+            outcome
+        );
+        drop(live);
+        let mut reopened = LiveRoot::open_with_state(root.path(), [0; 32], state.path()).unwrap();
+        assert_eq!(
+            reopened
+                .apply_transaction([11; 32], &changes, &BTreeMap::new(), &mut grant, 3)
+                .unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn explicit_file_rename_preserves_equal_content_sibling() {
+        let root = namespace_tree();
+        let mut live = LiveRoot::open(root.path(), [0; 32]).unwrap();
+        let changes = namespace_changes(
+            &live,
+            [namespace_change(&live, "src/main", Some("src/new"))],
+        );
+        let mut grant = namespace_grant(&live, &[]);
+        let outcome = live
+            .apply_transaction([12; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+            .unwrap();
+        assert!(
+            matches!(outcome, TransactionOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+        assert!(!root.path().join("src/main").exists());
+        assert_eq!(std::fs::read(root.path().join("src/new")).unwrap(), b"same");
+        assert_eq!(std::fs::read(root.path().join("other")).unwrap(), b"same");
+    }
+
+    #[test]
+    fn directory_rename_checks_nested_source_and_destination_exclusions() {
+        for exclusion in ["src/private", "lib/private"] {
+            let root = namespace_tree();
+            let mut live = LiveRoot::open(root.path(), [0; 32]).unwrap();
+            let changes = namespace_changes(&live, [namespace_change(&live, "src", Some("lib"))]);
+            let mut grant =
+                namespace_grant(&live, &[CanonicalPath::new(exclusion.as_bytes()).unwrap()]);
+            assert_eq!(
+                live.apply_transaction([13; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+                    .unwrap(),
+                TransactionOutcome::Refused
+            );
+            assert!(!root.path().join("lib").exists());
+            assert_eq!(
+                std::fs::read(root.path().join("src/main")).unwrap(),
+                b"same"
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("src/private/data")).unwrap(),
+                b"secret"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_subtree_deletion_checks_every_path_before_any_effect() {
+        for excluded in [false, true] {
+            let root = namespace_tree();
+            let mut live = LiveRoot::open(root.path(), [0; 32]).unwrap();
+            let changes = namespace_changes(
+                &live,
+                ["src", "src/main", "src/private", "src/private/data"]
+                    .map(|path| namespace_change(&live, path, None)),
+            );
+            let exclusions = if excluded {
+                vec![CanonicalPath::new(b"src/private/data").unwrap()]
+            } else {
+                vec![]
+            };
+            let mut grant = namespace_grant(&live, &exclusions);
+            let outcome = live
+                .apply_transaction([14; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+                .unwrap();
+            if excluded {
+                assert_eq!(outcome, TransactionOutcome::Refused);
+                assert_eq!(
+                    std::fs::read(root.path().join("src/main")).unwrap(),
+                    b"same"
+                );
+                assert_eq!(
+                    std::fs::read(root.path().join("src/private/data")).unwrap(),
+                    b"secret"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, TransactionOutcome::Applied { .. }),
+                    "{outcome:?}"
+                );
+                assert!(!root.path().join("src").exists());
+            }
+            assert_eq!(std::fs::read(root.path().join("other")).unwrap(), b"same");
+        }
+    }
+
+    #[test]
+    fn implicit_subtree_deletion_is_refused_before_earlier_file_deletion() {
+        let root = namespace_tree();
+        let mut live = LiveRoot::open(root.path(), [0; 32]).unwrap();
+        let changes = namespace_changes(
+            &live,
+            ["src", "src/main"].map(|path| namespace_change(&live, path, None)),
+        );
+        let mut grant = namespace_grant(&live, &[]);
+        assert_eq!(
+            live.apply_transaction([15; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+                .unwrap(),
+            TransactionOutcome::Conflict
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("src/main")).unwrap(),
+            b"same"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("src/private/data")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[test]
+    fn directory_rename_detects_unexpected_host_child_before_effects() {
+        let root = namespace_tree();
+        let mut live = LiveRoot::open(root.path(), [0; 32]).unwrap();
+        let changes = namespace_changes(&live, [namespace_change(&live, "src", Some("lib"))]);
+        let mut grant = namespace_grant(&live, &[]);
+        std::fs::write(root.path().join("src/new"), b"external").unwrap();
+        assert_eq!(
+            live.apply_transaction([16; 32], &changes, &BTreeMap::new(), &mut grant, 1)
+                .unwrap(),
+            TransactionOutcome::Conflict
+        );
+        assert!(!root.path().join("lib").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("src/new")).unwrap(),
+            b"external"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("src/main")).unwrap(),
+            b"same"
+        );
+    }
 
     #[test]
     fn durable_history_outlives_the_cache_and_replays_old_results_after_restart() {

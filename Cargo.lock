@@ -251,11 +251,10 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "blake3"
-version = "1.8.6"
+version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
 dependencies = [
- "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
@@ -365,7 +364,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.4",
  "rustix-linux-procfs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "winx",
 ]
 
@@ -792,7 +791,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1623,50 +1622,52 @@ dependencies = [
 [[package]]
 name = "kore-abi"
 version = "0.1.4"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "bitflags 2.13.1",
  "zerocopy",
 ]
 
 [[package]]
-name = "kore-block"
-version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
-
-[[package]]
 name = "kore-collections"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
+
+[[package]]
+name = "kore-dagfs"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "kore-abi",
+ "kore-collections",
+ "kore-rt",
+ "kore-svc-extract",
+ "zerocopy",
+]
 
 [[package]]
 name = "kore-driver"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "crc",
  "gpt_disk_types",
  "kore-abi",
- "kore-block",
+ "kore-collections",
+ "kore-ring",
  "kore-rt",
-]
-
-[[package]]
-name = "kore-hostlink"
-version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
-dependencies = [
- "blake3",
- "heapless",
  "zerocopy",
 ]
 
 [[package]]
+name = "kore-hint"
+version = "0.0.0"
+dependencies = [
+ "raw-cpuid",
+]
+
+[[package]]
 name = "kore-hostlink"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2#fd383fb8705e63400e7b78762185f3208ee355c2"
 dependencies = [
  "blake3",
  "heapless",
@@ -1676,22 +1677,18 @@ dependencies = [
 [[package]]
 name = "kore-hostlink-shmem"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 
 [[package]]
 name = "kore-nvme"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "kore-abi",
- "kore-block",
  "kore-driver",
 ]
 
 [[package]]
 name = "kore-ring"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "kore-abi",
  "zerocopy",
@@ -1700,10 +1697,10 @@ dependencies = [
 [[package]]
 name = "kore-rt"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "kore-abi",
  "kore-collections",
+ "kore-hint",
  "kore-ring",
  "kore-rt-macros",
  "raw-cpuid",
@@ -1713,8 +1710,8 @@ dependencies = [
 [[package]]
 name = "kore-rt-macros"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -1723,10 +1720,8 @@ dependencies = [
 [[package]]
 name = "kore-svc-block"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "kore-abi",
- "kore-block",
  "kore-driver",
  "kore-nvme",
  "kore-rt",
@@ -1735,38 +1730,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "kore-svc-device"
-version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
-dependencies = [
- "heapless",
- "kore-abi",
- "kore-rt",
-]
-
-[[package]]
-name = "kore-svc-extract"
+name = "kore-svc-dagfs"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
-dependencies = [
- "blake3",
- "heapless",
- "kore-rt",
-]
-
-[[package]]
-name = "kore-svc-fs"
-version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "blake3",
  "crc",
  "heapless",
  "kore-abi",
- "kore-block",
  "kore-collections",
+ "kore-dagfs",
  "kore-driver",
- "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e)",
+ "kore-hostlink",
  "kore-nvme",
  "kore-ring",
  "kore-rt",
@@ -1778,15 +1752,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kore-svc-device"
+version = "0.0.0"
+dependencies = [
+ "heapless",
+ "kore-abi",
+ "kore-rt",
+]
+
+[[package]]
+name = "kore-svc-extract"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "heapless",
+ "kore-rt",
+]
+
+[[package]]
 name = "kore-svc-hostlink"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "blake3",
  "heapless",
  "kore-abi",
  "kore-driver",
- "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e)",
+ "kore-hostlink",
  "kore-hostlink-shmem",
  "kore-rt",
  "kore-svc-device",
@@ -1797,7 +1788,6 @@ dependencies = [
 [[package]]
 name = "kore-virtio"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1808,7 +1798,6 @@ dependencies = [
 [[package]]
 name = "kore-workspace-sync"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=cccf76da11fa397242c587817ec975dce529f40e#cccf76da11fa397242c587817ec975dce529f40e"
 dependencies = [
  "blake3",
  "heapless",
@@ -2457,7 +2446,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2769,7 +2758,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3163,10 +3152,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3509,7 +3498,7 @@ name = "vkore-hostlink-ab"
 version = "0.0.0"
 dependencies = [
  "blake3",
- "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2)",
+ "kore-hostlink",
  "kore-hostlink-shmem",
  "libc",
  "serde",
@@ -3590,8 +3579,8 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "cap-std",
- "kore-block",
- "kore-svc-fs",
+ "kore-driver",
+ "kore-svc-dagfs",
  "kore-workspace-sync",
  "notify",
  "rustix 1.1.4",
@@ -3605,7 +3594,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "httparse",
- "kore-hostlink 0.0.0 (git+https://github.com/MicroPerceptron/kore.git?rev=fd383fb8705e63400e7b78762185f3208ee355c2)",
+ "kore-hostlink",
  "kore-hostlink-shmem",
  "kore-workspace-sync",
  "memmap2",
@@ -3853,7 +3842,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

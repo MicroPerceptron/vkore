@@ -113,6 +113,169 @@ fn response_is_published_before_reclaim_and_cleanup_cannot_reply_twice() {
 }
 
 #[test]
+fn authority_update_http_reaches_running_runtime_without_publishing_the_prompt_answer() {
+    use hostlinkd::{AuthorityUpdateRequest, AuthorityUpdateStatus};
+    struct UpdateRuntime {
+        started: mpsc::Sender<()>,
+        received: mpsc::Sender<AuthorityUpdateRequest>,
+        release: mpsc::Receiver<()>,
+    }
+    impl TaskRuntime for UpdateRuntime {
+        fn supports_authority_updates(&self) -> bool {
+            true
+        }
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            panic!("must use live controls")
+        }
+        fn run_prompt_with_updates(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            emit: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            response_published: &dyn Fn() -> bool,
+            updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+        ) -> PromptStatus {
+            self.started.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let request = loop {
+                if let Some(request) = updates() {
+                    break request;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            };
+            self.received.send(request.clone()).unwrap();
+            if self.release.recv_timeout(Duration::from_secs(5)).is_err() {
+                return PromptStatus::Failed;
+            }
+            assert!(!response_published());
+            emit(
+                EventKind::AuthorityUpdate,
+                true,
+                serde_json::json!({
+                    "update_id": request.update_id, "status": "applied", "revision": 7,
+                    "message": "Input revoked."
+                }),
+            );
+            assert!(
+                !response_published(),
+                "an update result is not the prompt answer"
+            );
+            emit(
+                EventKind::Assistant,
+                true,
+                serde_json::json!({"text": "Finished."}),
+            );
+            assert!(response_published());
+            PromptStatus::Completed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    // This exercises HTTP, the harness worker and its runtime callback. The
+    // fixture does not claim native capability execution or real VM acceptance.
+    let temp = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (received_tx, received_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let service = HarnessService::start(
+        UpdateRuntime {
+            started: started_tx,
+            received: received_tx,
+            release: release_rx,
+        },
+        temp.path(),
+    );
+    let handle = service.handle();
+    create(&handle, "updates");
+    handle
+        .submit_prompt("updates", prompt("p1", "work"))
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        handle.clone(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
+    let address = server.local_addr();
+    let request = AuthorityUpdateRequest {
+        api_version: 1,
+        prompt_id: "p1".into(),
+        update_id: "u1".into(),
+        text: "Revoke input.".into(),
+    };
+    let body = serde_json::to_string(&request).unwrap();
+    let client = thread::spawn(move || {
+        http(
+            address,
+            "POST",
+            "/api/v1/sessions/updates/prompts/p1/updates",
+            &body,
+        )
+    });
+    server.poll(Duration::from_secs(2)).unwrap();
+    let response = client.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(
+        received_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        request
+    );
+    assert_eq!(
+        handle
+            .submit_authority_update("updates", request.clone())
+            .unwrap()
+            .status,
+        AuthorityUpdateStatus::Dispatched
+    );
+    release_tx.send(()).unwrap();
+    let events = wait_terminal(&handle, "updates", "p1");
+    let result = handle.authority_update("updates", "p1", "u1").unwrap();
+    assert_eq!(result.status, AuthorityUpdateStatus::Applied);
+    assert_eq!(result.revision, Some(7));
+    assert_eq!(
+        handle.submit_authority_update("updates", request).unwrap(),
+        result
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::AuthorityUpdate)
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.public
+                && matches!(event.kind, EventKind::Assistant | EventKind::Error))
+            .count(),
+        1
+    );
+    let client = thread::spawn(move || {
+        http(
+            address,
+            "GET",
+            "/api/v1/sessions/updates/prompts/p1/updates/u1",
+            "",
+        )
+    });
+    server.poll(Duration::from_secs(2)).unwrap();
+    let response = client.join().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.contains("\"status\":\"applied\""),
+        "{response}"
+    );
+}
+
+#[test]
 fn prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = BackendHarness::new(DeterministicBackend::new(2), DeterministicGuest::new());

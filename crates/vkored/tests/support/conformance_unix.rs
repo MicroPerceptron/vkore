@@ -373,6 +373,11 @@ impl InferenceBackend for InjectedBackend {
     fn sequence_metrics(&self, _: SequenceIdentity) -> Option<SequenceMetrics> {
         None
     }
+
+    fn broker_prompt_ready(&self, _: SequenceIdentity) -> bool {
+        // This late-event fixture does not model prompt ownership or cleanup.
+        false
+    }
 }
 
 #[test]

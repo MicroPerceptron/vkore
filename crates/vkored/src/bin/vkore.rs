@@ -91,6 +91,7 @@ fn run() -> Result<(), String> {
             std::thread::sleep(prompt_delay);
         }
         let prompt = format!("prompt-{}", index + 1);
+        let started = Instant::now();
         if let Err(error) = request(&server, "POST", &format!("/api/v1/sessions/{session}/prompts"), &json!({
             "api_version":1,"prompt_id":prompt,"idempotency_key":format!("cli-{}",index + 1),"text":text
         }).to_string()) {
@@ -98,7 +99,6 @@ fn run() -> Result<(), String> {
             had_prompt_failure = true;
             continue;
         }
-        let started = Instant::now();
         loop {
             if started.elapsed() >= timeout {
                 let _ = request(&server, "DELETE", &format!("/api/v1/sessions/{session}"), "");
@@ -116,9 +116,11 @@ fn run() -> Result<(), String> {
             )?;
             let mut terminal = None;
             for line in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
-                let event: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+                let mut event: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+                event["client_elapsed_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
+                event["client_received_unix_ms"] = json!(unix_ms());
                 if let Some(output) = trace_output.as_mut() {
-                    writeln!(output, "{line}").map_err(|error| error.to_string())?;
+                    writeln!(output, "{event}").map_err(|error| error.to_string())?;
                     output.flush().map_err(|error| error.to_string())?;
                 }
                 cursor = cursor.max(event["sequence"].as_u64().unwrap_or(0));

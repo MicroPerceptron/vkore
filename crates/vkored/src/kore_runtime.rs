@@ -1,17 +1,17 @@
 //! Interactive harness runtime backed by a real Kore VM and HostLink.
 
 use crate::{
-    BackendLimits, EventKind, HostLinkDaemon, InferenceBackend, LlamaServerBackend,
-    LlamaServerConfig, ProjectConfig, ProjectStore, PromptRequest, PromptStatus, RuntimeBackend,
-    SessionState, TaskRuntime, WorkspaceAccess, WorkspaceBackend,
-    interactive::emit_inference_observation,
+    AuthorityUpdateRequest, AuthorityUpdateStatus, BackendLimits, EventKind, HostLinkDaemon,
+    InferenceBackend, LlamaServerBackend, LlamaServerConfig, ProjectConfig, ProjectStore,
+    PromptRequest, PromptStatus, RuntimeBackend, SessionState, TaskRuntime, WorkspaceAccess,
+    WorkspaceBackend, interactive::emit_inference_observation,
 };
-use kore_hostlink::{AuthorityKind, AuthorityState, FrontendIntentId, FrontendResultKind};
+use kore_hostlink::{FrontendIntentId, FrontendResultKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -24,6 +24,93 @@ const BOOT_LOG_POLL: Duration = Duration::from_millis(250);
 const PROMPT_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_BOOT_ATTEMPTS: u8 = 3;
 const BOOT_LOG_TAIL_BYTES: u64 = 128 * 1024;
+
+/// Keep process ownership until termination and wait have both succeeded.
+fn retire_process<P>(
+    process: &mut Option<P>,
+    terminate: impl FnOnce(&mut P) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if let Some(child) = process.as_mut() {
+        terminate(child)?;
+        *process = None;
+    }
+    Ok(())
+}
+
+/// Correlates the authenticated API update with the guest's independent
+/// revision. Never consume another prompt's outcome or publish a chat answer.
+pub(crate) struct LiveUpdateBridge {
+    intent: FrontendIntentId,
+    pending: Option<(String, u32)>,
+}
+
+impl LiveUpdateBridge {
+    pub(crate) fn new(intent: FrontendIntentId) -> Self {
+        Self {
+            intent,
+            pending: None,
+        }
+    }
+
+    pub(crate) fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(crate) fn submit<B: InferenceBackend, S: crate::BenchmarkSink>(
+        &mut self,
+        core: &mut crate::daemon::LinkCore<B, S>,
+        updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(update) = updates() else {
+            return;
+        };
+        match core.queue_frontend_update(self.intent, update.text) {
+            Ok(revision) => self.pending = Some((update.update_id, revision)),
+            Err(error) => emit(
+                EventKind::AuthorityUpdate,
+                true,
+                json!({
+                    "update_id": update.update_id, "status": AuthorityUpdateStatus::Refused,
+                    "message": format!("The active prompt could not accept this authority update: {error:?}"),
+                    "source": "host_frontend"
+                }),
+            ),
+        }
+    }
+
+    pub(crate) fn receive<B: InferenceBackend, S: crate::BenchmarkSink>(
+        &mut self,
+        core: &mut crate::daemon::LinkCore<B, S>,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) {
+        let Some((id, revision)) = self.pending.as_ref() else {
+            return;
+        };
+        let Some(result) = core.pop_frontend_update_result_for(self.intent, *revision) else {
+            return;
+        };
+        use kore_hostlink::FrontendUpdateOutcome as Outcome;
+        let status = match result.outcome {
+            Outcome::Applied => AuthorityUpdateStatus::Applied,
+            Outcome::Refused => AuthorityUpdateStatus::Refused,
+            Outcome::Failed => AuthorityUpdateStatus::Failed,
+            Outcome::Cancelled => AuthorityUpdateStatus::Cancelled,
+        };
+        emit(
+            EventKind::AuthorityUpdate,
+            true,
+            json!({
+                "update_id": id, "revision": revision, "status": status,
+                "message": result.text, "source": "hostlink"
+            }),
+        );
+        self.pending = None;
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct KoreVmRuntimeConfig {
@@ -46,6 +133,7 @@ struct ProjectRuntime {
     daemon: HostLinkDaemon<Box<dyn InferenceBackend + Send>>,
     qemu: QemuConfig,
     process: Option<QemuProcess>,
+    stop_pending: bool,
     session_id: Option<String>,
     serial_log: Option<PathBuf>,
     boot_attempt: u8,
@@ -54,10 +142,6 @@ struct ProjectRuntime {
     active_model_turns: usize,
     vm_pause_due: Option<Instant>,
     vm_suspended: bool,
-    backend_failure: Option<String>,
-    completed_frontend_broker_decisions: u64,
-    completed_frontend_teardowns: u64,
-    completed_frontend_idle_barriers: u64,
 }
 
 impl KoreVmRuntime {
@@ -71,7 +155,11 @@ impl KoreVmRuntime {
         })
     }
 
-    fn ensure_project(&mut self, project_id: &str) -> Result<&mut ProjectRuntime, String> {
+    fn ensure_project(
+        &mut self,
+        project_id: &str,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<&mut ProjectRuntime, String> {
         // The HTTP project API owns a separate store instance. Reload its
         // atomic JSON files here so newly created or edited projects become
         // effective without restarting the harness daemon.
@@ -84,11 +172,16 @@ impl KoreVmRuntime {
             .get(project_id)
             .is_some_and(|runtime| runtime.config != project);
         if stale {
+            // Configuration replacement is also a process replacement. Keep
+            // the old runtime available for retry if its child cannot be reaped.
+            if let Some(runtime) = self.runtimes.get_mut(project_id) {
+                runtime.stop_process()?;
+            }
             self.runtimes.remove(project_id);
             self.incarnation = self.incarnation.saturating_add(1);
         }
         if !self.runtimes.contains_key(project_id) {
-            let runtime = ProjectRuntime::start(&self.config, project)?;
+            let runtime = ProjectRuntime::start(&self.config, project, emit)?;
             self.runtimes.insert(project_id.to_owned(), runtime);
         }
         self.runtimes
@@ -98,7 +191,12 @@ impl KoreVmRuntime {
 }
 
 impl ProjectRuntime {
-    fn start(runtime: &KoreVmRuntimeConfig, config: ProjectConfig) -> Result<Self, String> {
+    fn start(
+        runtime: &KoreVmRuntimeConfig,
+        config: ProjectConfig,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<Self, String> {
+        timing_marker(emit, "model_server_starting");
         let inference: Box<dyn InferenceBackend + Send> =
             match config.inference.backend {
                 RuntimeBackend::Deterministic => return Err(
@@ -146,6 +244,8 @@ impl ProjectRuntime {
                     )
                 }
             };
+        timing_marker(emit, "model_server_ready");
+        timing_marker(emit, "workspace_open_starting");
         let allow_writeback = config.workspace.access == WorkspaceAccess::AutomaticWriteback;
         let backend = WorkspaceBackend::open_with_inference(
             &config.workspace.root,
@@ -154,9 +254,12 @@ impl ProjectRuntime {
             inference,
         )
         .map_err(|error| format!("workspace backend failed: {error:?}"))?;
+        timing_marker(emit, "workspace_open_ready");
+        timing_marker(emit, "hostlink_bind_starting");
         let backend: Box<dyn InferenceBackend + Send> = Box::new(backend);
         let (daemon, hostlink) = HostLinkDaemon::bind_dynamic_tcp(backend, ())
             .map_err(|error| format!("HostLink bind failed: {error:?}"))?;
+        timing_marker(emit, "hostlink_bind_ready");
         let kore_iso = config
             .inference
             .kore_image
@@ -182,6 +285,7 @@ impl ProjectRuntime {
             daemon,
             qemu,
             process: None,
+            stop_pending: false,
             session_id: None,
             serial_log,
             boot_attempt: 0,
@@ -190,37 +294,43 @@ impl ProjectRuntime {
             active_model_turns: 0,
             vm_pause_due: None,
             vm_suspended: false,
-            backend_failure: None,
-            completed_frontend_broker_decisions: 0,
-            completed_frontend_teardowns: 0,
-            completed_frontend_idle_barriers: 0,
         })
     }
 
-    fn stop_process(&mut self) {
-        if self.vm_suspended
-            && let Some(process) = self.process.as_ref()
-        {
-            let _ = process.resume();
-        }
+    fn stop_process(&mut self) -> Result<(), String> {
+        self.stop_pending = true;
         self.active_model_turns = 0;
         self.vm_pause_due = None;
-        self.vm_suspended = false;
         self.next_boot_log_check = None;
-        if let Some(mut process) = self.process.take() {
-            let _ = process.terminate();
-        }
         self.daemon.force_disconnect();
+        // Host process termination does not require QMP/vCPU resumption.
+        // Keep the exact child and its private QMP socket on any failure.
+        retire_process(&mut self.process, |process| process.terminate().map(|_| ()))
+            .map_err(|error| format!("Kore VM termination was not confirmed: {error}"))?;
+        self.vm_suspended = false;
+        self.stop_pending = false;
+        Ok(())
     }
 
-    fn stop(&mut self) {
-        self.stop_process();
+    fn stop(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) -> bool {
+        if let Err(error) = self.stop_process() {
+            emit(
+                EventKind::Error,
+                false,
+                json!({"message": error, "stage": "vm_stop_failed"}),
+            );
+            return false;
+        }
         // Retiring the VM is not closing the logical conversation. Retain
         // ownership so an explicit session close can clear its model context.
         self.boot_attempt = 0;
+        true
     }
 
     fn spawn_vm(&mut self) -> Result<(), String> {
+        if self.process.is_some() || self.stop_pending {
+            return Err("Previous Kore VM termination must be confirmed before startup".into());
+        }
         if let Some(path) = self.serial_log.as_deref() {
             let _ = OpenOptions::new().write(true).truncate(true).open(path);
         }
@@ -260,6 +370,9 @@ impl ProjectRuntime {
         &mut self,
         emit: &mut dyn FnMut(EventKind, bool, Value),
     ) -> Result<(), String> {
+        if self.stop_pending {
+            return Err("Kore VM termination is still pending".into());
+        }
         if !self.vm_suspended {
             return Ok(());
         }
@@ -312,6 +425,10 @@ impl ProjectRuntime {
     }
 
     fn maybe_suspend_vm(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        if self.daemon.core().frontend_requires_progress() {
+            self.vm_pause_due = None;
+            return;
+        }
         let Some(due) = self.vm_pause_due else {
             return;
         };
@@ -394,6 +511,9 @@ impl ProjectRuntime {
             let message = entry
                 .split_once(' ')
                 .map_or(entry.as_str(), |(_, message)| message);
+            if entry.ends_with("epoch established") {
+                timing_marker(emit, "hostlink_epoch_established");
+            }
             if entry.ends_with("frontend intent claimed by broker") {
                 emit(
                     EventKind::Validation,
@@ -406,8 +526,6 @@ impl ProjectRuntime {
                     }),
                 );
             } else if entry.ends_with("frontend broker poll parked") {
-                self.completed_frontend_idle_barriers =
-                    self.completed_frontend_idle_barriers.saturating_add(1);
                 emit(
                     EventKind::Validation,
                     false,
@@ -429,27 +547,22 @@ impl ProjectRuntime {
                 );
             }
             if let Some(failure) = message.strip_prefix("backend failed ") {
-                self.backend_failure = Some(failure.to_owned());
+                // This is a per-request inference terminal, not a transport
+                // failure. The guest still owns its frontend result and cleanup.
+                emit(
+                    EventKind::Error,
+                    false,
+                    json!({
+                        "stage": "inference_failure", "message": format!("Inference backend reported {failure}; awaiting the guest outcome.")
+                    }),
+                );
             }
         }
         self.hostlink_trace_cursor = transcript.len();
         while let Some(observation) = self.daemon.take_inference_observation() {
-            if observation.role == crate::BackendRole::Broker
-                && observation.kind == crate::ObservationKind::BrokerProposal
-            {
-                self.completed_frontend_broker_decisions =
-                    self.completed_frontend_broker_decisions.saturating_add(1);
-            }
             emit_inference_observation(observation, emit);
         }
         while let Some(observation) = self.daemon.take_authority_observation() {
-            if observation.state == AuthorityState::Teardown
-                && observation.kind == AuthorityKind::Agent
-                && observation.label == "agent/frontend"
-            {
-                self.completed_frontend_teardowns =
-                    self.completed_frontend_teardowns.saturating_add(1);
-            }
             emit(
                 EventKind::Capability,
                 false,
@@ -467,7 +580,16 @@ impl ProjectRuntime {
         // One pending request may emit several templated prompts during a
         // correction; workspace traffic is excluded by WorkspaceBackend.
         self.active_model_turns = self.daemon.core().backend_metrics().pending;
-        if self.active_model_turns == 0 {
+        if self.daemon.core().frontend_requires_progress() {
+            self.vm_pause_due = None;
+            if let Err(error) = self.resume_vm_for_prompt(emit) {
+                emit(
+                    EventKind::Error,
+                    false,
+                    json!({"stage": "guest_settlement_resume_failed", "message": error}),
+                );
+            }
+        } else if self.active_model_turns == 0 {
             self.model_turn_finished(emit);
         } else {
             self.model_turn_started(emit);
@@ -477,7 +599,7 @@ impl ProjectRuntime {
 
 impl Drop for ProjectRuntime {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop_process();
     }
 }
 
@@ -490,16 +612,21 @@ impl KoreVmRuntime {
         cancelled: &dyn Fn() -> bool,
         response_published: &dyn Fn() -> bool,
         context: &[(bool, String)],
+        updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
     ) -> PromptStatus {
-        let runtime = match self.ensure_project(&session.project_id) {
+        timing_marker(emit, "runtime_lookup_starting");
+        let runtime = match self.ensure_project(&session.project_id, emit) {
             Ok(runtime) => runtime,
             Err(error) => {
                 emit(EventKind::Error, true, json!({"message": error}));
                 return PromptStatus::Failed;
             }
         };
-        if runtime.session_id.as_deref() != Some(&session.session_id) {
-            runtime.stop();
+        timing_marker(emit, "runtime_ready");
+        if runtime.session_id.as_deref() != Some(&session.session_id) || runtime.stop_pending {
+            if !runtime.stop(emit) {
+                return PromptStatus::Failed;
+            }
             runtime.session_id = Some(session.session_id.clone());
         }
         if let Err(error) = runtime.daemon.set_conversation_context(context) {
@@ -521,17 +648,20 @@ impl KoreVmRuntime {
                 return PromptStatus::Failed;
             }
         };
-        runtime.backend_failure = None;
+        let mut boot_timing =
+            BootTiming::new(runtime.serial_log.clone(), runtime.process.is_none());
         if runtime.process.is_none() {
+            timing_marker(emit, "vm_spawn_starting");
             runtime.boot_attempt = 0;
             if let Err(error) = runtime.spawn_vm() {
                 runtime.daemon.cancel_frontend_intent(intent_id);
                 emit(EventKind::Error, true, json!({"message": error}));
                 return PromptStatus::Failed;
             }
+            timing_marker(emit, "vm_process_spawned");
         } else if let Err(error) = runtime.resume_vm_for_prompt(emit) {
             runtime.daemon.cancel_frontend_intent(intent_id);
-            runtime.stop();
+            runtime.stop(emit);
             emit(EventKind::Error, true, json!({"message": error}));
             return PromptStatus::Failed;
         }
@@ -546,45 +676,86 @@ impl KoreVmRuntime {
                 "guest": "kore",
             }),
         );
-        let deadline = Instant::now()
+        let mut deadline = Instant::now()
             + Duration::from_secs(u64::from(runtime.config.resources.prompt_seconds.max(1)));
         let started = Instant::now();
         let mut next_progress = started;
         let tick_interval = hostlink_tick_interval();
-        let broker_decision_target = runtime
-            .completed_frontend_broker_decisions
-            .saturating_add(1);
-        let teardown_target = runtime.completed_frontend_teardowns.saturating_add(1);
-        let idle_barrier_target = runtime.completed_frontend_idle_barriers.saturating_add(1);
         let mut pending_terminal = None;
-        let mut reclaimed_at = None;
         let mut response_at = None;
-        loop {
-            if cancelled() {
-                emit(
-                    EventKind::Error,
-                    true,
-                    json!({"message": "Prompt cancelled", "stage": "agent_failure"}),
-                );
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
-                return PromptStatus::Cancelled;
+        let mut loop_timing = LoopTiming::default();
+        let mut authority_updates = LiveUpdateBridge::new(intent_id);
+        let mut cancellation_seen = false;
+        let mut cancellation_pending = false;
+        let status = loop {
+            boot_timing.poll(emit);
+            if !cancellation_seen && cancelled() {
+                cancellation_seen = true;
+                match runtime
+                    .daemon
+                    .core_mut()
+                    .request_frontend_cancellation(intent_id)
+                {
+                    crate::daemon::FrontendCancelOutcome::QueuedRemoved => {
+                        // No broker ever claimed this intent. Preserve the VM
+                        // and every unrelated route; there is no guest cleanup
+                        // or receipt obligation for work that never reached it.
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"message": "Prompt cancelled", "stage": "agent_failure"}),
+                        );
+                        break PromptStatus::Cancelled;
+                    }
+                    crate::daemon::FrontendCancelOutcome::Requested => {
+                        cancellation_pending = true;
+                        deadline = Instant::now() + Duration::from_secs(10);
+                        // A paused guest cannot poll its control decision or
+                        // cancel its own exact inference request. Keep it awake
+                        // through publication and native retirement.
+                        if let Err(error) = runtime.resume_vm_for_prompt(emit) {
+                            runtime.stop(emit);
+                            emit(EventKind::Error, true, json!({"message": error}));
+                            break PromptStatus::Failed;
+                        }
+                        emit(
+                            EventKind::Validation,
+                            false,
+                            json!({"stage": "kore_cancellation_requested", "intent_id": hex16(intent_id)}),
+                        );
+                    }
+                    crate::daemon::FrontendCancelOutcome::AlreadySettled => {}
+                    crate::daemon::FrontendCancelOutcome::Unknown => {
+                        runtime.stop(emit);
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"message": "Cancellation could not resolve the active intent."}),
+                        );
+                        break PromptStatus::Failed;
+                    }
+                }
             }
             if Instant::now() >= deadline {
                 emit(
                     EventKind::Error,
                     true,
-                    json!({"message": "Kore prompt timed out", "stage": "agent_failure"}),
+                    json!({"message": if cancellation_pending { "Kore cancellation was not confirmed" } else { "Kore prompt timed out" }, "stage": "agent_failure"}),
                 );
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
-                return PromptStatus::Failed;
+                runtime.stop(emit);
+                break PromptStatus::Failed;
             }
+            if !cancellation_pending && pending_terminal.is_none() {
+                authority_updates.submit(runtime.daemon.core_mut(), updates, emit);
+            }
+            let tick_started = Instant::now();
             let tick_result = if runtime.vm_suspended {
                 runtime.daemon.tick_frozen()
             } else {
                 runtime.daemon.tick()
             };
+            loop_timing.record_tick(tick_started.elapsed());
             if let Err(error) = tick_result {
                 emit(
                     EventKind::Error,
@@ -592,11 +763,29 @@ impl KoreVmRuntime {
                     json!({"message": format!("HostLink failed: {error:?}")}),
                 );
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
-                return PromptStatus::Failed;
+                runtime.stop(emit);
+                break PromptStatus::Failed;
             }
             runtime.drain_events(emit);
-            runtime.maybe_suspend_vm(emit);
+            authority_updates.receive(runtime.daemon.core_mut(), emit);
+            if runtime.daemon.core().frontend_interrupted(intent_id) {
+                // The old guest may have applied tool effects. A new link
+                // epoch cannot authorize replay, nor prove native retirement.
+                runtime.daemon.cancel_frontend_intent(intent_id);
+                runtime.stop(emit);
+                emit(
+                    EventKind::Error,
+                    pending_terminal.is_none(),
+                    json!({
+                        "message": "HostLink disconnected after the guest claimed this prompt; execution or cleanup could not be confirmed. The prompt was not replayed.",
+                        "stage": "guest_connection_lost",
+                    }),
+                );
+                break PromptStatus::Failed;
+            }
+            if !cancellation_pending {
+                runtime.maybe_suspend_vm(emit);
+            }
             let now = Instant::now();
             if now >= next_progress {
                 let last_hostlink = runtime
@@ -622,20 +811,14 @@ impl KoreVmRuntime {
                 );
                 next_progress = now + PROMPT_PROGRESS_INTERVAL;
             }
-            if let Some(failure) = runtime.backend_failure.take() {
-                emit(
-                    EventKind::Error,
-                    true,
-                    json!({"message": format!("host inference failed: {failure}")}),
-                );
-                runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop();
-                return PromptStatus::Failed;
-            }
             if let Some(marker) = runtime.boot_failure() {
                 if runtime.boot_attempt < MAX_BOOT_ATTEMPTS {
                     let failed_attempt = runtime.boot_attempt;
-                    runtime.stop_process();
+                    if let Err(error) = runtime.stop_process() {
+                        runtime.daemon.cancel_frontend_intent(intent_id);
+                        emit(EventKind::Error, true, json!({"message": error, "stage": "vm_stop_failed"}));
+                        break PromptStatus::Failed;
+                    }
                     emit(
                         EventKind::Validation,
                         false,
@@ -645,17 +828,20 @@ impl KoreVmRuntime {
                             "reason": marker,
                         }),
                     );
+                    timing_marker(emit, "vm_spawn_starting");
+                    boot_timing = BootTiming::new(runtime.serial_log.clone(), true);
                     if let Err(error) = runtime.spawn_vm() {
                         runtime.daemon.cancel_frontend_intent(intent_id);
                         emit(EventKind::Error, true, json!({"message": error}));
-                        return PromptStatus::Failed;
+                        break PromptStatus::Failed;
                     }
+                    timing_marker(emit, "vm_process_spawned");
                     continue;
                 }
                 let attempts = runtime.boot_attempt;
                 let serial_log = runtime.serial_log.clone();
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop_process();
+                runtime.stop(emit);
                 emit(
                     EventKind::Error,
                     true,
@@ -669,7 +855,7 @@ impl KoreVmRuntime {
                         )
                     }),
                 );
-                return PromptStatus::Failed;
+                break PromptStatus::Failed;
             }
             while pending_terminal.is_none()
                 && let Some(result) = runtime.daemon.take_frontend_result()
@@ -706,53 +892,31 @@ impl KoreVmRuntime {
                 pending_terminal = Some(status);
             }
             if pending_terminal.is_some() && response_published() {
-                response_at.get_or_insert_with(Instant::now);
+                if response_at.is_none() {
+                    response_at = Some(Instant::now());
+                    timing_marker(emit, "kore_response_published");
+                }
                 // The result is durable and available to the client event
                 // stream. Only now may the guest release the prompt's worker.
                 runtime.daemon.acknowledge_frontend_result(intent_id);
             }
-            if response_published()
-                && let Some(status) = terminal_after_reclaim_and_idle(
-                    pending_terminal,
-                    runtime.completed_frontend_broker_decisions,
-                    broker_decision_target,
-                    runtime.completed_frontend_teardowns,
-                    teardown_target,
-                    runtime.completed_frontend_idle_barriers,
-                    idle_barrier_target,
-                )
-            {
-                if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
-                    runtime.stop();
-                    emit(EventKind::Error, true, json!({"message": error}));
-                    return PromptStatus::Failed;
-                }
-                return status;
-            }
             if let Some(status) = pending_terminal
                 && response_published()
-                && runtime.completed_frontend_teardowns >= teardown_target
+                && !authority_updates.pending()
+                && runtime.daemon.core_mut().finish_frontend_intent(intent_id)
             {
-                // Single-prompt guests (including PR909) never issue another
-                // BrokerNext poll. Do not manufacture an idle barrier or hang
-                // a completed prompt: retire the real VM after confirmed
-                // worker reclamation and boot a fresh one for the next prompt.
-                let reclaimed = reclaimed_at.get_or_insert_with(Instant::now);
-                if reclaimed.elapsed() >= Duration::from_secs(2) {
-                    emit(
-                        EventKind::Validation,
-                        false,
-                        json!({"stage": "guest_retired_after_reclaim", "reason": "guest did not return to frontend idle"}),
-                    );
-                    runtime.stop();
-                    return status;
+                timing_marker(emit, "kore_frontend_ready");
+                if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
+                    runtime.stop(emit);
+                    emit(EventKind::Error, true, json!({"message": error}));
+                    break PromptStatus::Failed;
                 }
+                break status;
             }
             if unconfirmed_cleanup_timed_out(
                 pending_terminal,
                 response_published(),
-                runtime.completed_frontend_teardowns,
-                teardown_target,
+                runtime.daemon.core().frontend_ready(intent_id),
                 response_at.map(|at: Instant| at.elapsed()),
             ) {
                 // Reclamation can fail after any response, not only an
@@ -762,15 +926,15 @@ impl KoreVmRuntime {
                 emit(
                     EventKind::Error,
                     false,
-                    json!({"message": "Agent cleanup was not confirmed after its response; the Kore VM was stopped.", "stage": "agent_cleanup_failed"}),
+                    json!({"message": "Agent cleanup and broker readiness were not confirmed after the response; Kore VM shutdown was requested.", "stage": "agent_cleanup_failed"}),
                 );
                 emit(
                     EventKind::Validation,
                     false,
                     json!({"stage": "failed_guest_shutdown", "reason": "no guest reclamation confirmation after published response"}),
                 );
-                runtime.stop();
-                return PromptStatus::Failed;
+                runtime.stop(emit);
+                break PromptStatus::Failed;
             }
             let exited = runtime
                 .process
@@ -785,14 +949,28 @@ impl KoreVmRuntime {
                     true,
                     json!({"message": format!("Kore VM exited before replying: {status}")}),
                 );
-                return PromptStatus::Failed;
+                break PromptStatus::Failed;
             }
+            let sleep_started = Instant::now();
             std::thread::sleep(tick_interval);
-        }
+            loop_timing.sleep += sleep_started.elapsed();
+            if Instant::now() >= loop_timing.next_report {
+                loop_timing.report(emit, false);
+            }
+        };
+        // VM/link closure can settle a delivered update after the last tick.
+        // Preserve that exact outcome before the harness handles unknown work.
+        authority_updates.receive(runtime.daemon.core_mut(), emit);
+        loop_timing.report(emit, true);
+        status
     }
 }
 
 impl TaskRuntime for KoreVmRuntime {
+    fn supports_authority_updates(&self) -> bool {
+        true
+    }
+
     fn run_prompt(
         &mut self,
         session: &SessionState,
@@ -801,6 +979,41 @@ impl TaskRuntime for KoreVmRuntime {
         cancelled: &dyn Fn() -> bool,
         response_published: &dyn Fn() -> bool,
     ) -> PromptStatus {
+        self.run_prompt_with_updates(
+            session,
+            prompt,
+            emit,
+            cancelled,
+            response_published,
+            &|| None,
+        )
+    }
+
+    fn run_prompt_with_updates(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
+        updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+    ) -> PromptStatus {
+        let timing_started = Instant::now();
+        let mut emit_time = Duration::ZERO;
+        let mut event_count = 0u64;
+        let mut timed_emit = |kind, public, mut payload: Value| {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "runtime_elapsed_ms".into(),
+                    json!(timing_started.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+            event_count += 1;
+            let emit_started = Instant::now();
+            emit(kind, public, payload);
+            emit_time += emit_started.elapsed();
+        };
+        timing_marker(&mut timed_emit, "runtime_prompt_started");
         let key = (session.project_id.clone(), session.session_id.clone());
         let context = self.conversations.get(&key).cloned().unwrap_or_default();
         let mut response = None;
@@ -814,11 +1027,24 @@ impl TaskRuntime for KoreVmRuntime {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
-                emit(kind, public, payload);
+                timed_emit(kind, public, payload);
             },
             cancelled,
             response_published,
             &context,
+            updates,
+        );
+        timing_marker(&mut timed_emit, "runtime_prompt_finished");
+        emit(
+            EventKind::Validation,
+            false,
+            json!({
+                "stage": "runtime_timing_summary",
+                "runtime_elapsed_ms": timing_started.elapsed().as_secs_f64() * 1000.0,
+                "event_publish_ms": emit_time.as_secs_f64() * 1000.0,
+                "event_count": event_count,
+                "status": format!("{status:?}"),
+            }),
         );
         if response_published()
             && let Some(response) = response
@@ -838,7 +1064,9 @@ impl TaskRuntime for KoreVmRuntime {
         if let Some(runtime) = self.runtimes.get_mut(&session.project_id)
             && runtime.session_id.as_deref() == Some(&session.session_id)
         {
-            runtime.stop();
+            if !runtime.stop(emit) {
+                return;
+            }
             let _ = runtime.daemon.set_conversation_context(&[]);
             runtime.session_id = None;
         }
@@ -851,6 +1079,137 @@ impl TaskRuntime for KoreVmRuntime {
 
     fn backend_incarnation(&self) -> u64 {
         self.incarnation
+    }
+}
+
+fn timing_marker(emit: &mut dyn FnMut(EventKind, bool, Value), stage: &str) {
+    emit(
+        EventKind::Validation,
+        false,
+        json!({"stage": stage, "timing": true}),
+    );
+}
+
+struct LoopTiming {
+    ticks: u64,
+    tick: Duration,
+    max_tick: Duration,
+    sleep: Duration,
+    next_report: Instant,
+}
+
+impl Default for LoopTiming {
+    fn default() -> Self {
+        Self {
+            ticks: 0,
+            tick: Duration::ZERO,
+            max_tick: Duration::ZERO,
+            sleep: Duration::ZERO,
+            next_report: Instant::now() + Duration::from_secs(5),
+        }
+    }
+}
+
+impl LoopTiming {
+    fn record_tick(&mut self, duration: Duration) {
+        self.ticks += 1;
+        self.tick += duration;
+        self.max_tick = self.max_tick.max(duration);
+    }
+    fn report(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value), final_sample: bool) {
+        emit(
+            EventKind::Validation,
+            false,
+            json!({
+                "stage": if final_sample { "runtime_loop_totals" } else { "runtime_loop_sample" }, "timing": true,
+                "ticks": self.ticks, "tick_ms": self.tick.as_secs_f64() * 1000.0,
+                "max_tick_ms": self.max_tick.as_secs_f64() * 1000.0,
+                "sleep_ms": self.sleep.as_secs_f64() * 1000.0,
+            }),
+        );
+        self.next_report = Instant::now() + Duration::from_secs(5);
+    }
+}
+
+// These are host observations of guest serial output, not guest CPU timers.
+// Poll incrementally, bounded per pass. Buffered guest output and host scheduling
+// may delay observation; never use these markers as runtime authority/readiness.
+struct BootTiming {
+    path: Option<PathBuf>,
+    offset: u64,
+    pending: String,
+    seen: std::collections::BTreeSet<String>,
+    next_poll: Instant,
+}
+
+impl BootTiming {
+    fn new(path: Option<PathBuf>, enabled: bool) -> Self {
+        Self {
+            path: if enabled { path } else { None },
+            offset: 0,
+            pending: String::new(),
+            seen: Default::default(),
+            next_poll: Instant::now(),
+        }
+    }
+    fn poll(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        if Instant::now() < self.next_poll {
+            return;
+        }
+        self.next_poll = Instant::now() + Duration::from_millis(10);
+        let Some(path) = &self.path else {
+            return;
+        };
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return;
+        };
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return;
+        }
+        let mut bytes = [0u8; 16384];
+        let Ok(count) = file.read(&mut bytes) else {
+            return;
+        };
+        self.offset += count as u64;
+        self.pending
+            .push_str(&String::from_utf8_lossy(&bytes[..count]));
+        while let Some(newline) = self.pending.find('\n') {
+            let line = bounded_progress_text(self.pending[..newline].trim(), 512);
+            self.pending.drain(..=newline);
+            let marker = if line.contains("kore: _start") {
+                Some("kernel_entry")
+            } else if line.contains("first-userland-boot: services founded") {
+                Some("all_services_ready")
+            } else if line.contains("resident agent broker founded") {
+                Some("resident_broker_initialized")
+            } else if line.contains("first-userland-boot:")
+                && (line.contains(" ready (") || line.ends_with(" founded"))
+            {
+                Some("guest_service")
+            } else {
+                None
+            };
+            if let Some(marker) = marker {
+                let label = if marker == "guest_service" {
+                    line.clone()
+                } else {
+                    marker.to_owned()
+                };
+                if self.seen.len() < 128 && self.seen.insert(label) {
+                    emit(
+                        EventKind::Validation,
+                        false,
+                        json!({
+                            "stage": "guest_boot_observation", "marker": marker,
+                            "detail": line, "clock": "host_observed", "poll_interval_ms": 10,
+                        }),
+                    );
+                }
+            }
+        }
+        if self.pending.len() > 16384 {
+            self.pending.clear();
+        }
     }
 }
 
@@ -891,30 +1250,13 @@ fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
 fn unconfirmed_cleanup_timed_out(
     pending: Option<PromptStatus>,
     published: bool,
-    observed_teardowns: u64,
-    teardown_target: u64,
+    ready: bool,
     response_age: Option<Duration>,
 ) -> bool {
     pending.is_some()
         && published
-        && observed_teardowns < teardown_target
+        && !ready
         && response_age.is_some_and(|age| age >= Duration::from_secs(5))
-}
-
-fn terminal_after_reclaim_and_idle(
-    pending: Option<PromptStatus>,
-    observed_broker_decisions: u64,
-    broker_decision_target: u64,
-    observed_teardowns: u64,
-    teardown_target: u64,
-    observed_idle_barriers: u64,
-    idle_barrier_target: u64,
-) -> Option<PromptStatus> {
-    (observed_broker_decisions >= broker_decision_target
-        && observed_teardowns >= teardown_target
-        && observed_idle_barriers >= idle_barrier_target)
-        .then_some(pending)
-        .flatten()
 }
 
 fn reserve_loopback_port() -> Result<u16, String> {
@@ -987,6 +1329,230 @@ fn read_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn runtime_restart_waits_for_owned_process_and_pending_stop_before_touching_artifacts() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ProjectStore::open(root.path().join("projects")).unwrap();
+        let config = store
+            .create_from_workspace(
+                &workspace,
+                crate::InferenceConfig {
+                    backend: RuntimeBackend::Deterministic,
+                    kore_image: None,
+                    llama_server: None,
+                    model: None,
+                    extra_args: vec![],
+                    context_tokens: 4096,
+                    output_tokens: 256,
+                    threads: 1,
+                    slots: 2,
+                },
+            )
+            .unwrap()
+            .project;
+        let backend: Box<dyn InferenceBackend + Send> =
+            Box::new(crate::backend::DeterministicBackend::new(1));
+        let (daemon, _) = HostLinkDaemon::bind_dynamic_tcp(backend, ()).unwrap();
+        let iso = root.path().join("unused.iso");
+        let serial = root.path().join("serial.log");
+        std::fs::write(&iso, []).unwrap();
+        std::fs::write(&serial, b"previous guest evidence").unwrap();
+        // Exercise ProjectRuntime's real spawn/stop paths with an OS child.
+        // This fixture does not boot Kore or emulate a successful QMP server.
+        let qemu = QemuConfig {
+            executable: "/bin/sh".into(),
+            kore_iso: iso,
+            arguments: vec!["-c".into(), "exec sleep 60".into()],
+            hostlink_arguments: vec![],
+        };
+        let process = Some(qemu.clone().spawn().unwrap());
+        let mut runtime = ProjectRuntime {
+            config,
+            daemon,
+            qemu,
+            process,
+            stop_pending: false,
+            session_id: Some("retained-session".into()),
+            serial_log: Some(serial.clone()),
+            boot_attempt: 2,
+            next_boot_log_check: None,
+            hostlink_trace_cursor: 0,
+            active_model_turns: 0,
+            vm_pause_due: None,
+            vm_suspended: false,
+        };
+        let pid = runtime.process.as_ref().unwrap().id();
+        assert!(runtime.spawn_vm().is_err());
+        assert_eq!(runtime.process.as_ref().unwrap().id(), pid);
+        assert_eq!(runtime.boot_attempt, 2);
+        assert_eq!(std::fs::read(&serial).unwrap(), b"previous guest evidence");
+        runtime.stop_pending = true;
+        runtime.vm_suspended = true;
+        assert!(
+            runtime
+                .resume_vm_for_prompt(&mut |_, _, _| panic!("resumed pending stop"))
+                .is_err()
+        );
+        // Successful termination must not attempt QMP resume: this subprocess
+        // has no QMP server, despite the runtime's suspended posture.
+        runtime.stop_process().unwrap();
+        assert!(runtime.process.is_none());
+        assert!(!runtime.stop_pending && !runtime.vm_suspended);
+        assert_eq!(runtime.boot_attempt, 2, "boot retry count is retained");
+        assert_eq!(runtime.session_id.as_deref(), Some("retained-session"));
+        // An unresolved stop also blocks startup when no process is present.
+        runtime.stop_pending = true;
+        assert!(runtime.spawn_vm().is_err());
+        assert_eq!(std::fs::read(&serial).unwrap(), b"previous guest evidence");
+        runtime.stop_process().unwrap();
+        runtime.spawn_vm().unwrap();
+        assert!(runtime.process.is_some());
+        assert_eq!(runtime.boot_attempt, 3);
+        assert!(std::fs::read(&serial).unwrap().is_empty());
+        assert!(runtime.stop(&mut |_, _, _| panic!("unexpected stop failure")));
+        assert!(runtime.process.is_none());
+        assert_eq!(runtime.boot_attempt, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_vm_termination_retains_the_exact_process_until_reap() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let iso = directory.path().join("unused.iso");
+        std::fs::write(&iso, []).unwrap();
+        // A real owned OS child, not a guest VM. The shell execs sleep so
+        // QemuProcess owns the only process throughout cleanup and on panic.
+        let mut process = Some(
+            QemuConfig {
+                executable: "/bin/sh".into(),
+                kore_iso: iso,
+                arguments: vec!["-c".into(), "exec sleep 60".into()],
+                hostlink_arguments: Vec::new(),
+            }
+            .spawn()
+            .unwrap(),
+        );
+        let pid = process.as_ref().unwrap().id();
+        for _ in 0..2 {
+            assert!(
+                retire_process(&mut process, |_| {
+                    Err(std::io::Error::other("injected termination failure"))
+                })
+                .is_err()
+            );
+            assert_eq!(process.as_ref().unwrap().id(), pid);
+            assert!(process.as_mut().unwrap().try_wait().unwrap().is_none());
+        }
+        let mut reaped = None;
+        retire_process(&mut process, |child| {
+            reaped = Some(child.terminate()?);
+            Ok(())
+        })
+        .unwrap();
+        assert!(reaped.is_some());
+        assert!(process.is_none());
+        retire_process(&mut process, |_| panic!("already reaped")).unwrap();
+    }
+
+    #[test]
+    fn runtime_timing_preserves_startup_failure_and_public_event_semantics() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let mut runtime = KoreVmRuntime::new(KoreVmRuntimeConfig {
+            qemu_executable: root.path().join("unused-qemu"),
+            qemu_arguments: vec![],
+            project_root: root.path().join("projects"),
+            require_real: true,
+        })
+        .unwrap();
+        let session = SessionState {
+            api_version: 1,
+            project_id: "missing".into(),
+            session_id: "timing".into(),
+            status: crate::SessionStatus::Open,
+            generation: 1,
+            backend_incarnation: 0,
+            last_event_sequence: 0,
+            prompts: BTreeMap::new(),
+        };
+        let prompt = PromptRequest {
+            api_version: 1,
+            prompt_id: "p".into(),
+            idempotency_key: "p".into(),
+            text: "hello".into(),
+        };
+        let mut events = Vec::new();
+        let status = runtime.run_prompt(
+            &session,
+            &prompt,
+            &mut |kind, public, payload| events.push((kind, public, payload)),
+            &|| false,
+            &|| false,
+        );
+        assert_eq!(status, PromptStatus::Failed);
+        assert!(runtime.runtimes.is_empty());
+        assert!(runtime.conversations.is_empty());
+        let public: Vec<_> = events.iter().filter(|(_, public, _)| *public).collect();
+        assert_eq!(public.len(), 1);
+        assert_eq!(public[0].0, EventKind::Error);
+        assert!(!events.iter().any(|(_, _, p)| p["stage"] == "runtime_ready"));
+        let mut previous = 0.0;
+        for (_, _, payload) in &events {
+            let elapsed = payload["runtime_elapsed_ms"].as_f64().unwrap();
+            assert!(elapsed >= previous);
+            previous = elapsed;
+        }
+        let (_, public, summary) = events.last().unwrap();
+        assert!(!public);
+        assert_eq!(summary["stage"], "runtime_timing_summary");
+        assert_eq!(summary["status"], "Failed");
+        assert_eq!(
+            summary["event_count"].as_u64(),
+            Some(events.len() as u64 - 1)
+        );
+    }
+
+    #[test]
+    fn boot_timing_bounds_diagnostic_marker_storage() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for index in 0..200 {
+            writeln!(file, "first-userland-boot: service-{index} founded").unwrap();
+        }
+        let mut timing = super::BootTiming::new(Some(file.path().to_owned()), true);
+        let mut count = 0;
+        timing.poll(&mut |_, _, _| count += 1);
+        assert_eq!(count, 128);
+        assert_eq!(timing.seen.len(), 128);
+    }
+
+    #[test]
+    fn boot_timing_waits_for_complete_lines_and_does_not_repeat_markers() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "kore: _sta").unwrap();
+        let mut timing = super::BootTiming::new(Some(file.path().to_owned()), true);
+        let mut events = Vec::new();
+        timing.poll(&mut |_, _, payload| events.push(payload));
+        assert!(events.is_empty());
+        writeln!(file, "rt").unwrap();
+        writeln!(file, "kore: _start").unwrap();
+        writeln!(file, "first-userland-boot: kore-svc-init ready (14/17)").unwrap();
+        timing.next_poll = std::time::Instant::now();
+        timing.poll(&mut |_, _, payload| events.push(payload));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["marker"], "kernel_entry");
+        assert_eq!(events[1]["marker"], "guest_service");
+        timing.next_poll = std::time::Instant::now();
+        timing.poll(&mut |_, _, payload| events.push(payload));
+        assert_eq!(events.len(), 2);
+    }
+
     #[test]
     fn session_memory_keeps_bounded_whole_exchanges() {
         let mut history = Vec::new();
@@ -1003,10 +1569,7 @@ mod tests {
         super::remember_exchange(&mut history, &"x".repeat(16 * 1024), "answer");
         assert!(history.is_empty());
     }
-    use super::{
-        qemu_serial_log, read_tail, terminal_after_reclaim_and_idle,
-        without_qemu_resource_arguments,
-    };
+    use super::{qemu_serial_log, read_tail, without_qemu_resource_arguments};
     use crate::PromptStatus;
     use std::ffi::OsString;
 
@@ -1022,34 +1585,30 @@ mod tests {
             assert!(!check(
                 Some(status),
                 false,
-                0,
-                1,
+                false,
                 Some(Duration::from_secs(60))
             ));
             assert!(!check(
                 Some(status),
                 true,
-                0,
-                1,
+                false,
                 Some(Duration::from_secs(4))
             ));
             assert!(check(
                 Some(status),
                 true,
-                0,
-                1,
+                false,
                 Some(Duration::from_secs(5))
             ));
             assert!(!check(
                 Some(status),
                 true,
-                1,
-                1,
+                true,
                 Some(Duration::from_secs(60))
             ));
         }
-        assert!(!check(None, true, 0, 1, Some(Duration::from_secs(60))));
-        assert!(!check(Some(PromptStatus::Completed), true, 0, 1, None));
+        assert!(!check(None, true, false, Some(Duration::from_secs(60))));
+        assert!(!check(Some(PromptStatus::Completed), true, false, None));
     }
 
     #[test]
@@ -1091,29 +1650,5 @@ mod tests {
         let tail = read_tail(&path, 512).unwrap();
         assert!(!tail.contains(&"x".repeat(4096)));
         assert!(tail.contains("first-shell: FAIL"));
-    }
-
-    #[test]
-    fn frontend_result_is_not_terminal_until_kore_is_ready_for_the_next_chat() {
-        assert_eq!(
-            terminal_after_reclaim_and_idle(None, 2, 3, 4, 5, 7, 8),
-            None
-        );
-        assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 2, 3, 4, 5, 7, 8),
-            None
-        );
-        assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 4, 5, 7, 8),
-            None
-        );
-        assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 5, 5, 7, 8),
-            None
-        );
-        assert_eq!(
-            terminal_after_reclaim_and_idle(Some(PromptStatus::Completed), 3, 3, 5, 5, 8, 8),
-            Some(PromptStatus::Completed)
-        );
     }
 }

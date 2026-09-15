@@ -7,7 +7,7 @@ license = "MPL-2.0"
 description = "Host control-plane daemon for Kore guests."
 
 [dependencies]
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
 httparse = { version = "=1.10.1", default-features = false, features = ["std"] }
 kore-hostlink.workspace = true
 kore-hostlink-shmem.workspace = true

@@ -59,6 +59,9 @@ const STRUCTURED_COMPLETION_GRACE: Duration = Duration::from_millis(750);
 // It is a security boundary, not a low-latency poll, so do not inherit the
 // 25 ms per-read timeout used by the streaming transport.
 const SLOT_CLEANUP_TIMEOUT_MIN: Duration = Duration::from_secs(5);
+/// Retry failed startup on host time: guest timeout ticks may be paused while
+/// inference is outstanding. Each attempt still has startup_timeout as a bound.
+const SERVER_RESTART_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct LlamaServerConfig {
@@ -242,6 +245,7 @@ enum StructuredOutput {
 enum TerminalIssued {
     Cancelled { tick: u64 },
     TimedOut,
+    Failed,
 }
 
 struct ActiveRequest {
@@ -343,6 +347,7 @@ pub struct LlamaServerBackend {
     config: LlamaServerConfig,
     registry: SequenceRegistry<LlamaSequence>,
     child: Option<Child>,
+    restart_not_before: Option<Instant>,
     slot_cache: tempfile::TempDir,
     metrics: BackendMetrics,
     incarnation: u64,
@@ -368,6 +373,7 @@ impl LlamaServerBackend {
             config,
             registry,
             child: None,
+            restart_not_before: None,
             slot_cache,
             metrics: BackendMetrics {
                 incarnation: 1,
@@ -481,10 +487,19 @@ impl LlamaServerBackend {
 
     fn restart_server(&mut self) {
         self.stop_server();
+        if self
+            .restart_not_before
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return;
+        }
         self.incarnation = self.incarnation.saturating_add(1);
         self.metrics.incarnation = self.incarnation;
         self.metrics.restarts = self.metrics.restarts.saturating_add(1);
-        let _ = self.spawn_server();
+        self.restart_not_before = match self.spawn_server() {
+            Ok(()) => None,
+            Err(_) => Some(Instant::now() + SERVER_RESTART_RETRY_DELAY),
+        };
     }
 
     fn child_exited(&mut self) -> bool {
@@ -521,7 +536,7 @@ impl LlamaServerBackend {
                 entry.state.metrics.failed = entry.state.metrics.failed.saturating_add(1);
                 self.metrics.failed = self.metrics.failed.saturating_add(1);
             }
-            if let Some(active) = entry.state.active.take() {
+            if let Some(active) = entry.state.active.as_mut() {
                 active.cancel.store(true, Ordering::Release);
                 if active.terminal_issued.is_none() && self.terminal.len() < TERMINAL_EVENTS_MAX {
                     self.terminal.push_back(BackendEvent::Failed {
@@ -534,9 +549,21 @@ impl LlamaServerBackend {
                     entry.state.metrics.failed = entry.state.metrics.failed.saturating_add(1);
                     self.metrics.failed = self.metrics.failed.saturating_add(1);
                 }
+                // Failure delivery and server restart do not prove that the
+                // HTTP thread has exited. Keep its receiver/JoinHandle until
+                // worker_event_one observes termination and joins it.
+                active.terminal_issued.get_or_insert(TerminalIssued::Failed);
             }
-            entry.state.reserved_bytes = 0;
-            entry.state.reserved_tokens = 0;
+            entry.state.reserved_bytes = entry
+                .state
+                .active
+                .as_ref()
+                .map_or(0, |active| active.reserved_bytes);
+            entry.state.reserved_tokens = entry
+                .state
+                .active
+                .as_ref()
+                .map_or(0, |active| active.reserved_tokens);
         }
         self.refresh_metrics();
     }
@@ -1430,11 +1457,14 @@ impl InferenceBackend for LlamaServerBackend {
             && broker_protocol.is_some()
             && decoded.turn == 1
             && self.registry.get(identity).is_ok_and(|entry| {
-                entry.state.accepted_turn != 0
+                (entry.state.accepted_turn != 0 || entry.state.poisoned)
                     && entry.state.pending() == 0
                     && !entry.state.seen.contains(&request)
             });
         if reset_broker_context {
+            if self.registry.get(identity)?.state.poisoned && !self.broker_prompt_ready(identity) {
+                return Err(BackendError::BackendUnavailable);
+            }
             let slot = self.registry.get(identity)?.slot;
             if !erase_slot(self.config.port, slot, self.config.io_timeout) {
                 return Err(BackendError::BackendUnavailable);
@@ -1620,13 +1650,10 @@ impl InferenceBackend for LlamaServerBackend {
     }
 
     fn poll(&mut self, tick: u64) -> Option<BackendEvent> {
-        if self
-            .registry
-            .entries
-            .iter()
-            .any(|entry| entry.state.pending() != 0)
-            && self.child_exited()
-        {
+        // The model process is supervised even while all guest routes are
+        // idle. Pending-only checks leave an idle crash permanently invisible
+        // and never retry a failed replacement once failures have drained.
+        if self.child_exited() {
             self.fail_all(BackendFailure::BackendRestarted);
             self.restart_server();
         }
@@ -1652,6 +1679,26 @@ impl InferenceBackend for LlamaServerBackend {
             .get(identity)
             .ok()
             .map(|entry| entry.state.metrics)
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self.child.is_some()
+            && !self
+                .terminal
+                .iter()
+                .any(|event| event.sequence() == identity)
+            && self.registry.get(identity).is_ok_and(|entry| {
+                entry.state.pending() == 0
+                    // A poisoned broker can start a fresh structured
+                    // prompt only after every failed HTTP owner is gone.
+                    // submit still requires turn one, a new request ID,
+                    // and successful erasure of this exact model slot.
+                    && (!entry.state.poisoned
+                        || self.registry.entries.iter().all(|peer| {
+                            !peer.state.poisoned || peer.state.pending() == 0
+                        }))
+            })
     }
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {
@@ -2205,9 +2252,22 @@ fn encode_broker_plan(output: &str, broker: BrokerLlamaPlan) -> Result<Vec<u8>, 
     if decision.label.len() > BROKER_LABEL_MAX || selector_count > BROKER_SELECTORS_MAX {
         return Err("broker completion exceeds label or selector bounds");
     }
-    for (index, selector) in decision.executables.iter().chain(&decision.resources).enumerate() {
-        if decision.executables.iter().chain(&decision.resources).take(index).any(|prior| prior == selector) {
-            return Err("capability selectors must be unique: select each tool once, even when the worker will call it repeatedly; budget.tool_calls counts all calls");
+    for (index, selector) in decision
+        .executables
+        .iter()
+        .chain(&decision.resources)
+        .enumerate()
+    {
+        if decision
+            .executables
+            .iter()
+            .chain(&decision.resources)
+            .take(index)
+            .any(|prior| prior == selector)
+        {
+            return Err(
+                "capability selectors must be unique: select each tool once, even when the worker will call it repeatedly; budget.tool_calls counts all calls",
+            );
         }
     }
     let action = match decision.action.as_str() {
@@ -2782,7 +2842,9 @@ fn run_completion(
         ));
         if matches!(format, StructuredOutput::Broker(_)) {
             let content = messages[0]["content"].as_str().unwrap_or("");
-            messages[0]["content"] = json!(format!("{content}\nThe executable and resource arrays are SETS of capabilities, not a sequence of operations. Select each capability at most once. Reusing a tool requires more tool_calls, never duplicate selectors. The worker decides call order. A conversational task still needs create_agent, with empty sets and zero tool_calls. Emit compact single-line JSON."));
+            messages[0]["content"] = json!(format!(
+                "{content}\nThe executable and resource arrays are SETS of capabilities, not a sequence of operations. Select each capability at most once. Reusing a tool requires more tool_calls, never duplicate selectors. The worker decides call order. A conversational task still needs create_agent, with empty sets and zero tool_calls. Emit compact single-line JSON."
+            ));
         }
     }
     let mut retry_prompt = base_prompt.clone();

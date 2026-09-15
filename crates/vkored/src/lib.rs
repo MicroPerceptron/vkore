@@ -4,6 +4,7 @@ pub mod approval;
 pub mod backend;
 pub mod bulk;
 pub mod daemon;
+mod frontend_updates;
 pub mod harness;
 #[cfg(unix)]
 pub mod hybrid;
@@ -32,9 +33,9 @@ pub use daemon::{
 #[cfg(unix)]
 pub use hybrid::{HybridError, HybridHostLink, HybridMetrics};
 pub use interactive::{
-    BackendHarness, CreateSession, DeterministicGuest, EventKind, HarnessEvent, HarnessHandle,
-    HarnessHttpServer, HarnessService, PromptRequest, PromptStatus, SessionState, SessionStatus,
-    TaskRuntime,
+    AuthorityUpdateRequest, AuthorityUpdateState, AuthorityUpdateStatus, BackendHarness,
+    CreateSession, DeterministicGuest, EventKind, HarnessEvent, HarnessHandle, HarnessHttpServer,
+    HarnessService, PromptRequest, PromptStatus, SessionState, SessionStatus, TaskRuntime,
 };
 pub use ivshmem::{
     IVSHMEM_BACKING_BYTES, IvshmemBulkHost, IvshmemError, IvshmemMetrics, frozen_layout,

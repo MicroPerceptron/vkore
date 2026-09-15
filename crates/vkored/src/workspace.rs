@@ -592,7 +592,13 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
                 let journal_transaction = *identity.finalize().as_bytes();
                 let outcome = self
                     .workspace
-                    .apply_transaction(journal_transaction, &transaction.changes, &contents, grant, tick)
+                    .apply_transaction(
+                        journal_transaction,
+                        &transaction.changes,
+                        &contents,
+                        grant,
+                        tick,
+                    )
                     .unwrap_or(TransactionOutcome::Refused);
                 let (status, snapshot, applied) = match outcome {
                     TransactionOutcome::Applied { snapshot } => (
@@ -691,6 +697,10 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
 
     fn take_observation(&mut self) -> Option<crate::backend::InferenceObservation> {
         self.inference.take_observation()
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        self.inference.broker_prompt_ready(identity)
     }
 }
 

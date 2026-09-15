@@ -21,15 +21,15 @@ license = "MPL-2.0"
 repository = "https://github.com/MicroPerceptron/vkore"
 rust-version = "1.97"
 
-# PR #722 is the integration source for the initial extraction. These shared
-# crates remain Kore-owned wire/guest contracts; vKore consumes one exact
-# revision instead of copying protocol definitions into the host repository.
+# Shared contracts remain Kore-owned. During the current-Kore port, use
+# scripts/local-kore.py to override the complete direct dependency set. The
+# historical wire pins below are not the final integrated guest revision.
 [workspace.dependencies]
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
-kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
+kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c10aaee6be251bdd93b13c565c50fbf6949d9cac" }
 kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "fd383fb8705e63400e7b78762185f3208ee355c2" }
 kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c10aaee6be251bdd93b13c565c50fbf6949d9cac" }
 kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

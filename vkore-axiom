@@ -285,6 +285,11 @@ if test "$check_only" = 1; then
 fi
 
 build_flags=()
+cargo_config=()
+if test -n "${VKORE_CARGO_CONFIG:-}"; then
+    test -f "$VKORE_CARGO_CONFIG" || { echo "Missing local Cargo configuration: $VKORE_CARGO_CONFIG" >&2; exit 2; }
+    cargo_config=(--config "$VKORE_CARGO_CONFIG")
+fi
 profile_dir=debug
 if test "$release" = 1; then
     build_flags+=(--release)
@@ -292,7 +297,7 @@ if test "$release" = 1; then
 fi
 
 if test "$no_build" != 1; then
-    cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+    cargo "${cargo_config[@]}" build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
         -p vkored --bin vkore-harnessd --bin vkore
 fi
 harness="$vkore_root/target/$profile_dir/vkore-harnessd"
@@ -470,6 +475,12 @@ if test "$debug" = 1; then
         --delay-between-prompts-seconds "$debug_prompt_delay"
     cli_status=${PIPESTATUS[1]}
     set -e
+    if python3 "$vkore_root/scripts/report-timings.py" "$runtime/events.jsonl" \
+        --markdown "$runtime/timings.md" --json "$runtime/timings.json"; then
+        echo "Timing report: $runtime/timings.md"
+    else
+        echo "Timing report generation failed; raw events remain at $runtime/events.jsonl" >&2
+    fi
     echo "Terminal diagnostic completed with status $cli_status"
     exit "$cli_status"
 fi
@@ -485,7 +496,7 @@ if test -n "${WSL_DISTRO_NAME:-}" && command -v cargo.exe >/dev/null 2>&1; then
     ui="$windows_target/$profile_dir/vkore-ui.exe"
 else
     if test "$no_build" != 1; then
-        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
+        cargo "${cargo_config[@]}" build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
     fi
     ui="$vkore_root/target/$profile_dir/vkore-ui"
 fi

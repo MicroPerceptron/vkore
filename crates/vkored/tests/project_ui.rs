@@ -100,7 +100,11 @@ fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() 
     let result = runtime.run_prompt(
         &session,
         &prompt,
-        &mut |kind, _, payload| events.push((kind, payload)),
+        &mut |kind, public, payload| {
+            if public {
+                events.push((kind, payload));
+            }
+        },
         &|| false,
         &|| true,
     );

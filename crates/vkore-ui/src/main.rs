@@ -1,3 +1,4 @@
+mod authority_updates;
 mod fonts;
 mod logo;
 mod render_backend;
@@ -84,6 +85,7 @@ enum Message {
     PromptAction(iced_core::text::editor::Action),
     SelectText(String, iced_core::text::editor::Action),
     SendPrompt,
+    SendPermissionUpdate,
     CancelPrompt,
     ToggleWorking(String),
     ToggleWorkOutput(String),
@@ -126,6 +128,7 @@ enum RequestKind {
     StartSession,
     StopSession,
     SendPrompt,
+    PermissionUpdate(u64),
     CancelPrompt,
     RequestApproval,
     DecideApproval,
@@ -1014,6 +1017,7 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                         }
                     })
                 }
+                "authority_update" => authority_updates::work_row(event),
                 "error" => Some(WorkRow {
                     speaker: if event["payload"]["stage"] == "agent_failure" {
                         "Agent failed".into()
@@ -1496,6 +1500,8 @@ struct Model {
     session: Option<String>,
     prompt_id: Option<String>,
     submitted_prompt: Option<String>,
+    permission_update: Option<authority_updates::Submission>,
+    next_permission_update: u64,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
@@ -1563,6 +1569,8 @@ impl Model {
             session: None,
             prompt_id: None,
             submitted_prompt: None,
+            permission_update: None,
+            next_permission_update: 0,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
@@ -1862,6 +1870,7 @@ impl Model {
                 }
             }
             Message::SendPrompt => self.send_prompt(),
+            Message::SendPermissionUpdate => self.send_permission_update(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
                     self.network.request(Request {
@@ -2066,6 +2075,9 @@ impl Model {
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
         let result = result.and_then(ApiResponse::json);
         match (kind, result) {
+            (RequestKind::PermissionUpdate(token), result) => {
+                self.permission_update_response(token, result)
+            }
             (RequestKind::Health, Ok(_)) => {
                 self.connected = true;
                 self.status = "Connected to the resident vKore broker.".into();
@@ -2279,6 +2291,7 @@ impl Model {
             Ok(events) => {
                 let mut prompt_finished = false;
                 for event in events {
+                    self.permission_update_event(&event);
                     if event["kind"] == "prompt_terminal"
                         && event["prompt_id"].as_str() == self.prompt_id.as_deref()
                     {
@@ -3201,8 +3214,33 @@ impl Model {
             .font(fonts::body())
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .style(widgets::composer_editor);
+        let update_button: UiElement<'_> = if self.prompt_id.is_some() {
+            button(widgets::control(self.permission_update_label()))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    self.can_update_permissions()
+                        .then_some(Message::SendPermissionUpdate),
+                )
+                .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
+        let update_status: UiElement<'_> = if let Some(message) = self.permission_update_message() {
+            container(widgets::body(
+                message,
+                theme::SIZE_SM,
+                theme::TEXT_SECONDARY,
+            ))
+            .padding([4, 16])
+            .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
         let composer = container(column![
             prompt,
+            update_status,
             container(
                 row![
                     space::horizontal(),
@@ -3213,6 +3251,7 @@ impl Model {
                             Some(theme::BORDER),
                             theme::RADIUS_SM
                         )),
+                    update_button,
                     send,
                 ]
                 .spacing(theme::SPACE_2)
@@ -3382,9 +3421,7 @@ impl Model {
     }
 
     fn settings_panel(&self) -> UiElement<'_> {
-        let selected_model = self.settings["default_model_id"]
-            .as_str()
-            .unwrap_or("");
+        let selected_model = self.settings["default_model_id"].as_str().unwrap_or("");
         let mut model_choices = column![];
         if let Some(models) = self.settings["models"].as_array() {
             for model in models {
@@ -4290,18 +4327,204 @@ mod tests {
         model.prompt = text_editor::Content::with_text(&draft);
         model.send_prompt();
         assert_eq!(model.prompt.text(), draft);
-        model.response(RequestKind::SendPrompt, Err("Prompt must contain 1–128 UTF-8 bytes".into()));
+        model.response(
+            RequestKind::SendPrompt,
+            Err("Prompt must contain 1–128 UTF-8 bytes".into()),
+        );
         assert_eq!(model.prompt.text(), draft);
         assert!(model.prompt_id.is_none());
         model.prompt = text_editor::Content::with_text("Hello");
         model.send_prompt();
         model.prompt = text_editor::Content::with_text("My next draft");
-        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
         assert_eq!(model.prompt.text(), "My next draft");
         model.prompt_id = None;
         model.send_prompt();
-        model.response(RequestKind::SendPrompt, Ok(ApiResponse { content_type: "application/json".into(), body: b"{}".to_vec() }));
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
         assert!(model.prompt.text().is_empty());
+    }
+
+    fn permission_fixture() -> (Model, mpsc::Receiver<Request>) {
+        let mut model = populated_fixture_model();
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        model.network = Network {
+            sender: requests,
+            session: sessions,
+        };
+        model.session = Some("permission-session".into());
+        model.prompt_id = Some("permission-prompt".into());
+        model.events.clear();
+        model.prompt = text_editor::Content::with_text("Revoke input.");
+        (model, receiver)
+    }
+
+    fn permission_reply(request: &Request, status: &str) -> ApiResponse {
+        ApiResponse {
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&json!({
+                "request": request.body, "status": status, "revision": 7,
+                "message": if status == "applied" { "Input revoked." } else { "Update queued." }
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn permission_event(request: &Request, status: &str) -> Value {
+        json!({"kind": "authority_update", "session_id": "permission-session",
+        "prompt_id": "permission-prompt", "public": true, "payload": {
+            "update_id": request.body.as_ref().unwrap()["update_id"], "status": status,
+            "revision": 7, "message": "Input revoked."
+        }})
+    }
+
+    #[test]
+    fn permission_update_retries_exact_request_and_preserves_new_draft() {
+        let (mut model, requests) = permission_fixture();
+        model.update(Message::SendPermissionUpdate);
+        let first = requests.try_recv().unwrap();
+        assert!(matches!(first.kind, RequestKind::PermissionUpdate(_)));
+        assert_eq!(
+            first.path,
+            "/api/v1/sessions/permission-session/prompts/permission-prompt/updates"
+        );
+        assert_eq!(first.body.as_ref().unwrap()["text"], "Revoke input.");
+        model.update(Message::SendPermissionUpdate);
+        assert!(requests.try_recv().is_err());
+        model.response(first.kind, Err("response lost".into()));
+        assert_eq!(model.prompt.text(), "Revoke input.");
+        assert_eq!(model.permission_update_label(), "Retry update");
+        model.prompt = text_editor::Content::with_text("My next chat draft");
+        model.update(Message::SendPermissionUpdate);
+        let retry = requests.try_recv().unwrap();
+        assert_eq!(
+            (retry.kind, &retry.path, &retry.body),
+            (first.kind, &first.path, &first.body)
+        );
+        model.response(retry.kind, Ok(permission_reply(&retry, "queued")));
+        assert_eq!(model.prompt.text(), "My next chat draft");
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.can_update_permissions());
+        let mut foreign = permission_event(&retry, "applied");
+        foreign["session_id"] = json!("another-session");
+        model.permission_update_event(&foreign);
+        assert!(!model.can_update_permissions());
+        model.poll_result(Ok(vec![permission_event(&retry, "applied")]));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.events.iter().any(|event| matches!(
+            event["kind"].as_str(),
+            Some("assistant" | "error" | "prompt_terminal")
+        )));
+        let rows = work_rows(&model.events.iter().collect::<Vec<_>>());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].context.as_deref(), Some("Update applied"));
+    }
+
+    #[test]
+    fn permission_update_ignores_stale_replies_and_clears_only_acknowledged_unchanged_drafts() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let first = requests.try_recv().unwrap();
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert!(model.prompt.text().is_empty());
+        model.permission_update_event(&permission_event(&first, "applied"));
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        model.send_permission_update();
+        let next = requests.try_recv().unwrap();
+        assert_ne!(first.kind, next.kind);
+        assert_ne!(
+            first.body.as_ref().unwrap()["update_id"],
+            next.body.as_ref().unwrap()["update_id"]
+        );
+        model.response(first.kind, Ok(permission_reply(&first, "applied")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.session = Some("new-session".into());
+        model.prompt_id = Some("new-prompt".into());
+        model.response(next.kind, Ok(permission_reply(&next, "queued")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert!(model.permission_update_message().is_none());
+    }
+
+    #[test]
+    fn permission_update_requires_active_prompt_and_validates_bound_and_testimony() {
+        let (mut model, requests) = permission_fixture();
+        model.prompt_id = None;
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt_id = Some("permission-prompt".into());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(129));
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(128));
+        model.send_permission_update();
+        let request = requests.try_recv().unwrap();
+        let mut malformed = permission_event(&request, "applied");
+        malformed["payload"]["revision"] = json!(0);
+        model.permission_update_event(&malformed);
+        assert!(authority_updates::work_row(&malformed).is_none());
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.permission_update_event(&permission_event(&request, "failed"));
+        assert!(model.can_update_permissions());
+        model.events.push(json!({"kind":"assistant", "session_id":"permission-session", "prompt_id":"permission-prompt", "public":true}));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        let rows = work_rows(&[
+            &permission_event(&request, "refused"),
+            &permission_event(&request, "failed"),
+            &permission_event(&request, "cancelled"),
+        ]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.context.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Update refused", "Update unconfirmed", "Update cancelled"]
+        );
+    }
+
+    #[test]
+    fn permission_update_tracks_external_pending_and_hides_old_prompt_status() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let own = requests.try_recv().unwrap();
+        model.response(own.kind, Ok(permission_reply(&own, "applied")));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        let mut other = permission_event(&own, "queued");
+        other["payload"]["update_id"] = json!("another-client");
+        model.poll_result(Ok(vec![other.clone()]));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        other["payload"]["status"] = json!("cancelled");
+        model.poll_result(Ok(vec![other]));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt_id = Some("a-new-prompt".into());
+        assert!(model.permission_update_message().is_none());
+        assert!(model.can_update_permissions());
     }
 
     fn populated_fixture_model() -> Model {
@@ -4773,6 +4996,22 @@ mod tests {
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
+        if let Ok(state) = std::env::var("VKORE_UI_PERMISSION_UPDATE") {
+            let (mut active, requests) = permission_fixture();
+            active.events.push(json!({"kind":"user_prompt", "session_id":"permission-session",
+                "prompt_id":"permission-prompt", "payload":{"text":"Inspect the project input files."}}));
+            active.send_permission_update();
+            let request = requests.try_recv().unwrap();
+            if state == "uncertain" {
+                active.response(request.kind, Err("capture: response lost".into()));
+            } else {
+                active.response(request.kind, Ok(permission_reply(&request, "queued")));
+                active.poll_result(Ok(vec![permission_event(&request, &state)]));
+            }
+            active.expanded_work.insert("permission-prompt".into());
+            active.events_changed();
+            model = active;
+        }
         if std::env::var_os("VKORE_UI_EMPTY").is_some() {
             model.events.clear();
             model.selectable_text.clear();

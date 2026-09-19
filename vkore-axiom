@@ -297,7 +297,7 @@ if test "$release" = 1; then
 fi
 
 if test "$no_build" != 1; then
-    cargo "${cargo_config[@]}" build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+    cargo ${cargo_config[@]+"${cargo_config[@]}"} build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
         -p vkored --bin vkore-harnessd --bin vkore
 fi
 harness="$vkore_root/target/$profile_dir/vkore-harnessd"
@@ -496,7 +496,7 @@ if test -n "${WSL_DISTRO_NAME:-}" && command -v cargo.exe >/dev/null 2>&1; then
     ui="$windows_target/$profile_dir/vkore-ui.exe"
 else
     if test "$no_build" != 1; then
-        cargo "${cargo_config[@]}" build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
+        cargo ${cargo_config[@]+"${cargo_config[@]}"} build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
     fi
     ui="$vkore_root/target/$profile_dir/vkore-ui"
 fi

@@ -26,11 +26,11 @@ rust-version = "1.97"
 # historical wire pins below are not the final integrated guest revision.
 [workspace.dependencies]
 blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
-kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c10aaee6be251bdd93b13c565c50fbf6949d9cac" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "fd383fb8705e63400e7b78762185f3208ee355c2" }
-kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c10aaee6be251bdd93b13c565c50fbf6949d9cac" }
-kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c3baa37be40de2214de2f36c2a690d76788ed980" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c3baa37be40de2214de2f36c2a690d76788ed980" }
+kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c3baa37be40de2214de2f36c2a690d76788ed980" }
+kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c3baa37be40de2214de2f36c2a690d76788ed980" }
+kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "c3baa37be40de2214de2f36c2a690d76788ed980" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

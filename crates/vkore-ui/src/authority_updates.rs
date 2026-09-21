@@ -48,6 +48,7 @@ impl UpdateState {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Submission {
     token: u64,
     session: String,
@@ -206,13 +207,43 @@ impl Model {
         token: u64,
         response: Result<Value, String>,
     ) {
-        let Some(update) = self
+        // A permission POST can finish after the user switches projects.
+        // Keep its exact request/retry state with that chat, never the new one.
+        if !self
             .permission_update
-            .as_mut()
-            .filter(|update| update.token == token)
-        else {
+            .as_ref()
+            .is_some_and(|update| update.token == token)
+        {
+            for chat in self.project_chats.values_mut() {
+                let Some(update) = chat
+                    .permission_update
+                    .as_mut()
+                    .filter(|update| update.token == token)
+                else {
+                    continue;
+                };
+                let accepted = match &response {
+                    Ok(value) if value["request"] == update.body() => update.accept(value),
+                    _ => false,
+                };
+                if !accepted && !update.state.terminal() {
+                    update.state = UpdateState::Uncertain;
+                    update.message =
+                        "Could not confirm the update. Retry sends the same permission request."
+                            .into();
+                }
+                if accepted
+                    && matches!(update.state, UpdateState::Awaiting | UpdateState::Applied)
+                    && chat.prompt_id.as_deref() == Some(update.prompt.as_str())
+                    && chat.draft == update.draft
+                {
+                    chat.draft.clear();
+                }
+                return;
+            }
             return;
-        };
+        }
+        let update = self.permission_update.as_mut().unwrap();
         let accepted = match &response {
             Ok(value) if value["request"] == update.body() => update.accept(value),
             _ => false,

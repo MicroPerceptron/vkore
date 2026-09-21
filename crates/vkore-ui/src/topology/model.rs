@@ -110,7 +110,7 @@ impl Graph {
         let references: Vec<&Value> = events.iter().collect();
         let catalog = crate::broker_catalog(&references);
         let offered: Vec<String> = catalog.values().map(|entry| entry.label.clone()).collect();
-        if events.is_empty() {
+        if catalog.is_empty() && !events.iter().any(worker_evidence) {
             return Self::default();
         }
 
@@ -132,21 +132,25 @@ impl Graph {
         }];
 
         // One worker per generation the stream mentions, in first-seen order.
-        let mut workers: BTreeMap<u64, usize> = BTreeMap::new();
-        let mut calls: BTreeMap<(u64, u64), (usize, usize)> = BTreeMap::new();
+        let mut workers: BTreeMap<String, usize> = BTreeMap::new();
+        let mut calls: BTreeMap<(usize, u64), (usize, usize)> = BTreeMap::new();
         for event in events {
+            if !worker_evidence(event) && event["kind"] != "error" {
+                continue;
+            }
             let Some(generation) = event["generation"]
                 .as_u64()
                 .or_else(|| event["payload"]["generation"].as_u64())
             else {
                 continue;
             };
-            if generation == 0 {
+            let identity = worker_identity(event);
+            if generation == 0 || (event["kind"] == "error" && !workers.contains_key(&identity)) {
                 continue;
             }
-            let index = *workers.entry(generation).or_insert_with(|| {
+            let index = *workers.entry(identity.clone()).or_insert_with(|| {
                 agents.push(Agent {
-                    id: format!("agent-{generation}"),
+                    id: identity,
                     name: format!("agent-{generation:04x}"),
                     role: Role::Worker,
                     generation,
@@ -183,16 +187,12 @@ impl Graph {
                     if let Some(call) = tool_call(event) {
                         let call_id = crate::decision_payload(event)
                             .and_then(|payload| payload["call_id"].as_u64());
-                        if call_id.is_some_and(|call_id| calls.contains_key(&(generation, call_id)))
-                        {
+                        if call_id.is_some_and(|call_id| calls.contains_key(&(index, call_id))) {
                             continue;
                         }
                         agents[index].tools.push(call);
                         if let Some(call_id) = call_id {
-                            calls.insert(
-                                (generation, call_id),
-                                (index, agents[index].tools.len() - 1),
-                            );
+                            calls.insert((index, call_id), (index, agents[index].tools.len() - 1));
                         }
                     }
                 }
@@ -201,7 +201,7 @@ impl Graph {
                         let call_id = crate::decision_payload(event)
                             .and_then(|payload| payload["call_id"].as_u64());
                         let tool = call_id
-                            .and_then(|call_id| calls.get(&(generation, call_id)).copied())
+                            .and_then(|call_id| calls.get(&(index, call_id)).copied())
                             .or_else(|| {
                                 agents[index]
                                     .tools
@@ -228,7 +228,25 @@ impl Graph {
         }
 
         // The newest generation is the live one while the session runs.
-        if session_live && let Some(last) = agents.iter_mut().skip(1).next_back() {
+        let latest_lifecycle = events.iter().rev().find(|event| {
+            worker_evidence(event)
+                || matches!(
+                    event["kind"].as_str(),
+                    Some("prompt_terminal" | "conversation_closed")
+                )
+        });
+        let retired = latest_lifecycle.is_some_and(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some("prompt_terminal" | "conversation_closed")
+            ) || event["payload"]["state"]
+                .as_str()
+                .is_some_and(|state| state.eq_ignore_ascii_case("teardown"))
+        });
+        if session_live
+            && !retired
+            && let Some(last) = agents.iter_mut().skip(1).next_back()
+        {
             last.live = true;
         }
         Self { agents }
@@ -242,6 +260,35 @@ impl Graph {
     /// Finds an agent by its selection identity.
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.agents.iter().position(|agent| agent.id == id)
+    }
+}
+
+/// Prompts in one chat have independent workers despite sharing a chat generation.
+pub(super) fn worker_identity(event: &Value) -> String {
+    event["prompt_id"]
+        .as_str()
+        .map(|id| format!("task-{id}"))
+        .unwrap_or_else(|| {
+            format!(
+                "agent-{}",
+                event["generation"]
+                    .as_u64()
+                    .or_else(|| event["payload"]["generation"].as_u64())
+                    .unwrap_or_default()
+            )
+        })
+}
+
+// Session generation and readiness metadata do not prove that a worker exists.
+fn worker_evidence(event: &Value) -> bool {
+    match event["kind"].as_str() {
+        Some("broker_proposal") => crate::decision_payload(event).is_some_and(|proposal| {
+            proposal["action"].as_str().is_some_and(|action| {
+                action.eq_ignore_ascii_case("CreateAgent") || action == "create_agent"
+            })
+        }),
+        Some("capability" | "tool_call" | "tool_result") => true,
+        _ => false,
     }
 }
 
@@ -351,6 +398,37 @@ mod tests {
     #[test]
     fn an_empty_stream_has_no_graph() {
         assert_eq!(Graph::from_events(&[], false), Graph::default());
+    }
+
+    #[test]
+    fn session_metadata_does_not_invent_agents_and_terminal_retires_the_worker() {
+        let metadata = [
+            json!({"kind":"session_opened","generation":1,"payload":{}}),
+            json!({"kind":"user_prompt","generation":1,"payload":{"text":"hello"}}),
+            json!({"kind":"validation","generation":1,"payload":{"stage":"model_server_starting"}}),
+        ];
+        assert_eq!(Graph::from_events(&metadata, true), Graph::default());
+        let events = [
+            json!({"kind":"tool_call","generation":1,"payload":{"tool":"cat"}}),
+            json!({"kind":"prompt_terminal","generation":1,"payload":{"status":"completed"}}),
+        ];
+        let graph = Graph::from_events(&events, true);
+        assert_eq!(graph.agents.len(), 2);
+        assert!(!graph.agents[1].live);
+    }
+
+    #[test]
+    fn a_broker_refusal_does_not_create_a_worker() {
+        let graph = Graph::from_events(
+            &[
+                catalog_event(),
+                json!({"kind":"broker_proposal","generation":1,"payload":{"action":"refused","reason":"unavailable"}}),
+                json!({"kind":"error","generation":1,"payload":{"stage":"agent_failure"}}),
+            ],
+            true,
+        );
+        assert_eq!(graph.agents.len(), 1);
+        assert_eq!(graph.agents[0].role, Role::Broker);
     }
 
     #[test]

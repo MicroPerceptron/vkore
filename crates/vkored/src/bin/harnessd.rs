@@ -22,7 +22,7 @@ fn run() -> Result<(), String> {
         match arg.as_str() {
             "--listen" => listen = args.next().and_then(|value| value.parse().ok()).ok_or("invalid --listen")?,
             "--state" => state = PathBuf::from(args.next().ok_or("missing --state")?),
-            "--llama-server" | "--llama-model" | "--llama-port" | "--llama-arg" => return Err("configure llama.cpp in the selected project; the production harness requires real Kore via --qemu".into()),
+            "--llama-server" | "--llama-model" | "--llama-port" | "--llama-arg" => return Err("configure the application llama.cpp profile in settings.json; the production harness requires real Kore via --qemu".into()),
             "--qemu" => qemu = Some(PathBuf::from(args.next().ok_or("missing --qemu")?)),
             "--require-real" => {}, // Compatibility: real execution is now unconditional.
             "--qemu-arg" => qemu_args.push(args.next().ok_or("missing --qemu-arg")?.into()),

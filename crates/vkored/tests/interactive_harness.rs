@@ -812,3 +812,240 @@ fn find_python() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+#[test]
+fn preparation_is_async_and_queued_projects_keep_their_scope_and_fair_turns() {
+    use std::sync::{Arc, Mutex};
+    struct Prepared {
+        release: mpsc::Receiver<()>,
+        entered: mpsc::Sender<()>,
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl TaskRuntime for Prepared {
+        fn prepare(
+            &mut self,
+            status: &mut dyn FnMut(Value),
+            _: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.entered.send(()).unwrap();
+            self.release.recv().unwrap();
+            status(serde_json::json!({"phase":"broker_ready"}));
+            Ok(())
+        }
+        fn run_prompt(
+            &mut self,
+            session: &SessionState,
+            prompt: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((session.project_id.clone(), prompt.prompt_id.clone()));
+            PromptStatus::Completed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (release, wait) = mpsc::channel();
+    let (entered, entered_wait) = mpsc::channel();
+    let service = HarnessService::start(
+        Prepared {
+            release: wait,
+            entered,
+            seen: seen.clone(),
+        },
+        temp.path(),
+    );
+    entered_wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    let handle = service.handle();
+    for name in ["alpha", "beta", "closed"] {
+        handle
+            .create_session(CreateSession {
+                api_version: 1,
+                project_id: name.into(),
+                session_id: name.into(),
+            })
+            .unwrap();
+    }
+    for (name, id) in [
+        ("alpha", "a1"),
+        ("alpha", "a2"),
+        ("beta", "b1"),
+        ("closed", "c1"),
+    ] {
+        handle.submit_prompt(name, prompt(id, "hello")).unwrap();
+    }
+    handle.close_session("closed").unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+    release.send(()).unwrap();
+    wait_terminal(&handle, "alpha", "a2");
+    wait_terminal(&handle, "closed", "c1");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("alpha".into(), "a1".into()),
+            ("beta".into(), "b1".into()),
+            ("alpha".into(), "a2".into())
+        ]
+    );
+    assert_eq!(
+        handle.state("closed").unwrap().prompts["c1"],
+        PromptStatus::Cancelled
+    );
+    service.shutdown();
+}
+
+#[test]
+fn shared_failure_invalidates_other_queued_generations_before_running_them() {
+    struct FailsOnce {
+        incarnation: u64,
+        failed: bool,
+    }
+    impl TaskRuntime for FailsOnce {
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            prompt: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            assert_ne!(prompt.prompt_id, "stale");
+            self.failed = true;
+            PromptStatus::Failed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+        fn runtime_status(&mut self) -> Option<Value> {
+            if self.failed && self.incarnation == 1 {
+                self.incarnation = 2;
+            }
+            None
+        }
+        fn backend_incarnation(&self) -> u64 {
+            self.incarnation
+        }
+    }
+    // A preparation barrier makes both submissions definitely precede failure.
+    struct Barrier {
+        inner: FailsOnce,
+        release: mpsc::Receiver<()>,
+    }
+    impl TaskRuntime for Barrier {
+        fn prepare(
+            &mut self,
+            _: &mut dyn FnMut(Value),
+            _: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.release.recv().unwrap();
+            Ok(())
+        }
+        fn run_prompt(
+            &mut self,
+            s: &SessionState,
+            p: &PromptRequest,
+            e: &mut dyn FnMut(EventKind, bool, Value),
+            c: &dyn Fn() -> bool,
+            r: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            self.inner.run_prompt(s, p, e, c, r)
+        }
+        fn close(&mut self, s: &SessionState, e: &mut dyn FnMut(EventKind, bool, Value)) {
+            self.inner.close(s, e);
+        }
+        fn runtime_status(&mut self) -> Option<Value> {
+            self.inner.runtime_status()
+        }
+        fn backend_incarnation(&self) -> u64 {
+            self.inner.incarnation
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (send, release) = mpsc::channel();
+    let service = HarnessService::start(
+        Barrier {
+            inner: FailsOnce {
+                incarnation: 1,
+                failed: false,
+            },
+            release,
+        },
+        temp.path(),
+    );
+    let handle = service.handle();
+    let old = create(&handle, "first");
+    create(&handle, "second");
+    handle
+        .submit_prompt("first", prompt("failure", "hello"))
+        .unwrap();
+    handle
+        .submit_prompt("second", prompt("stale", "hello"))
+        .unwrap();
+    send.send(()).unwrap();
+    wait_terminal(&handle, "second", "stale");
+    assert_eq!(
+        handle.state("second").unwrap().prompts["stale"],
+        PromptStatus::Cancelled
+    );
+    assert_ne!(handle.state("first").unwrap().generation, old.generation);
+    assert_eq!(handle.state("second").unwrap().backend_incarnation, 2);
+    service.shutdown();
+}
+
+#[test]
+fn app_shutdown_cancels_preparation_and_terminalizes_queued_work() {
+    struct Starting(mpsc::Sender<()>);
+    impl TaskRuntime for Starting {
+        fn prepare(
+            &mut self,
+            _: &mut dyn FnMut(Value),
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.0.send(()).unwrap();
+            while !cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err("startup cancelled".into())
+        }
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            panic!("shutdown must not run queued work");
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (entered, wait) = mpsc::channel();
+    let service = HarnessService::start(Starting(entered), temp.path());
+    let handle = service.handle();
+    wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    create(&handle, "queued");
+    for index in 0..32 {
+        handle
+            .submit_prompt("queued", prompt(&format!("p{index}"), "hello"))
+            .unwrap();
+    }
+    handle.close_session("queued").unwrap();
+    service.shutdown();
+    assert_eq!(
+        handle.state("queued").unwrap().prompts["p0"],
+        PromptStatus::Cancelled
+    );
+    assert_eq!(
+        handle
+            .events("queued", 0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::PromptTerminal)
+            .count(),
+        32
+    );
+}

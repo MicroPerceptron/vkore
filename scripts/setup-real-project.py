@@ -13,22 +13,24 @@ def main():
     parser.add_argument("--kore-root", type=Path, required=True)
     parser.add_argument("--llama-server", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--workspace", type=Path, help="Optional existing project focus folder")
     parser.add_argument("--state", type=Path,
                         default=Path.home() / ".local/state/vkore-real")
     parser.add_argument("--gpu-layers", type=int, default=0)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    kore, server, model, workspace, state = (
+    kore, server, model, state = (
         path.expanduser().resolve() for path in
-        (args.kore_root, args.llama_server, args.model, args.workspace, args.state)
+        (args.kore_root, args.llama_server, args.model, args.state)
     )
+    virtual = args.workspace is None
+    workspace = (state / "virtual-projects/personal") if virtual else args.workspace.expanduser().resolve()
     # The launcher currently splits QEMU arguments on whitespace; Make paths
     # also need to remain literal. Refuse unsupported paths before writing.
     for path in (root, kore, server, model, workspace, state):
         if any(c.isspace() or c in "$#\\\"'`" for c in str(path)):
             parser.error(f"unsupported whitespace or shell/Make character in path: {path}")
-    if not workspace.is_dir():
+    if not virtual and not workspace.is_dir():
         parser.error("--workspace must be an existing, narrow project directory")
     if state == workspace or workspace in state.parents:
         parser.error("--state must be outside the workspace")
@@ -36,29 +38,43 @@ def main():
         parser.error("--llama-server must be an executable file")
     if not model.is_file():
         parser.error("--model must be an existing GGUF file")
-    iso = kore / "target/kore-x86-release.iso"
+    lock = dict(line.split(":=", 1) for line in
+                (root / "config/real-stack.lock.mk").read_text().splitlines()
+                if ":=" in line and not line.lstrip().startswith("#"))
+    lock = {key.strip(): value.strip() for key, value in lock.items()}
+    iso = kore / lock["VKORE_KORE_ISO_RELATIVE"]
     if not iso.is_file():
         parser.error("download the pinned Kore ISO first; see docs/linux-setup.md")
-    if hashlib.sha256(iso.read_bytes()).hexdigest() != (
-        "36f49b9f4f84ab05c22c31f3ab7b080e66682ffd842bf9200d81064a2f936e71"
-    ):
-        parser.error("Kore ISO does not match the development snapshot")
+    if hashlib.sha256(iso.read_bytes()).hexdigest() != lock["VKORE_EXPECTED_ISO_SHA256"]:
+        parser.error("Kore ISO does not match config/real-stack.lock.mk")
     project = json.loads((root / "config/real-project.template.json").read_text())
     project_path = state / "projects" / (project["id"] + ".json")
     local = root / "Makefile.local"
-    if local.exists() or project_path.exists():
+    settings_path = state / "settings.json"
+    if local.exists() or project_path.exists() or settings_path.exists():
         parser.error("configuration already exists; edit it manually (nothing overwritten)")
-    project["workspace"].update(root=str(workspace), state=str(state / "workspaces" / project["id"]))
+    project["workspace"].update(root=str(workspace), state=str(state / "workspaces" / project["id"]), virtual_only=virtual)
+    if virtual:
+        workspace.mkdir(parents=True, exist_ok=True)
+        project["name"] = "Personal assistant"
+        project["workspace"]["access"] = "read_only"
     project["inference"].update(kore_image=str(iso), llama_server=str(server),
                                 model=str(model), extra_args=["--n-gpu-layers", str(args.gpu_layers)])
     (state / "workspaces" / project["id"]).mkdir(parents=True, exist_ok=True)
     project_path.parent.mkdir(parents=True, exist_ok=True)
     with project_path.open("x") as stream:
         stream.write(json.dumps(project, indent=2) + "\n")
+    with settings_path.open("x") as stream:
+        json.dump({"schema_version": 2, "default_inference": project["inference"],
+                   "runtime": {"virtual_cpus": 2, "memory_mib": 2048},
+                   "legacy_runtime_migrated": True, "authorized_locations": [],
+                   "body_font": "design_default", "show_working": True,
+                   "working_expanded_default": False}, stream, indent=2)
+        stream.write("\n")
     with local.open("x") as stream:
         stream.write(f"KORE_ROOT := {kore}\nVKORE_STATE := {state}\n"
                      f"VKORE_PROJECT := {project['id']}\nVKORE_LISTEN := 127.0.0.1:8787\n"
-                     "VKORE_REAL_STACK_LOCK := config/linux-handoff-20260914.lock.mk\n")
+                     "VKORE_REAL_STACK_LOCK := config/real-stack.lock.mk\n")
     print(f"Created {local} and {project_path}")
     print("Run make dev-check, then make dev-real.")
 

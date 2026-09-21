@@ -191,6 +191,7 @@ pub enum FrontendCancelOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendResultOwned {
+    /// Authenticated source; never inferred from model text.
     pub intent_id: FrontendIntentId,
     pub kind: FrontendResultKind,
     pub text: String,
@@ -425,29 +426,27 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 }
             }
             BULK_FINISH => {
-                if self.completed_bulk.len() == COMPLETED_BULK_MAX {
-                    Err(BulkError::Backpressure)
-                } else {
-                    match self
-                        .bulk
-                        .finish(envelope_in.route_id, envelope_in.request_id, payload)
-                    {
-                        Ok((completed, bytes, chunks, _opened_request)) => {
-                            let id = completed.bulk_id.0.to_vec();
-                            let _ = self.routes[index].state.replenish_bulk(bytes, chunks);
-                            // FINISH is transport-terminal, but a completed
-                            // upload is still awaiting its role-specific
-                            // backend's typed application result. Keep the
-                            // request live until `finish` emits that result;
-                            // otherwise the generation-aware backend event is
-                            // discarded as late and the guest sees READY with
-                            // no WORKSPACE_REPLY.
-                            backend_bulk = Some(completed.clone());
-                            self.completed_bulk.push_back(completed);
-                            Ok((BULK_READY, id))
+                match self
+                    .bulk
+                    .finish(envelope_in.route_id, envelope_in.request_id, payload)
+                {
+                    Ok((completed, bytes, chunks, _opened_request)) => {
+                        let id = completed.bulk_id.0.to_vec();
+                        let _ = self.routes[index].state.replenish_bulk(bytes, chunks);
+                        // The typed backend owns processing; this queue is only
+                        // a bounded diagnostic copy. Unread observations must
+                        // never block the application-owned broker after its
+                        // twelfth prompt.
+                        if self.completed_bulk.len() == COMPLETED_BULK_MAX {
+                            self.completed_bulk.pop_front();
                         }
-                        Err(error) => Err(error),
+                        // Keep the request live until the backend emits its
+                        // typed result, even though transport FINISH is terminal.
+                        backend_bulk = Some(completed.clone());
+                        self.completed_bulk.push_back(completed);
+                        Ok((BULK_READY, id))
                     }
+                    Err(error) => Err(error),
                 }
             }
             BULK_ABORT => {
@@ -941,6 +940,8 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         self.bulk_out.bytes -= frame.len();
         Some(frame)
     }
+    /// Drain retained diagnostic uploads (oldest entries may be evicted).
+    /// Typed backend processing does not depend on this observation queue.
     pub fn pop_completed_bulk(&mut self) -> Option<CompletedBulk> {
         self.completed_bulk.pop_front()
     }
@@ -993,6 +994,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
+            ObservationKind::ModelTiming => "model_timing",
             ObservationKind::Validation => "validation",
             ObservationKind::AssistantMessage => "assistant_message",
             ObservationKind::ToolCall => "tool_call",
@@ -3140,6 +3142,48 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
             bulk_write_chunk: usize::MAX,
         })
     }
+    pub(crate) fn with_idle_backend<T>(
+        &mut self,
+        use_backend: impl FnOnce(&mut B) -> T,
+    ) -> Result<T, BackendError> {
+        if !self.broker_idle() {
+            return Err(BackendError::OutOfOrder);
+        }
+        Ok(use_backend(&mut self.core.backend))
+    }
+
+    /// Only the runtime owner may use this after confirming its guest exited.
+    /// Disconnection alone is not proof that a guest has released authority.
+    pub(crate) fn with_disconnected_backend<T>(
+        &mut self,
+        use_backend: impl FnOnce(&mut B) -> T,
+    ) -> Result<T, BackendError> {
+        if self.control.is_some()
+            || self.bulk.is_some()
+            || self.core.epoch.is_some()
+            || self.core.negotiation_nonce.is_some()
+            || !self.core.routes.is_empty()
+            || !self.core.frontend_intents.is_empty()
+            || !self.core.frontend_receipts.is_empty()
+            || !self.core.frontend_completions.is_empty()
+        {
+            return Err(BackendError::OutOfOrder);
+        }
+        Ok(use_backend(&mut self.core.backend))
+    }
+
+    pub(crate) fn broker_idle(&self) -> bool {
+        self.core.frontend_intents.is_empty()
+            && self.core.frontend_receipts.is_empty()
+            && self.core.frontend_completions.is_empty()
+            && self.core.frontend_polls.iter().any(|poll| {
+                matches!(
+                    poll.poll.phase,
+                    FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext
+                )
+            })
+    }
+
     pub fn core(&self) -> &LinkCore<B, S> {
         &self.core
     }
@@ -3535,6 +3579,28 @@ mod tests {
             stream_parts: Vec::new(),
             completed_requests: VecDeque::new(),
         });
+    }
+
+    #[test]
+    fn disconnected_attachment_rejects_queued_intent_and_live_epoch() {
+        let (mut daemon, _) =
+            HostLinkDaemon::bind_dynamic_tcp(crate::backend::DeterministicBackend::new(1), ())
+                .unwrap();
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
+        let intent = daemon.queue_frontend_intent("pending task").unwrap();
+        assert!(matches!(
+            daemon.with_disconnected_backend(|_| panic!("mutated pending task")),
+            Err(BackendError::OutOfOrder)
+        ));
+        daemon.cancel_frontend_intent(intent);
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
+        daemon.core.epoch = Some(LinkEpoch([7; 16]));
+        assert!(matches!(
+            daemon.with_disconnected_backend(|_| panic!("mutated live epoch")),
+            Err(BackendError::OutOfOrder)
+        ));
+        daemon.force_disconnect();
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
     }
 
     #[test]
@@ -4393,10 +4459,18 @@ mod tests {
         core.pop_frontend_result().unwrap();
         assert!(core.acknowledge_frontend_result(intent));
         submit_frontend_lifecycle(
-            &mut core, broker, 1, FrontendPollPhase::BrokerRetired, intent,
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            intent,
         );
         submit_frontend_lifecycle(
-            &mut core, broker, 2, FrontendPollPhase::BrokerReadyNext, intent,
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
         );
         assert!(core.frontend_ready(intent));
         core.disconnect();
@@ -5871,8 +5945,6 @@ mod tests {
 
         let epoch = LinkEpoch([31; 16]);
         let route_id = RouteId([32; 16]);
-        let request = RequestId([33; 16]);
-        let bulk_id = BulkId([34; 16]);
         let generation = TaskGeneration::new(1).unwrap();
         let identity = SequenceIdentity {
             route: route_id,
@@ -5970,47 +6042,59 @@ mod tests {
         .unwrap();
         assert!(kir1_len > FOUNDED_CLIENT_BUFFER);
 
-        let frames = outbound_bulk_payloads(
-            bulk_id,
-            kore_hostlink::INFERENCE_REQUEST_CONTENT,
-            &kir1[..kir1_len],
-        )
-        .unwrap();
-        for (sequence, (kind, payload)) in frames.into_iter().enumerate() {
-            core.receive(
-                SocketPlane::Bulk,
-                envelope(
-                    kind,
-                    epoch,
-                    route_id,
-                    generation.get(),
-                    sequence as u64,
-                    request,
-                    payload.len(),
-                ),
-                &payload,
-            );
-        }
+        // More requests than the retained diagnostic capacity must still
+        // reach the typed backend and retire on this same broker route.
+        for round in 0..COMPLETED_BULK_MAX + 4 {
+            let request = RequestId([33 + round as u8; 16]);
+            let bulk_id = BulkId([34 + round as u8; 16]);
+            let frames = outbound_bulk_payloads(
+                bulk_id,
+                kore_hostlink::INFERENCE_REQUEST_CONTENT,
+                &kir1[..kir1_len],
+            )
+            .unwrap();
+            for (sequence, (kind, payload)) in frames.into_iter().enumerate() {
+                core.receive(
+                    SocketPlane::Bulk,
+                    envelope(
+                        kind,
+                        epoch,
+                        route_id,
+                        generation.get(),
+                        (round * 3 + sequence) as u64,
+                        request,
+                        payload.len(),
+                    ),
+                    &payload,
+                );
+            }
 
-        assert!(core.routes[0].state.has_request(request));
-        assert_eq!(core.routes[0].stream_parts, vec![(request, 0)]);
-        core.advance();
-        assert!(!core.routes[0].state.has_request(request));
-        assert!(core.routes[0].stream_parts.is_empty());
-        let kinds: Vec<u16> = core
-            .control_out
-            .frames
-            .iter()
-            .map(|frame| {
-                EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN])
-                    .unwrap()
-                    .kind
-                    .get()
-            })
-            .collect();
+            assert!(core.routes[0].state.has_request(request));
+            assert_eq!(core.routes[0].stream_parts, vec![(request, 0)]);
+            core.advance();
+            assert!(!core.routes[0].state.has_request(request));
+            assert!(core.routes[0].stream_parts.is_empty());
+            let kinds: Vec<u16> = core
+                .control_out
+                .frames
+                .iter()
+                .map(|frame| {
+                    EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN])
+                        .unwrap()
+                        .kind
+                        .get()
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![BULK_ACCEPTED, BULK_ACCEPTED, BULK_READY, INFER_REPLY]
+            );
+            while core.pop_control_frame().is_some() {}
+        }
+        assert_eq!(core.completed_bulk.len(), COMPLETED_BULK_MAX);
         assert_eq!(
-            kinds,
-            vec![BULK_ACCEPTED, BULK_ACCEPTED, BULK_READY, INFER_REPLY]
+            core.completed_bulk.front().unwrap().request,
+            RequestId([37; 16])
         );
     }
 

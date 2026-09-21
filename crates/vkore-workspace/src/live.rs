@@ -37,6 +37,7 @@ pub struct ServedRange {
 
 pub struct LiveRoot {
     root: Dir,
+    selected: Option<Vec<SelectedFile>>,
     manifest: Manifest,
     sources: BTreeMap<SourceCorrelation, CanonicalPath>,
     next_delta_sequence: u64,
@@ -262,6 +263,72 @@ impl WatchHints {
     }
 }
 
+/// A text representation of one explicitly authorized backing file. The open
+/// directory capability and digest bind every range read to that same source.
+pub struct SelectedFile {
+    directory: Dir,
+    name: std::path::PathBuf,
+    pub alias: CanonicalPath,
+    pub backing_path: std::path::PathBuf,
+    original_digest: [u8; 32],
+    bytes: Vec<u8>,
+}
+
+impl SelectedFile {
+    pub fn new(
+        directory: Dir,
+        name: std::path::PathBuf,
+        alias: CanonicalPath,
+        backing_path: std::path::PathBuf,
+        original_digest: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> Result<Self, Error> {
+        if bytes.len() as u64 > kore_workspace_sync::bounds::MAX_FILE_BYTES {
+            return Err(Error::Bounds);
+        }
+        let selected = Self {
+            directory,
+            name,
+            alias,
+            backing_path,
+            original_digest,
+            bytes,
+        };
+        selected.verify()?;
+        Ok(selected)
+    }
+
+    fn verify(&self) -> Result<(), Error> {
+        let before = self.directory.symlink_metadata(&self.name)?;
+        if !before.is_file() || before.file_type().is_symlink() || before.len() > 32 * 1024 * 1024 {
+            return Err(Error::InvalidArtifact);
+        }
+        let mut file = self.directory.open(&self.name)?;
+        if metadata_fingerprint(&before) != metadata_fingerprint(&file.metadata()?) {
+            return Err(Error::Conflict);
+        }
+        let mut hash = blake3::Hasher::new();
+        let mut buffer = [0u8; 8192];
+        let mut remaining = before.len();
+        while remaining > 0 {
+            let take = remaining.min(buffer.len() as u64) as usize;
+            let read = file.read(&mut buffer[..take])?;
+            if read == 0 {
+                return Err(Error::Conflict);
+            }
+            hash.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+        let after = self.directory.symlink_metadata(&self.name)?;
+        if metadata_fingerprint(&before) != metadata_fingerprint(&after)
+            || hash.finalize().as_bytes() != &self.original_digest
+        {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
+}
+
 impl LiveRoot {
     pub fn open(path: &Path, parent: [u8; 32]) -> Result<Self, Error> {
         Self::open_inner(path, parent, None)
@@ -287,12 +354,45 @@ impl LiveRoot {
         };
         Ok(Self {
             root,
+            selected: None,
             manifest: artifact.manifest,
             sources,
             next_delta_sequence: 1,
             results,
             journal,
         })
+    }
+
+    /// Sparse, read-only virtual topology. Files remain at their authorized
+    /// host locations; aliases identify bounded text views and not host paths.
+    pub fn open_selected(empty_root: &Path, selected: Vec<SelectedFile>) -> Result<Self, Error> {
+        use kore_workspace_sync::{Entry, ManifestBuilder};
+        if selected.len() > kore_workspace_sync::bounds::MAX_ENTRIES {
+            return Err(Error::Bounds);
+        }
+        let mut root = Self::open(empty_root, [0; 32])?;
+        let mut builder = ManifestBuilder::new([0; 32], Policy::default());
+        for file in &selected {
+            file.verify()?;
+            let digest = *blake3::hash(&file.bytes).as_bytes();
+            let mut source = blake3::Hasher::new();
+            source.update(file.backing_path.as_os_str().as_encoded_bytes());
+            source.update(&file.original_digest);
+            let mut identity = [0u8; 16];
+            identity.copy_from_slice(&source.finalize().as_bytes()[..16]);
+            builder.push(Entry::file_with_range_root(
+                file.alias.clone(),
+                false,
+                file.bytes.len() as u32,
+                digest,
+                range_root(&file.bytes).ok_or(Error::Bounds)?,
+                identity,
+            )?)?;
+        }
+        root.manifest = builder.finish()?;
+        root.sources = source_map(&root.manifest)?;
+        root.selected = Some(selected);
+        Ok(root)
     }
 
     pub fn manifest(&self) -> &Manifest {
@@ -321,6 +421,22 @@ impl LiveRoot {
             || entry.content_len != request.file_len.get()
         {
             return Err(Error::Conflict);
+        }
+        if let Some(selected) = &self.selected {
+            let file = selected
+                .iter()
+                .find(|file| file.alias == *path)
+                .ok_or(Error::Conflict)?;
+            file.verify()?;
+            let leaf =
+                (request.offset.get() / kore_workspace_sync::bounds::RANGE_BYTES as u32) as u16;
+            let proof = build_range_proof(&file.bytes, leaf).ok_or(Error::Bounds)?;
+            let start = usize::from(leaf) * kore_workspace_sync::bounds::RANGE_BYTES;
+            let end = (start + kore_workspace_sync::bounds::RANGE_BYTES).min(file.bytes.len());
+            return Ok(ServedRange {
+                bytes: file.bytes.get(start..end).ok_or(Error::Bounds)?.to_vec(),
+                proof,
+            });
         }
         let before = self.root.symlink_metadata(path.as_str())?;
         if !before.is_file()
@@ -368,6 +484,9 @@ impl LiveRoot {
         grant: &mut StandingGrant,
         now: u64,
     ) -> Result<TransactionOutcome, Error> {
+        if self.selected.is_some() {
+            return Ok(TransactionOutcome::Refused);
+        }
         if transaction == [0; 32] || changes.verify().is_err() {
             return Err(Error::InvalidArtifact);
         }
@@ -588,6 +707,12 @@ impl LiveRoot {
     /// Securely rescan after any watcher hint and produce one canonical,
     /// parent-bound delta. Returning `None` means the hint was spurious.
     pub fn rescan(&mut self, origin_transaction: [u8; 32]) -> Result<Option<TopologyDelta>, Error> {
+        if let Some(selected) = &self.selected {
+            for file in selected {
+                file.verify()?;
+            }
+            return Ok(None);
+        }
         let desired = Artifact::scan_cap(&self.root, self.manifest.snapshot_id())?;
         // The second scan's parent makes its identity advance even when the
         // tree is unchanged; compare the committed root first.
@@ -1197,6 +1322,32 @@ mod tests {
             live.read_range(&request(&live, "a", 0, 1)),
             Err(Error::SourceChanged(_) | Error::Conflict)
         ));
+    }
+
+    #[test]
+    fn selected_document_reads_projection_only_while_backing_is_current() {
+        let host = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("deck.pptx"), b"original bytes").unwrap();
+        std::fs::write(host.path().join("unrelated.txt"), b"not authorized").unwrap();
+        let selected = SelectedFile::new(
+            Dir::open_ambient_dir(host.path(), ambient_authority()).unwrap(),
+            "deck.pptx".into(),
+            CanonicalPath::new(b"deck-text.txt").unwrap(),
+            host.path().join("deck.pptx"),
+            *blake3::hash(b"original bytes").as_bytes(),
+            b"Slide 2: Growth 17.8%".to_vec(),
+        )
+        .unwrap();
+        let live = LiveRoot::open_selected(empty.path(), vec![selected]).unwrap();
+        assert_eq!(live.manifest().entries().len(), 1);
+        let request = request(&live, "deck-text.txt", 0, 1);
+        assert_eq!(
+            live.read_range(&request).unwrap().bytes,
+            b"Slide 2: Growth 17.8%"
+        );
+        std::fs::write(host.path().join("deck.pptx"), b"modified bytes").unwrap();
+        assert!(live.read_range(&request).is_err());
     }
 
     #[cfg(unix)]

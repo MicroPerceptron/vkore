@@ -253,6 +253,9 @@ mod tests {
             commands,
             shared: Arc::new(Mutex::new(Shared {
                 authority_updates_supported: true,
+                shutting_down: false,
+                runtime_status: json!({"phase":"broker_ready"}),
+                next_generation: 1,
                 sessions: BTreeMap::new(),
                 next_sequence: 1,
                 queued: 0,

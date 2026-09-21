@@ -1,10 +1,15 @@
-# Run the September 14 development snapshot on Linux
+# Run the shared-assistant development stack on Linux
+
+> Historical PR #41 guest instructions/results. PR #43 now uses a different
+> current-Kore image and compatibility path. Use [the current UI handoff](ui-handoff.md)
+> and [stacked validation](stacked-ui-validation.md) for its exact pin and limits.
+> The older release image and unchanged-process claims below do not apply to #43.
+
 
 Open the **vKore repository** in your editor and terminal. Run the native app
 from a Linux desktop session (X11 or Wayland). The guest is an x86-64 Kore ISO
-running under QEMU TCG, including when the host is ARM64. This is a development
-checkpoint with known chat recall and broker-refusal/cleanup problems; see
-[real chat validation](real-chat-validation.md). Linux execution has not yet
+running under QEMU TCG, including when the host is ARM64. This implements issue #24 on top of PR #39; see
+[shared assistant validation](issue24-validation.md) and [the architecture decision](adr/0024-shared-assistant.md). Linux execution has not yet
 been tested on the destination device.
 
 ## Repositories and access
@@ -16,10 +21,10 @@ Clone these three repositories into sibling directories:
 ```sh
 mkdir -p "$HOME/src"
 cd "$HOME/src"
-gh repo clone MicroPerceptron/vkore vkore -- --branch codex/test-all-ui-agent-fixes
-gh repo clone MicroPerceptron/kore kore-vkore-real -- --branch codex/vkore-linux-handoff-20260914
+gh repo clone MicroPerceptron/vkore vkore -- --branch codex/issue24-shared-assistant
+gh repo clone MicroPerceptron/kore kore-vkore-real -- --branch codex/issue24-resident-broker
 gh repo clone MicroPerceptron/llama.cpp llama.cpp -- --branch codex/harness-implemenation
-git -C kore-vkore-real checkout --detach 3916ae8bc98bc16c685524b7bbb6d8ce65a760e2
+git -C kore-vkore-real checkout --detach 3fca0fe1f8578d59c16c465089967ecb268b7f79
 git -C llama.cpp checkout --detach 0b953005451976d78c8227b16ad3d42a07c2053b
 ```
 
@@ -70,15 +75,15 @@ and qcow2 firmware formats.
 
 ## Download the exact ISO
 
-Use the asset **kore-x86-release.iso** from the Kore development prerelease
-**vkore-dev-20260914**. Do not use an older Kore release or run `make artifacts`
+Use the asset **kore-x86-vkore-headless-release.iso** from the Kore development prerelease
+**vkore-issue24-20260914**. Do not use an older Kore release or run `make artifacts`
 for this handoff: rebuilding changes packaging metadata and can change the hash.
 
 ```sh
 cd "$HOME/src"
 mkdir -p kore-vkore-real/target
-gh release download vkore-dev-20260914 --repo MicroPerceptron/kore \
-  --pattern kore-x86-release.iso --pattern SHA256SUMS \
+gh release download vkore-issue24-20260914 --repo MicroPerceptron/kore \
+  --pattern kore-x86-vkore-headless-release.iso --pattern SHA256SUMS \
   --dir kore-vkore-real/target
 (cd kore-vkore-real/target && sha256sum -c SHA256SUMS)
 ```
@@ -86,17 +91,14 @@ gh release download vkore-dev-20260914 --repo MicroPerceptron/kore \
 Expected ISO SHA-256:
 
 ```text
-36f49b9f4f84ab05c22c31f3ab7b080e66682ffd842bf9200d81064a2f936e71
+6ae17033d2fca456567c35626618fcf18d60106e401e60276863b4a2df570aa0
 ```
 
-The ISO was built from `fd383fb8705e63400e7b78762185f3208ee355c2`
-plus tracked patch digest
-`70a32975fe1dbef9614d317ef9eb7febfc1c1fad5e15c1f8aaebbf839b77f39b`.
-Commit `3916ae8bc98bc16c685524b7bbb6d8ce65a760e2` records those tracked
-source files and guest binaries, plus the previously untracked authority test.
-The existing ISO retains the original build identity. The handoff lock binds
-this committed snapshot to those exact ISO bytes and requires a clean tracked
-Kore worktree. It does not claim the ISO was rebuilt from the new commit.
+The ISO is packaged from Kore commit `3fca0fe1f8578d59c16c465089967ecb268b7f79`. Its
+tracked x86 userland artifacts were rebuilt from source commit
+`5173ebce12f6b6631792e8967142b87fcf4c6789`; the shell build stamp identifies
+that source revision. `config/real-stack.lock.mk` binds the packaged commit to
+the exact ISO bytes and requires a clean tracked Kore worktree.
 
 ## Build llama.cpp and get the model
 
@@ -123,28 +125,43 @@ slow and may exceed the configured 900-second prompt timeout.
 
 ## Configure this device and launch
 
-Use paths without spaces. Choose a narrow workspace directory; the project is
-configured for automatic writeback inside that directory, matching the Mac.
-The following creates an empty test workspace. Application state is separate.
+Use paths without spaces. The following creates a personal-assistant project
+without a physical focus folder. Application settings own the single model
+server and the 2-CPU/2-GiB VM. Both begin preparing as the app opens.
 
 ```sh
-mkdir -p "$HOME/src/vkore-testworkspace"
 cd "$HOME/src/vkore"
 python3 scripts/setup-real-project.py \
   --kore-root "$HOME/src/kore-vkore-real" \
   --llama-server "$HOME/src/llama.cpp/build/bin/llama-server" \
-  --model "$HOME/src/llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf" \
-  --workspace "$HOME/src/vkore-testworkspace"
+  --model "$HOME/src/llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf"
 make dev-check
 make dev-real
 ```
 
-The helper creates ignored `Makefile.local` and a project JSON under
-`~/.local/state/vkore-real/projects/`. It refuses to overwrite existing setup.
+The helper creates ignored `Makefile.local`, application `settings.json`, and
+a project JSON under `~/.local/state/vkore-real/projects/`. It refuses to overwrite existing setup.
 It defaults to CPU inference; add `--gpu-layers 99` for a configured GPU build.
 No transcripts, credentials, or Mac-specific runtime state need to be copied.
 
-The native window opens project `qwen9b-q4km-real`. There is no website to open.
+To work on a particular folder, create it first and add `--workspace /absolute/path`
+to the setup command. This optional focus project enables automatic writeback
+inside that folder. Opening a focus project still requires the broker to grant
+its workers specific files or a directory.
+
+After launch, use Settings → Document access → Add folder to authorize folders
+for read-only personal search. No folders are authorized by default. Supported
+text, PPTX slide text and DOCX document text can be discovered; PDF/OCR and
+embedded images are not supported. The filesystem tab shows effective task
+grants, not the searchable library.
+
+The native window opens project `qwen9b-q4km-real` (named Personal assistant
+when no focus folder was supplied). There is no website to open. Watch the
+status bar for model, VM and broker readiness; the brief native animation is
+independent. Prompts entered during startup stay queued for their chat. New
+projects and chats reuse the same processes. Settings’ active model applies
+application-wide; changing it explicitly restarts preparation. If preparation
+fails, correct the reported configuration and use Retry.
 Keep the launch terminal alive. Closing the window stops its harness and child
 processes. Close any existing launcher before launching another on port 8787.
 For a headless machine, use `make dev-debug PROMPT="hello"` instead; this runs
@@ -152,10 +169,13 @@ one actual model/guest prompt and retains diagnostics.
 
 ## Verification of this handoff
 
-The existing vKore workspace tests and Python process-session tests passed on
-the Mac. The native release app launched and the backend health endpoint passed.
-The Linux setup helper is checked in isolation, and the firmware-format change
-is shell-syntax checked. This is not a new Linux end-to-end acceptance pass.
-Prior Kore gate outcomes and the outstanding host-test compilation failure are
-recorded in `docs/real-chat-validation.md`; the guest was not rebuilt for this
-source/artifact publication.
+The September 14 validation rebuilt the guest, passed the host suites and all
+three architecture checks, ran the kernel boot suite with four CPUs/4 GiB and
+the production gate with the two-CPU/2-GiB vKore configuration, and exercised
+the native Mac UI. See the validation report for exact gate results and the
+two-CPU kernel-test distribution failures.
+`make dev-check` verified the published source/image pins. The setup helper
+was checked in isolation, including state-directory creation and refusal to
+overwrite existing configuration. See [shared assistant validation](issue24-validation.md)
+for the live prompt results, startup timings and remaining bounds. Linux end-to-end execution
+has not yet been verified on the destination device.

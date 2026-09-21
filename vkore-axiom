@@ -12,8 +12,8 @@ listen=${VKORE_LISTEN:-127.0.0.1:8787}
 project=${VKORE_PROJECT:-qwen9b-live-kore}
 make_command=${VKORE_MAKE:-${MAKE:-$(command -v gmake || command -v make)}}
 qemu=${QEMU:-$(command -v qemu-system-x86_64 || true)}
-expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-cccf76da11fa397242c587817ec975dce529f40e}
-expected_iso=${VKORE_EXPECTED_ISO_SHA256:-b020d1effa66e7117194141f88a72a2ae831cd615f1977e1d6b34ac3a788e53c}
+expected_kore=${VKORE_EXPECTED_KORE_COMMIT:-3fca0fe1f8578d59c16c465089967ecb268b7f79}
+expected_iso=${VKORE_EXPECTED_ISO_SHA256:-6ae17033d2fca456567c35626618fcf18d60106e401e60276863b4a2df570aa0}
 check_only=0
 no_build=0
 require_real=1
@@ -155,10 +155,12 @@ if test -n "${VKORE_EXPECTED_KORE_DIFF_SHA256:-}"; then
     }
 fi
 
+kore_boot_features=${VKORE_KORE_BOOT_FEATURES:-boot-vkore-headless}
+
 make_value() {
     local name=$1
     "$make_command" -C "$kore_root" --no-print-directory -s \
-        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         --eval '.PHONY: _print_vkore_runtime' \
         --eval "_print_vkore_runtime: ; \$(info \$($name))" \
@@ -192,20 +194,21 @@ test -f "$ovmf_code" && test -f "$ovmf_vars" || {
 
 validate_real_project() {
     local project_file="$state/projects/$project.json"
-    test -f "$project_file" || {
-        echo "real-stack project is missing: $project_file" >&2
-        echo "Create it once in the UI, select llama.cpp, and configure the verified Kore ISO." >&2
-        return 2
-    }
-    python3 - "$project_file" "$iso" <<'PY'
+    python3 - "$project_file" "$iso" "$state/settings.json" <<'PY'
 import json
 import os
 import sys
 
-project_file, verified_iso = sys.argv[1:]
-with open(project_file, encoding="utf-8") as stream:
-    project = json.load(stream)
-inference = project.get("inference") or {}
+project_file, verified_iso, settings_file = sys.argv[1:]
+project = {}
+if os.path.isfile(project_file):
+    with open(project_file, encoding="utf-8") as stream:
+        project = json.load(stream)
+settings = {}
+if os.path.isfile(settings_file):
+    with open(settings_file, encoding="utf-8") as stream:
+        settings = json.load(stream)
+inference = settings.get("default_inference") or project.get("inference") or {}
 problems = []
 if inference.get("backend") != "llama_cpp":
     problems.append("inference.backend must be llama_cpp (deterministic is forbidden)")
@@ -353,24 +356,13 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     qemu-img create -f raw "$usb" 16M >/dev/null
     cp -- "$ovmf_vars" "$vars"
 
-    # Kore's NUMA memory objects and CPU assignments must agree with the
-    # project limits which the daemon applies to -m and -smp.
-    resource_arguments=()
-    if test -f "$state/projects/$project.json"; then
-        project_resources=$(python3 -c '
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as stream:
-    resources = json.load(stream)["resources"]
-cpus, memory = resources["virtual_cpus"], resources["memory_mib"]
-if type(cpus) is not int or type(memory) is not int or cpus < 1 or memory < 1:
-    raise SystemExit("project CPU and memory limits must be positive integers")
-print(cpus, memory)
-' "$state/projects/$project.json")
-        read -r project_cpus project_memory <<<"$project_resources"
-        resource_arguments=("CPUS=$project_cpus" "MEM=$project_memory")
-    fi
+    # Resolve the application resource profile before constructing NUMA nodes.
+    # This matches the daemon's one-time migration of unanimous legacy limits.
+    application_resources=$(python3 "$vkore_root/scripts/runtime-resources.py" "$state")
+    read -r application_cpus application_memory <<<"$application_resources"
+    resource_arguments=("CPUS=$application_cpus" "MEM=$application_memory")
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
-        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+        PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         "${resource_arguments[@]}" \
         NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \
@@ -444,13 +436,15 @@ print(cpus, memory)
     done
 fi
 
-curl -fsS --max-time 2 "$projects_url" | python3 -c '
+# A project is optional for native startup; diagnostics need an exact target.
+project_available=$(curl -fsS --max-time 2 "$projects_url" | python3 -c '
 import json, sys
-wanted = sys.argv[1]
-projects = json.load(sys.stdin)
-if not any(p.get("id") == wanted and not p.get("archived", False) for p in projects):
-    raise SystemExit(f"project {wanted!r} is not available; create it once in the project picker")
-' "$project"
+print("yes" if any(p.get("id") == sys.argv[1] and not p.get("archived", False) for p in json.load(sys.stdin)) else "no")
+' "$project")
+if test "$debug" = 1 && test "$project_available" != yes; then
+    echo "Diagnostic project $project is unavailable" >&2
+    exit 2
+fi
 
 if test "$debug" = 1; then
     project_file="$state/projects/$project.json"
@@ -507,4 +501,6 @@ test -x "$ui" || {
 
 echo "Opening vKore · Axiom for project $project"
 echo "Kore $actual_kore · ISO sha256 $actual_iso"
-"$ui" --server "$listen" --project "$project"
+ui_arguments=(--server "$listen")
+if test "$project_available" = yes; then ui_arguments+=(--project "$project"); fi
+"$ui" "${ui_arguments[@]}"

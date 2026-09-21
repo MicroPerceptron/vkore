@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-pub const PROJECT_SCHEMA_VERSION: u16 = 1;
+pub const PROJECT_SCHEMA_VERSION: u16 = 2;
 const SCAN_ENTRY_LIMIT: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -20,6 +20,10 @@ pub enum WorkspaceAccess {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkspaceConfig {
+    /// Legacy roots migrate to optional focus folders. Virtual projects have
+    /// no user folder; their empty backing directory is application-owned.
+    #[serde(default)]
+    pub virtual_only: bool,
     pub root: PathBuf,
     pub state: PathBuf,
     pub access: WorkspaceAccess,
@@ -184,6 +188,11 @@ impl ProjectStore {
             let bytes = fs::read(&path).map_err(io_error)?;
             let mut serialized: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|error| ProjectError::Io(error.to_string()))?;
+            let legacy_focus = serialized["schema_version"].as_u64() == Some(1);
+            if legacy_focus {
+                serialized["schema_version"] = serde_json::json!(PROJECT_SCHEMA_VERSION);
+                serialized["workspace"]["virtual_only"] = serde_json::json!(false);
+            }
             let had_legacy_quotas = serialized
                 .pointer_mut("/workspace")
                 .and_then(serde_json::Value::as_object_mut)
@@ -193,7 +202,7 @@ impl ProjectStore {
                 });
             let config: ProjectConfig = serde_json::from_value(serialized)
                 .map_err(|error| ProjectError::Io(error.to_string()))?;
-            if had_legacy_quotas {
+            if had_legacy_quotas || legacy_focus {
                 write_project_atomically(&root, &config)?;
             }
             projects.insert(config.id.clone(), config);
@@ -271,6 +280,34 @@ impl ProjectStore {
     ///
     /// Project identity and state are derived from the canonical workspace;
     /// selecting the same folder again resolves to the existing project.
+    pub fn create_virtual(
+        &self,
+        name: &str,
+        inference: InferenceConfig,
+    ) -> Result<NewProjectOutcome, ProjectError> {
+        if name.trim().is_empty() || name.len() > 80 {
+            return Err(ProjectError::InvalidName);
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| ProjectError::Io(e.to_string()))?
+            .as_nanos();
+        let empty = self
+            .root
+            .parent()
+            .unwrap_or(&self.root)
+            .join("virtual-projects")
+            .join(format!("task-{nonce:x}"));
+        fs::create_dir_all(&empty).map_err(io_error)?;
+        let mut outcome = self.create_from_workspace(&empty, inference)?;
+        outcome.project.name = name.trim().into();
+        outcome.project.workspace.virtual_only = true;
+        outcome.project.workspace.access = WorkspaceAccess::ReadOnly;
+        outcome.project = self.save(outcome.project)?;
+        outcome.preflight = preflight(&outcome.project)?;
+        Ok(outcome)
+    }
+
     pub fn create_from_workspace(
         &self,
         workspace: &Path,
@@ -315,6 +352,7 @@ impl ProjectStore {
             id: id.clone(),
             name,
             workspace: WorkspaceConfig {
+                virtual_only: false,
                 root: canonical,
                 state,
                 // A project can make useful edits, but every write remains in

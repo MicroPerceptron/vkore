@@ -4,34 +4,18 @@ The harness API is a loopback-only, versioned client boundary for vKore. The
 native Axiom UI, terminal clients, tests, and third-party local applications can
 drive the same lifecycle.
 
-## Start the reference runtime
+## Start the real runtime
 
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --listen 127.0.0.1:8787 `
-  --state C:\path\to\.vkore
-```
+Use `make dev-real` after following [Linux setup](linux-setup.md), or supply
+`vkore-harnessd --qemu PATH --state STATE` with Kore's complete QEMU topology.
+The native UI connects with `vkore-ui --server 127.0.0.1:8787`; a project is
+optional. `GET /` returns native-client discovery JSON, not an HTML document.
 
-Launch
-`cargo run --release -p vkore-ui -- --server 127.0.0.1:8787 --project PROJECT_ID`.
-The project selector is optional when only one active project exists. The
-loopback harness has no login, bearer token, or browser credential session.
-`GET /` is a JSON native-client discovery response, not an HTML document.
-
-The default backend is the deterministic broker/worker and guest-protocol test
-oracle. To use one caller-supplied llama.cpp server executable and GGUF model
-through the same API:
-
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --listen 127.0.0.1:8787 `
-  --state C:\path\to\.vkore `
-  --llama-server C:\path\to\llama-server.exe `
-  --llama-model C:\path\to\model.gguf
-```
-
-The harness supervises llama.cpp, assigns separate broker and worker slots,
-uses continuous batching, and erases each slot when its route closes.
+The application starts one Kore VM, one llama.cpp server and one resident
+broker immediately using `STATE/settings.json`. Projects and chats attach to
+that runtime. Deterministic backends are contract-test oracles and cannot be
+selected by the production harness. See [ADR 24](adr/0024-shared-assistant.md)
+for ownership, migration, bounds, recovery and task filesystem semantics.
 
 ## Local boundary and provenance
 
@@ -53,6 +37,9 @@ All JSON records use `api_version: 1`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/health` | Loopback liveness |
+| `GET` | `/api/v1/runtime` | Application readiness, process IDs, incarnation and bounded startup history |
+| `POST` | `/api/v1/runtime/retry` | Explicit shared-runtime preparation/recovery |
+| `POST` | `/api/v1/projects/virtual` | Create a project with `{"name":"..."}` and no focus folder |
 | `GET` | `/api/v1/settings` | Read versioned application preferences and available models/fonts |
 | `POST` | `/api/v1/settings` | Atomically update validated application preferences |
 | `GET` | `/api/v1/activity` | Read bounded, privacy-safe local session summaries |

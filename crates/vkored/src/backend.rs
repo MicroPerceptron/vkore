@@ -201,6 +201,7 @@ pub struct SequenceMetrics {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendMetrics {
+    pub process_id: Option<u32>,
     pub incarnation: u64,
     pub restarts: u64,
     pub stale_events: u64,
@@ -288,6 +289,9 @@ pub trait InferenceBackend {
     ) -> Result<BackendEvent, BackendError>;
     fn poll(&mut self, tick: u64) -> Option<BackendEvent>;
     fn metrics(&self) -> BackendMetrics;
+    fn healthy(&mut self) -> bool {
+        true
+    }
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics>;
     /// Whether this exact, open broker sequence can begin a fresh prompt.
     /// Terminal delivery alone is insufficient: cancelled model work may still
@@ -355,6 +359,9 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
     fn metrics(&self) -> BackendMetrics {
         (**self).metrics()
     }
+    fn healthy(&mut self) -> bool {
+        (**self).healthy()
+    }
 
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics> {
         (**self).sequence_metrics(sequence)
@@ -395,6 +402,8 @@ pub enum ObservationKind {
     ModelOutputChunk,
     RawModelCompletion,
     ReturnedModelFields,
+    /// Compact final server timings, retained independently of verbose SSE capture.
+    ModelTiming,
     Validation,
     AssistantMessage,
     ToolCall,

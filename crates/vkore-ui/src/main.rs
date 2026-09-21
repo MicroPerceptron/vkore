@@ -4153,6 +4153,10 @@ fn http(
     stream
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    parse_http_response(&bytes)
+}
+
+fn parse_http_response(bytes: &[u8]) -> Result<ApiResponse, String> {
     let split = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -4172,10 +4176,19 @@ fn http(
         })
         .map(|(_, value)| value.trim().to_owned())
         .unwrap_or_default();
-    let response = ApiResponse {
-        content_type,
-        body: bytes[split + 4..].to_vec(),
+    let transfer_encodings: Vec<_> = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(',').map(str::trim))
+        .collect();
+    let body = &bytes[split + 4..];
+    let body = match transfer_encodings.as_slice() {
+        [] => body.to_vec(),
+        [encoding] if encoding.eq_ignore_ascii_case("chunked") => decode_chunked_body(body)?,
+        _ => return Err("unsupported HTTP transfer encoding".into()),
     };
+    let response = ApiResponse { content_type, body };
     if (200..300).contains(&status) {
         Ok(response)
     } else {
@@ -4184,6 +4197,49 @@ fn http(
             .and_then(|value| value["error"].as_str().map(str::to_owned))
             .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
         Err(format!("HTTP {status}: {detail}"))
+    }
+}
+
+/// HTTP framing can split an SSE record or even a UTF-8 character. Reassemble
+/// bytes before either JSON or SSE parsing, including for HTTP error responses.
+fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>, String> {
+    fn line<'a>(body: &mut &'a [u8]) -> Result<&'a [u8], String> {
+        let end = body
+            .windows(2)
+            .position(|pair| pair == b"\r\n")
+            .ok_or("truncated HTTP chunk line")?;
+        let result = &body[..end];
+        *body = &body[end + 2..];
+        Ok(result)
+    }
+
+    let mut decoded = Vec::new();
+    loop {
+        let size_line = line(&mut body)?;
+        let size_text = size_line
+            .split(|byte| *byte == b';')
+            .next()
+            .unwrap_or_default();
+        if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_hexdigit) {
+            return Err("invalid HTTP chunk size".into());
+        }
+        let size = usize::from_str_radix(
+            std::str::from_utf8(size_text).map_err(|_| "invalid HTTP chunk size")?,
+            16,
+        )
+        .map_err(|_| "invalid HTTP chunk size")?;
+        if size == 0 {
+            // Consume optional trailers and require their terminating blank line.
+            while !line(&mut body)?.is_empty() {}
+            return Ok(decoded);
+        }
+        let end = size.checked_add(2).ok_or("invalid HTTP chunk size")?;
+        let chunk = body.get(..end).ok_or("truncated HTTP chunk data")?;
+        if &chunk[size..] != b"\r\n" {
+            return Err("malformed HTTP chunk terminator".into());
+        }
+        decoded.extend_from_slice(&chunk[..size]);
+        body = &body[end..];
     }
 }
 
@@ -6354,6 +6410,64 @@ mod tests {
 
         assert!(request_receiver.try_recv().is_err());
         assert!(model.status.contains("Close the current project"));
+    }
+
+    #[test]
+    fn native_transport_decodes_chunked_events_before_parsing_json() {
+        let answer = json!({"sequence": 1, "kind": "assistant", "payload": {
+            "text": format!("{}heron 🐦", "x".repeat(10_000))
+        }});
+        let terminal = json!({"sequence": 2, "kind": "prompt_terminal",
+            "payload": {"status": "completed"}});
+        let body = format!("data: {answer}\n\ndata: {terminal}\n\n").into_bytes();
+        // Split both a large JSON record and the UTF-8 bytes of the bird.
+        let bird = body.windows(4).position(|b| b == "🐦".as_bytes()).unwrap();
+        let boundaries = [0, 8192, bird + 1, body.len()];
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\ntRaNsFeR-EnCoDiNg: ChUnKeD\r\n\r\n".to_vec();
+        for bounds in boundaries.windows(2) {
+            let chunk = &body[bounds[0]..bounds[1]];
+            write!(response, "{:x};test=extension\r\n", chunk.len()).unwrap();
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\nX-Test: trailer\r\n\r\n");
+        let events = parse_sse(parse_http_response(&response).unwrap()).unwrap();
+        assert_eq!(events, vec![answer, terminal]);
+    }
+
+    #[test]
+    fn native_transport_preserves_plain_bodies_and_decodes_chunked_errors() {
+        let response = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}",
+        ).unwrap();
+        assert_eq!(response.json().unwrap(), json!({"ok": true}));
+        let error = parse_http_response(
+            b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"error\":\"busy\"}\r\n0\r\n\r\n",
+        ).unwrap_err();
+        assert_eq!(error, "HTTP 409: busy");
+    }
+
+    #[test]
+    fn native_transport_rejects_incomplete_or_invalid_chunk_framing() {
+        for body in [
+            "",
+            "xyz\r\n",
+            "+1\r\na\r\n0\r\n\r\n",
+            "ffffffffffffffffffffffffffffffff\r\n",
+            "5\r\nhi",
+            "1\r\naXX0\r\n\r\n",
+            "1\r\na\r\n",
+            "0\r\n",
+            "0\r\nX-Test: missing-final-blank-line\r\n",
+        ] {
+            assert!(decode_chunked_body(body.as_bytes()).is_err(), "{body:?}");
+        }
+        assert!(
+            parse_http_response(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]

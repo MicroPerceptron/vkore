@@ -25,14 +25,14 @@ override it after migration.
 | --- | --- |
 | vKore branch | `codex/vkore-40-current-kore`, stacked on `codex/issue24-shared-assistant` |
 | Parent PR #41 revision | `506c205ffce90fb831402683c59f980a1568eddd` |
-| Kore revision | `b80e341fa936b6fd93e93293b78afb5946039fb7` |
+| Kore revision | `ac9d0dc9f4aca5213ce5c0d6c494103782508f7e` |
 | ISO | `kore-vkore-merge/target/kore-x86-release.iso` |
-| ISO SHA-256 | `b1a33ecdf4f764ea2a03c822e4f36e514471b8bfca19fd815a5dfef4ae795573` |
+| ISO SHA-256 | `4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51` |
 | Model | `llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf` |
 | Model server | `llama.cpp/build/bin/llama-server` |
 
 Paths above are relative to `/Users/colinhayes/microperceptron` except the vKore
-branch. The source identity is `3ca0edd4120903414aac7d6766bb7093a2a9a9eb`; the
+branch. The source identity is `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`; the
 artifact checkout records its rebuilt payloads separately. `make artifacts`
 reproduces the image using both pinned identities. See
 [current-main validation](current-main-validation.md) for acceptance status;
@@ -40,13 +40,12 @@ fresh native UI checks are pending.
 
 ## Timing and attachment compatibility
 
-Allow five minutes per prompt before declaring it stuck. Cold tool prompts
-took 332 seconds in the earlier source-`79b40ede` headless run, warm file prompts
-about 112–115 seconds, and chat-only arithmetic 79 seconds on this Mac. The
-older guest was faster (roughly 130–155 / 50–60 / 35–40 seconds). Inspect
-progress rather than treating five minutes as a hard failure; validation uses
-a 900-second prompt budget. These are whole-turn times,
-not model token-generation timing.
+Allow five minutes per prompt before declaring it stuck. The pinned source's
+headless run took 282 seconds for cold create, 100 seconds for readback,
+88 seconds for missing-file handling and 77 seconds for arithmetic on this Mac.
+These are one-run whole-turn observations, not token-generation benchmarks.
+Inspect progress rather than treating five minutes as a hard failure;
+validation uses a 900-second prompt budget.
 
 Preparation boots an empty application root. The current guest retains native
 workspace imports and standing write grants, so it cannot safely switch roots

@@ -1,80 +1,80 @@
-# Current-main candidate acceptance — 2026-09-21
+# Current-main candidate acceptance — 2026-09-22
 
 PR #43 remains stacked on PR #41 (`506c205ffce90fb831402683c59f980a1568eddd`).
-This candidate updates the native owners and real guest to Kore #1015's current-main
-integration. Earlier UI results in [the stacked report](stacked-ui-validation.md)
-belong to a different guest and are not acceptance of this pin.
+Earlier results in [the stacked report](stacked-ui-validation.md) and the
+historical headless section below do not certify this candidate.
 
 ## Exact provenance
 
 - Kore main incorporated: `ba0067956d9678f22f44e84a8c2e4d02784d16b8`.
-- Kore source / host native dependency: `3ca0edd4120903414aac7d6766bb7093a2a9a9eb`.
-- Kore artifact checkout: `b80e341fa936b6fd93e93293b78afb5946039fb7`.
-- Libkore export: `e2d7262c2ff4e43c607dc509a016390968e8d9fd`.
-  The guest facade remains pinned to byte-identical `841e46e697dfc6b40a233d8427562dda8472ea39`,
-  with native owners patched to its Kore checkout.
-- Native export source: `3ca0edd4120903414aac7d6766bb7093a2a9a9eb`;
-  all 414 exported files match final Kore source exactly.
+- Kore source / 19 host native owners: `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`.
+- Generated artifact checkout: `ac9d0dc9f4aca5213ce5c0d6c494103782508f7e`.
+- Libkore export: `f9ab51fa803c6fc056f88d09a0fdbde86fc59d28`, exactly 414 files
+  in 31 packages from that source. The guest facade remains pinned to
+  `841e46e697dfc6b40a233d8427562dda8472ea39`, with native owners patched to Kore.
 - ISO: `kore-vkore-merge/target/kore-x86-release.iso`.
-- ISO SHA-256: `b1a33ecdf4f764ea2a03c822e4f36e514471b8bfca19fd815a5dfef4ae795573`.
+- Packaged ISO SHA-256: `4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51`.
 
-The lock separates source identity from the generated-artifact commit. Both
-`KORE_GIT_HEAD` and `KORE_BUILD_STAMP` use the source identity; the reproducible
-packager uses the artifact commit's timestamp and identity for ISO metadata.
+The lock separates source identity from the generated-artifact commit.
+`KORE_GIT_HEAD` and `KORE_BUILD_STAMP` use the source identity; ISO metadata uses
+the artifact commit. Packaging preserved every member's bytes, and `make artifacts`
+reproduced the exact ISO digest. Its SHA-verified production gate passed.
 
-## Validation and remaining gates
+## Current checks and limitations
 
-- vKore release workspace: 368 passed, 0 failed, 3 ignored. Actual release
-  harness, CLI and UI executables built separately against this source.
-- Cargo metadata: 19 unique native owners, all at the pinned HTTPS Git revision;
-  no kernel dependency or local path substitution.
-- Kore: 6,354 host tests passed, 34 ignored; all architecture checks including
-  combined boot-test/userland features passed. Fresh payload/digest checks,
-  separate production and test images, logged boot-test, production gate and
-  two-terminal keyboard/display gate passed.
-- Production and two-terminal guests seeded 35/35 applications, 3/3 libraries,
-  2/2 data entries and passed package/Lua checks. Production SPMD passed with
-  the reserved-core case explicitly unavailable on this QEMU TCG topology.
-- Libkore full local matrix passed, including
-  505 host tests, 39 Miri tests and actual executable-link/composition checks.
-  Fresh remote checks are running on the new export.
-- Canonical ISO: `make artifacts` reproduced the exact digest with unchanged
-  payload bytes; the runtime-only production gate verified that SHA and passed.
-- Fresh native UI acceptance: pending because computer use reports a locked Mac.
-- Remote Kore CI and approving review remain required before merge.
+- Kore's complete local matrix passed: 6,359 host tests (34 ignored), payloads,
+  architecture checks, separate production/test images, logged boot test,
+  production provisioning and two-terminal keyboard/display gate. Production
+  guests seeded 35/35 apps, 3/3 libraries and 2/2 data members.
+- SDK matrix and actual-Kore local/Git composition passed: 505 host tests,
+  seven tooling tests, 39 Miri tests, all target/link/binding checks and exact
+  export verification. SDK validation is not guest or native UI acceptance.
+- vKore's refreshed release workspace passed 368 tests (three ignored), the
+  CLI/harness/UI executable builds and dev-check. Cargo metadata resolves 19
+  unique Kore owners at the pinned
+  HTTPS Git revision, without local substitutions or a kernel dependency.
+- The full desktop guest test failed to reopen Power on recycle round eight.
+  A diagnostic repeated the missing reopen on round three with zero pointer-ring
+  losses, rejected reports or resets; Terminal still opened and Power remained
+  cached. This remains unresolved.
+- [Source hardware run 35690674760](https://github.com/MicroPerceptron/kore/actions/runs/35690674760)
+  completed with 15 of 22 final scenario verdicts passing. Both boot tests passed;
+  Intel production/display/window/VM status/lifecycle/Python lanes passed.
+  AMD production seeded 34/35 apps (projection directory code 73); some AMD
+  jobs failed during startup, others on missing injected input or editor content.
+  Intel returning-main did not reach its description witness. Logs are retained;
+  no missing or failed assertion is counted as a pass.
+- Native vKore computer-use acceptance is pending because the Mac is locked.
+  An approving review is still required before merge. No merge has been performed.
 
-These local guest runs use Intel profile, QEMU TCG and explicit 4k48 paging.
-They do not certify hardware virtualization, physical hardware, 4k57 or Linux.
-Earlier two-terminal runs had an initialization timeout and a 33/35 application
-resize failure. Later diagnostic and clean-source runs passed; the earlier
-failures remain retained without claiming a separate root-cause fix.
+Local guests use Intel QEMU TCG with 4k48 paging. They do not certify physical
+hardware, Linux, or other paging modes. The current main hardware control was
+unavailable; do not label all remote failures branch regressions or CI defects.
 
-## Host-writeback regression
+## Four-prompt real-stack check
 
-Testing the earlier current-main source `7c9f734` found a real defect: UI create
-reported success and guest readback returned `hello`, while the host file was
-empty. DagFS atomic replacement bypassed HostLink's older mutation interception.
-Kore now commits the existing staged replacement through the host transaction
-and requires acknowledgment before guest publication. Refusal retains staging
-for abort/close; uncertain receipts retain reconciliation custody. Seven new
-regressions and the full host suite pass. Earlier real-stack headless verification
-confirmed host writeback at source `79b40ede`; the refreshed run is pending.
-Native UI acceptance remains separate.
+A fresh isolated fixture and backup are under
+`~/.local/state/vkore-main-1015-nvme-optimal`; test.txt starts absent.
+The refreshed headless run completed in session `cli-20280` on the exact packaged
+ISO above. Create produced exactly five host bytes `hello` (independently read).
+Read returned tool text `hello\n`; the assistant added introductory prose, so
+strict exact-output formatting failed. Missing-file handling correctly said the
+file does not exist, without issuing a read call; its harness status was failed.
+Arithmetic returned exactly `42`, with zero tools, executables and resources.
+Whole-turn times were 282.193s, 99.955s, 88.404s and 77.493s respectively.
+The CLI exited 2 for the missing-file status and recovered to complete arithmetic
+in the same guest. These are semantic results with explicit formatting/status
+limits, not an all-green harness or native UI result.
 
-The fresh UI fixture is under `~/.local/state/vkore-main-1015-corrected`; a
-new headless fixture is under `~/.local/state/vkore-main-1015-native-isolation`.
-It contains the isolated input fixtures with `test.txt` initially absent; the
-previous headless state and evidence are retained separately.
-The original user workspace and earlier failure evidence are preserved.
+Raw evidence: `~/.local/state/vkore-main-1015-nvme-optimal/diagnostics/
+run.20260922T061818Z.5qqQwc/`. Independent host-byte proof and parsed plans/tool
+results are retained alongside the integration logs.
 
-Repeat the four handoff prompts in one UI chat, verify exactly `b'hello'` on the
-host, then test a new chat, draft preservation, physical-folder switching and
-cancel/recovery. Judge missing-file text separately from its known failed chip;
-record exact-output formatting honestly. Do not report headless results as UI
-acceptance. Retain launcher logs before stopping the UI stack.
-
-Evidence is retained under `~/.local/state/kore-1015-merge/20260921/` and the
-isolated state directories. See [the handoff](ui-handoff.md) for launch guidance.
+UI checks also require visible replies, multi-chat, unsent drafts across panels,
+Settings and project navigation, workspace isolation and cancellation recovery.
+Do not report headless outcomes as native UI acceptance. Evidence remains under
+`~/.local/state/kore-1015-merge/20260921/` and isolated diagnostics directories.
+See [the handoff](ui-handoff.md) for launch instructions and compatibility limits.
 
 ## Previous headless acceptance (source `79b40ede`)
 
@@ -104,13 +104,3 @@ run.20260922T001645Z.QKFRKj/`. The integration evidence directory contains
 `headless-host-byte-proof.json`, `final-headless-semantic-results.json`, binary
 hashes, exact pins and retained failure logs. These are headless results, not
 computer-use proof of native UI behavior.
-
-## Current runtime correction
-
-The current source settles pending providers before privileged installation and
-lets native file-handle I/O proceed without awaiting unrelated HostLink attach
-or delta refresh. Host-backed handles retain refresh and authority checks.
-Projection diagnostics distinguish cleanup/open/directory/link/close failures
-without increasing timeouts. The longer editor-resize scenario and refreshed
-four-prompt real-stack run are pending. Fresh hardware CI is
-[run 35678116363](https://github.com/MicroPerceptron/kore/actions/runs/35678116363).

@@ -5,7 +5,7 @@ PR #43 incorporates PR #41's application runtime and chat UI. See
 results and compatibility limits. The earlier HTTP failure and fix remain in
 [the September 20 report](ui-computer-use-test.md).
 
-## Launch the verified local stack
+## Launch the pinned local candidate
 
 ```sh
 cd /Users/colinhayes/microperceptron/vkore-current-kore
@@ -13,24 +13,30 @@ make dev-check VKORE_REAL_STACK_LOCK=config/real-stack.lock.mk
 make dev-real VKORE_REAL_STACK_LOCK=config/real-stack.lock.mk
 ```
 
-The explicit lock overrides an ignored local Makefile selecting an older lock.
+Set `KORE_ROOT=/Users/colinhayes/microperceptron/kore-vkore-merge` in
+`Makefile.local` or on the command line. The explicit lock overrides older local
+lock selections. Use an isolated backed-up workspace for validation.
 Use only one launcher, harness, guest and model stack at a time. The launcher
 builds release binaries; `make dev-fast` skips rebuilding. Application settings
 own the installed model/ISO profile. Legacy per-project model settings do not
 override it after migration.
 
-| Component | Verified value |
+| Component | Pinned value |
 | --- | --- |
 | vKore branch | `codex/vkore-40-current-kore`, stacked on `codex/issue24-shared-assistant` |
 | Parent PR #41 revision | `506c205ffce90fb831402683c59f980a1568eddd` |
-| Kore revision | `74ae24c87323dd7bc7ac0a12770c25ec8c8c4852` |
-| ISO | `kore-vkore-port/target/kore-x86-release.iso` |
-| ISO SHA-256 | `bfee034fa6312b3aab799e2b79031f8fe2da57d32028603541f2ee510cb4afac` |
+| Kore revision | `bce68f0cb221b9cc278fe10a345645d4f96145df` |
+| ISO | `kore-vkore-merge/target/kore-x86-release.iso` |
+| ISO SHA-256 | `ed1ec4f3ed967a170a317c58590e7b2269260db5aba436c1c91c31daf335763f` |
 | Model | `llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf` |
 | Model server | `llama.cpp/build/bin/llama-server` |
 
 Paths above are relative to `/Users/colinhayes/microperceptron` except the vKore
-branch. No guest source or ISO rebuild is part of this integration.
+branch. The source identity is `79b40ede71a37984d46f0e16fb9208be1c21b116`; the
+artifact checkout records its rebuilt payloads separately. `make artifacts`
+reproduces the image using both pinned identities. See
+[current-main validation](current-main-validation.md) for acceptance status;
+fresh native UI checks are pending.
 
 ## Timing and attachment compatibility
 

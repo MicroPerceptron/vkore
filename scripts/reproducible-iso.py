@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Use the pinned source timestamp/identity for xorriso packaging metadata."""
+"""Use the pinned checkout timestamp/identity for xorriso packaging metadata."""
 
 from datetime import datetime, timezone
 import os

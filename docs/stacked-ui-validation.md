@@ -1,5 +1,9 @@
 # PR #43 on PR #41: native UI validation — 2026-09-21
 
+This report describes the earlier `74ae24c` guest. The current-main candidate
+and its separate acceptance status are recorded in
+[current-main validation](current-main-validation.md).
+
 The four original prompts were exercised through the native UI in one chat.
 This is **partial acceptance**, not an all-green multi-chat result: strict
 readback formatting, the system folder picker, and a subsequent new-chat file

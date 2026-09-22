@@ -371,6 +371,10 @@ impl ProjectRuntime {
                         brokers: 1,
                         agents: slots.saturating_sub(1),
                         max_output_tokens: config.inference.output_tokens,
+                        // The interactive guest keeps its clock running during
+                        // inference and can request 900,000 ticks. The outer
+                        // prompt deadline still bounds actual wall-clock time.
+                        request_timeout_ticks: 1_000_000,
                         ..BackendLimits::default()
                     };
                     timing_marker(emit, "model_server_starting");

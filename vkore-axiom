@@ -156,11 +156,17 @@ if test -n "${VKORE_EXPECTED_KORE_DIFF_SHA256:-}"; then
 fi
 
 kore_boot_features=${VKORE_KORE_BOOT_FEATURES:-boot-vkore-headless}
+kore_supervisor=${VKORE_KORE_AGENT_SUPERVISOR:-1}
+test "$kore_supervisor" = 1 || {
+    echo "vKore requires an explicitly enabled guest supervisor; ordinary Kore boot does not start one." >&2
+    exit 2
+}
 
 make_value() {
     local name=$1
     "$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
+        KORE_AGENT_SUPERVISOR="$kore_supervisor" KORE_AGENT_SUPERVISOR_PROJECT=1 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         --eval '.PHONY: _print_vkore_runtime' \
         --eval "_print_vkore_runtime: ; \$(info \$($name))" \
@@ -363,6 +369,7 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     resource_arguments=("CPUS=$application_cpus" "MEM=$application_memory")
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
+        KORE_AGENT_SUPERVISOR="$kore_supervisor" KORE_AGENT_SUPERVISOR_PROJECT=1 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         "${resource_arguments[@]}" \
         NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \

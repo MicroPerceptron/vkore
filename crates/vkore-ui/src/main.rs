@@ -2992,8 +2992,9 @@ impl Model {
             Some("model_starting") => "Loading AI model…",
             Some("model_ready" | "preparing") => "Preparing assistant…",
             Some("vm_booting") => "Starting Kore…",
-            Some("hostlink_connected" | "bootstrap_ready") => "Preparing resident broker…",
-            Some("broker_ready") => "Assistant ready",
+            Some("hostlink_connected") => "Connected to Kore…",
+            Some("supervisor_starting" | "bootstrap_ready") => "Starting assistant…",
+            Some("supervisor_ready" | "broker_ready") => "Assistant ready",
             Some("unavailable") => "Assistant connection unavailable",
             Some("failed") => self.runtime_status["message"]
                 .as_str()

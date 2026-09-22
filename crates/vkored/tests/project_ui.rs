@@ -79,6 +79,7 @@ fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() 
         qemu_arguments: Vec::new(),
         project_root: projects,
         require_real: false, // Legacy flag cannot re-enable a test backend.
+        headless_park: false,
     })
     .unwrap();
     let session = SessionState {

@@ -5,17 +5,40 @@ PR #43 incorporates PR #41's application runtime and chat UI. See
 results and compatibility limits. The earlier HTTP failure and fix remain in
 [the September 20 report](ui-computer-use-test.md).
 
-## Launch the pinned local candidate
+## Supervisor overhaul candidate (in progress)
 
-```sh
-cd /Users/colinhayes/microperceptron/vkore-current-kore
-make dev-check VKORE_REAL_STACK_LOCK=config/real-stack.lock.mk
-make dev-real VKORE_REAL_STACK_LOCK=config/real-stack.lock.mk
-```
+The implementation now expects the separately founded supervisor contract v1.
+The accepted revision/hash table below still describes the earlier baseline;
+**new candidate pins and native/UI acceptance have not been promoted yet**.
+Do not treat those baseline hashes as validation of the overhaul.
+
+Ordinary Kore builds default to `KORE_AGENT_SUPERVISOR=0`. A vKore candidate
+must rebuild its kernel and user payloads with `KORE_AGENT_SUPERVISOR=1` and
+`KORE_AGENT_SUPERVISOR_PROJECT=1`. The launcher verifies the accepted image hash;
+a connected transport or an older broker poll is not supervisor readiness.
+
+Supervisor startup, death, timeout and unconfirmed cleanup retain the VM and
+request containment of the exact supervisor generation. Retry observes that
+cleanup and its replacement; it does not replay the failed prompt. A write
+whose response was lost remains an unknown outcome. Workspace/model replacement
+still uses its separate VM replacement path described below; changing only a
+host adapter would leave stale native grants and is not a safe shortcut.
+
+The default runtime keeps the interactive desktop scheduled between prompts
+and during inference. `vkore-harnessd --headless-park` explicitly enables the
+headless parking optimization. Timing measurements from the old automatically
+parked runtime do not predict this mode's performance.
+
+## Previous baseline (historical)
+
+The following table and earlier timing observations describe the pre-overhaul
+baseline. `config/real-stack.lock.mk` still selects that baseline and must not
+be used as acceptance evidence for this branch. Candidate execution and the
+opt-in native restart gate are documented in
+[supervisor acceptance](supervisor-acceptance.md).
 
 Set `KORE_ROOT=/Users/colinhayes/microperceptron/kore-vkore-merge` in
-`Makefile.local` or on the command line. The explicit lock overrides older local
-lock selections. Use an isolated backed-up workspace for validation.
+`Makefile.local` or on the command line. Use an isolated backed-up workspace for validation.
 Use only one launcher, harness, guest and model stack at a time. The launcher
 builds release binaries; `make dev-fast` skips rebuilding. Application settings
 own the installed model/ISO profile. Legacy per-project model settings do not

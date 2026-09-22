@@ -650,6 +650,7 @@ pub struct LinkCore<B, S = ()> {
     frontend_intents: VecDeque<FrontendIntentOwned>,
     frontend_updates: FrontendUpdates,
     frontend_polls: VecDeque<PendingFrontendPoll>,
+    supervisor_contract: Option<SequenceIdentity>,
     frontend_results: VecDeque<FrontendResultOwned>,
     frontend_receipts: VecDeque<PendingFrontendReceipt>,
     frontend_completions: VecDeque<FrontendCompletion>,
@@ -681,6 +682,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             frontend_intents: VecDeque::with_capacity(FRONTEND_INTENTS_MAX),
             frontend_updates: FrontendUpdates::default(),
             frontend_polls: VecDeque::with_capacity(FRONTEND_POLLS_MAX),
+            supervisor_contract: None,
             frontend_results: VecDeque::with_capacity(FRONTEND_RESULTS_MAX),
             frontend_receipts: VecDeque::with_capacity(FRONTEND_RECEIPTS_MAX),
             frontend_completions: VecDeque::with_capacity(FRONTEND_RESULTS_MAX),
@@ -1124,6 +1126,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 let role_matches = matches!(
                     (identity.role, poll.phase),
                     (BackendRole::Broker, FrontendPollPhase::BrokerNext)
+                        | (BackendRole::Broker, FrontendPollPhase::SupervisorNextV1)
                         | (BackendRole::Broker, FrontendPollPhase::BrokerReadyNext)
                         | (BackendRole::Broker, FrontendPollPhase::BrokerRetired)
                         | (BackendRole::Broker, FrontendPollPhase::BrokerControl)
@@ -1299,6 +1302,9 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             tick: self.tick,
         });
         if let Some(pending) = accepted {
+            if pending.poll.phase == FrontendPollPhase::SupervisorNextV1 {
+                self.supervisor_contract = Some(identity);
+            }
             if pending.poll.phase == FrontendPollPhase::BrokerReadyNext {
                 for completion in &mut self.frontend_completions {
                     if completion.intent_id == pending.poll.intent_id
@@ -1313,7 +1319,9 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             self.service_frontend_polls();
             if matches!(
                 pending.poll.phase,
-                FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext
+                FrontendPollPhase::BrokerNext
+                    | FrontendPollPhase::SupervisorNextV1
+                    | FrontendPollPhase::BrokerReadyNext
             ) && self.frontend_polls.iter().any(|candidate| {
                 candidate.identity == pending.identity && candidate.request == pending.request
             }) {
@@ -1482,7 +1490,9 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 continue;
             }
             let intent_index = match pending.poll.phase {
-                FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext => {
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => {
                     // Worker lanes share one broker inference sequence. Keep
                     // planning/founding serial until the worker claims its
                     // intent, then allow the next plan alongside that worker.
@@ -1536,7 +1546,9 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 continue;
             }
             self.frontend_intents[intent_index].state = match pending.poll.phase {
-                FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext => {
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => {
                     self.frontend_intents[intent_index].broker = Some(pending.identity);
                     FrontendIntentState::BrokerClaimed
                 }
@@ -1549,9 +1561,9 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             };
             self.frontend_polls.remove(index);
             self.log(match pending.poll.phase {
-                FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext => {
-                    "frontend intent claimed by broker"
-                }
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => "frontend intent claimed by broker",
                 FrontendPollPhase::AgentClaim => "frontend intent claimed by agent",
                 FrontendPollPhase::BrokerRetired | FrontendPollPhase::BrokerControl => {
                     unreachable!()
@@ -1863,6 +1875,24 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 let _ = self.backend.close(identity);
                 self.frontend_updates.close_broker(identity);
                 self.routes.swap_remove(index);
+                if self.supervisor_contract == Some(identity) {
+                    self.supervisor_contract = None;
+                }
+                self.frontend_polls.retain(|poll| poll.identity != identity);
+                if identity.role == BackendRole::Broker {
+                    // Reap of the exact supervisor ends its claims. A new
+                    // incarnation must never inherit or replay uncertain work.
+                    for intent in &mut self.frontend_intents {
+                        if intent.broker == Some(identity) {
+                            intent.state = FrontendIntentState::Disconnected;
+                        }
+                    }
+                    for completion in &mut self.frontend_completions {
+                        if completion.broker == Some(identity) && !completion.ready {
+                            completion.connection_lost = true;
+                        }
+                    }
+                }
                 // A confirmed route close ends only this generation's pending
                 // receipt delivery. Never redirect it to a replacement route.
                 self.frontend_receipts
@@ -2816,6 +2846,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         self.outbound_bulk.clear();
         self.routes.clear();
         self.frontend_polls.clear();
+        self.supervisor_contract = None;
         self.frontend_receipts.clear();
         for completion in &mut self.frontend_completions {
             if !completion.ready {
@@ -3176,12 +3207,82 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
         self.core.frontend_intents.is_empty()
             && self.core.frontend_receipts.is_empty()
             && self.core.frontend_completions.is_empty()
-            && self.core.frontend_polls.iter().any(|poll| {
+            && self.broker_poll().is_some()
+    }
+
+    /// A transport connection or route advertisement is insufficient. The
+    /// exact broker must have submitted an authenticated frontend poll.
+    pub(crate) fn supervisor_ready(&self) -> Option<SequenceIdentity> {
+        self.broker_poll()
+            .filter(|identity| self.core.supervisor_contract == Some(*identity))
+    }
+
+    fn broker_poll(&self) -> Option<SequenceIdentity> {
+        self.core
+            .frontend_polls
+            .iter()
+            .find(|poll| {
                 matches!(
                     poll.poll.phase,
-                    FrontendPollPhase::BrokerNext | FrontendPollPhase::BrokerReadyNext
-                )
+                    FrontendPollPhase::BrokerNext
+                        | FrontendPollPhase::SupervisorNextV1
+                        | FrontendPollPhase::BrokerReadyNext
+                ) && poll.identity.role == BackendRole::Broker
+                    && self
+                        .core
+                        .routes
+                        .iter()
+                        .any(|route| route.identity == poll.identity)
             })
+            .map(|poll| poll.identity)
+    }
+
+    /// Request containment of one incarnation. The surviving guest launcher
+    /// performs task/descendant reap; only its route closure confirms that step.
+    pub(crate) fn stop_supervisor(&mut self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self
+                .core
+                .routes
+                .iter()
+                .any(|route| route.identity == identity)
+            && self.core.reply_routed(
+                SocketPlane::Control,
+                SUPERVISOR_STOP,
+                identity.route,
+                RequestId::ZERO,
+                &[],
+            )
+    }
+
+    pub(crate) fn supervisor_identity(&self) -> Option<SequenceIdentity> {
+        self.core
+            .routes
+            .iter()
+            .find(|route| route.identity.role == BackendRole::Broker)
+            .map(|route| route.identity)
+    }
+
+    /// The harness has already terminalized interrupted prompts. Release only
+    /// their host bookkeeping after a replacement has proved readiness; never
+    /// requeue text or reinterpret an unknown write outcome as a failed write.
+    pub(crate) fn release_interrupted_frontend(&mut self) {
+        let ids: Vec<_> = self
+            .core
+            .frontend_intents
+            .iter()
+            .map(|row| row.intent_id)
+            .chain(
+                self.core
+                    .frontend_completions
+                    .iter()
+                    .map(|row| row.intent_id),
+            )
+            .filter(|id| self.core.frontend_interrupted(*id))
+            .collect();
+        for id in ids {
+            self.core.cancel_frontend_intent(id);
+        }
     }
 
     pub fn core(&self) -> &LinkCore<B, S> {
@@ -4251,6 +4352,114 @@ mod tests {
                 REFUSED
             );
         }
+    }
+
+    #[test]
+    fn supervisor_contract_requires_the_new_authenticated_poll_and_ends_with_its_route() {
+        let (mut core, _, broker, _) = frontend_race_fixture();
+        assert!(core.supervisor_contract.is_none());
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert!(
+            core.supervisor_contract.is_none(),
+            "legacy init is not the supervisor contract"
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::SupervisorNextV1,
+            FrontendIntentId::ZERO,
+        );
+        assert_eq!(core.supervisor_contract, Some(broker));
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                core.epoch.unwrap(),
+                broker.route,
+                broker.generation.get(),
+                2,
+                RequestId::ZERO,
+                0,
+            ),
+            &[],
+        );
+        assert!(core.supervisor_contract.is_none());
+    }
+
+    #[test]
+    fn supervisor_close_fences_claims_polls_and_published_results_without_replay() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        let result = core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        let mut bytes = [0; INFERENCE_PART_MAX];
+        let len = FrontendPoll {
+            phase: FrontendPollPhase::BrokerNext,
+            intent_id: FrontendIntentId::ZERO,
+        }
+        .encode(&mut bytes)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &bytes[..len]);
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                0,
+                RequestId([75; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert!(
+            core.frontend_polls
+                .iter()
+                .any(|poll| poll.identity == broker)
+        );
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                1,
+                RequestId::ZERO,
+                0,
+            ),
+            &[],
+        );
+        assert!(core.frontend_interrupted(intent));
+        assert!(!core.frontend_ready(intent));
+        assert!(
+            !core
+                .frontend_polls
+                .iter()
+                .any(|poll| poll.identity == broker)
+        );
+        assert!(core.frontend_completions[0].published);
+        assert_eq!(result.intent_id, intent);
+        install_frontend_route(
+            &mut core,
+            epoch,
+            RouteId([91; 16]),
+            TaskGeneration::new(broker.generation.get() + 1).unwrap(),
+            RouteRole::Broker,
+            BackendRole::Broker,
+        );
+        core.service_frontend_polls();
+        assert!(core.frontend_results.is_empty());
+        assert!(core.frontend_interrupted(intent));
     }
 
     #[test]

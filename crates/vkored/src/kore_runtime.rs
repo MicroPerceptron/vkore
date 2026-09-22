@@ -124,6 +124,9 @@ pub struct KoreVmRuntimeConfig {
     pub project_root: PathBuf,
     /// Compatibility flag; live inference is mandatory even when false.
     pub require_real: bool,
+    /// Explicit headless optimization. Interactive desktops must keep running
+    /// both between prompts and while the host performs inference.
+    pub headless_park: bool,
 }
 
 pub struct KoreVmRuntime {
@@ -131,6 +134,7 @@ pub struct KoreVmRuntime {
     runtime: Option<ProjectRuntime>,
     incarnation: u64,
     conversations: BTreeMap<(String, String), ConversationContext>,
+    supervisor: Option<crate::backend::SequenceIdentity>,
 }
 
 struct ProjectRuntime {
@@ -150,6 +154,10 @@ struct ProjectRuntime {
     resource_identities: BTreeMap<String, PathBuf>,
     task_catalog: Vec<(String, bool)>,
     focus_attached: bool,
+    headless_park: bool,
+    recovering: bool,
+    retiring_supervisor: Option<crate::backend::SequenceIdentity>,
+    supervisor_stop_sent: bool,
 }
 
 impl KoreVmRuntime {
@@ -171,6 +179,7 @@ impl KoreVmRuntime {
             runtime: None,
             incarnation: 1,
             conversations: BTreeMap::new(),
+            supervisor: None,
         })
     }
 
@@ -233,7 +242,7 @@ impl KoreVmRuntime {
         let reuse_attachment = runtime.focus_attached
             && discovery.files.is_empty()
             && runtime.config.workspace == project.workspace;
-        if !runtime.daemon.broker_idle() {
+        if runtime.recovering || !runtime.daemon.broker_idle() {
             return Err("Task attachment requires reclaimed broker idle".into());
         }
         runtime.resource_identities = discovery.identities.into_iter().collect();
@@ -442,6 +451,10 @@ impl ProjectRuntime {
             resource_identities: BTreeMap::new(),
             task_catalog: Vec::new(),
             focus_attached: false,
+            headless_park: runtime.headless_park,
+            recovering: false,
+            retiring_supervisor: None,
+            supervisor_stop_sent: false,
         })
     }
 
@@ -475,6 +488,43 @@ impl ProjectRuntime {
         true
     }
 
+    fn recover_supervisor(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
+        if !self.recovering {
+            self.recovering = true;
+            self.retiring_supervisor = self.daemon.supervisor_identity();
+            self.supervisor_stop_sent = false;
+        }
+        // Keep the desktop and native cleanup owner scheduled. A failed QMP
+        // resume is reported, never converted into implicit VM termination.
+        if let Err(error) = self.resume_vm_for_prompt(emit) {
+            emit(
+                EventKind::Error,
+                false,
+                json!({"message":error,"stage":"supervisor_recovery_pending"}),
+            );
+            return;
+        }
+        if !self.supervisor_stop_sent
+            && let Some(identity) = self.retiring_supervisor
+        {
+            self.supervisor_stop_sent = self.daemon.stop_supervisor(identity);
+        }
+    }
+
+    fn observe_supervisor_ready(&mut self) -> Option<crate::backend::SequenceIdentity> {
+        let identity = self.daemon.supervisor_ready()?;
+        if self.recovering {
+            if self.retiring_supervisor == Some(identity) {
+                return None;
+            }
+            self.recovering = false;
+            self.retiring_supervisor = None;
+            self.supervisor_stop_sent = false;
+            self.daemon.release_interrupted_frontend();
+        }
+        Some(identity)
+    }
+
     fn spawn_vm(&mut self) -> Result<(), String> {
         if self.process.is_some() || self.stop_pending {
             return Err("Previous Kore VM termination must be confirmed before startup".into());
@@ -497,7 +547,7 @@ impl ProjectRuntime {
         &mut self,
         emit: &mut dyn FnMut(EventKind, bool, Value),
     ) -> Result<(), String> {
-        if self.vm_suspended {
+        if !self.headless_park || self.vm_suspended {
             return Ok(());
         }
         self.process
@@ -558,7 +608,7 @@ impl ProjectRuntime {
     }
 
     fn model_turn_started(&mut self, emit: &mut dyn FnMut(EventKind, bool, Value)) {
-        if self.vm_suspended || self.vm_pause_due.is_some() {
+        if !self.headless_park || self.vm_suspended || self.vm_pause_due.is_some() {
             return;
         }
         // Keep Kore running long enough to consume the inference admission
@@ -826,7 +876,7 @@ impl KoreVmRuntime {
             timing_marker(emit, "vm_process_spawned");
         } else if let Err(error) = runtime.resume_vm_for_prompt(emit) {
             runtime.daemon.cancel_frontend_intent(intent_id);
-            runtime.stop(emit);
+            runtime.recover_supervisor(emit);
             emit(EventKind::Error, true, json!({"message": error}));
             return PromptStatus::Failed;
         }
@@ -879,7 +929,7 @@ impl KoreVmRuntime {
                         // cancel its own exact inference request. Keep it awake
                         // through publication and native retirement.
                         if let Err(error) = runtime.resume_vm_for_prompt(emit) {
-                            runtime.stop(emit);
+                            runtime.recover_supervisor(emit);
                             emit(EventKind::Error, true, json!({"message": error}));
                             break PromptStatus::Failed;
                         }
@@ -891,7 +941,7 @@ impl KoreVmRuntime {
                     }
                     crate::daemon::FrontendCancelOutcome::AlreadySettled => {}
                     crate::daemon::FrontendCancelOutcome::Unknown => {
-                        runtime.stop(emit);
+                        runtime.recover_supervisor(emit);
                         emit(
                             EventKind::Error,
                             true,
@@ -908,7 +958,7 @@ impl KoreVmRuntime {
                     json!({"message": if cancellation_pending { "Kore cancellation was not confirmed" } else { "Kore prompt timed out" }, "stage": "agent_failure"}),
                 );
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop(emit);
+                runtime.recover_supervisor(emit);
                 break PromptStatus::Failed;
             }
             if !cancellation_pending && pending_terminal.is_none() {
@@ -928,7 +978,7 @@ impl KoreVmRuntime {
                     json!({"message": format!("HostLink failed: {error:?}")}),
                 );
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop(emit);
+                runtime.recover_supervisor(emit);
                 break PromptStatus::Failed;
             }
             runtime.drain_events(emit);
@@ -937,7 +987,7 @@ impl KoreVmRuntime {
                 // The old guest may have applied tool effects. A new link
                 // epoch cannot authorize replay, nor prove native retirement.
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop(emit);
+                runtime.recover_supervisor(emit);
                 emit(
                     EventKind::Error,
                     pending_terminal.is_none(),
@@ -980,7 +1030,7 @@ impl KoreVmRuntime {
                 let attempts = runtime.boot_attempt;
                 let serial_log = runtime.serial_log.clone();
                 runtime.daemon.cancel_frontend_intent(intent_id);
-                runtime.stop(emit);
+                runtime.recover_supervisor(emit);
                 emit(
                     EventKind::Error,
                     true,
@@ -1046,7 +1096,7 @@ impl KoreVmRuntime {
             {
                 timing_marker(emit, "kore_frontend_ready");
                 if let Err(error) = runtime.suspend_vm_between_prompts(emit) {
-                    runtime.stop(emit);
+                    runtime.recover_supervisor(emit);
                     emit(EventKind::Error, true, json!({"message": error}));
                     break PromptStatus::Failed;
                 }
@@ -1061,18 +1111,18 @@ impl KoreVmRuntime {
                 // Reclamation can fail after any response, not only an
                 // explicit worker failure. Never strand a published final,
                 // or pretend the guest confirmed cleanup: report a failed
-                // cleanup and terminate the actual VM after publication.
+                // cleanup and request supervisor containment after publication.
                 emit(
                     EventKind::Error,
                     false,
-                    json!({"message": "Agent cleanup and broker readiness were not confirmed after the response; Kore VM shutdown was requested.", "stage": "agent_cleanup_failed"}),
+                    json!({"message": "Agent cleanup was not confirmed after the response. Supervisor recovery was requested; the desktop remains running. The prompt will not be replayed.", "stage": "agent_cleanup_failed"}),
                 );
                 emit(
                     EventKind::Validation,
                     false,
-                    json!({"stage": "failed_guest_shutdown", "reason": "no guest reclamation confirmation after published response"}),
+                    json!({"stage": "supervisor_recovery_requested", "reason": "no guest reclamation confirmation after published response"}),
                 );
-                runtime.stop(emit);
+                runtime.recover_supervisor(emit);
                 break PromptStatus::Failed;
             }
             let exited = runtime
@@ -1112,51 +1162,53 @@ impl TaskRuntime for KoreVmRuntime {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
         let profile = self.application_profile()?;
-        let _ = self.runtime_status();
-        if let Some(runtime) = self.runtime.as_ref()
-            && runtime.config.inference == profile.inference
-            && runtime.daemon.broker_idle()
+        let started = Instant::now();
+        // A deliberate model/configuration replacement has a different scope
+        // from recovering an optional application inside a healthy OS.
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.config.inference != profile.inference)
         {
-            status(
-                json!({"phase":"broker_ready","incarnation":self.incarnation,
-                "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
-                "ai_server_pid":runtime.daemon.core().backend_metrics().process_id}),
-            );
-            return Ok(());
-        }
-        if let Some(runtime) = self.runtime.as_mut() {
-            runtime.stop_process()?;
-        }
-        if self.runtime.take().is_some() {
+            self.runtime.as_mut().unwrap().stop_process()?;
+            self.runtime = None;
+            self.supervisor = None;
             self.incarnation = self
                 .incarnation
                 .checked_add(1)
                 .ok_or("Runtime generation exhausted")?;
             self.conversations.clear();
-            status(json!({"phase":"preparing","restart":true,"incarnation":self.incarnation}));
         }
-        let started = Instant::now();
-        let mut runtime = ProjectRuntime::start(
-            &self.config,
-            profile,
-            &mut |_, _, payload| {
-                let phase = match payload["stage"].as_str() {
-                    Some("model_server_starting") => "model_starting",
-                    Some("model_server_ready") => "model_ready",
-                    _ => "preparing",
-                };
-                status(
-                    json!({"phase":phase,"detail":payload,"elapsed_ms":started.elapsed().as_millis()}),
-                );
-            },
-            cancelled,
-        )?;
-        status(json!({"phase":"vm_booting","elapsed_ms":started.elapsed().as_millis()}));
-        runtime.spawn_vm()?;
-        let mut boot_timing = BootTiming::new(runtime.serial_log.clone(), true);
+        if self.runtime.is_none() {
+            self.runtime = Some(ProjectRuntime::start(
+                &self.config,
+                profile,
+                &mut |_, _, payload| {
+                    let phase = match payload["stage"].as_str() {
+                        Some("model_server_starting") => "model_starting",
+                        Some("model_server_ready") => "model_ready",
+                        _ => "preparing",
+                    };
+                    status(
+                        json!({"phase":phase,"detail":payload,"elapsed_ms":started.elapsed().as_millis()}),
+                    );
+                },
+                cancelled,
+            )?);
+        }
+        let runtime = self.runtime.as_mut().unwrap();
+        if runtime.process.is_none() {
+            status(json!({"phase":"vm_booting","elapsed_ms":started.elapsed().as_millis()}));
+            runtime.spawn_vm()?;
+        } else if runtime.recovering || !runtime.daemon.broker_idle() {
+            runtime.recover_supervisor(&mut |_, _, detail| {
+                status(json!({"phase":"supervisor_starting","detail":detail}))
+            });
+        }
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut connected = false;
-        while !runtime.daemon.broker_idle() {
+        let mut boot_timing = BootTiming::new(runtime.serial_log.clone(), true);
+        let identity = loop {
             if cancelled() {
                 return Err("Assistant startup cancelled".into());
             }
@@ -1164,17 +1216,32 @@ impl TaskRuntime for KoreVmRuntime {
                 .daemon
                 .tick()
                 .map_err(|e| format!("HostLink preparation failed: {e:?}"))?;
+            if runtime.recovering {
+                runtime.recover_supervisor(&mut |_, _, detail| {
+                    status(json!({"phase":"supervisor_starting","detail":detail}))
+                });
+            }
+            if let Some(identity) = runtime.observe_supervisor_ready()
+                && runtime
+                    .daemon
+                    .with_idle_backend(|backend| backend.healthy())
+                    .unwrap_or(false)
+            {
+                break identity;
+            }
             boot_timing.poll(&mut |_, _, detail| {
                 status(json!({
-                    "phase": if connected { "hostlink_connected" } else { "vm_booting" },
-                    "detail": detail,
-                    "elapsed_ms": started.elapsed().as_millis(),
-                }));
+                    "phase":if connected { "supervisor_starting" } else { "vm_booting" },
+                    "detail":detail,"elapsed_ms":started.elapsed().as_millis(),
+                }))
             });
             if !connected && runtime.daemon.core().epoch().is_some() {
                 connected = true;
                 status(
                     json!({"phase":"hostlink_connected","elapsed_ms":started.elapsed().as_millis()}),
+                );
+                status(
+                    json!({"phase":"supervisor_starting","elapsed_ms":started.elapsed().as_millis()}),
                 );
             }
             if runtime
@@ -1183,24 +1250,32 @@ impl TaskRuntime for KoreVmRuntime {
                 .and_then(|p| p.try_wait().ok().flatten())
                 .is_some()
             {
+                runtime.process = None;
+                runtime.daemon.force_disconnect();
                 return Err("Kore exited during application startup".into());
             }
             if Instant::now() >= deadline {
-                return Err(
-                    "Kore did not reach resident broker readiness; verify the headless guest image"
-                        .into(),
-                );
+                // Retain the OS process and all pending native owners. Retry
+                // observes/retires the supervisor; it does not discard the VM.
+                return Err("Supervisor readiness was not confirmed. Kore remains running; verify that the selected image explicitly enables the supervisor.".into());
             }
             std::thread::sleep(DEFAULT_TICK);
+        };
+        if self.supervisor.is_some_and(|previous| previous != identity) {
+            self.incarnation = self
+                .incarnation
+                .checked_add(1)
+                .ok_or("Runtime generation exhausted")?;
+            self.conversations.clear();
         }
-        status(json!({"phase":"bootstrap_ready","elapsed_ms":started.elapsed().as_millis()}));
+        self.supervisor = Some(identity);
         runtime.drain_events(&mut |_, _, _| {});
-        let pid = runtime.process.as_ref().map(QemuProcess::id);
-        let ai_server_pid = runtime.daemon.core().backend_metrics().process_id;
         runtime.suspend_vm_between_prompts(&mut |_, _, _| {})?;
-        self.runtime = Some(runtime);
         status(
-            json!({"phase":"broker_ready","incarnation":self.incarnation,"qemu_pid":pid,"ai_server_pid":ai_server_pid,
+            json!({"phase":"supervisor_ready","incarnation":self.incarnation,
+            "supervisor_generation":identity.generation.get(),
+            "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
+            "ai_server_pid":runtime.daemon.core().backend_metrics().process_id,
             "elapsed_ms":started.elapsed().as_millis()}),
         );
         Ok(())
@@ -1341,20 +1416,45 @@ impl TaskRuntime for KoreVmRuntime {
             .process
             .as_mut()
             .is_some_and(|process| matches!(process.try_wait(), Ok(None)));
-        let healthy = alive
-            && runtime
-                .daemon
-                .with_idle_backend(|backend| backend.healthy())
-                .unwrap_or(false);
-        if !healthy {
-            self.runtime.take();
+        if !alive {
+            runtime.process = None;
+            runtime.daemon.force_disconnect();
+            return Some(json!({"phase":"failed","incarnation":self.incarnation,
+                "message":"Kore is no longer running. Retry starts the OS again."}));
+        }
+        // Keep transport/retirement progressing while the UI is idle. Never
+        // drop the VM just because the optional supervisor lacks readiness.
+        if let Err(error) = runtime.daemon.tick() {
+            runtime.recover_supervisor(&mut |_, _, _| {});
+            return Some(
+                json!({"phase":"failed","message":format!("HostLink recovery pending: {error:?}. Kore remains running.")}),
+            );
+        }
+        if runtime.recovering {
+            runtime.recover_supervisor(&mut |_, _, _| {});
+        }
+        let Some(identity) = runtime.observe_supervisor_ready() else {
+            return Some(json!({"phase":"failed","incarnation":self.incarnation,
+                "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
+                "message":"Supervisor readiness is unavailable. Kore remains running. Retry recovers the supervisor without replaying any prompt."}));
+        };
+        if self.supervisor.is_some_and(|previous| previous != identity) {
             self.incarnation = self.incarnation.saturating_add(1);
             self.conversations.clear();
-            return Some(json!({"phase":"failed", "incarnation":self.incarnation,
-                "message":"Shared assistant runtime lost readiness. Retry restarts it and clears affected task contexts."}));
+        }
+        self.supervisor = Some(identity);
+        if !runtime
+            .daemon
+            .with_idle_backend(|backend| backend.healthy())
+            .unwrap_or(false)
+        {
+            return Some(json!({"phase":"failed","incarnation":self.incarnation,
+                "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
+                "message":"The model backend is not ready. Kore remains running while model recovery is checked."}));
         }
         Some(
-            json!({"phase":"broker_ready", "incarnation":self.incarnation,
+            json!({"phase":"supervisor_ready","incarnation":self.incarnation,
+            "supervisor_generation":identity.generation.get(),
             "qemu_pid":runtime.process.as_ref().map(QemuProcess::id),
             "ai_server_pid":runtime.daemon.core().backend_metrics().process_id}),
         )
@@ -1677,6 +1777,10 @@ mod tests {
             resource_identities: BTreeMap::new(),
             task_catalog: Vec::new(),
             focus_attached: false,
+            headless_park: false,
+            recovering: false,
+            retiring_supervisor: None,
+            supervisor_stop_sent: false,
         };
         let pid = runtime.process.as_ref().unwrap().id();
         assert!(runtime.spawn_vm().is_err());
@@ -1706,6 +1810,20 @@ mod tests {
         assert!(runtime.process.is_some());
         assert_eq!(runtime.boot_attempt, 3);
         assert!(std::fs::read(&serial).unwrap().is_empty());
+        let surviving_pid = runtime.process.as_ref().unwrap().id();
+        runtime.recover_supervisor(&mut |_, _, _| {});
+        assert!(runtime.recovering);
+        assert_eq!(runtime.process.as_ref().unwrap().id(), surviving_pid);
+        assert!(
+            runtime
+                .process
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(runtime.observe_supervisor_ready().is_none());
         assert!(runtime.stop(&mut |_, _, _| panic!("unexpected stop failure")));
         assert!(runtime.process.is_none());
         assert_eq!(runtime.boot_attempt, 0);
@@ -1761,6 +1879,7 @@ mod tests {
             qemu_arguments: vec![],
             project_root: root.path().join("projects"),
             require_real: true,
+            headless_park: false,
         })
         .unwrap();
         let session = SessionState {
@@ -1945,3 +2064,6 @@ mod tests {
         assert!(tail.contains("first-shell: FAIL"));
     }
 }
+
+#[cfg(test)]
+mod native_supervisor_gate;

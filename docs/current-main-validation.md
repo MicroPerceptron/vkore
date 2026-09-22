@@ -7,22 +7,24 @@ historical headless section below do not certify this candidate.
 ## Exact provenance
 
 - Kore main incorporated: `ba0067956d9678f22f44e84a8c2e4d02784d16b8`.
-- Kore guest source: `91c2b1b5cf5c4d5265d8c0226485fadcc70b0ef8`.
+- Kore guest source: `c1a0fd568bcac9b94bd9e53759bc632c4085d195`.
 - Retained 19 host native owners: `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`.
-- Generated artifact checkout: `ee357da4a0fa296482e60ccd2afa25eef184c3fb`.
+- Generated artifact checkout: `6d01d91e74b70c19cde1bbfe36d203064827b6a0`.
 - Libkore export: `f9ab51fa803c6fc056f88d09a0fdbde86fc59d28`, exactly 414 files
   in 31 packages from the retained host source. The guest facade remains pinned to
   `841e46e697dfc6b40a233d8427562dda8472ea39`, with native owners patched to Kore.
 - ISO: `kore-vkore-merge/target/kore-x86-release.iso`.
-- Packaged ISO SHA-256: `7e43929c73c0740ea859325000fed4bede3c3c3d03b571ca533d1387d838238a`.
+- Packaged ISO SHA-256: `843bcf183326cb0b22feea80ba6d090b23ab781a13b70890dd34f464d3e3517f`.
 
 The lock separates source identity from the generated-artifact commit.
 `KORE_GIT_HEAD` and `KORE_BUILD_STAMP` use the source identity; ISO metadata uses
 the artifact commit. Packaging preserved every member's bytes, and `make artifacts`
 reproduced the exact ISO digest. Its SHA-verified production gate passed.
 
-The guest change preserves stable dock presses across unrelated window layout
-changes. It changes no Rust implementation bytes in the 31 SDK packages or 19
+The guest settles retained provider requests before TreeAcquire, preventing
+retirement of a previous application from making its next acquisition report
+ImageUnavailable. Stable dock presses also survive unrelated window layout
+changes. These corrections change no Rust implementation bytes in the 31 SDK packages or 19
 vKore host owners; only an inherited generated DagFS boot digest differs in
 those directories. Their validated source pins and host binaries remain in place.
 
@@ -39,12 +41,15 @@ those directories. Their validated source pins and host binaries remain in place
   CLI/harness/UI executable builds and dev-check. Cargo metadata resolves 19
   unique Kore owners at the pinned
   HTTPS Git revision, without local substitutions or a kernel dependency.
-- The dock regression and its cancellation counterparts pass; all 214 focused
-  UI/compositor tests pass (one ignored). The unchanged extended desktop test
-  still failed on Power reopen seven after six successful rounds. Terminal
-  opened afterward and reported cached Power. The original 600-second deadline
-  and inputs were preserved. This live failure remains unresolved; the local
-  invalidation fix does not establish its cause.
+- The original extended desktop gate passed all twelve Power/Terminal recycle
+  rounds, dirty-buffer relayout, saved-file reopen and five concurrent windows.
+  Two further runs each passed the twelve recycle rounds and file checks. One
+  then exposed a capacity-driver race: Power took focus during `window list`.
+  The driver now observes application admission and Terminal focus before
+  typing. Its corrected capacity phase passed in a fresh SHA-verified guest;
+  all 42 tooling tests pass, including captured-frame focus regressions. This
+  focused result is not another complete desktop run. An earlier cursor-delivery
+  failure remains recorded; input reliability is not claimed universally fixed.
 - [Source hardware run 35690674760](https://github.com/MicroPerceptron/kore/actions/runs/35690674760)
   completed with 15 of 22 final scenario verdicts passing. Both boot tests passed;
   Intel production/display/window/VM status/lifecycle/Python lanes passed.

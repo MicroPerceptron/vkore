@@ -25,14 +25,14 @@ override it after migration.
 | --- | --- |
 | vKore branch | `codex/vkore-40-current-kore`, stacked on `codex/issue24-shared-assistant` |
 | Parent PR #41 revision | `506c205ffce90fb831402683c59f980a1568eddd` |
-| Kore revision | `ee357da4a0fa296482e60ccd2afa25eef184c3fb` |
+| Kore revision | `6d01d91e74b70c19cde1bbfe36d203064827b6a0` |
 | ISO | `kore-vkore-merge/target/kore-x86-release.iso` |
-| ISO SHA-256 | `7e43929c73c0740ea859325000fed4bede3c3c3d03b571ca533d1387d838238a` |
+| ISO SHA-256 | `843bcf183326cb0b22feea80ba6d090b23ab781a13b70890dd34f464d3e3517f` |
 | Model | `llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf` |
 | Model server | `llama.cpp/build/bin/llama-server` |
 
 Paths above are relative to `/Users/colinhayes/microperceptron` except the vKore
-branch. The guest source identity is `91c2b1b5cf5c4d5265d8c0226485fadcc70b0ef8`; the
+branch. The guest source identity is `c1a0fd568bcac9b94bd9e53759bc632c4085d195`; the
 artifact checkout records its rebuilt payloads separately. `make artifacts`
 reproduces the image using both pinned identities. See
 [current-main validation](current-main-validation.md) for acceptance status;

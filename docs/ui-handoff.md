@@ -25,14 +25,14 @@ override it after migration.
 | --- | --- |
 | vKore branch | `codex/vkore-40-current-kore`, stacked on `codex/issue24-shared-assistant` |
 | Parent PR #41 revision | `506c205ffce90fb831402683c59f980a1568eddd` |
-| Kore revision | `ac9d0dc9f4aca5213ce5c0d6c494103782508f7e` |
+| Kore revision | `ee357da4a0fa296482e60ccd2afa25eef184c3fb` |
 | ISO | `kore-vkore-merge/target/kore-x86-release.iso` |
-| ISO SHA-256 | `4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51` |
+| ISO SHA-256 | `7e43929c73c0740ea859325000fed4bede3c3c3d03b571ca533d1387d838238a` |
 | Model | `llama.cpp/gguf/Qwen3.5-9B-Q4_K_M.gguf` |
 | Model server | `llama.cpp/build/bin/llama-server` |
 
 Paths above are relative to `/Users/colinhayes/microperceptron` except the vKore
-branch. The source identity is `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`; the
+branch. The guest source identity is `91c2b1b5cf5c4d5265d8c0226485fadcc70b0ef8`; the
 artifact checkout records its rebuilt payloads separately. `make artifacts`
 reproduces the image using both pinned identities. See
 [current-main validation](current-main-validation.md) for acceptance status;
@@ -40,8 +40,8 @@ fresh native UI checks are pending.
 
 ## Timing and attachment compatibility
 
-Allow five minutes per prompt before declaring it stuck. The pinned source's
-headless run took 282 seconds for cold create, 100 seconds for readback,
+Allow five minutes per prompt before declaring it stuck. The previous guest source `68dda5a` with the same host binaries
+had a headless run that took 282 seconds for cold create, 100 seconds for readback,
 88 seconds for missing-file handling and 77 seconds for arithmetic on this Mac.
 These are one-run whole-turn observations, not token-generation benchmarks.
 Inspect progress rather than treating five minutes as a hard failure;

@@ -4,8 +4,8 @@
 # ISO from the reviewed commit, verify the resulting image, and commit both
 # updates together. The developer launcher never checks out this revision or
 # changes a Kore worktree automatically.
-VKORE_EXPECTED_KORE_COMMIT := ac9d0dc9f4aca5213ce5c0d6c494103782508f7e
+VKORE_EXPECTED_KORE_COMMIT := ee357da4a0fa296482e60ccd2afa25eef184c3fb
 # Source identity stays fixed when the generated payloads are committed.
-VKORE_EXPECTED_KORE_SOURCE_COMMIT := 68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf
-VKORE_EXPECTED_ISO_SHA256 := 4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51
+VKORE_EXPECTED_KORE_SOURCE_COMMIT := 91c2b1b5cf5c4d5265d8c0226485fadcc70b0ef8
+VKORE_EXPECTED_ISO_SHA256 := 7e43929c73c0740ea859325000fed4bede3c3c3d03b571ca533d1387d838238a
 VKORE_KORE_ISO_RELATIVE := target/kore-x86-release.iso

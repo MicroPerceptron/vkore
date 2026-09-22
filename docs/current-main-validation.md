@@ -7,36 +7,44 @@ historical headless section below do not certify this candidate.
 ## Exact provenance
 
 - Kore main incorporated: `ba0067956d9678f22f44e84a8c2e4d02784d16b8`.
-- Kore source / 19 host native owners: `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`.
-- Generated artifact checkout: `ac9d0dc9f4aca5213ce5c0d6c494103782508f7e`.
+- Kore guest source: `91c2b1b5cf5c4d5265d8c0226485fadcc70b0ef8`.
+- Retained 19 host native owners: `68dda5a411d4d1ba0d015b5f341e2b5bfa0a5daf`.
+- Generated artifact checkout: `ee357da4a0fa296482e60ccd2afa25eef184c3fb`.
 - Libkore export: `f9ab51fa803c6fc056f88d09a0fdbde86fc59d28`, exactly 414 files
-  in 31 packages from that source. The guest facade remains pinned to
+  in 31 packages from the retained host source. The guest facade remains pinned to
   `841e46e697dfc6b40a233d8427562dda8472ea39`, with native owners patched to Kore.
 - ISO: `kore-vkore-merge/target/kore-x86-release.iso`.
-- Packaged ISO SHA-256: `4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51`.
+- Packaged ISO SHA-256: `7e43929c73c0740ea859325000fed4bede3c3c3d03b571ca533d1387d838238a`.
 
 The lock separates source identity from the generated-artifact commit.
 `KORE_GIT_HEAD` and `KORE_BUILD_STAMP` use the source identity; ISO metadata uses
 the artifact commit. Packaging preserved every member's bytes, and `make artifacts`
 reproduced the exact ISO digest. Its SHA-verified production gate passed.
 
+The guest change preserves stable dock presses across unrelated window layout
+changes. It changes no Rust implementation bytes in the 31 SDK packages or 19
+vKore host owners; only an inherited generated DagFS boot digest differs in
+those directories. Their validated source pins and host binaries remain in place.
+
 ## Current checks and limitations
 
-- Kore's complete local matrix passed: 6,359 host tests (34 ignored), payloads,
+- Kore's complete local matrix passed: 6,363 host tests (34 ignored), payloads,
   architecture checks, separate production/test images, logged boot test,
   production provisioning and two-terminal keyboard/display gate. Production
   guests seeded 35/35 apps, 3/3 libraries and 2/2 data members.
 - SDK matrix and actual-Kore local/Git composition passed: 505 host tests,
   seven tooling tests, 39 Miri tests, all target/link/binding checks and exact
   export verification. SDK validation is not guest or native UI acceptance.
-- vKore's refreshed release workspace passed 368 tests (three ignored), the
+- The retained vKore release workspace passed 368 tests (three ignored), the
   CLI/harness/UI executable builds and dev-check. Cargo metadata resolves 19
   unique Kore owners at the pinned
   HTTPS Git revision, without local substitutions or a kernel dependency.
-- The full desktop guest test failed to reopen Power on recycle round eight.
-  A diagnostic repeated the missing reopen on round three with zero pointer-ring
-  losses, rejected reports or resets; Terminal still opened and Power remained
-  cached. This remains unresolved.
+- The dock regression and its cancellation counterparts pass; all 214 focused
+  UI/compositor tests pass (one ignored). The unchanged extended desktop test
+  still failed on Power reopen seven after six successful rounds. Terminal
+  opened afterward and reported cached Power. The original 600-second deadline
+  and inputs were preserved. This live failure remains unresolved; the local
+  invalidation fix does not establish its cause.
 - [Source hardware run 35690674760](https://github.com/MicroPerceptron/kore/actions/runs/35690674760)
   completed with 15 of 22 final scenario verdicts passing. Both boot tests passed;
   Intel production/display/window/VM status/lifecycle/Python lanes passed.
@@ -51,12 +59,14 @@ Local guests use Intel QEMU TCG with 4k48 paging. They do not certify physical
 hardware, Linux, or other paging modes. The current main hardware control was
 unavailable; do not label all remote failures branch regressions or CI defects.
 
-## Four-prompt real-stack check
+## Previous four-prompt real-stack check (source `68dda5a`)
 
 A fresh isolated fixture and backup are under
 `~/.local/state/vkore-main-1015-nvme-optimal`; test.txt starts absent.
-The refreshed headless run completed in session `cli-20280` on the exact packaged
-ISO above. Create produced exactly five host bytes `hello` (independently read).
+This headless run completed in session `cli-20280` on the previous guest artifact
+`ac9d0dc9f4aca5213ce5c0d6c494103782508f7e`, ISO SHA-256
+`4fb3f53c3d511c0b14fe8570bd525e3b2c5b5aff328a4d2e7dcea819e4ed0a51`.
+It is retained compatibility evidence, not a fresh run on the new guest image. Create produced exactly five host bytes `hello` (independently read).
 Read returned tool text `hello\n`; the assistant added introductory prose, so
 strict exact-output formatting failed. Missing-file handling correctly said the
 file does not exist, without issuing a read call; its harness status was failed.

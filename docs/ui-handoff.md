@@ -41,8 +41,11 @@ fresh native UI checks are pending.
 ## Timing and attachment compatibility
 
 Allow five minutes per prompt before declaring it stuck. Cold tool prompts
-have taken roughly 130–155 seconds, warm file prompts about 50–60 seconds, and
-chat-only prompts about 35–40 seconds on this Mac. These are whole-turn times,
+took 332 seconds in the final current-main headless run, warm file prompts
+about 112–115 seconds, and chat-only arithmetic 79 seconds on this Mac. The
+older guest was faster (roughly 130–155 / 50–60 / 35–40 seconds). Inspect
+progress rather than treating five minutes as a hard failure; validation uses
+a 900-second prompt budget. These are whole-turn times,
 not model token-generation timing.
 
 Preparation boots an empty application root. The current guest retains native

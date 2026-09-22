@@ -56,8 +56,8 @@ empty. DagFS atomic replacement bypassed HostLink's older mutation interception.
 Kore now commits the existing staged replacement through the host transaction
 and requires acknowledgment before guest publication. Refusal retains staging
 for abort/close; uncertain receipts retain reconciliation custody. Seven new
-regressions and the full host suite pass, but they do not replace fresh end-to-end
-host-byte verification or native UI acceptance.
+regressions and the full host suite pass. Fresh real-stack headless verification
+now confirms host writeback; native UI acceptance remains separate.
 
 The fresh UI fixture is under `~/.local/state/vkore-main-1015-corrected`; a
 separate headless fixture is under `~/.local/state/vkore-main-1015-headless`.
@@ -72,3 +72,28 @@ acceptance. Retain launcher logs before stopping the UI stack.
 
 Evidence is retained under `~/.local/state/kore-1015-merge/20260921/` and the
 isolated state directories. See [the handoff](ui-handoff.md) for launch guidance.
+
+## Final headless acceptance
+
+At vKore `e41b32a`, session `cli-8151` used one real QEMU guest (PID 9879)
+for all four prompts, after the initial focus-folder attachment restart.
+
+| Prompt | Observed result | Whole turn |
+| --- | --- | --- |
+| Create test.txt containing hello | Completed; independent host bytes exactly `b'hello'` (5 bytes). | 332.08 s |
+| Read exact contents | Tool read `hello`; answer added introductory prose, so strict exact-output formatting fails. | 115.09 s |
+| Read missing-file.txt | Correctly reported that it does not exist; known failed prompt status. | 112.48 s |
+| 17 plus 25, number only | Exactly `42`; zero tool calls, executables and resources. | 78.61 s |
+
+The CLI exits 2 because of the expected missing-file failure status; this is not
+an all-green harness run. It recovered to complete arithmetic in the same guest.
+The initial attempt failed before tools because the manually copied fixture
+lacked its transaction-state directory. Normal project creation supplies it;
+the fixture was corrected and the failed evidence retained. No product change
+was made for that setup error.
+
+Final raw evidence: `~/.local/state/vkore-main-1015-headless/diagnostics/
+run.20260922T001645Z.QKFRKj/`. The integration evidence directory contains
+`headless-host-byte-proof.json`, `final-headless-semantic-results.json`, binary
+hashes, exact pins and retained failure logs. These are headless results, not
+computer-use proof of native UI behavior.

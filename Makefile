@@ -70,7 +70,7 @@ artifacts:
 	  echo 'Create or select a separate Kore worktree at that commit; this target will not change it.' >&2; \
 	  exit 2; \
 	}
-	$(VKORE_MAKE) -C "$(KORE_ROOT)" iso-boot-x86 \
+	$(VKORE_MAKE) -C "$(KORE_ROOT)" prepare-boot-gate-x86 \
 	  PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
 	  BOOT_FEATURES="$(VKORE_KORE_BOOT_FEATURES)" \
 	  KORE_AGENT_SUPERVISOR="$(VKORE_KORE_AGENT_SUPERVISOR)" KORE_AGENT_SUPERVISOR_PROJECT=1 \

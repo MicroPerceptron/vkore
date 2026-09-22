@@ -47,3 +47,14 @@ This idle lifecycle gate does not establish desktop input responsiveness,
 in-flight tool cancellation, unknown-write handling, per-resource reclamation
 accounting or process isolation. Those remain distinct native/UI acceptance
 scenarios in the coordinated plan. Save failed runs as well as successful ones.
+
+## Payload configuration
+
+Committed Kore payloads belong to the ordinary disabled configuration. Building
+the enabled candidate must rebuild the user/service payloads, stamp their
+digests and then build the kernel/ISO with the same selectors. vKore's
+`make artifacts` therefore uses `prepare-boot-gate-x86`, rather than invoking
+only the final ISO recipe. The enabled build may leave generated payload and
+digest changes in the Kore checkout; the candidate lock must record their
+exact diff hash as well as the ISO hash. Do not commit enabled service payloads
+as the ordinary disabled baseline or treat the old baseline lock as compatible.

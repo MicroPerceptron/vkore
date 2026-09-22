@@ -64,6 +64,31 @@ Local guests use Intel QEMU TCG with 4k48 paging. They do not certify physical
 hardware, Linux, or other paging modes. The current main hardware control was
 unavailable; do not label all remote failures branch regressions or CI defects.
 
+## Current-image four-prompt real-stack check
+
+At vKore `c38d69d30ee0b32e64f2995555fb4c15756b041f`, the pinned guest above
+completed the four prompts in session `cli-36550`, using QEMU PID 37807 for
+all four after the initial focus-folder attachment restart. The isolated
+workspace and its pre-test backup are under
+`~/.local/state/vkore-main-1015-tree-acquire`.
+
+| Prompt | Observed result | Whole turn |
+| --- | --- | --- |
+| Create test.txt containing hello | Completed; independently read host bytes exactly `hello` (5 bytes). | 282.179 s |
+| Read exact contents | Tool returned `hello\n`; assistant added introductory prose, so strict formatting failed. | 100.497 s |
+| Read missing-file.txt | Correctly reported absence without a read tool call; known failed harness status. | 88.856 s |
+| 17 plus 25, number only | Exactly `42`; zero tool calls, executable grants or resource grants. | 76.722 s |
+
+The CLI exited 2 because of the missing-file status, then shut down normally.
+It recovered from that prompt to complete arithmetic in the same guest. This
+is fresh headless compatibility evidence for source `c1a0fd568`, not an
+all-green harness result or native UI acceptance.
+
+Raw events and retained guest logs are in
+`~/.local/state/vkore-main-1015-tree-acquire/diagnostics/run.20260922T093057Z.0k9FWR/`.
+Independent host-byte, session/PID and parsed tool-result proofs are retained
+under `~/.local/state/kore-1015-merge/20260921/tree-acquire-headless-*`.
+
 ## Previous four-prompt real-stack check (source `68dda5a`)
 
 A fresh isolated fixture and backup are under

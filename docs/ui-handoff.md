@@ -40,9 +40,11 @@ fresh native UI checks are pending.
 
 ## Timing and attachment compatibility
 
-Allow five minutes per prompt before declaring it stuck. The previous guest source `68dda5a` with the same host binaries
-had a headless run that took 282 seconds for cold create, 100 seconds for readback,
-88 seconds for missing-file handling and 77 seconds for arithmetic on this Mac.
+Allow five minutes per prompt before declaring it stuck. The current guest source
+`c1a0fd568` completed a fresh headless run in 282 seconds for cold create,
+100 seconds for readback, 89 seconds for missing-file handling and 77 seconds
+for arithmetic on this Mac. Host bytes were independently verified as `hello`;
+readback added prose and missing-file handling retained its known failed status.
 These are one-run whole-turn observations, not token-generation benchmarks.
 Inspect progress rather than treating five minutes as a hard failure;
 validation uses a 900-second prompt budget.

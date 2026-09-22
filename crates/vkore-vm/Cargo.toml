@@ -10,7 +10,7 @@ description = "QEMU lifecycle and HostLink topology for Kore guests."
 name = "vkore_vm"
 path = "src/lib.rs"
 
-[target.'cfg(unix)'.dependencies]
+[dependencies]
 tempfile = "3.23.0"
 
 [dev-dependencies]

@@ -107,10 +107,16 @@ impl QemuConfig {
                 format!("Kore ISO does not exist: {}", self.kore_iso.display()),
             ));
         }
+        // Never mount the mutable build output. A later build can truncate the
+        // same inode while QEMU still has it open. Copy (not hard-link) into a
+        // private directory whose lifetime follows this exact process.
+        let image_directory = tempfile::Builder::new().prefix("vkore-image.").tempdir()?;
+        let image = image_directory.path().join("kore.iso");
+        std::fs::copy(&self.kore_iso, &image)?;
         let mut command = Command::new(&self.executable);
         command.args(self.arguments);
         command.args(self.hostlink_arguments);
-        command.arg("-cdrom").arg(self.kore_iso);
+        command.arg("-cdrom").arg(image);
         #[cfg(unix)]
         let qmp = {
             let directory = tempfile::Builder::new().prefix("vkore-qmp.").tempdir()?;
@@ -134,6 +140,7 @@ impl QemuConfig {
         };
         command.spawn().map(|child| QemuProcess {
             child,
+            _image_directory: image_directory,
             #[cfg(unix)]
             qmp,
         })
@@ -152,6 +159,8 @@ struct QmpControl {
 #[derive(Debug)]
 pub struct QemuProcess {
     child: Child,
+    // Drop runs process retirement before this backing is removed.
+    _image_directory: tempfile::TempDir,
     #[cfg(unix)]
     qmp: QmpControl,
 }
@@ -326,6 +335,28 @@ mod tests {
             std::thread::yield_now();
         };
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_process_image_survives_source_rebuild_and_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let iso = directory.path().join("kore.iso");
+        std::fs::write(&iso, b"original boot image").unwrap();
+        let process = QemuConfig {
+            executable: "/bin/sh".into(),
+            kore_iso: iso.clone(),
+            arguments: vec!["-c".into(), "exec sleep 30".into()],
+            hostlink_arguments: Vec::new(),
+        }
+        .spawn()
+        .unwrap();
+        let mounted = process._image_directory.path().join("kore.iso");
+        std::fs::write(&iso, b"replacement build").unwrap();
+        std::fs::remove_file(&iso).unwrap();
+        assert_eq!(std::fs::read(&mounted).unwrap(), b"original boot image");
+        drop(process);
+        assert!(!mounted.exists());
     }
 
     #[cfg(unix)]

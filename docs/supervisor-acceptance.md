@@ -1,5 +1,8 @@
 # Optional supervisor native acceptance
 
+Candidate identities and observed checks are recorded in
+[the candidate evidence](supervisor-candidate-validation.md).
+
 Status: gate implemented; native execution still pending. Host unit tests do
 not certify this gate. Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
@@ -58,3 +61,40 @@ only the final ISO recipe. The enabled build may leave generated payload and
 digest changes in the Kore checkout; the candidate lock must record their
 exact diff hash as well as the ISO hash. Do not commit enabled service payloads
 as the ordinary disabled baseline or treat the old baseline lock as compatible.
+
+## Candidate build and preflight
+
+`config/supervisor-candidate.lock.mk` is an **unaccepted** integration candidate.
+The default `config/real-stack.lock.mk` remains the previous pinned baseline;
+do not mix its image identity with the optional-supervisor host protocol.
+The candidate records the committed ordinary payload base, the frozen source
+identity, the enabled ISO digest and the generated payload diff digest.
+
+Use a Kore checkout at the candidate's exact commit and a dedicated state
+with the real model/server and workspace configured. Machine-local paths
+belong in the ignored `Makefile.local` or command-line variables, not the lock.
+Build and verify with:
+
+```sh
+CARGO_INCREMENTAL=0 make artifacts \
+  VKORE_REAL_STACK_LOCK=config/supervisor-candidate.lock.mk \
+  KORE_ROOT=/absolute/path/to/candidate-kore
+
+make dev-check \
+  VKORE_REAL_STACK_LOCK=config/supervisor-candidate.lock.mk \
+  KORE_ROOT=/absolute/path/to/candidate-kore \
+  VKORE_STATE=/absolute/path/to/dedicated-state \
+  VKORE_PROJECT=current-kore-integration
+```
+
+Use Kore's pinned toolchain for the build. `make artifacts` deliberately
+regenerates enabled payloads from the committed disabled baseline. Preserve
+the generated diff; preflight verifies it. It must contain only the expected
+payload/digest changes, not unrecorded implementation edits.
+
+After existing VM sessions are stopped, launch the same configuration with
+`make dev-real` and the same variables. The launcher must be the only active
+owner of its VM, disks, HostLink socket and listen port. Do not run the ignored
+native restart gate concurrently with the UI launcher. Promoting the default
+lock requires the native boot, containment, restart and UI evidence described
+in the coordinated plan, not merely a successful build or preflight.

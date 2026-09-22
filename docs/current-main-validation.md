@@ -1,4 +1,10 @@
-# Current-main candidate acceptance — 2026-09-22
+# Previous init-integrated candidate acceptance — 2026-09-22
+
+This is a historical evidence snapshot for the init-integrated baseline. It
+does not certify the optional-supervisor overhaul now on PR #43. Current
+candidate identities and remaining gates are in
+[supervisor acceptance](supervisor-acceptance.md) and
+`config/supervisor-candidate.lock.mk`.
 
 PR #43 remains stacked on PR #41 (`506c205ffce90fb831402683c59f980a1568eddd`).
 Earlier results in [the stacked report](stacked-ui-validation.md) and the

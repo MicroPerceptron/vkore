@@ -8,13 +8,21 @@ results and compatibility limits. The earlier HTTP failure and fix remain in
 ## Supervisor overhaul candidate (in progress)
 
 The implementation now expects the separately founded supervisor contract v1.
-The accepted revision/hash table below still describes the earlier baseline;
+The revision/hash table below still describes the earlier baseline;
 **new candidate pins and native/UI acceptance have not been promoted yet**.
 Do not treat those baseline hashes as validation of the overhaul.
 
+The enabled candidate is pinned in `config/supervisor-candidate.lock.mk`.
+Use `make artifacts` and `make dev-check` with
+`VKORE_REAL_STACK_LOCK=config/supervisor-candidate.lock.mk`; after exclusive
+VM access is available, pass the same variable to `make dev-real`. Configure
+a dedicated state and fixture, and retain the generated Kore payload diff.
+See [candidate build and preflight](supervisor-acceptance.md#candidate-build-and-preflight)
+for complete commands. The default lock is deliberately not promoted yet.
+
 Ordinary Kore builds default to `KORE_AGENT_SUPERVISOR=0`. A vKore candidate
 must rebuild its kernel and user payloads with `KORE_AGENT_SUPERVISOR=1` and
-`KORE_AGENT_SUPERVISOR_PROJECT=1`. The launcher verifies the accepted image hash;
+`KORE_AGENT_SUPERVISOR_PROJECT=1`. The launcher verifies the selected image hash;
 a connected transport or an older broker poll is not supervisor readiness.
 
 Supervisor startup, death, timeout and unconfirmed cleanup retain the VM and

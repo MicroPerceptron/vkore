@@ -352,3 +352,29 @@ loose copies (24 and 104 frames respectively). Diagnostic guest edits are
 restored before building release artifacts. Host `cargo test -p vkored --lib`
 passes 91 tests with 9 native tests ignored; ignored tests require their real
 native runs and are never counted as unit-test passes.
+
+
+### Optional acquisition refusal — 2026-09-23
+
+`sequence-missing-supervisor-01` passes (99.79 s wrapper). The diagnostic
+changes only the optional supervisor acquisition name to a valid missing
+`boot:missing-agent-supervisor`, with autostart enabled. Native init reports
+kind 2/index 3 acquisition, kind 3/index 2 refusal, then kind 2/index 8 skipped
+launch before founding the shell. Power renders/closes, Terminal clears and
+executes time/status exec, reporting three retained rows and one compensated
+founding. No supervisor-ready claim is made. Exact source base is
+`c57ed07820bac7ed41060140b4cd4777c684012d`, source patch SHA-256
+`c93f94138e988cef4f164196ff4436762236849c1a85dc117f970a65fc134ac6`;
+ISO SHA-256 `a3763cc95dfc642277703858bcc1c86c549d87a55df69bc587cb458028b862f3`,
+BLAKE3 `715167dc7fc243777b505e081bbefe9e90dbeba65df24cde11c2e08bc170dacf`.
+The prebuilt run wrapper's selector 0 does not rebuild this enabled image;
+its verified digest and actual acquisition/refusal testimony identify it.
+Diagnostic source/payload edits were restored, with exact patches retained.
+Frames were archived and byte-verified before removing duplicate loose copies.
+
+Additional status observations isolate the local provider failure to the
+scheduler/manifold section: `status sys` and `status cpu` show per-core rows
+but `SCHEDULER / MANIFOLD provider unavailable` and exit 4. Memory, filesystem
+and network sections render. This does not pass returning-main or explain
+its separate CI first-command witness failure. The provider assertion remains
+unchanged pending diagnosis.

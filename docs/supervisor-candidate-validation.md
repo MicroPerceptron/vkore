@@ -6,7 +6,8 @@ during real inference in the same VM. Termination after a published response and
 The enabled artifact reproduces exactly and the four original native file/model
 prompts pass functionally. Committed-write disconnect and stop now pass on the
 workspace-rebind repair, including a subsequent fresh tool effect in the same
-VM. Final artifacts, authority, desktop/isolation and UI acceptance remain
+VM. Native two-terminal isolation and no-project refusal/arithmetic also pass.
+Final artifacts, authority, desktop and UI acceptance remain
 pending. The default real-stack lock has not been promoted.
 
 ## Current source refresh
@@ -109,11 +110,25 @@ passed. Automated native desktop/fault/authority gates continue independently.
   all 12 terminal/Power recycling cycles pass. Power does not present when
   Terminal plus Aftershock, Skylilt and Files are already active. Full gate
   exits 2; 106 captures are preserved in `frames.tar.gz`.
-- Two-terminal retries exposed test-driver problems: day-only pixel decoding,
+- `sequence-two-terminal-08`: **PASS**, 432.15 s, disabled userland-gate ISO
+  `9ba9f188c8c76b896c0f64bf0c23c4eff2581518a88a65dac2abca34809cc2ed`.
+  Actual task-owned keyboards/framebuffers prove private roots, explicit live
+  read-only sharing, denied write/directory/move operations, unsharing,
+  independent cwd and executable namespaces. The corrected driver is Kore
+  `76d220e85`; all 47 focused driver/returning-main decoder tests pass.
+  Earlier retries exposed test-driver problems: day-only pixel decoding,
   a pointer obscuring terminal cells, then an obsolete `help shutdown`
   expectation. Actual catalogue power control is `pwctl`; shutdown/reboot are
-  arguments, not standalone commands. Decoder fixes pass 45 host tests;
-  full native isolation remains pending, not inferred from screenshots.
+  arguments, not standalone commands. Modern `hello` returns silently, so
+  post-refusal liveness now uses real `time` output.
+- `sequence-no-project-02`: **PASS**, 180.44 s, PROJECT=0 ISO
+  `f13d6e1d3c10d311e3e97b148405f3ac1fa9b1d07cae7130b7757652c9bd8a2e`.
+  The actual broker catalogue has no filesystem grants or filesystem tools;
+  creation yields an accepted `refused` proposal. Arithmetic then returns
+  exactly `42`, with no tool calls, VM replacement or parking. Run 01 stopped
+  on the known frontend `Failed` classification of that valid refusal; the
+  corrected gate requires the validated refusal and actual empty filesystem
+  authority rather than accepting an arbitrary failure status.
 - CI run `35828436910` initially fails AMD and Intel 4k57 provisioning with
   `APP_PROJECTION_LINK` (74). The exact CI image SHA-256
   `8fad587979f45036b29905cf77444e413a18845d14bf5f943f15338afdf977e0`
@@ -129,8 +144,7 @@ Existing-name collision
 coverage is implemented as `native_existing_file_collision_preserves_bytes`,
 with backed-up `test.txt = hello`, required native create refusal, unchanged
 host bytes, and a subsequent arithmetic prompt in the same VM. This new gate,
-live authority revocation and absent-project refusal compile; native executions
-are still pending.
+and live authority revocation compile; their native executions are still pending.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

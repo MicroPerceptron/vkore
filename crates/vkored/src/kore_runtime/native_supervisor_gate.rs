@@ -404,14 +404,54 @@ fn native_no_project_refuses_files_and_answers_arithmetic() {
             let intent = guest.daemon.queue_frontend_intent(text).unwrap();
             let deadline = Instant::now() + Duration::from_secs(300);
             let mut published = false;
+            let mut catalog_observed = false;
+            let mut refused_plan = false;
             loop {
                 guest.daemon.tick().unwrap();
-                guest.drain_events(&mut |kind, _, e| eprintln!("{kind:?} {e}"));
+                guest.drain_events(&mut |kind, _, e| {
+                    eprintln!("{kind:?} {e}");
+                    assert_ne!(
+                        kind,
+                        EventKind::ToolCall,
+                        "no-project gate must not execute a tool"
+                    );
+                    if e["role"] == "Broker" {
+                        let payload = e["payload"]
+                            .as_str()
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+                        if e["kind"] == "Input" {
+                            let payload = payload.as_ref().expect("broker input JSON");
+                            let offers = payload["offer_catalog"].as_array().unwrap();
+                            assert!(offers.iter().all(|offer| offer["kind"] == "executable"
+                                && matches!(
+                                    offer["label"].as_str(),
+                                    Some("hello" | "time" | "random")
+                                )));
+                            catalog_observed = true;
+                        }
+                        if e["kind"] == "BrokerProposal" && e["accepted"] == true {
+                            refused_plan = payload.is_some_and(|p| p["action"] == "refused");
+                        }
+                    }
+                });
                 if let Some(result) = guest.daemon.take_frontend_result() {
                     assert_eq!(result.intent_id, intent);
-                    assert_eq!(result.kind, expected, "{}", result.text);
+                    assert!(
+                        catalog_observed,
+                        "must observe the actual empty filesystem authority"
+                    );
                     if expected == FrontendResultKind::Completed {
+                        assert_eq!(result.kind, expected, "{}", result.text);
                         assert_eq!(result.text.trim(), "42");
+                    } else {
+                        // The existing frontend classifies a valid broker
+                        // refusal as Failed. Require the actual validated
+                        // refusal, not merely any failed prompt/status chip.
+                        assert!(refused_plan, "{}", result.text);
+                        assert!(matches!(
+                            result.kind,
+                            FrontendResultKind::Refused | FrontendResultKind::Failed
+                        ));
                     }
                     eprintln!(
                         "{}",

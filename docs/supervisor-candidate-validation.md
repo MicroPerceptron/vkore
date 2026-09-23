@@ -1,9 +1,36 @@
-# Optional supervisor acceptance — 2026-09-22
+# Optional supervisor acceptance — 2026-09-23
 
-**Not merge-ready.** Disabled production boot and three native idle supervisor
-restarts passed on development images. Final pinned artifact reproduction,
-the remaining native matrix and computer-use acceptance are still required.
+**Not merge-ready.** Native idle recovery succeeds, but a subsequent prompt
+is refused during workspace admission before inference. This is an unresolved
+guest failure; final artifacts, fault injection and UI acceptance remain pending.
 The default real-stack lock has not been promoted.
+
+## Current-main refresh
+
+Kore merged main `515ed58c4` in `9c9c08637461a9986abdf3841ee738d5ddf96a3f`.
+The PR no longer has merge conflicts. Native dependencies now pin that merge;
+the exact SDK export is `9d94def23eabcc916be7406d5c2152cacd280f82`. The full
+Kore host/architecture matrix, SDK required matrix plus actual-Kore composition,
+and vKore workspace tests passed. Guest diagnostics/source are at `9566b213e`;
+their enabled image and final payload refresh remain pending.
+
+Before the main refresh, disabled production boot and release boottest passed
+at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).
+The desktop gate failed because its driver clicked the dock before dismissing
+the welcome surface; the saved frame verifies this precondition error. Its
+Return-key correction still needs native window-lifecycle acceptance.
+
+`repaired-native-faults-02` uses enabled ISO SHA-256
+`06734e66e7cf7a3630dfd465080290e73c550519698fa7e2263a3df48b7b248c`,
+artifact base `c3a3dcd26`, source `1562f5b9b`, and exact generated patch SHA-256
+`14cd37ac19d266f1efe0dc7f2b47e87af742f6b08294d312994793d3e0b0e075`.
+It passes three idle restarts and idle disconnect in the same live VM, then
+fails with `Workspace admission could not be completed` before the requested
+inference fault. The failure and predecessor timeout remain preserved. These
+results must not be described as passing in-flight fault coverage.
+
+The earlier checkpoint below records how startup was repaired; it is not the
+current final source/artifact tuple.
 
 ## Current source checkpoint
 

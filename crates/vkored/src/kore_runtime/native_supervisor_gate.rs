@@ -6,19 +6,74 @@ use super::*;
 #[test]
 #[ignore = "requires an isolated real-stack configuration and exclusive QEMU use"]
 fn three_supervisor_restarts_preserve_the_native_vm() {
+    on_native_stack(run_native_supervisor_gate);
+}
+
+#[test]
+#[ignore = "requires an isolated real-stack configuration and exclusive QEMU use"]
+fn native_frontend_prompt_before_recovery() {
+    on_native_stack(|| {
+        let mut runtime = configured_runtime();
+        let guest = runtime.runtime.as_mut().unwrap();
+        let intent = guest
+            .daemon
+            .queue_frontend_intent("What is 17 plus 25? Answer with the number only.")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let mut published = false;
+        loop {
+            guest.daemon.tick().unwrap();
+            guest.drain_events(&mut |kind, _, event| eprintln!("{kind:?} {event}"));
+            if let Some(result) = guest.daemon.take_frontend_result() {
+                assert_eq!(result.intent_id, intent);
+                eprintln!(
+                    "{}",
+                    json!({"gate":"native_frontend", "kind":format!("{:?}",result.kind),"text":result.text})
+                );
+                assert_eq!(
+                    result.kind,
+                    FrontendResultKind::Completed,
+                    "{}",
+                    result.text
+                );
+                assert_eq!(result.text.trim(), "42");
+                published = true;
+            }
+            if published {
+                guest.daemon.acknowledge_frontend_result(intent);
+                if guest.daemon.core_mut().finish_frontend_intent(intent) {
+                    assert!(!guest.vm_suspended);
+                    assert_eq!(guest.boot_attempt, 1);
+                    eprintln!(
+                        "{}",
+                        json!({"gate":"native_frontend","result":"ready_after_receipt"})
+                    );
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fresh native prompt did not complete and retire"
+            );
+            std::thread::sleep(DEFAULT_TICK);
+        }
+    });
+}
+
+fn on_native_stack(run: fn()) {
     // Debug workspace-image construction carries large bounded temporaries.
     // Match the workspace image tests instead of overflowing libtest's small
     // default stack before a VM has even been started.
     std::thread::Builder::new()
         .name("native-supervisor-gate".into())
         .stack_size(64 * 1024 * 1024)
-        .spawn(run_native_supervisor_gate)
+        .spawn(run)
         .unwrap()
         .join()
         .unwrap();
 }
 
-fn run_native_supervisor_gate() {
+fn configured_runtime() -> KoreVmRuntime {
     let file = std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG")
         .expect("set VKORE_SUPERVISOR_GATE_CONFIG to the gate JSON file");
     let input: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
@@ -53,6 +108,11 @@ fn run_native_supervisor_gate() {
     runtime
         .prepare(&mut |status| eprintln!("{status}"), &|| false)
         .unwrap();
+    runtime
+}
+
+fn run_native_supervisor_gate() {
+    let mut runtime = configured_runtime();
     let pid = runtime
         .runtime
         .as_ref()
@@ -145,6 +205,12 @@ fn run_native_supervisor_gate() {
                     guest.daemon.force_disconnect();
                     assert!(guest.daemon.core().frontend_interrupted(intent));
                     break;
+                }
+                if let Some(result) = guest.daemon.take_frontend_result() {
+                    panic!(
+                        "prompt ended before the inference fault boundary: {:?}: {}",
+                        result.kind, result.text
+                    );
                 }
             } else if let Some(result) = guest.daemon.take_frontend_result() {
                 assert_eq!(result.intent_id, intent);

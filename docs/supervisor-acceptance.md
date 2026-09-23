@@ -3,14 +3,20 @@
 Candidate identities and observed checks are recorded in
 [the candidate evidence](supervisor-candidate-validation.md).
 
-Status: three native idle restarts passed on a diagnostic image after repairing
-guest startup. The ordinary disabled production boot also passed on the
-standard four-CPU topology. Final artifact reproduction, in-flight failures
-and computer-use acceptance remain pending. Host unit tests do not certify this gate.
+Status: idle restarts and idle disconnect passed, but the next prompt was
+refused during workspace admission before the intended inference fault.
+Disabled production boot and release boottest passed on the preceding source
+checkpoint. Final artifact reproduction, fault recovery and computer-use
+acceptance remain pending. Host unit tests do not certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
 
 ## Repeated native restart gate
+
+`kore_runtime::native_supervisor_gate::native_frontend_prompt_before_recovery`
+uses the same isolated configuration to check a real arithmetic prompt on a
+fresh supervisor, including response receipt and confirmed worker retirement.
+This separates startup/admission defects from failures caused by recovery.
 
 `kore_runtime::native_supervisor_gate::three_supervisor_restarts_preserve_the_native_vm`
 starts a real configured Kore VM and llama.cpp server, waits for authenticated

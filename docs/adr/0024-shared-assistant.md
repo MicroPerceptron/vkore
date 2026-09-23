@@ -116,6 +116,13 @@ changed or replaced source data fails closed instead of serving stale text.
 Office text is exposed through a read-only virtual `.txt` alias. Same-named
 files from different locations receive different identity-derived aliases.
 
+When discovery finds a file inside the explicitly selected focus folder, keep
+that folder attachment and its existing access policy. Its filenames remain
+stable across create/read/write prompts. Virtual projects and external-only
+matches still use sparse read-only aliases. A mixed result containing a focus
+match gives the selected folder precedence; combining focus and external
+namespaces is not implemented.
+
 The deterministic authority layer validates catalog selectors and source
 identity again before deriving grants. Exact file grants are preferred for
 known files; directory grants permit traversal of that selected subtree. A

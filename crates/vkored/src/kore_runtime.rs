@@ -216,13 +216,16 @@ impl KoreVmRuntime {
             .get()
             .map_err(|e| e.to_string())?;
         let discovery_started = Instant::now();
-        let discovery = crate::personal::search(query, &settings.authorized_locations)?;
+        let mut discovery = crate::personal::search(query, &settings.authorized_locations)?;
+        let focus_match = !project.workspace.virtual_only
+            && discovery.prefer_focus_root(&project.workspace.root)?;
         emit(
             EventKind::Validation,
             false,
             json!({"stage":"personal_discovery_completed",
             "elapsed_ms":discovery_started.elapsed().as_millis(), "entries_scanned":discovery.scanned,
-            "candidate_count":discovery.files.len(), "bounded":discovery.bounded}),
+            "candidate_count":discovery.files.len(), "bounded":discovery.bounded,
+            "focus_match":focus_match}),
         );
         let runtime = self
             .runtime

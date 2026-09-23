@@ -60,6 +60,111 @@ fn native_frontend_prompt_before_recovery() {
     });
 }
 
+#[test]
+#[ignore = "writes test.txt; requires an isolated backed-up project and exclusive QEMU use"]
+fn native_frontend_file_roundtrip() {
+    on_native_stack(|| {
+        let file = std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap();
+        let input: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        let project_id = input["file_project_id"].as_str().expect("file_project_id");
+        let backup = PathBuf::from(input["fixture_backup"].as_str().expect("fixture_backup"));
+        assert!(
+            backup.is_dir(),
+            "back up the isolated fixture before this gate"
+        );
+        let projects = PathBuf::from(input["project_root"].as_str().unwrap());
+        let project = ProjectStore::open(&projects)
+            .unwrap()
+            .get(project_id)
+            .unwrap();
+        assert_eq!(
+            project.workspace.access,
+            WorkspaceAccess::AutomaticWriteback
+        );
+        let target = project.workspace.root.join("test.txt");
+        assert!(
+            !target.exists() && !backup.join("test.txt").exists(),
+            "test.txt must be absent; never delete a preexisting fixture"
+        );
+        assert!(!project.workspace.root.join("missing-file.txt").exists());
+        let mut runtime = configured_runtime();
+        let session = SessionState {
+            api_version: 1,
+            project_id: project_id.into(),
+            session_id: "native-file-gate".into(),
+            status: crate::SessionStatus::Open,
+            generation: 1,
+            backend_incarnation: 0,
+            last_event_sequence: 0,
+            prompts: BTreeMap::new(),
+        };
+        let prompts = [
+            "Create a file named test.txt containing the word hello.",
+            "Read test.txt and reply with its exact contents.",
+            "Read missing-file.txt and reply with its contents.",
+            "What is 17 plus 25? Answer with the number only.",
+        ];
+        for (index, text) in prompts.into_iter().enumerate() {
+            let prompt = PromptRequest {
+                api_version: 1,
+                prompt_id: format!("file-gate-{index}"),
+                idempotency_key: format!("file-gate-{index}"),
+                text: text.into(),
+            };
+            let mut events = Vec::new();
+            let status = runtime.run_prompt(&session, &prompt, &mut |kind, public, event| {
+                eprintln!("{}", json!({"gate":"native_files","prompt":index,"kind":format!("{kind:?}"),"public":public,"event":event}));
+                events.push((kind, event));
+            }, &|| false, &|| true);
+            eprintln!(
+                "{}",
+                json!({"gate":"native_files","prompt":index,"status":format!("{status:?}")})
+            );
+            let text = events
+                .iter()
+                .filter(|(kind, _)| {
+                    matches!(
+                        kind,
+                        EventKind::Assistant | EventKind::Error | EventKind::ToolResult
+                    )
+                })
+                .map(|(_, event)| event.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if index != 2 {
+                assert_eq!(status, PromptStatus::Completed, "{text}");
+            }
+            assert_eq!(
+                std::fs::read(&target).expect("real host writeback"),
+                b"hello"
+            );
+            match index {
+                1 => assert!(text.contains("hello"), "{text}"),
+                2 => {
+                    let lower = text.to_ascii_lowercase();
+                    assert!(
+                        lower.contains("not found")
+                            || lower.contains("does not exist")
+                            || lower.contains("no such file"),
+                        "missing-file refusal: {text}"
+                    );
+                }
+                3 => assert!(
+                    events
+                        .iter()
+                        .any(|(kind, event)| *kind == EventKind::Assistant
+                            && event["text"]
+                                .as_str()
+                                .is_some_and(|text| text.trim() == "42")),
+                    "{text}"
+                ),
+                _ => {}
+            }
+            assert!(!runtime.runtime.as_ref().unwrap().vm_suspended);
+        }
+    });
+}
+
 fn on_native_stack(run: fn()) {
     // Debug workspace-image construction carries large bounded temporaries.
     // Match the workspace image tests instead of overflowing libtest's small

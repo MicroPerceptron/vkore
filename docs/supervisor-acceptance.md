@@ -112,3 +112,15 @@ owner of its VM, disks, HostLink socket and listen port. Do not run the ignored
 native restart gate concurrently with the UI launcher. Promoting the default
 lock requires the native boot, containment, restart and UI evidence described
 in the coordinated plan, not merely a successful build or preflight.
+
+### Native file roundtrip gate
+
+The ignored `kore_runtime::native_supervisor_gate::native_frontend_file_roundtrip`
+uses the real application runtime and a configured project with automatic
+writeback. In addition to the ordinary gate configuration, set
+`file_project_id` and `fixture_backup` to an isolated project and its completed
+fixture backup. `test.txt` and `missing-file.txt` must be absent before launch;
+the test never deletes preexisting files. It runs create, read, missing-file,
+and arithmetic prompts, verifies the exact host bytes `hello`, and requires
+the arithmetic response `42`. A correct missing-file error may have failed
+prompt status. This is native integration evidence, not computer-use evidence.

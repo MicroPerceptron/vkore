@@ -2,8 +2,8 @@
 
 **Not merge-ready.** Native fresh-worker arithmetic and response retirement now
 pass. Recovery passes three idle restarts, idle disconnect and disconnect
-during real inference in the same VM. Response-before-receipt termination,
-final artifacts, isolation/tool and UI acceptance remain pending. The default
+during real inference in the same VM. Termination after a published response and before receipt also passes.
+Final artifacts, isolation/tool and UI acceptance remain pending. The default
 real-stack lock has not been promoted.
 
 ## Current source refresh
@@ -21,9 +21,9 @@ The separate recovery refusal was a workspace `list page` refresh after attach
 request IDs reset to 1. The affine connection now retains its request sequence
 and rejects future replies while draining older terminal control replies.
 The reattachment regression fails with the original ID reuse restored.
-`sequence-recovery-01` has reached supervisor generation 6 in the same QEMU
-process, including an actual inference disconnect; its remaining fault gate is
-still running. These are diagnostic images with exact saved source/diffs, not
+`sequence-recovery-01` passed through supervisor generation 7 in QEMU PID
+26289, with one boot and no VM parking, including an actual inference disconnect
+and termination after response publication before receipt. These are diagnostic images with exact saved source/diffs, not
 promoted release artifacts. Existing failed runs remain below for comparison.
 
 Before the main refresh, disabled production boot and release boottest passed

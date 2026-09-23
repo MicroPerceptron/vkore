@@ -6,13 +6,19 @@ use super::*;
 #[test]
 #[ignore = "requires an isolated real-stack configuration and exclusive QEMU use"]
 fn three_supervisor_restarts_preserve_the_native_vm() {
-    on_native_stack(|| run_native_supervisor_gate(false));
+    on_native_stack(|| run_native_supervisor_gate(false, false));
 }
 
 #[test]
 #[ignore = "requires a real guest, desktop_probe command, backed-up state and exclusive QEMU use"]
 fn native_supervisor_faults_preserve_desktop() {
-    on_native_stack(|| run_native_supervisor_gate(true));
+    on_native_stack(|| run_native_supervisor_gate(true, false));
+}
+
+#[test]
+#[ignore = "requires the native desktop probe and exclusive real guest/model"]
+fn native_response_stop_preserves_desktop() {
+    on_native_stack(|| run_native_supervisor_gate(true, true));
 }
 
 #[test]
@@ -720,7 +726,7 @@ fn probe_desktop(guest: &mut ProjectRuntime, boundary: &str) {
     }
 }
 
-fn run_native_supervisor_gate(desktop: bool) {
+fn run_native_supervisor_gate(desktop: bool, only_response: bool) {
     let mut runtime = configured_runtime();
     let pid = runtime
         .runtime
@@ -734,7 +740,7 @@ fn run_native_supervisor_gate(desktop: bool) {
     if desktop {
         probe_desktop(runtime.runtime.as_mut().unwrap(), "initial");
     }
-    for cycle in 1..=3 {
+    for cycle in 1..=if only_response { 0 } else { 3 } {
         runtime
             .runtime
             .as_mut()
@@ -769,6 +775,7 @@ fn run_native_supervisor_gate(desktop: bool) {
         assert!(!guest.recovering);
         if desktop {
             probe_desktop(guest, &format!("ready-{cycle}"));
+            assert_eq!(guest.daemon.supervisor_ready(), Some(next));
         }
         eprintln!(
             "{}",
@@ -777,43 +784,51 @@ fn run_native_supervisor_gate(desktop: bool) {
         );
         previous = next;
     }
-    let previous_epoch = runtime
-        .runtime
-        .as_ref()
-        .unwrap()
-        .daemon
-        .core()
-        .epoch()
-        .unwrap();
-    runtime.runtime.as_mut().unwrap().daemon.force_disconnect();
-    if desktop {
-        probe_desktop(runtime.runtime.as_mut().unwrap(), "host-disconnected");
+    if !only_response {
+        let previous_epoch = runtime
+            .runtime
+            .as_ref()
+            .unwrap()
+            .daemon
+            .core()
+            .epoch()
+            .unwrap();
+        runtime.runtime.as_mut().unwrap().daemon.force_disconnect();
+        if desktop {
+            probe_desktop(runtime.runtime.as_mut().unwrap(), "host-disconnected");
+        }
+        runtime
+            .prepare(&mut |status| eprintln!("{status}"), &|| false)
+            .unwrap();
+        let next = runtime.supervisor.unwrap();
+        assert_eq!(next.generation.get(), previous.generation.get() + 1);
+        assert_ne!(next.route, previous.route);
+        let guest = runtime.runtime.as_mut().unwrap();
+        assert_ne!(guest.daemon.core().epoch(), Some(previous_epoch));
+        let process = guest.process.as_mut().unwrap();
+        assert_eq!(process.id(), pid, "transport loss replaced the OS");
+        assert!(process.try_wait().unwrap().is_none());
+        assert_eq!(guest.boot_attempt, 1);
+        assert!(!guest.vm_suspended);
+        assert!(!guest.recovering);
+        if desktop {
+            probe_desktop(guest, "host-reconnected");
+            assert_eq!(guest.daemon.supervisor_ready(), Some(next));
+        }
+        eprintln!(
+            "{}",
+            json!({"gate":"native_supervisor", "fault":"host_disconnect",
+            "qemu_pid":pid,"generation":next.generation.get(),"result":"ready"})
+        );
     }
-    runtime
-        .prepare(&mut |status| eprintln!("{status}"), &|| false)
-        .unwrap();
-    let next = runtime.supervisor.unwrap();
-    assert_eq!(next.generation.get(), previous.generation.get() + 1);
-    assert_ne!(next.route, previous.route);
-    let guest = runtime.runtime.as_mut().unwrap();
-    assert_ne!(guest.daemon.core().epoch(), Some(previous_epoch));
-    let process = guest.process.as_mut().unwrap();
-    assert_eq!(process.id(), pid, "transport loss replaced the OS");
-    assert!(process.try_wait().unwrap().is_none());
-    assert_eq!(guest.boot_attempt, 1);
-    assert!(!guest.vm_suspended);
-    assert!(!guest.recovering);
-    if desktop {
-        probe_desktop(guest, "host-reconnected");
-    }
-    eprintln!(
-        "{}",
-        json!({"gate":"native_supervisor", "fault":"host_disconnect",
-        "qemu_pid":pid,"generation":next.generation.get(),"result":"ready"})
-    );
     // Fault only after observing real progress. A deadline is a failure,
     // never a substitute for reaching the requested boundary.
-    for fault in ["inference_disconnect", "response_before_receipt_stop"] {
+    let faults: &[&str] = if only_response {
+        &["response_before_receipt_stop"]
+    } else {
+        &["inference_disconnect", "response_before_receipt_stop"]
+    };
+    for &fault in faults {
         let previous = runtime.supervisor.unwrap();
         let guest = runtime.runtime.as_mut().unwrap();
         let intent = guest
@@ -875,6 +890,7 @@ fn run_native_supervisor_gate(desktop: bool) {
         );
         if desktop {
             probe_desktop(guest, &format!("ready-{fault}"));
+            assert_eq!(guest.daemon.supervisor_ready(), Some(next));
         }
         eprintln!(
             "{}",

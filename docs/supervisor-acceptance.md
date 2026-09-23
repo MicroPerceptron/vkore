@@ -9,8 +9,8 @@ termination after response publication before receipt in one live VM.
 Disabled production/kernel boot, real file prompts, two-terminal isolation,
 absent-project refusal and committed-write recovery also pass on their recorded
 images. Live file revocation and existing-name collision also pass. The recycled
-ordinary desktop passes with the repaired pointer driver. Final artifact refresh,
-desktop responsiveness during supervisor faults and computer-use acceptance remain pending. Host unit tests do not
+ordinary desktop passes with the repaired pointer driver. A diagnostic full desktop/fault sequence now passes; an earlier final-recovery
+timeout remains unexplained. Final artifact refresh and computer-use acceptance remain pending. Host unit tests do not
 certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
@@ -94,6 +94,11 @@ and `status exec` commands through Terminal. Saved framebuffers and JSON retain
 the observed exec task counts at each boundary. These counts are observations,
 not proof that every mapping/client allocation was reclaimed. The first native run passes twelve desktop probes but fails final supervisor
 readiness after the response fault. It is not an accepted recovery result.
+A diagnostic rerun passes all thirteen probes and generations 1–7. Preserve
+both results; this does not establish the timeout's cause. The focused
+`native_response_stop_preserves_desktop` test isolates the final fault on a
+fresh supervisor. Both desktop tests also verify authenticated readiness after
+each post-recovery probe, so a probe cannot hide a new disconnection.
 
 ## Payload configuration
 

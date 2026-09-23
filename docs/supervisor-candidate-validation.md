@@ -322,3 +322,33 @@ diagnostic target. A frontend SelectorUnknown refusal and transport
 reconnection precede it. This is a failed combined recovery gate, not a
 passing containment result. Frames, exact host source, logs and twelve
 checkpoint records are retained; all test-owned processes have exited.
+
+
+### Diagnostic full desktop/fault rerun
+
+`sequence-desktop-faults-02` **PASSES** in 446.67 seconds (451.70 s wrapper)
+on diagnostic enabled ISO SHA-256
+`7fc1a6ad2aa4f617166fb3ba8133cd641274e9ccf3354878b5427f81487316ec`,
+BLAKE3 `2864bc15bd69799a645200cc717907c5702e8b882b0afee5a3e00ee10fa46a20`.
+Kore source base is `c57ed07820bac7ed41060140b4cd4777c684012d`, with the
+saved bind-result diagnostic patch; host base is
+`de9b21550d263c393711cc3cc97e4c3ea5684cbc` plus the saved test patch.
+All thirteen Power/Terminal probes pass with four retained exec rows, and
+supervisor generations 1–7 use QEMU PID 62000. Authenticated readiness remains
+valid after each recovery probe. Project binding reports transient
+`change-directory: storage failed` and then succeeds; no recovery policy was
+changed. Run 01's prolonged failure is **not explained or claimed fixed**.
+
+The focused `sequence-response-desktop-01` also passes on the same diagnostic
+image (223.59 s wrapper): actual arithmetic 42, stop before receipt, three
+Power/Terminal probes, generations 1–2 and QEMU PID 57744. A later storage
+failure in its serial tail occurs during test teardown, when the host link
+has intentionally disconnected; it is not evidence of spontaneous live failure.
+
+Both runs preserve exact source patches, logs, hashes and JSON probes under
+`~/.local/state/vkore-supervisor-acceptance-20260922/diagnostics/`.
+Raw PPMs were archived and individually hash-verified before deleting duplicate
+loose copies (24 and 104 frames respectively). Diagnostic guest edits are
+restored before building release artifacts. Host `cargo test -p vkored --lib`
+passes 91 tests with 9 native tests ignored; ignored tests require their real
+native runs and are never counted as unit-test passes.

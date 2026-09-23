@@ -756,3 +756,36 @@ The corrected host's complete locked workspace test run passes 373 tests with
 locked dependency graph (36.79 s). Native gate results above come from separate
 real guest/model executions. Logs are `broker-live-update-workspace.log` and
 `broker-live-update-release.log` in `/tmp/vkore-supervisor-evidence/`.
+
+
+### Projection-cause diagnostic native checks
+
+Kore source/base `93fefba5f2ba668555a06c73616a627b88d68322` builds fresh
+disabled ARM and x86 payloads in 843.82 s. This is a diagnostic checkpoint with
+SDK `688d5bfb` and host native owner `60e659644`; it is not a new coordinated
+export or an enabled candidate. Its generated payload patch SHA-256 is
+`dd14c2a3e33367908a5c23ef0f76bcbea44c7605c0e47fc12042957a4fdd60d5`.
+The production ISO SHA-256 is
+`47de113048ed53ec5e8369e3128aaac9b925587b28982d18710873225291ce34`
+(BLAKE3 `c4f58f32182438df97a89b87baead8cec6136d364316703b34c170b4b8c0c267`).
+`projection-cause-default-01` PASSES the ordinary production bring-up in
+50.10 s with agent supervision disabled, QEMU TCG, 4 CPUs and 4 GiB RAM.
+The G7 topology-specific retirement witness remains explicitly not exercisable
+on this run, as reported by the unchanged gate.
+
+The separate kernel test image builds in 121.58 s with the exact captured
+payload patch, SHA-256
+`903d13197fddc80ebabff2239563e26ead67fed562f7769bb0bbb68610e9d6b4`.
+`projection-cause-kernel-01` PASSES in 14.59 s. The build helper verifies and
+saves the initial generated patch instead of silently accepting arbitrary
+working-tree changes, and captures the actual test-specific ISO. These results
+complete the local host/architecture/native service/kernel/production checks
+for the reporting change. They do not explain or erase the earlier hardware
+failures. CI `35878845333` has passed all architecture checks, supply-chain
+checks, shared payload build and ARM/RISC-V application builds at the latest
+snapshot; host and hardware work are still in progress.
+
+The Mac remains locked at the last computer-use attempt. Final UI acceptance,
+hardware failure diagnosis, final source/export convergence and default-lock
+promotion are still open. Generated diagnostic payloads remain uncommitted;
+the earlier enabled candidate and its source/diff/hash evidence are preserved.

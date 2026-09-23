@@ -500,7 +500,9 @@ fn native_live_authority_revocation_preserves_vm() {
     on_native_stack(|| {
         use std::cell::Cell;
         const INTENT: &str = "Read authority.txt five times using five separate read tool calls, then report the last contents.";
-        const UPDATE: &str = "Revoke all file and tool grants. Use empty resources and executables and zero tool calls. Finish without file access.";
+        // KBR1 carries one action per update. Revoke the file grant while
+        // retaining read so the worker can witness native authority denial.
+        const UPDATE: &str = "Revoke the current agent's resource grant for authority.txt. Keep its read tool so subsequent reads prove access is denied.";
         assert!(INTENT.len() <= kore_hostlink::TASK_INTENT_MAX);
         assert!(UPDATE.len() <= kore_hostlink::TASK_INTENT_MAX);
         let input: Value = serde_json::from_slice(
@@ -582,7 +584,7 @@ fn native_live_authority_revocation_preserves_vm() {
         // remaining model/tool budget before reporting that failure.
         }, &|| update_failed.get(), &|| true, &|| {
             if worker_started.get() && !sent.replace(true) {
-                Some(AuthorityUpdateRequest { api_version:1, prompt_id:prompt.prompt_id.clone(), update_id:"remove-all-files-and-tools".into(),
+                Some(AuthorityUpdateRequest { api_version:1, prompt_id:prompt.prompt_id.clone(), update_id:"revoke-authority-file".into(),
                     text:UPDATE.into() })
             } else { None }
         });

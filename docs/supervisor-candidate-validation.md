@@ -666,10 +666,61 @@ Formatting/status limits remain explicit: read-answer prose violates the
 number/content-only presentation instruction; the accurate missing-file reply
 is still marked Failed by the frontend. `observations.json` preserves exact
 tool results, user-visible answers and statuses. These are functional native
-checks, not computer-use acceptance. Separate collision, live-revocation and
-interrupted-write repetitions are running.
+checks, not computer-use acceptance. The separate collision repetition passes; live-revocation and interrupted-write
+results are tracked below.
 
 Forty-one completed older fixture disks were compressed losslessly. Each
 `disk-archive.json` records the original byte hash and replacement gzip path;
 the original is removed only after streamed decompression matches that hash.
 Models and fixtures outside completed test evidence are untouched.
+
+
+### Resealed collision and authority-update diagnosis
+
+`canary-resealed-collision-01` passes in 339.53 s on the resealed `b8a6f1d8`
+image. The real create tool reports the existing name; host bytes remain
+exactly `hello`, and the follow-up answer is `42`.
+
+`canary-resealed-authority-01` fails in 306.08 s. Its broker returns
+`create_agent` with empty resources/executables for the live revoke request.
+That is a syntactically valid creation proposal, but the guest's live transaction
+correctly refuses it. No file revocation is confirmed, and the fixture remains
+`authority fixture`. The harness cancels the test-owned worker after the terminal
+update refusal. This is not the earlier bulk-upload receipt bug.
+
+The broker system instructions explained creation without describing existing-agent
+actions. The pending host correction explicitly describes `revoke_grant` and its
+existing-agent/existing-grant selectors. The native test also now requests one
+file-grant revocation, matching KBR1's one-action reply and its unchanged assertions
+for Applied/resumed receipt, native Revoked observation, denied reads, preserved
+bytes and same-VM arithmetic. It retains the read tool to witness the denial; it
+does not assert that all tool grants were revoked. Twelve broker/agent host tests
+pass, including exact revocation-reference and wrong-kind rejection checks.
+`canary-resealed-authority-02` PASSES in 612.53 s with that saved host patch
+and the same unchanged guest image. The guest publishes Applied after resume,
+revokes the actual file object, and denies all five subsequent reads with an
+empty resource catalog. Host bytes remain `authority fixture`; the next prompt
+returns exactly `42` in the same QEMU PID 638. Initial setup switched from the
+default project to the isolated fixture before the measured prompt sequence;
+that setup restart is not presented as supervisor recovery. The broker initially
+duplicated a tool selector; strict validation rejected it and accepted its
+bounded correction. `observations.json` preserves the exact evidence. The initial host test command selected stable Rust and
+failed on required nightly features; the pinned-nightly run is the passing result.
+
+Hardware CI `35867475708` completed with seven failing hardware scenarios.
+AMD VM additionally fails executable-acquisition timeouts (rungs 31328/31428)
+and the required MicroPython startup witness. Intel VM passes four subscenarios
+but its repeated-launch stress test never observes the final fresh prompt; the
+last frame contains a truncated MicroPython banner. These join the previously
+recorded AMD projection-link, window-lifecycle and early-readiness failures, and
+both returning-main execution-witness failures. The initial 4k57 builder's
+on-demand recovery passes. Detailed final classifications and raw vendor VM logs
+are in `diagnostics/ci-d65ddeb35/`; these failures are not dismissed as CI noise.
+
+Kore's pending projection diagnostic patch preserves the actual Link/validation
+Open filesystem cause instead of collapsing it into failure 74. It changes no
+timeouts or authority. The exec, client-wire and ABI host suites pass 383 tests
+with one ignored, including exact outstanding-request recovery without replay.
+All three architecture checks and the native x86 exec-service check also pass.
+It is not part of the resealed guest image and needs its own source/export/build
+validation before publication. No default lock promotion or merge.

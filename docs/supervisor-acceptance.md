@@ -17,8 +17,11 @@ unchanged FS occupancy at all thirteen desktop probes. Candidate artifacts
 reproduce exactly and preflight passes at their pinned artifact base. The
 corrected kernel boot, returning-main and two-terminal gates pass. Extended
 desktop repeat passes all cycles, editor persistence and five windows. Its
-earlier intermittent Files-activation failure remains unexplained. Hardware CI
-and computer-use acceptance remain pending. The candidate lock now selects the latest driver-only Kore commit; its refreshed
+earlier intermittent Files-activation failure remains unexplained. Hardware CI has seven failing scenarios; computer-use acceptance remains
+blocked by the locked Mac. The first refreshed file-revocation attempt was
+refused because the broker proposed creating a new agent. The corrected planning
+instruction and single-grant request pass native revocation, five denied reads
+and a same-VM follow-up prompt. The candidate lock now selects the latest driver-only Kore commit; its refreshed
 image contains exactly the same payload files. Clean reproduction and preflight
 pass at the refreshed revision. Host unit tests do not
 certify these gates.
@@ -207,7 +210,9 @@ as proof of the absent-authority boundary.
 `native_live_authority_revocation_preserves_vm` requires a backed-up
 `authority.txt` containing `authority fixture`. It begins a multi-read task,
 waits for a real endowed worker's inference input, then submits an authenticated
-update removing filesystem and executable grants. Passing requires native
+update revoking the exact file grant while retaining the read executable.
+KBR1 returns one action per update; this gate does not claim revocation of all
+tool grants. Passing requires native
 Installed and Revoked observations, an Applied update receipt after resume,
 unchanged fixture bytes, and a subsequent `42` prompt in the same VM. An update
 that loses the completion race does not pass this gate.

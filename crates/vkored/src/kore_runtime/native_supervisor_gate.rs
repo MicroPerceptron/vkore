@@ -105,7 +105,6 @@ fn run_file_gate(existing: bool) {
         );
     }
     assert!(!project.workspace.root.join("missing-file.txt").exists());
-    let mut runtime = configured_runtime();
     let session = SessionState {
         api_version: 1,
         project_id: project_id.into(),
@@ -117,7 +116,7 @@ fn run_file_gate(existing: bool) {
         prompts: BTreeMap::new(),
     };
     let collision_prompts = [
-        "Use the create tool to create a new empty file named test.txt. If creation fails because the file exists, report that error and leave its contents unchanged.",
+        "Create an empty file named test.txt using create. If it exists, report the error without changing its contents.",
         "What is 17 plus 25? Answer with the number only.",
     ];
     let file_prompts = [
@@ -131,6 +130,12 @@ fn run_file_gate(existing: bool) {
     } else {
         &file_prompts[..]
     };
+    assert!(
+        prompts
+            .iter()
+            .all(|text| text.len() <= kore_hostlink::TASK_INTENT_MAX)
+    );
+    let mut runtime = configured_runtime();
     let mut pid = None;
     for (index, text) in prompts.iter().copied().enumerate() {
         let prompt = PromptRequest {
@@ -482,6 +487,10 @@ fn native_no_project_refuses_files_and_answers_arithmetic() {
 fn native_live_authority_revocation_preserves_vm() {
     on_native_stack(|| {
         use std::cell::Cell;
+        const INTENT: &str = "Read authority.txt five times using five separate read tool calls, then report the last contents.";
+        const UPDATE: &str = "Revoke all file and tool grants. Use empty resources and executables and zero tool calls. Finish without file access.";
+        assert!(INTENT.len() <= kore_hostlink::TASK_INTENT_MAX);
+        assert!(UPDATE.len() <= kore_hostlink::TASK_INTENT_MAX);
         let input: Value = serde_json::from_slice(
             &std::fs::read(std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap()).unwrap(),
         )
@@ -524,8 +533,12 @@ fn native_live_authority_revocation_preserves_vm() {
             last_event_sequence: 0,
             prompts: BTreeMap::new(),
         };
-        let prompt = PromptRequest { api_version:1, prompt_id:"authority-revoke".into(), idempotency_key:"authority-revoke".into(),
-            text:"Read authority.txt five times using five separate read tool calls, then report the last contents.".into() };
+        let prompt = PromptRequest {
+            api_version: 1,
+            prompt_id: "authority-revoke".into(),
+            idempotency_key: "authority-revoke".into(),
+            text: INTENT.into(),
+        };
         let worker_started = Cell::new(false);
         let sent = Cell::new(false);
         let applied = Cell::new(false);
@@ -542,7 +555,7 @@ fn native_live_authority_revocation_preserves_vm() {
         }, &|| false, &|| true, &|| {
             if worker_started.get() && !sent.replace(true) {
                 Some(AuthorityUpdateRequest { api_version:1, prompt_id:prompt.prompt_id.clone(), update_id:"remove-all-files-and-tools".into(),
-                    text:"Revoke all filesystem resources and all executable tools from this agent. Use an empty resource set, empty executable set and zero tool calls. Finish conversationally without accessing any files.".into() })
+                    text:UPDATE.into() })
             } else { None }
         });
         assert!(

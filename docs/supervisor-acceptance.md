@@ -6,9 +6,11 @@ Candidate identities and observed checks are recorded in
 Status: real fresh-worker arithmetic and receipt retirement pass. Recovery
 passes three idle restarts, idle disconnect, disconnect during inference and
 termination after response publication before receipt in one live VM.
-The refreshed disabled production image also passes its boot gate. Final
-artifact reproduction, tool/isolation/authority and computer-use acceptance
-remain pending. Host unit tests do not certify these gates.
+Disabled production/kernel boot, real file prompts, two-terminal isolation,
+absent-project refusal and committed-write recovery also pass on their recorded
+images. Final artifact refresh, live authority, existing-name collision, full
+desktop and computer-use acceptance remain pending. Host unit tests do not
+certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
 
@@ -60,6 +62,9 @@ During development, pass the complete native-owner Cargo override before
 `test`. Release acceptance must use the committed compatible dependency pins.
 Missing configuration, mismatched ISO bytes, timeout, stale readiness or a VM
 replacement fails the gate; there is no skip-success path.
+Planning intents and authority-update text must fit the current native
+`TASK_INTENT_MAX` of 128 UTF-8 bytes. Oversized test text fails before model
+planning and cannot exercise the intended native operation.
 
 This lifecycle gate does not establish desktop input responsiveness,
 in-flight filesystem tool cancellation, unknown-write handling, per-resource reclamation
@@ -135,13 +140,17 @@ host transaction reply after the filesystem effect and durable journal record
 exist. The guest tools and model remain real. It then disconnects or requests
 supervisor retirement before releasing that original reply. The gate requires
 the next generation in the same VM, preserved host bytes, unchanged transaction
-journal during recovery, and no stale frontend result. It never retries the
+journal during recovery, and no stale frontend result. A fresh create after
+both faults must also succeed through the replacement supervisor. It never retries the
 interrupted prompt. This gate is not a replacement for live authority or UI
 acceptance.
 
 `native_no_project_refuses_files_and_answers_arithmetic` requires a separately
 pinned image built with `KORE_AGENT_SUPERVISOR_PROJECT=0`. It requires an explicit
-file-action refusal, then `42` and confirmed receipt/retirement in the same VM.
+validated broker file-action refusal with an actual empty filesystem catalogue,
+then `42` and confirmed receipt/retirement in the same VM without tool calls.
+The existing frontend may classify that valid refusal as Failed; the gate
+requires the actual accepted refusal proposal rather than an arbitrary failure.
 Do not run it with the ordinary project-enabled candidate or count compilation
 as proof of the absent-authority boundary.
 

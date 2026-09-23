@@ -110,6 +110,11 @@ passed. Automated native desktop/fault/authority gates continue independently.
   all 12 terminal/Power recycling cycles pass. Power does not present when
   Terminal plus Aftershock, Skylilt and Files are already active. Full gate
   exits 2; 106 captures are preserved in `frames.tar.gz`.
+  Fresh capacity-only `sequence-capacity-01` PASSES on the same ISO in 127.46 s:
+  actual Power controls render and `window list` confirms all five live
+  presentations. This rules out a fixed four-window ceiling; it does not
+  erase the earlier recycled-session failure. A full rerun retains extra
+  failure-time window/exec diagnostics.
 - `sequence-two-terminal-08`: **PASS**, 432.15 s, disabled userland-gate ISO
   `9ba9f188c8c76b896c0f64bf0c23c4eff2581518a88a65dac2abca34809cc2ed`.
   Actual task-owned keyboards/framebuffers prove private roots, explicit live
@@ -145,6 +150,13 @@ coverage is implemented as `native_existing_file_collision_preserves_bytes`,
 with backed-up `test.txt = hello`, required native create refusal, unchanged
 host bytes, and a subsequent arithmetic prompt in the same VM. This new gate,
 and live authority revocation compile; their native executions are still pending.
+
+`sequence-collision-01` stops before model planning because the test's 157-byte
+intent exceeds the existing 128-byte `TASK_INTENT_MAX`. It preserves fixture
+bytes but cannot certify a collision. The test now uses a 111-byte equivalent
+intent and checks the protocol bound before VM startup. Its unrun authority
+update prompt was also shortened to the existing bound. The corrected gates
+compile; native reruns remain required.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

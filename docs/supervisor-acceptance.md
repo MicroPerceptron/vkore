@@ -16,8 +16,13 @@ Use the coordinated plan in Kore
 starts a real configured Kore VM and llama.cpp server, waits for authenticated
 versioned supervisor readiness, then requests three supervisor retire/relaunch
 cycles. It asserts exact successor generations and fresh broker routes, the same live QEMU PID, one
-VM boot, and an unparked interactive desktop. It never substitutes a simulated
-guest or deterministic inference backend. Its final teardown stops its own VM.
+VM boot, and an unparked interactive desktop. It then severs HostLink while
+idle, during an observed real inference request, and requests supervisor stop
+after a real arithmetic response but before acknowledging its receipt. Each
+boundary must actually be observed; timeout fails the gate. Recovery requires
+the exact next generation, a fresh route and the same live VM, with no stale
+response or automatic prompt replay. It never substitutes a simulated guest
+or deterministic inference backend. Its final teardown stops its own VM.
 
 Run only with exclusive QEMU use and a dedicated vKore state directory. Back
 up fixtures first. The application settings next to `project_root` must select
@@ -49,8 +54,8 @@ During development, pass the complete native-owner Cargo override before
 Missing configuration, mismatched ISO bytes, timeout, stale readiness or a VM
 replacement fails the gate; there is no skip-success path.
 
-This idle lifecycle gate does not establish desktop input responsiveness,
-in-flight tool cancellation, unknown-write handling, per-resource reclamation
+This lifecycle gate does not establish desktop input responsiveness,
+in-flight filesystem tool cancellation, unknown-write handling, per-resource reclamation
 accounting or process isolation. Those remain distinct native/UI acceptance
 scenarios in the coordinated plan. Save failed runs as well as successful ones.
 

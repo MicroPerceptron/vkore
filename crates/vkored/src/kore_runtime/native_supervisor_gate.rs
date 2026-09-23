@@ -99,6 +99,94 @@ fn run_native_supervisor_gate() {
         );
         previous = next;
     }
-    // ProjectRuntime's Drop reaps only the VM owned by this test. This gate
-    // does not certify desktop input, in-flight tools or MM reclamation.
+    let previous_epoch = runtime
+        .runtime
+        .as_ref()
+        .unwrap()
+        .daemon
+        .core()
+        .epoch()
+        .unwrap();
+    runtime.runtime.as_mut().unwrap().daemon.force_disconnect();
+    runtime
+        .prepare(&mut |status| eprintln!("{status}"), &|| false)
+        .unwrap();
+    let next = runtime.supervisor.unwrap();
+    assert_eq!(next.generation.get(), previous.generation.get() + 1);
+    assert_ne!(next.route, previous.route);
+    let guest = runtime.runtime.as_mut().unwrap();
+    assert_ne!(guest.daemon.core().epoch(), Some(previous_epoch));
+    let process = guest.process.as_mut().unwrap();
+    assert_eq!(process.id(), pid, "transport loss replaced the OS");
+    assert!(process.try_wait().unwrap().is_none());
+    assert_eq!(guest.boot_attempt, 1);
+    assert!(!guest.vm_suspended);
+    assert!(!guest.recovering);
+    eprintln!(
+        "{}",
+        json!({"gate":"native_supervisor", "fault":"host_disconnect",
+        "qemu_pid":pid,"generation":next.generation.get(),"result":"ready"})
+    );
+    // Fault only after observing real progress. A deadline is a failure,
+    // never a substitute for reaching the requested boundary.
+    for fault in ["inference_disconnect", "response_before_receipt_stop"] {
+        let previous = runtime.supervisor.unwrap();
+        let guest = runtime.runtime.as_mut().unwrap();
+        let intent = guest
+            .daemon
+            .queue_frontend_intent("What is 17 plus 25? Answer with the number only.")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            guest.daemon.tick().unwrap();
+            guest.drain_events(&mut |kind, _, event| eprintln!("{kind:?} {event}"));
+            if fault == "inference_disconnect" {
+                if guest.daemon.core().backend_metrics().pending > 0 {
+                    guest.daemon.force_disconnect();
+                    assert!(guest.daemon.core().frontend_interrupted(intent));
+                    break;
+                }
+            } else if let Some(result) = guest.daemon.take_frontend_result() {
+                assert_eq!(result.intent_id, intent);
+                assert_eq!(result.kind, FrontendResultKind::Completed);
+                assert_eq!(result.text.trim(), "42");
+                // Preserve the observed response, but deliberately withhold
+                // its receipt so native worker retirement is still pending.
+                eprintln!("{}", json!({"boundary":fault,"text":result.text}));
+                assert!(!guest.daemon.core().frontend_ready(intent));
+                break;
+            }
+            assert!(Instant::now() < deadline, "did not reach {fault}");
+            std::thread::sleep(DEFAULT_TICK);
+        }
+        // Match the runtime's terminalization/containment order. Never
+        // requeue the interrupted intent, even after successful recovery.
+        guest.daemon.cancel_frontend_intent(intent);
+        guest.recover_supervisor(&mut |_, _, event| eprintln!("{event}"));
+        runtime
+            .prepare(&mut |status| eprintln!("{status}"), &|| false)
+            .unwrap();
+        let next = runtime.supervisor.unwrap();
+        assert_eq!(next.generation.get(), previous.generation.get() + 1);
+        assert_ne!(next.route, previous.route);
+        let guest = runtime.runtime.as_mut().unwrap();
+        let process = guest.process.as_mut().unwrap();
+        assert_eq!(process.id(), pid, "{fault} replaced the OS");
+        assert!(process.try_wait().unwrap().is_none());
+        assert_eq!(guest.boot_attempt, 1);
+        assert!(!guest.vm_suspended);
+        assert!(!guest.recovering);
+        assert!(
+            guest.daemon.take_frontend_result().is_none(),
+            "stale result after {fault}"
+        );
+        eprintln!(
+            "{}",
+            json!({"gate":"native_supervisor","fault":fault,
+            "qemu_pid":pid,"generation":next.generation.get(),"result":"ready"})
+        );
+    }
+    // ProjectRuntime's Drop reaps only the VM owned by this test. Inference
+    // and receipt boundaries do not certify in-flight filesystem effects,
+    // desktop input or MM reclamation.
 }

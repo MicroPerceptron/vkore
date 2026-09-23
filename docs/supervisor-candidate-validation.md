@@ -7,8 +7,10 @@ The enabled artifact reproduces exactly and the four original native file/model
 prompts pass functionally. Committed-write disconnect and stop now pass on the
 workspace-rebind repair, including a subsequent fresh tool effect in the same
 VM. Native two-terminal isolation and no-project refusal/arithmetic also pass.
-Final artifacts, authority, desktop and UI acceptance remain
-pending. The default real-stack lock has not been promoted.
+Live file-grant revocation also passes, including denied reads and a usable
+follow-up prompt in the same VM. Existing-name collision also passes with
+unchanged host bytes and a successful follow-up. Final artifacts, desktop and
+UI acceptance remain pending. The default real-stack lock has not been promoted.
 
 ## Current source refresh
 
@@ -43,12 +45,12 @@ Artifact source, generated diff and build log are preserved in Kore's
 `target/agent-supervisor-evidence/sequence-default/`. The separate
 kernel boot test also passes (`sequence-boottest-01`), ISO SHA-256
 `e135d5df4f6c136d738acbc1eb241b96da5db60445eb753aee7b7001698c7884`.
-Desktop checks remain pending for this freeze.
+The full desktop gate fails after recycling; fresh capacity passes, as detailed below.
 
 `sequence-files-01` failed before agent admission: the hand-prepared acceptance
 project lacked its separate transaction-state directory. Normal `ProjectStore`
 creation supplies it. The fixture was corrected, the gate now checks this
-precondition before VM startup, and `sequence-files-02` is running. No file
+precondition before VM startup, and `sequence-files-02` subsequently exposed the focus issue below. No file
 operation pass is inferred from the failed setup.
 
 `sequence-files-02` creates the file through a native tool and verifies exact
@@ -67,8 +69,7 @@ Its exact generated payload diff SHA-256 is
 Reproduction from the restored committed payload baseline PASSES with the
 exact ISO and generated diff. The release host/UI build and `make dev-check`
 also pass using the dedicated UI state. `sequence-files-03` passes on this image with the focus fix; the full vKore
-workspace suite also passes after that fix. Native uncertain-transaction fault
-gates are implemented and compile, but have not yet run.
+workspace suite also passes after that fix. The subsequent uncertain-transaction results are recorded below.
 
 `sequence-files-03` completed all four original prompts through the real
 application runtime, guest tools and Qwen model. Create returned success and
@@ -113,8 +114,13 @@ passed. Automated native desktop/fault/authority gates continue independently.
   Fresh capacity-only `sequence-capacity-01` PASSES on the same ISO in 127.46 s:
   actual Power controls render and `window list` confirms all five live
   presentations. This rules out a fixed four-window ceiling; it does not
-  erase the earlier recycled-session failure. A full rerun retains extra
-  failure-time window/exec diagnostics.
+  erase the earlier recycled-session failure. Full rerun `sequence-desktop-02` reproduces the failure in 695.26 s.
+  The terminal renderer echoes keys, but `window list` never returns.
+  The compositor still renders pointer/chrome. This is a shell/controller
+  stall, not merely an unrecognized Power window. All 110 captures are
+  retained in the verified `frames.tar.gz`; duplicate loose copies were
+  removed only after byte-for-byte archive verification. A diagnostic shell
+  uses the standard native panic reporter instead of silently spinning.
 - `sequence-two-terminal-08`: **PASS**, 432.15 s, disabled userland-gate ISO
   `9ba9f188c8c76b896c0f64bf0c23c4eff2581518a88a65dac2abca34809cc2ed`.
   Actual task-owned keyboards/framebuffers prove private roots, explicit live
@@ -148,15 +154,41 @@ retain the application preparation followed by explicit project attachment.
 Existing-name collision
 coverage is implemented as `native_existing_file_collision_preserves_bytes`,
 with backed-up `test.txt = hello`, required native create refusal, unchanged
-host bytes, and a subsequent arithmetic prompt in the same VM. This new gate,
-and live authority revocation compile; their native executions are still pending.
+host bytes, and a subsequent arithmetic prompt in the same VM. Both native gates have now run and exposed the failures recorded below.
 
 `sequence-collision-01` stops before model planning because the test's 157-byte
 intent exceeds the existing 128-byte `TASK_INTENT_MAX`. It preserves fixture
 bytes but cannot certify a collision. The test now uses a 111-byte equivalent
-intent and checks the protocol bound before VM startup. Its unrun authority
-update prompt was also shortened to the existing bound. The corrected gates
-compile; native reruns remain required.
+intent and checks the protocol bound before VM startup. The authority-update prompt was also shortened to the existing bound.
+
+`sequence-collision-02` reaches real model planning but the broker selects the
+existing file object, not the directory authority required by create. Native
+admission correctly refuses `Backend(Filesystem)`; no create tool runs and
+fixture bytes are preserved. This does not certify collision handling. The
+next prompt explicitly requests the project directory capability (122 bytes);
+no native rights have been widened. Native `sequence-collision-03` PASSES
+in 336.22 seconds on the same `8c6f4f2e` diagnostic image: real create returns
+`create: already exists`, the assistant accurately reports the collision,
+host bytes stay exactly `hello`, and the next prompt returns `42` in the same
+unparked QEMU PID 90884. The broker also selects an unnecessary write tool;
+no write is executed.
+
+`sequence-authority-01` admits the exact read-only file object and executes
+five reads, but the live update fails during planning. Source inspection found
+that live-update planning treated bulk upload acknowledgments as terminal
+failure, unlike initial planning. The fix retains the same revision/request/
+offers for `BULK_READY` and `BULK_ACCEPTED`. All 121 runner and 3 supervisor
+tests pass. Native `sequence-authority-02` PASSES in 506.24 seconds on diagnostic ISO SHA-256
+`8c6f4f2e70e48a76d15efa69cdd860a61b7b3b5c8738766e33a0701493cec6ef`;
+source base `fa628da409ab99765fd4371f049f2704576f86bc`, exact source/payload
+patch and build log are retained in Kore `target/agent-supervisor-evidence/
+live-update-progress/`. The file object is revoked; all five subsequent native reads refuse with an
+empty resource list. A follow-up prompt returns exactly `42` in the same
+unparked QEMU PID 80990; the fixture is unchanged. Captured events were
+independently checked in `revocation-observations.json`. The broker selected
+one `revoke_grant` operation, so removal of every tool grant is not claimed.
+The gate now also asserts the post-revocation refusal directly; that additional
+assertion compiles in the collision run, and will run at final acceptance.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

@@ -116,7 +116,7 @@ fn run_file_gate(existing: bool) {
         prompts: BTreeMap::new(),
     };
     let collision_prompts = [
-        "Create an empty file named test.txt using create. If it exists, report the error without changing its contents.",
+        "Use the project directory capability and create tool to create test.txt. Report errors; never overwrite existing contents.",
         "What is 17 plus 25? Answer with the number only.",
     ];
     let file_prompts = [
@@ -542,17 +542,33 @@ fn native_live_authority_revocation_preserves_vm() {
         let worker_started = Cell::new(false);
         let sent = Cell::new(false);
         let applied = Cell::new(false);
+        let update_failed = Cell::new(false);
         let installed_file = Cell::new(false);
         let revoked_file = Cell::new(false);
+        let refused_after_revoke = Cell::new(false);
+        let output_after_revoke = Cell::new(false);
         let status = runtime.run_prompt_with_updates(&session, &prompt, &mut |kind, public, event| {
             eprintln!("{}", json!({"gate":"native_authority", "kind":format!("{kind:?}"), "public":public, "event":event}));
             if event["kind"] == "Input" && event["role"] == "Agent" { worker_started.set(true); }
             if kind == EventKind::AuthorityUpdate && event["status"] == "applied" { applied.set(true); }
+            if kind == EventKind::AuthorityUpdate && matches!(event["status"].as_str(), Some("failed" | "refused" | "cancelled")) {
+                update_failed.set(true);
+            }
             if kind == EventKind::Capability && matches!(event["kind"].as_str(), Some("View" | "Object")) {
                 if event["state"] == "Installed" { installed_file.set(true); }
                 if event["state"] == "Revoked" { revoked_file.set(true); }
             }
-        }, &|| false, &|| true, &|| {
+            if revoked_file.get() && event["kind"] == "ToolResult" {
+                let result: serde_json::Value = serde_json::from_str(event["payload"].as_str().unwrap()).unwrap();
+                if result["result"] == "refused" && result["available_resources"] == json!([]) {
+                    refused_after_revoke.set(true);
+                }
+                if result["result"] == "output" { output_after_revoke.set(true); }
+            }
+        // A terminal update failure cannot pass. Cancel the test-owned read
+        // task through its normal cleanup path instead of spending its full
+        // remaining model/tool budget before reporting that failure.
+        }, &|| update_failed.get(), &|| true, &|| {
             if worker_started.get() && !sent.replace(true) {
                 Some(AuthorityUpdateRequest { api_version:1, prompt_id:prompt.prompt_id.clone(), update_id:"remove-all-files-and-tools".into(),
                     text:UPDATE.into() })
@@ -565,6 +581,10 @@ fn native_live_authority_revocation_preserves_vm() {
         assert!(
             applied.get() && revoked_file.get(),
             "native revoke and resumed-update receipt were not confirmed: {status:?}"
+        );
+        assert!(
+            refused_after_revoke.get() && !output_after_revoke.get(),
+            "a read after revocation must refuse with no resource authority"
         );
         let guest = runtime.runtime.as_ref().unwrap();
         assert_eq!(guest.process.as_ref().unwrap().id(), pid);

@@ -42,7 +42,7 @@ with stable FS capacity in one VM. Kernel boot, returning-main and two-terminal
 isolation also pass on their distinct recorded products. The extended desktop repeat passes with the earlier intermittent failure
 retained. UI and unresolved CI remain open. No default lock promotion.
 
-The latest Kore head `d65ddeb357a8fbb8004bff1c1690e682f07b811f` changes only
+The candidate packaging head `d65ddeb357a8fbb8004bff1c1690e682f07b811f` changes only
 the returning-main test driver, its regression and this project's evidence ledger.
 It does not alter guest payload source or SDK exports. The candidate has now been resealed for that exact commit and its lock updated.
 Preflight continues to require the recorded revision, image and generated diff.
@@ -340,13 +340,14 @@ This fixes subsequent launches and does not retroactively repair the old run.
 ## Remaining acceptance
 
 Follow [Kore #1053](https://github.com/MicroPerceptron/kore/issues/1053) and
-[the run instructions](supervisor-acceptance.md). Remaining gates include final
-pinned artifact reproduction and applicable boot/boottest/desktop checks,
-missing and narrowed authority, isolated/shared views, live revocation,
-in-flight cancellation/termination/disconnect, native capacity reclamation,
-and real UI create/read/missing-file/arithmetic, host-byte verification,
-recovery, drafts and project/chat selection. Three idle restarts do not prove
-those scenarios. Only one QEMU owner may run at a time.
+[the run instructions](supervisor-acceptance.md). The later ledger entries record
+completed native authority, file, fault/recovery and capacity checks on their
+exact artifacts. Remaining work is diagnosis of the unresolved native/hardware
+failures, final source/SDK/artifact convergence and reproduction, applicable
+native gates on that final tuple, and live macOS UI create/read/missing-file/
+arithmetic, recovery, drafts and project/chat selection with independent host
+readback. Headless UI tests and fixture renders are separate evidence and do
+not complete native computer-use acceptance. Only one QEMU owner may run at a time.
 
 ### Pointer delivery and returning-main observations
 
@@ -789,3 +790,89 @@ The Mac remains locked at the last computer-use attempt. Final UI acceptance,
 hardware failure diagnosis, final source/export convergence and default-lock
 promotion are still open. Generated diagnostic payloads remain uncommitted;
 the earlier enabled candidate and its source/diff/hash evidence are preserved.
+
+
+### Locked-Mac validation and completed diagnostic CI — 2026-09-23
+
+Computer use reports that automatic unlock is paused after local physical input.
+This is not missing computer-use permission. Native Mac interaction remains
+unavailable until a manual unlock; QEMU control, host checks and offscreen
+rendering remain available.
+
+The unchanged vKore runtime at `e389274` (documentation head `d5435f9`) passes
+133 headless UI tests, with its one ignored capture/benchmark test run separately
+and passing. The full reference comparison measures 60 samples with zero
+differing pixels and zero maximum channel delta. Wide/narrow chat, narrow
+settings and uncertain-authority-update fixtures render and were visually
+inspected. These are fixture/application-state checks, not live macOS or guest
+UI acceptance. The exact previously built workspace binary and its SHA-256
+are recorded in `diagnostics/locked-mac-ui-renders/manifest.json`. An initial
+isolated-package rebuild was stopped for disk pressure; only its recorded new
+outputs and superseded UI test binaries were removed. Models, fixtures and
+current binaries remain intact. Superseded diagnostic images and completed VM
+disks were losslessly compressed with verified hashes and restore manifests.
+
+Kore CI `35878845333` completed against merge `d2dce91cdb6a3cfe24bac0bef9c473ac0062f1da`:
+host, architecture, supply-chain, application and image builds pass; 11 of 18
+hardware test lanes pass. Seven fail: AMD window capacity/power controls, AMD
+high-resolution display provisioning, both returning-main execution witnesses,
+both vendor VM suites, and AMD status-devices startup. The reporting change
+identifies actual projection timeouts (code 96), including incomplete app seeds.
+Intel VM's saved status frame also proves a separate input focus race: partial
+`vm` remains in Terminal 0 while Terminal 1 owns focus. Both returning-main
+frames show focused Terminal 0, submitted `hello` and a fresh prompt without
+execution testimony. Classification, raw logs and selected frames are retained
+in `diagnostics/ci-93fefba5f/`; these are not blanket-classified as CI noise.
+
+The source correction switches init's service waits to its existing observed
+executor immediately after READY. Post-ready store/Lua/SPMD work previously
+used the bootstrap executor, which could consume shell notices without
+forwarding them. The command driver now shares the returning-main focus
+barrier, witnessing all configured terminals and the selected seat before
+input. Fifty-two focused driver tests, the real executor observer regression,
+and init checks on x86/ARM64/RISC-V pass. No capability rights, wire layout,
+observation budgets or command-output requirements were changed.
+
+Fresh disabled production and interactive images were built from `93fefba5f`
+plus the recorded source patch; they are diagnostic products, not a release
+pin or coordinated SDK refresh. Production ISO SHA-256:
+`fac1f3bf32055a7e2c6704cfb08413df8fa901659393fa8bd2b496530aa43c30`.
+Interactive ISO SHA-256:
+`77ab3868fac85e55833362eef017cb6566866197c4c45cd54e901d645da8dfb6`.
+The complete tracked working-tree patch SHA-256 is
+`eb84a7f086109808d0c916a648d6c94dc94e919013cea45254c790d908029b20`;
+the newly added focus helper is saved separately with its own hash. The build
+manifest includes all source-file hashes. The initial packaging attempt lacked
+`KORE_ROOT`; the corrected helper supplies it and the expected commit. This
+helper failure is not presented as a native build defect.
+
+`post-ready-default-01` PASSES production boot in 42.32 s. The first new
+returning-main run FAILS after 603.28 s at its provisioning prerequisite:
+34/35 applications, no package, projection timeout 96. It never reaches the
+command sequence and therefore does not validate the init correction. This
+reproduces a hardware failure boundary locally. Projection retains the exact
+uncertain operation for cleanup but publication fails after one observation
+slice; compare its continuation with the existing bounded write-owner resumes
+before changing a budget or claiming a root-cause fix.
+
+`post-ready-focus-driver-02` PASSES in 61.35 s on the same interactive image:
+35/35 seed, both seats ready, selected-seat focus, exact expected `help` rows
+and a fresh prompt. The earlier focus pilot submitted `status` successfully
+but used a token that scrolled offscreen; its failure and test-design limitation
+remain recorded. All native tests ran serially with isolated VM disks.
+
+`post-ready-returning-02` PASSES the full unchanged gate in 220.01 s:
+20 hello rounds, full-width exit values, lifecycle/finalizer/worker variants,
+utilities, status selectors and dynamically linked lspci. All 35 applications
+seeded on this boot. The pass exercises report forwarding, but does not erase
+the earlier incomplete-provisioning failure or establish hardware convergence.
+
+The enabled candidate remains `b8a6f1d8` at artifact base `d65ddeb35`, SDK
+`688d5bfb` and native owner `60e659644`. These newer diagnostic source changes
+are not part of that tuple. Remaining work is unresolved provisioning and other
+hardware failures, final source/export/artifact convergence and reproduction,
+applicable native validation on that final tuple, and live macOS computer use.
+No merge, issue closure, or default artifact-lock promotion.
+
+The init/focus correction and execution ledger are committed as Kore `f3e2b45df`;
+generated diagnostic payloads remain separate, captured build products.

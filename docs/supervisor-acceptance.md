@@ -227,3 +227,16 @@ actual tool result to report the existing name, verifies unchanged host bytes,
 and follows with exact `42` in the same VM. Never prepare this by overwriting
 a user file; create a separate fixture. Native `sequence-collision-03` passes on its recorded diagnostic image;
 see the candidate evidence for exact identities and remaining final-image gates.
+
+
+### Checks available while macOS computer use is paused
+
+A locked-use pause after local physical input requires a manual unlock before
+native Mac interaction resumes. Headless checks remain available: run the
+workspace UI tests, the separate reference-render comparison, and guest QMP
+acceptance gates serially with isolated disks and exact ISO hashes. Preserve
+screenshots, host-byte proofs and failures. Fixture renders do not establish
+live Mac focus, input delivery, project selection or real guest UI behavior.
+See the locked-Mac checkpoint in [the evidence ledger](supervisor-candidate-validation.md)
+for passing headless UI/render checks, init/focus validation, and the locally
+reproduced provisioning timeout. Final live UI acceptance remains open.

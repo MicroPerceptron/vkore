@@ -1640,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "kore-abi"
 version = "0.1.4"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "bitflags 2.13.1",
  "zerocopy",
@@ -1649,12 +1649,12 @@ dependencies = [
 [[package]]
 name = "kore-collections"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 
 [[package]]
 name = "kore-dagfs"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "heapless",
  "kore-abi",
@@ -1667,7 +1667,7 @@ dependencies = [
 [[package]]
 name = "kore-driver"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -1684,7 +1684,7 @@ dependencies = [
 [[package]]
 name = "kore-hint"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "raw-cpuid",
 ]
@@ -1692,7 +1692,7 @@ dependencies = [
 [[package]]
 name = "kore-hostlink"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "blake3",
  "heapless",
@@ -1702,12 +1702,12 @@ dependencies = [
 [[package]]
 name = "kore-hostlink-shmem"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 
 [[package]]
 name = "kore-nvme"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1716,7 +1716,7 @@ dependencies = [
 [[package]]
 name = "kore-ring"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "kore-abi",
  "zerocopy",
@@ -1725,7 +1725,7 @@ dependencies = [
 [[package]]
 name = "kore-rt"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "kore-abi",
  "kore-collections",
@@ -1739,7 +1739,7 @@ dependencies = [
 [[package]]
 name = "kore-rt-macros"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1750,12 +1750,12 @@ dependencies = [
 [[package]]
 name = "kore-scrub"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 
 [[package]]
 name = "kore-svc-block"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1768,7 +1768,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-dagfs"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "blake3",
  "crc",
@@ -1791,7 +1791,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-device"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "heapless",
  "kore-abi",
@@ -1801,7 +1801,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-extract"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "blake3",
  "heapless",
@@ -1811,7 +1811,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-hostlink"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "blake3",
  "heapless",
@@ -1828,7 +1828,7 @@ dependencies = [
 [[package]]
 name = "kore-virtio"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1839,7 +1839,7 @@ dependencies = [
 [[package]]
 name = "kore-workspace-sync"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/kore.git?rev=d0905ff6aa86487b7f6ca051277a693558c98175#d0905ff6aa86487b7f6ca051277a693558c98175"
+source = "git+https://github.com/MicroPerceptron/kore.git?rev=b7fefa3156ad9f2bcbcb057403becb29e618d50d#b7fefa3156ad9f2bcbcb057403becb29e618d50d"
 dependencies = [
  "blake3",
  "heapless",
@@ -3200,7 +3200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

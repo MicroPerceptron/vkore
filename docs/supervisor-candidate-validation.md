@@ -1,74 +1,86 @@
-# Optional supervisor candidate — 2026-09-22
+# Optional supervisor acceptance — 2026-09-22
 
-Status: source implementation, host checks, artifact reproduction and preflight
-passed. **Native and computer-use acceptance have not run. Do not merge or
-promote the default lock on this evidence alone.**
+**Not merge-ready.** Disabled production boot and three native idle supervisor
+restarts passed on development images. Final pinned artifact reproduction,
+the remaining native matrix and computer-use acceptance are still required.
+The default real-stack lock has not been promoted.
 
-| Identity | Revision or digest |
+## Current source checkpoint
+
+| Component | Revision |
 | --- | --- |
-| Kore source | `ac349b75dc23f7d20f35c78b923c14a691133cb4` |
-| Committed disabled artifact base | `c2b45da4c4cd8ad98245e1207d069fc5d73d2628` |
-| SDK | `1f7e248b070ef3a04bd1226c1cef8a46b46e1f2c` |
-| SDK and host native owner source | `d0905ff6aa86487b7f6ca051277a693558c98175` |
-| Enabled ISO SHA-256 | `df4c0e29b94e7629722ec42ecf7e34989eba94f0fcadeb16ab71208aa25386cc` |
-| Enabled ISO BLAKE3 | `3b4148268290ef22d809fb3ea891c371be708f8de6c4b61dcd3510235df42c27` |
-| Generated Kore diff SHA-256 | `71f3f93b587fbe81470c84ba4c2b50d7a3405334c6064dde31ab6d880626d273` |
+| Native fixes / host owner pin | `b7fefa3156ad9f2bcbcb057403becb29e618d50d` |
+| Exact SDK export | `fcf434490304802be7987b2b7c4460960169310a` |
 
-The final vKore implementation includes this document's commit and its
-ancestors. `config/supervisor-candidate.lock.mk` selects the tuple above.
-`config/real-stack.lock.mk` is still the previous baseline. Both SDK
-lockfiles and the vKore dependency lock remain unchanged by packaging.
+The capacity repair is Kore `9702a67b6`; the next commit preserves pending exec
+construction across transient observation errors and adds launch diagnostics.
+The guest is being repinned to the SDK above. Final disabled payloads and the
+enabled candidate lock must be rebuilt after that source freeze. The existing
+`config/supervisor-candidate.lock.mk` describes the superseded first candidate;
+it is not compatible with the current worktree and must not be promoted.
 
-## Observed checks
+The SDK full fmt/test/check/docs/owners/cross/Miri/bindings matrix and actual
+Kore composition (including mixed-owner rejection) passed. The host's full
+workspace suite and release binaries passed with the new Git-native owner pin.
+Kore's full host and final image/architecture checks are being refreshed.
 
-- Kore full host suite passed after the final policy/private-stop edits.
-  Enabled-selector focused tests passed; x86, ARM and RISC-V checks passed.
-  Disabled production and separate release boot-test images built; neither
-  has been booted for this overhaul.
-- SDK `make fmt test check docs owners cross miri bindings-check`, exact export,
-  actual-Kore composition, renamed consumer and mixed-owner negative controls
-  passed against the published native revision.
-- vKore's Git-pinned full workspace suite passed, then passed again after the
-  private ISO snapshot fix. Focused VM/daemon regressions and release builds
-  passed. The real native restart test is compiled but remains unexecuted.
-- Starting from clean tracked Kore source at the disabled artifact base,
-  `make artifacts VKORE_REAL_STACK_LOCK=config/supervisor-candidate.lock.mk`
-  reproduced both the ISO and all five generated files byte-for-byte. Compiler
-  caches were reused; this was not a cold toolchain installation.
-- `make dev-check` passed against a dedicated state and fixture. It verified
-  the source, generated diff, ISO, real model/server and project settings.
-  It did not start a harness or VM.
+## Native observations
 
-Local evidence is retained under Kore's `target/agent-supervisor-evidence/`
-and `~/.local/state/vkore-supervisor-acceptance-20260922/diagnostics/`.
-The latter contains candidate and host-gate manifests, preserved logs and an
-isolated native restart configuration. The fixture began empty and was backed
-up before testing. Failed earlier build attempts remain recorded separately.
-Current remote CI must be assessed on its exact head; old passes do not apply.
+Evidence root: `~/.local/state/vkore-supervisor-acceptance-20260922/diagnostics/`.
+Every native run uses dedicated disks, firmware variables and serial logs.
+The test fixture began empty and has a pre-test backup.
+
+- `default-boot-02`: disabled production boot passed on macOS QEMU TCG with
+  four CPUs and 4096 MiB. ISO SHA-256:
+  `9eeac9103e7dac8f7daa65686028b4ef77bbd59f571ea3c011856756e672d168`.
+  G7 retirement was not exercisable on this topology. The earlier two-CPU run
+  reached the shell but failed exclusive SPMD reservation; its failure remains.
+- `native-restart/gate.attempt02.log`: the first enabled image reached complete
+  provisioning and shell readiness but never started the supervisor.
+  Diagnostic03 identified the runner's exact `TableFull` refusal: the new
+  resident set required 42 image slots, while the ABI reserved 41.
+- `native-restart-reservation01`: after correcting capacity, image acquisition
+  and project binding succeed. Exec-client construction repeatedly enters
+  cleanup because the launcher treated a short observation error as terminal.
+  The fix resumes the same affine owner and pending request without extending
+  the overall startup deadline.
+- `native-restart-mint-resume02`: **three idle restart cycles pass**, generations
+  1 through 4, one boot, the same live QEMU PID 37975 and no parking. Initial
+  authenticated readiness took 70.7 seconds including model startup; recovery
+  readiness took 3.48, 3.13 and 3.15 seconds. Teardown completed successfully.
+  Diagnostic ISO SHA-256:
+  `23b63ecab8f18b053be088dfeb9c72921c4ac15c406f85da672d3f3feedd82c4`.
+  BLAKE3: `e2b82cfb373e249e7d050476691725a8e634e2e0d1409d073e07caaad29e7769`.
+  Source base: `9702a67b645d34d1ae5d2a0e07bf021117050d48` plus the run's recorded
+  binary source/payload patch. Patch SHA-256:
+  `f6e8ce0874aa791b27e718fe06bfc7a0a1b8b1feb59626e15c1dbf0c12a60854`.
+
+These diagnostic images are not the final release tuple. Earlier gate-driver
+failures are retained: a host stack overflow before VM launch, telemetry sent
+before mandatory init configuration, and a wrong assertion that the broker
+route must remain unchanged. The corrected restart gate requires a fresh
+route per generation, matching HostLink's authenticated rotation contract.
+A separate broker test now checks close acknowledgment and workspace retention.
 
 ## Running-session image incident
 
-The earlier manual QEMU process mounted the shared build-output ISO directly.
-During this implementation, image builds overwrote that inode even though the
-process and workspace were left running. Its original exact ISO backup was
-not found. This session is not valid acceptance evidence and must be restarted
-before further testing; lack of visible failure does not prove it was unaffected.
-The open inode was separated from subsequent build output. No manual process
-was stopped or fixture changed to conceal this incident.
+The original manual QEMU session mounted the build-output ISO directly. Builds
+overwrote that inode; its original exact backup was not found. It is not valid
+acceptance evidence. The incident record remains in the evidence root.
 
-New `QemuProcess` instances now own a private ISO copy until retirement.
-A regression test overwrites and removes the source image while the process
-is alive and verifies that its mounted copy remains unchanged and is cleaned
-up after process retirement. This fixes subsequent launches; it does not
-retroactively repair the old session or certify native boot behavior.
+The user subsequently authorized stopping that session. Its owned UI, launcher,
+VM and model processes were retired. The original workspace was not changed.
+New `QemuProcess` instances own a private ISO copy until retirement; both the
+regression test and the real native runs verify the separate mounted path.
+This fixes subsequent launches and does not retroactively repair the old run.
 
 ## Remaining acceptance
 
-Follow [the coordinated plan](https://github.com/MicroPerceptron/kore/issues/1053)
-and [run instructions](supervisor-acceptance.md). Required gates still include
-ordinary disabled boot, explicit enabled startup, missing authority, isolation,
-live authority changes, faults at each lifecycle boundary, repeated retirement
-and capacity reuse, two-terminal/extended desktop behavior, and real UI
-create/read/missing-file/arithmetic, host-byte verification, recovery, drafts
-and project/chat selection. Only one QEMU owner may run at a time. Approval to
-replace the user's existing manual session is still pending.
+Follow [Kore #1053](https://github.com/MicroPerceptron/kore/issues/1053) and
+[the run instructions](supervisor-acceptance.md). Remaining gates include final
+pinned artifact reproduction and applicable boot/boottest/desktop checks,
+missing and narrowed authority, isolated/shared views, live revocation,
+in-flight cancellation/termination/disconnect, native capacity reclamation,
+and real UI create/read/missing-file/arithmetic, host-byte verification,
+recovery, drafts and project/chat selection. Three idle restarts do not prove
+those scenarios. Only one QEMU owner may run at a time.

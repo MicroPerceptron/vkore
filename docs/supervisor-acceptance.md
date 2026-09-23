@@ -3,8 +3,11 @@
 Candidate identities and observed checks are recorded in
 [the candidate evidence](supervisor-candidate-validation.md).
 
-Status: gate implemented; native execution still pending. Host unit tests do
-not certify this gate. Use the coordinated plan in Kore
+Status: three native idle restarts passed on a diagnostic image after repairing
+guest startup. The ordinary disabled production boot also passed on the
+standard four-CPU topology. Final artifact reproduction, in-flight failures
+and computer-use acceptance remain pending. Host unit tests do not certify this gate.
+Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
 
 ## Repeated native restart gate
@@ -12,7 +15,7 @@ not certify this gate. Use the coordinated plan in Kore
 `kore_runtime::native_supervisor_gate::three_supervisor_restarts_preserve_the_native_vm`
 starts a real configured Kore VM and llama.cpp server, waits for authenticated
 versioned supervisor readiness, then requests three supervisor retire/relaunch
-cycles. It asserts exact successor generations, the same live QEMU PID, one
+cycles. It asserts exact successor generations and fresh broker routes, the same live QEMU PID, one
 VM boot, and an unparked interactive desktop. It never substitutes a simulated
 guest or deterministic inference backend. Its final teardown stops its own VM.
 

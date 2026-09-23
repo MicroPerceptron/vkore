@@ -81,6 +81,10 @@ fn native_frontend_file_roundtrip() {
             project.workspace.access,
             WorkspaceAccess::AutomaticWriteback
         );
+        assert!(
+            project.workspace.state.is_dir(),
+            "project transaction state must exist (create the fixture through ProjectStore)"
+        );
         let target = project.workspace.root.join("test.txt");
         assert!(
             !target.exists() && !backup.join("test.txt").exists(),
@@ -161,6 +165,124 @@ fn native_frontend_file_roundtrip() {
                 _ => {}
             }
             assert!(!runtime.runtime.as_ref().unwrap().vm_suspended);
+        }
+    });
+}
+
+#[test]
+#[ignore = "mutates an isolated backed-up project; requires real guest/model and exclusive QEMU"]
+fn native_transaction_reply_faults_preserve_effects_and_vm() {
+    on_native_stack(|| {
+        use std::sync::atomic::Ordering;
+        let input: Value = serde_json::from_slice(
+            &std::fs::read(std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let project_id = input["file_project_id"].as_str().unwrap();
+        let project = ProjectStore::open(input["project_root"].as_str().unwrap())
+            .unwrap()
+            .get(project_id)
+            .unwrap();
+        assert!(PathBuf::from(input["fixture_backup"].as_str().unwrap()).is_dir());
+        assert!(project.workspace.state.is_dir());
+        let names = ["interrupted-disconnect.txt", "interrupted-stop.txt"];
+        for name in names {
+            assert!(!project.workspace.root.join(name).exists());
+        }
+        let mut runtime = configured_runtime();
+        runtime
+            .ensure_project(project_id, "", &mut |_, _, e| eprintln!("{e}"))
+            .unwrap();
+        runtime
+            .prepare(&mut |e| eprintln!("{e}"), &|| false)
+            .unwrap();
+        let pid = runtime
+            .runtime
+            .as_ref()
+            .unwrap()
+            .process
+            .as_ref()
+            .unwrap()
+            .id();
+        let journal = project.workspace.state.join("workspace-transactions.v1");
+        for (index, name) in names.into_iter().enumerate() {
+            let previous = runtime.supervisor.unwrap();
+            let guest = runtime.runtime.as_mut().unwrap();
+            let gate = guest
+                .daemon
+                .with_idle_backend(|backend| backend.gate_next_transaction_reply())
+                .unwrap();
+            let intent = guest
+                .daemon
+                .queue_frontend_intent(&format!("Create an empty file named {name}."))
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(300);
+            while gate.load(Ordering::SeqCst) != 1 {
+                guest.daemon.tick().unwrap();
+                guest.drain_events(&mut |kind, _, e| eprintln!("{kind:?} {e}"));
+                assert!(
+                    guest.daemon.take_frontend_result().is_none(),
+                    "prompt ended before held transaction reply"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "transaction fault boundary not reached"
+                );
+                std::thread::sleep(DEFAULT_TICK);
+            }
+            assert_eq!(
+                std::fs::read(project.workspace.root.join(name)).unwrap(),
+                b""
+            );
+            let committed = std::fs::read(&journal).unwrap();
+            eprintln!(
+                "{}",
+                json!({"gate":"native_transaction_fault", "file":name,
+                "boundary":"host committed; reply withheld", "qemu_pid":pid})
+            );
+            if index == 0 {
+                guest.daemon.force_disconnect();
+            }
+            guest.daemon.cancel_frontend_intent(intent);
+            guest.recover_supervisor(&mut |_, _, e| eprintln!("{e}"));
+            // The stop has been requested while the real operation is awaiting
+            // its reply. Release that original outcome so cleanup can resolve
+            // actual custody; never replace it with a fabricated cancellation.
+            gate.store(2, Ordering::SeqCst);
+            runtime
+                .prepare(&mut |e| eprintln!("{e}"), &|| false)
+                .unwrap();
+            let next = runtime.supervisor.unwrap();
+            assert_eq!(next.generation.get(), previous.generation.get() + 1);
+            assert_ne!(next.route, previous.route);
+            let guest = runtime.runtime.as_mut().unwrap();
+            assert_eq!(guest.process.as_ref().unwrap().id(), pid);
+            assert!(
+                guest
+                    .process
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!guest.vm_suspended);
+            assert!(!guest.recovering);
+            assert!(guest.daemon.take_frontend_result().is_none());
+            assert_eq!(
+                std::fs::read(project.workspace.root.join(name)).unwrap(),
+                b""
+            );
+            assert_eq!(
+                std::fs::read(&journal).unwrap(),
+                committed,
+                "retirement replayed a write transaction"
+            );
+            eprintln!(
+                "{}",
+                json!({"gate":"native_transaction_fault", "file":name,
+                "generation":next.generation.get(), "result":"ready; original effect retained without replay"})
+            );
         }
     });
 }

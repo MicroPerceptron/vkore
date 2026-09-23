@@ -3,11 +3,12 @@
 Candidate identities and observed checks are recorded in
 [the candidate evidence](supervisor-candidate-validation.md).
 
-Status: idle restarts and idle disconnect passed, but the next prompt was
-refused during workspace admission before the intended inference fault.
-Disabled production boot and release boottest passed on the preceding source
-checkpoint. Final artifact reproduction, fault recovery and computer-use
-acceptance remain pending. Host unit tests do not certify these gates.
+Status: real fresh-worker arithmetic and receipt retirement pass. Recovery
+passes three idle restarts, idle disconnect, disconnect during inference and
+termination after response publication before receipt in one live VM.
+The refreshed disabled production image also passes its boot gate. Final
+artifact reproduction, tool/isolation/authority and computer-use acceptance
+remain pending. Host unit tests do not certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
 
@@ -119,8 +120,21 @@ The ignored `kore_runtime::native_supervisor_gate::native_frontend_file_roundtri
 uses the real application runtime and a configured project with automatic
 writeback. In addition to the ordinary gate configuration, set
 `file_project_id` and `fixture_backup` to an isolated project and its completed
-fixture backup. `test.txt` and `missing-file.txt` must be absent before launch;
+fixture backup. Its separate transaction-state directory must already exist,
+as it does for a project created through `ProjectStore`. `test.txt` and `missing-file.txt` must be absent before launch;
 the test never deletes preexisting files. It runs create, read, missing-file,
 and arithmetic prompts, verifies the exact host bytes `hello`, and requires
 the arithmetic response `42`. A correct missing-file error may have failed
 prompt status. This is native integration evidence, not computer-use evidence.
+
+### Uncertain native transaction outcomes
+
+`native_transaction_reply_faults_preserve_effects_and_vm` uses the same isolated
+project configuration. Its test-only backend hook pauses an actual successful
+host transaction reply after the filesystem effect and durable journal record
+exist. The guest tools and model remain real. It then disconnects or requests
+supervisor retirement before releasing that original reply. The gate requires
+the next generation in the same VM, preserved host bytes, unchanged transaction
+journal during recovery, and no stale frontend result. It never retries the
+interrupted prompt. This gate is not a replacement for live authority or UI
+acceptance.

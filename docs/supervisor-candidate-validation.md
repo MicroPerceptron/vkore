@@ -26,6 +26,40 @@ The reattachment regression fails with the original ID reuse restored.
 and termination after response publication before receipt. These are diagnostic images with exact saved source/diffs, not
 promoted release artifacts. Existing failed runs remain below for comparison.
 
+The current guest consumer freeze `580a7c0ce446fd24eb62c2dbb52ec00a7c8c1b9c`
+pins SDK `3a3f1ddf`. Its ordinary disabled production image passes
+`sequence-default-boot-01` (four CPUs, 4096 MiB, macOS QEMU TCG); ISO SHA-256
+`329769455e81ce77a306a949a0d4e3f9a0978b42fcc689ffe33e90dad9dd1dcf`.
+Artifact source, generated diff and build log are preserved in Kore's
+`target/agent-supervisor-evidence/sequence-default/`. The separate
+kernel boot test also passes (`sequence-boottest-01`), ISO SHA-256
+`e135d5df4f6c136d738acbc1eb241b96da5db60445eb753aee7b7001698c7884`.
+Desktop checks remain pending for this freeze.
+
+`sequence-files-01` failed before agent admission: the hand-prepared acceptance
+project lacked its separate transaction-state directory. Normal `ProjectStore`
+creation supplies it. The fixture was corrected, the gate now checks this
+precondition before VM startup, and `sequence-files-02` is running. No file
+operation pass is inferred from the failed setup.
+
+`sequence-files-02` creates the file through a native tool and verifies exact
+host bytes `hello`, then fails the read prompt. Personal discovery replaced the
+focus folder with hashed read-only aliases, removing `/project/test.txt` from
+the worker's view. The host now retains the selected focus root whenever a
+search result belongs to it. External-only and virtual-project discovery stay
+read-only. The focused discovery regression passes; native retest is pending.
+
+The unaccepted candidate lock now selects disabled artifact base
+`de6206941aad8e06616cd2b5290ebfb093118c7a`, source freeze `580a7c0ce`, and the
+new enabled image SHA-256
+`6a98af4aa9eff4005c08af874995145b33328b7ff9e04a3d107be9169f4608d3`.
+Its exact generated payload diff SHA-256 is
+`ed75af931c78f9408b44630e84cd09e71d2dde0f339dd087b6a0b73e8383cb3b`.
+Reproduction from the restored committed payload baseline is running.
+`sequence-files-03` tests this image with the focus fix; the full vKore
+workspace suite passes after that fix. Native uncertain-transaction fault
+gates are implemented and compile, but have not yet run.
+
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).
 The desktop gate failed because its driver clicked the dock before dismissing
@@ -54,9 +88,8 @@ current final source/artifact tuple.
 The capacity repair is Kore `9702a67b6`; the next commit preserves pending exec
 construction across transient observation errors and adds launch diagnostics.
 The guest is being repinned to the SDK above. Final disabled payloads and the
-enabled candidate lock must be rebuilt after that source freeze. The existing
-`config/supervisor-candidate.lock.mk` describes the superseded first candidate;
-it is not compatible with the current worktree and must not be promoted.
+enabled candidate lock must be rebuilt after that source freeze. The current `config/supervisor-candidate.lock.mk` supersedes this older
+checkpoint; it remains explicitly unaccepted until the integrated gates pass.
 
 The SDK full fmt/test/check/docs/owners/cross/Miri/bindings matrix and actual
 Kore composition (including mixed-owner rejection) passed. The host's full

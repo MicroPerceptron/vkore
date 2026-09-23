@@ -90,9 +90,15 @@ QMP socket in `qemu_arguments` (keep the runtime's own QMP socket). For example:
 
 Create the output directory before running. The probe opens Power, decodes its
 controls, requires Escape to close the frame, then runs fresh `clear`, `time`
-and `status exec` commands through Terminal. Saved framebuffers and JSON retain
-the observed exec task counts at each boundary. These counts are observations,
-not proof that every mapping/client allocation was reclaimed. The first native run passes twelve desktop probes but fails final supervisor
+and `status exec`, `status mem`, and `status fs` commands through Terminal.
+Saved framebuffers and JSON retain observed task, supply and filesystem-client
+counts at each boundary. Every provider must return a fresh available snapshot.
+MM child-supply totals are cumulative successful grants, not outstanding
+leases; do not interpret their growth alone as a leak. Filesystem client
+counts and physical allocator usage are occupancy observations. Compare
+equivalent ready boundaries; these observations do not alone prove that every
+kernel mapping was reclaimed. The added MM/filesystem observations
+require a guest containing Kore `52493011e` or its telemetry correction. The first native run passes twelve desktop probes but fails final supervisor
 readiness after the response fault. It is not an accepted recovery result.
 A diagnostic rerun passes all thirteen probes and generations 1–7. Preserve
 both results; this does not establish the timeout's cause. The focused
@@ -198,5 +204,5 @@ file roundtrip, but requires both the dedicated workspace and its backup to
 contain `test.txt` with exactly `hello`. It asks for a real create, requires the
 actual tool result to report the existing name, verifies unchanged host bytes,
 and follows with exact `42` in the same VM. Never prepare this by overwriting
-a user file; create a separate fixture. The gate compiles but has not passed
-native acceptance yet.
+a user file; create a separate fixture. Native `sequence-collision-03` passes on its recorded diagnostic image;
+see the candidate evidence for exact identities and remaining final-image gates.

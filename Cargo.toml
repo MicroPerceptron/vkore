@@ -26,11 +26,11 @@ rust-version = "1.97"
 # development; the committed graph builds without local checkout paths.
 [workspace.dependencies]
 blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
-kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb" }
-kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb" }
-kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb" }
-kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb" }
+kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "52493011e3491f955f478f92e895731af9fa9604" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "52493011e3491f955f478f92e895731af9fa9604" }
+kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "52493011e3491f955f478f92e895731af9fa9604" }
+kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "52493011e3491f955f478f92e895731af9fa9604" }
+kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "52493011e3491f955f478f92e895731af9fa9604" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -10,10 +10,31 @@ VM. Native two-terminal isolation and no-project refusal/arithmetic also pass.
 Live file-grant revocation also passes, including denied reads and a usable
 follow-up prompt in the same VM. Existing-name collision also passes with
 unchanged host bytes and a successful follow-up. Recycled ordinary desktop now
-passes with repaired pointer delivery; final artifacts, failure-time desktop and
-UI acceptance remain pending. The default real-stack lock has not been promoted.
+passes with repaired pointer delivery. A full desktop/fault diagnostic rerun
+also passes, with its earlier timeout retained. Final artifacts, detailed
+capacity observations and UI acceptance remain pending. The default real-stack lock has not been promoted.
 
-## Current source refresh
+## Refreshed source tuple
+
+The current native owner is `52493011e3491f955f478f92e895731af9fa9604`,
+with byte-exact SDK export `9ab4ee4b537c437cdc2a5e39ee34e8548358b157`.
+Kore consumer source freeze is `c0b7536026fbee512f17d32f54bd68aa53f5704b`;
+committed disabled ARM/x86 payload base is
+`00cf2d40230f9da39198393899ee033a43dd4920`. Full Kore host tests and all
+architecture checks pass. Required SDK checks, Miri, cross-target bindings and
+actual-Kore mixed-owner/identity checks pass; all seven SDK GitHub checks pass.
+The refreshed vKore workspace passes 372 tests, with 12 ignored tests requiring
+separate acceptance rather than being counted as passes.
+
+Disabled production `final-default-boot-01` passes in 42.03 seconds (4 CPUs,
+4096 MiB, Intel profile under macOS TCG), ISO SHA-256
+`89ef0216e4236192b775fb91de2e845967a7200470a556a52cd378b5c60fc71f`.
+The initial final-image packaging attempt omitted environment variables needed
+by the reproducible ISO wrapper; payload compilation/sealing had succeeded.
+Corrected packaging passes; both attempts and exact hashes are retained.
+The enabled image and candidate lock still require refresh and validation.
+
+## Source refresh history
 
 Kore repair `05fef507f` retires and reacquires the workspace view on supervisor
 replacement. This application-only change does not change the exported native
@@ -21,7 +42,7 @@ SDK closure. Its diagnostic native fault gate passes; refresh the final source
 and artifact lock before promotion.
 
 Kore merged main `515ed58c4` in `9c9c08637461a9986abdf3841ee738d5ddf96a3f`.
-Native owner pins now select `2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb`;
+That checkpoint selected native owner `2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb`;
 its exact SDK export is `3a3f1ddf3d4dd594e1cd22976baf9888a9acbd2a`. The full
 Kore host/architecture matrix, SDK matrix, actual-Kore composition including
 mixed-owner rejection, and updated vKore workspace tests passed.
@@ -38,7 +59,7 @@ The reattachment regression fails with the original ID reuse restored.
 and termination after response publication before receipt. These are diagnostic images with exact saved source/diffs, not
 promoted release artifacts. Existing failed runs remain below for comparison.
 
-The current guest consumer freeze `580a7c0ce446fd24eb62c2dbb52ec00a7c8c1b9c`
+The earlier guest consumer freeze `580a7c0ce446fd24eb62c2dbb52ec00a7c8c1b9c`
 pins SDK `3a3f1ddf`. Its ordinary disabled production image passes
 `sequence-default-boot-01` (four CPUs, 4096 MiB, macOS QEMU TCG); ISO SHA-256
 `329769455e81ce77a306a949a0d4e3f9a0978b42fcc689ffe33e90dad9dd1dcf`.
@@ -61,7 +82,7 @@ the worker's view. The host now retains the selected focus root whenever a
 search result belongs to it. External-only and virtual-project discovery stay
 read-only. The focused discovery regression and the native retest pass.
 
-The unaccepted candidate lock now selects disabled artifact base
+The earlier unaccepted candidate lock selected disabled artifact base
 `de6206941aad8e06616cd2b5290ebfb093118c7a`, source freeze `580a7c0ce`, and the
 new enabled image SHA-256
 `6a98af4aa9eff4005c08af874995145b33328b7ff9e04a3d107be9169f4608d3`.
@@ -372,9 +393,31 @@ its verified digest and actual acquisition/refusal testimony identify it.
 Diagnostic source/payload edits were restored, with exact patches retained.
 Frames were archived and byte-verified before removing duplicate loose copies.
 
-Additional status observations isolate the local provider failure to the
-scheduler/manifold section: `status sys` and `status cpu` show per-core rows
-but `SCHEDULER / MANIFOLD provider unavailable` and exit 4. Memory, filesystem
-and network sections render. This does not pass returning-main or explain
+Additional status observations show missing telemetry in the
+scheduler/manifold and memory sections: `status sys` and `status cpu` show per-core rows
+but `SCHEDULER / MANIFOLD provider unavailable` and exit 4. Memory reports both the system allocator and memory service unavailable;
+filesystem and network sections render. This does not pass returning-main or explain
 its separate CI first-command witness failure. The provider assertion remains
 unchanged pending diagnosis.
+
+
+### Native telemetry correction
+
+Kore `52493011e3491f955f478f92e895731af9fa9604` stops applying the 5 ms
+abandoned-operation maintenance slice to fresh MM Stats requests. The ordinary
+reply wait retains original-request custody; recovery remains bounded. The
+prior early return also prevented monitor/manifold observation. Seven focused
+exec recovery tests and 28 MM client tests pass.
+
+`sequence-provider-after-02` passes all six status forms (bare, sys, cpu, mem,
+fs, net), with fresh framebuffer output and exact new exit-0 serial testimony,
+in 124.42 seconds on disabled diagnostic ISO SHA-256
+`fc08f9ab0a8a7e7f312161110bf2fd40a83e057e30b288a8485b4f08e4606fdf`.
+Memory now reports actual allocator/supply data and all three manifold queries
+reach the kernel. The original after-run returned 0 but its screen assertion
+required a footer truncated by the existing process reply limit; the corrected
+check accepts that explicit truncation and still requires exit 0. Diagnostic
+kernel logging and payload changes were restored. This is not yet a final
+artifact or original returning-main acceptance result. All failed runs remain
+retained alongside the passing run, including the seven hardware scenarios
+that failed CI run 35847395393.

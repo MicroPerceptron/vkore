@@ -8,8 +8,9 @@ passes three idle restarts, idle disconnect, disconnect during inference and
 termination after response publication before receipt in one live VM.
 Disabled production/kernel boot, real file prompts, two-terminal isolation,
 absent-project refusal and committed-write recovery also pass on their recorded
-images. Final artifact refresh, live authority, existing-name collision, full
-desktop and computer-use acceptance remain pending. Host unit tests do not
+images. Live file revocation and existing-name collision also pass. The recycled
+ordinary desktop passes with the repaired pointer driver. Final artifact refresh,
+desktop responsiveness during supervisor faults and computer-use acceptance remain pending. Host unit tests do not
 certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
@@ -70,6 +71,29 @@ This lifecycle gate does not establish desktop input responsiveness,
 in-flight filesystem tool cancellation, unknown-write handling, per-resource reclamation
 accounting or process isolation. Those remain distinct native/UI acceptance
 scenarios in the coordinated plan. Save failed runs as well as successful ones.
+
+## Desktop fault probe
+
+`native_supervisor_faults_preserve_desktop` runs the same native restart/fault
+sequence and requires an additional `desktop_probe` command array in the gate
+JSON. The test appends a unique boundary name and pumps HostLink while the
+probe runs. Any failed or timed-out probe fails the test; the original lifecycle
+gate makes no desktop-input claim.
+
+Use Kore's `tools/keytest_supervisor_desktop.py` with an additional dedicated
+QMP socket in `qemu_arguments` (keep the runtime's own QMP socket). For example:
+
+```json
+"desktop_probe": ["python3", "/path/to/kore/tools/keytest_supervisor_desktop.py",
+                  "/tmp/supervisor-desktop.qmp", "/path/to/evidence/desktop"]
+```
+
+Create the output directory before running. The probe opens Power, decodes its
+controls, requires Escape to close the frame, then runs fresh `clear`, `time`
+and `status exec` commands through Terminal. Saved framebuffers and JSON retain
+the observed exec task counts at each boundary. These counts are observations,
+not proof that every mapping/client allocation was reclaimed. The first native run passes twelve desktop probes but fails final supervisor
+readiness after the response fault. It is not an accepted recovery result.
 
 ## Payload configuration
 

@@ -6,7 +6,13 @@ use super::*;
 #[test]
 #[ignore = "requires an isolated real-stack configuration and exclusive QEMU use"]
 fn three_supervisor_restarts_preserve_the_native_vm() {
-    on_native_stack(run_native_supervisor_gate);
+    on_native_stack(|| run_native_supervisor_gate(false));
+}
+
+#[test]
+#[ignore = "requires a real guest, desktop_probe command, backed-up state and exclusive QEMU use"]
+fn native_supervisor_faults_preserve_desktop() {
+    on_native_stack(|| run_native_supervisor_gate(true));
 }
 
 #[test]
@@ -679,7 +685,42 @@ fn configured_runtime() -> KoreVmRuntime {
     runtime
 }
 
-fn run_native_supervisor_gate() {
+// The probe drives actual guest input and decodes its framebuffer. Keep the
+// transport moving while it runs: a desktop check must not manufacture a
+// disconnected host by blocking the daemon's event loop.
+fn probe_desktop(guest: &mut ProjectRuntime, boundary: &str) {
+    let file = std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap();
+    let input: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let args = input["desktop_probe"]
+        .as_array()
+        .expect("desktop_probe must be a command array for native desktop acceptance");
+    let (program, arguments) = args.split_first().expect("desktop_probe cannot be empty");
+    let mut child = std::process::Command::new(program.as_str().unwrap())
+        .args(arguments.iter().map(|arg| arg.as_str().unwrap()))
+        .arg(boundary)
+        .spawn()
+        .expect("start the native desktop probe");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        guest.daemon.tick().unwrap();
+        guest.drain_events(&mut |kind, _, event| eprintln!("{kind:?} {event}"));
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "desktop probe failed at {boundary}: {status}"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("desktop probe timed out at {boundary}");
+        }
+        std::thread::sleep(DEFAULT_TICK);
+    }
+}
+
+fn run_native_supervisor_gate(desktop: bool) {
     let mut runtime = configured_runtime();
     let pid = runtime
         .runtime
@@ -690,12 +731,18 @@ fn run_native_supervisor_gate() {
         .unwrap()
         .id();
     let mut previous = runtime.supervisor.unwrap();
+    if desktop {
+        probe_desktop(runtime.runtime.as_mut().unwrap(), "initial");
+    }
     for cycle in 1..=3 {
         runtime
             .runtime
             .as_mut()
             .unwrap()
             .recover_supervisor(&mut |_, _, event| eprintln!("{event}"));
+        if desktop {
+            probe_desktop(runtime.runtime.as_mut().unwrap(), &format!("stop-{cycle}"));
+        }
         runtime
             .prepare(&mut |status| eprintln!("{status}"), &|| false)
             .unwrap();
@@ -720,6 +767,9 @@ fn run_native_supervisor_gate() {
         assert_eq!(guest.boot_attempt, 1, "recovery booted another VM");
         assert!(!guest.vm_suspended, "interactive desktop was parked");
         assert!(!guest.recovering);
+        if desktop {
+            probe_desktop(guest, &format!("ready-{cycle}"));
+        }
         eprintln!(
             "{}",
             json!({"gate":"native_supervisor", "cycle":cycle,
@@ -736,6 +786,9 @@ fn run_native_supervisor_gate() {
         .epoch()
         .unwrap();
     runtime.runtime.as_mut().unwrap().daemon.force_disconnect();
+    if desktop {
+        probe_desktop(runtime.runtime.as_mut().unwrap(), "host-disconnected");
+    }
     runtime
         .prepare(&mut |status| eprintln!("{status}"), &|| false)
         .unwrap();
@@ -750,6 +803,9 @@ fn run_native_supervisor_gate() {
     assert_eq!(guest.boot_attempt, 1);
     assert!(!guest.vm_suspended);
     assert!(!guest.recovering);
+    if desktop {
+        probe_desktop(guest, "host-reconnected");
+    }
     eprintln!(
         "{}",
         json!({"gate":"native_supervisor", "fault":"host_disconnect",
@@ -797,6 +853,9 @@ fn run_native_supervisor_gate() {
         // requeue the interrupted intent, even after successful recovery.
         guest.daemon.cancel_frontend_intent(intent);
         guest.recover_supervisor(&mut |_, _, event| eprintln!("{event}"));
+        if desktop {
+            probe_desktop(guest, fault);
+        }
         runtime
             .prepare(&mut |status| eprintln!("{status}"), &|| false)
             .unwrap();
@@ -814,6 +873,9 @@ fn run_native_supervisor_gate() {
             guest.daemon.take_frontend_result().is_none(),
             "stale result after {fault}"
         );
+        if desktop {
+            probe_desktop(guest, &format!("ready-{fault}"));
+        }
         eprintln!(
             "{}",
             json!({"gate":"native_supervisor","fault":fault,
@@ -821,6 +883,6 @@ fn run_native_supervisor_gate() {
         );
     }
     // ProjectRuntime's Drop reaps only the VM owned by this test. Inference
-    // and receipt boundaries do not certify in-flight filesystem effects,
-    // desktop input or MM reclamation.
+    // and receipt boundaries do not certify in-flight filesystem effects or
+    // MM reclamation. Desktop input is certified only by the explicit probe.
 }

@@ -9,7 +9,8 @@ workspace-rebind repair, including a subsequent fresh tool effect in the same
 VM. Native two-terminal isolation and no-project refusal/arithmetic also pass.
 Live file-grant revocation also passes, including denied reads and a usable
 follow-up prompt in the same VM. Existing-name collision also passes with
-unchanged host bytes and a successful follow-up. Final artifacts, desktop and
+unchanged host bytes and a successful follow-up. Recycled ordinary desktop now
+passes with repaired pointer delivery; final artifacts, failure-time desktop and
 UI acceptance remain pending. The default real-stack lock has not been promoted.
 
 ## Current source refresh
@@ -45,7 +46,7 @@ Artifact source, generated diff and build log are preserved in Kore's
 `target/agent-supervisor-evidence/sequence-default/`. The separate
 kernel boot test also passes (`sequence-boottest-01`), ISO SHA-256
 `e135d5df4f6c136d738acbc1eb241b96da5db60445eb753aee7b7001698c7884`.
-The full desktop gate fails after recycling; fresh capacity passes, as detailed below.
+Earlier recycled desktop attempts failed; run 04 passes after the pointer driver repair, as detailed below.
 
 `sequence-files-01` failed before agent admission: the hand-prepared acceptance
 project lacked its separate transaction-state directory. Normal `ProjectStore`
@@ -286,3 +287,38 @@ in-flight cancellation/termination/disconnect, native capacity reclamation,
 and real UI create/read/missing-file/arithmetic, host-byte verification,
 recovery, drafts and project/chat selection. Three idle restarts do not prove
 those scenarios. Only one QEMU owner may run at a time.
+
+### Pointer delivery and returning-main observations
+
+`sequence-desktop-04` **PASSES** in 466.12 seconds on diagnostic disabled ISO
+`884241d03bbf3b84781fa1f0650d7c5cb7c4036bd30b1bdf6aa214f7999a82a3`:
+12 recycling cycles, editor save/reopen and five concurrent windows pass.
+Driver repair Kore `d8c2c87cb` witnesses each individual HID-sized pointer
+report before another move. Both new regressions fail with the old algorithm;
+46 focused driver tests pass with the repair. Run 03 failed from overlapping
+motion, while its Terminal still answered diagnostic commands. The earlier
+shell stall does not reproduce on run 04; its hypothesized cause is not a
+confirmed fix. Exact diagnostic patches, frames and logs are retained.
+
+`sequence-runtest-observe-02` on the preserved `9ba9f188` userland ISO passes
+all 20 hello rounds and the lifecycle variants, then fails at bare `status`:
+exit 4 (provider unavailable), expected 0. The initial welcome-screen theory
+is not established; first-command testimony and framebuffers prove successful
+hello execution. Do not weaken the provider requirement or report this as a
+passing returning-main gate. Run 01 never booted because its QMP path exceeded
+the Unix socket length limit; run 02 uses a short path to isolated evidence.
+
+`sequence-desktop-faults-01` exercises the new real desktop probe on the
+recorded enabled `8c6f4f2e` image. Its failed result is detailed below.
+
+`sequence-desktop-faults-01` **FAILS** (580.65 s) on enabled `8c6f4f2e`.
+Twelve real desktop probes pass: Power renders/closes and fresh Terminal
+commands execute around three idle restarts, idle disconnect, inference
+disconnect and response-before-receipt stop. Each snapshot reports four
+retained exec rows; QEMU PID 32212 remains unchanged. The final replacement
+never confirms readiness. Native init repeatedly alternates Project and
+ProjectCleanup (kind-2 steps 16/17), so project-view binding is the next
+diagnostic target. A frontend SelectorUnknown refusal and transport
+reconnection precede it. This is a failed combined recovery gate, not a
+passing containment result. Frames, exact host source, logs and twelve
+checkpoint records are retained; all test-owned processes have exited.

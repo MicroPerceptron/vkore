@@ -104,8 +104,10 @@ passed. Automated native desktop/fault/authority gates continue independently.
   Intel production rerun passes; AMD's rerun is separately requested.
   Local success does not erase the original native hardware failures.
 
-Native fixture gates now attach their dedicated project before the first boot,
-removing a throwaway application VM and model context. Existing-name collision
+An attempted fixture-before-preparation setup failed the runtime precondition
+before starting a VM (`sequence-transaction-faults-03`). It was reverted; gates
+retain the application preparation followed by explicit project attachment.
+Existing-name collision
 coverage is implemented as `native_existing_file_collision_preserves_bytes`,
 with backed-up `test.txt = hello`, required native create refusal, unchanged
 host bytes, and a subsequent arithmetic prompt in the same VM. This new gate,

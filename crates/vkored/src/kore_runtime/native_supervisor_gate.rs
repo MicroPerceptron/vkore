@@ -557,13 +557,6 @@ fn configured_runtime() -> KoreVmRuntime {
         "{}",
         json!({"gate":"native_supervisor", "iso":iso, "blake3":digest})
     );
-    // Attach a dedicated fixture before the first boot. Starting the empty
-    // application profile first only creates a throwaway VM/model context.
-    if let Some(project_id) = input["file_project_id"].as_str() {
-        runtime
-            .ensure_project(project_id, "", &mut |_, _, event| eprintln!("{event}"))
-            .unwrap();
-    }
     runtime
         .prepare(&mut |status| eprintln!("{status}"), &|| false)
         .unwrap();

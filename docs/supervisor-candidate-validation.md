@@ -3,10 +3,18 @@
 **Not merge-ready.** Native fresh-worker arithmetic and response retirement now
 pass. Recovery passes three idle restarts, idle disconnect and disconnect
 during real inference in the same VM. Termination after a published response and before receipt also passes.
-The enabled artifact reproduces exactly and the four original native file/model prompts pass functionally. Full fault, authority, desktop/isolation and UI acceptance remain pending. The default
-real-stack lock has not been promoted.
+The enabled artifact reproduces exactly and the four original native file/model
+prompts pass functionally. Committed-write disconnect and stop now pass on the
+workspace-rebind repair, including a subsequent fresh tool effect in the same
+VM. Final artifacts, authority, desktop/isolation and UI acceptance remain
+pending. The default real-stack lock has not been promoted.
 
 ## Current source refresh
+
+Kore repair `05fef507f` retires and reacquires the workspace view on supervisor
+replacement. This application-only change does not change the exported native
+SDK closure. Its diagnostic native fault gate passes; refresh the final source
+and artifact lock before promotion.
 
 Kore merged main `515ed58c4` in `9c9c08637461a9986abdf3841ee738d5ddf96a3f`.
 Native owner pins now select `2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb`;
@@ -79,14 +87,24 @@ is prepared at `~/.local/state/vkore-supervisor-ui-20260923/`; `make dev-check`
 passed. Automated native desktop/fault/authority gates continue independently.
 
 
-### Current remaining native failures
+### Native results and remaining failures
 
 - `sequence-transaction-faults-01` and `-02` reach the real committed-create
   boundary, withhold its original host reply, disconnect and recover in the
   same VM at generation 2. File bytes and the durable journal are unchanged
   by recovery. The next prompt fails during workspace discovery with
-  `tool founding refused`; the combined gate is **not passed**. A native
-  diagnostic preserves the underlying exec refusal instead of dropping it.
+  `tool founding refused`; those runs **failed**. A native
+  diagnostic preserves the underlying exec refusal instead of dropping it:
+  `sequence-transaction-faults-04` reproduces `Denied` on ISO SHA-256
+  `0b52d48cf472c4dbc1042dabecf5133c2e39614cdb3a2378f4bf2665283451f8`.
+  Investigation found that interrupted committed creation can reimport and
+  revoke the workspace grant, while the launcher retains its old bound view
+  across supervisor generations. Retiring and rebinding that view passes
+  native validation in `sequence-transaction-faults-05`: **PASS**, 518.46 s,
+  ISO SHA-256 `5af7bb6cee59f3e955a0a62eff725d14f8e3f5f5511e2aa9ef1364ee51d38971`.
+  Both faults preserve bytes/journal without replay, generations 1–3 retain
+  QEMU PID 71090 unparked, and a fresh create succeeds after the final fault.
+  The repaired source still needs final pin/artifact refresh.
 - `sequence-desktop-01`: ordinary final disabled image; editor persistence and
   all 12 terminal/Power recycling cycles pass. Power does not present when
   Terminal plus Aftershock, Skylilt and Files are already active. Full gate
@@ -101,8 +119,8 @@ passed. Automated native desktop/fault/authority gates continue independently.
   `8fad587979f45036b29905cf77444e413a18845d14bf5f943f15338afdf977e0`
   passes `sequence-ci-4k57-01` under macOS QEMU TCG (4 CPU, 4096 MiB,
   `PAGING_PROFILE=4k57`), including all 35 app seeds and package manifest.
-  Intel production rerun passes; AMD's rerun is separately requested.
-  Local success does not erase the original native hardware failures.
+  Intel and AMD production reruns both pass (attempts 2 and 3).
+  These passes do not erase the original intermittent native hardware failures.
 
 An attempted fixture-before-preparation setup failed the runtime precondition
 before starting a VM (`sequence-transaction-faults-03`). It was reverted; gates

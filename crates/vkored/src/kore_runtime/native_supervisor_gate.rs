@@ -338,6 +338,49 @@ fn native_transaction_reply_faults_preserve_effects_and_vm() {
                 "generation":next.generation.get(), "result":"ready; original effect retained without replay"})
             );
         }
+        // Readiness alone missed a revoked cached workspace after recovery.
+        // Require a new native tool effect after the final fault as well.
+        let session = SessionState {
+            api_version: 1,
+            project_id: project_id.into(),
+            session_id: "native-transaction-recovery".into(),
+            status: crate::SessionStatus::Open,
+            generation: 1,
+            backend_incarnation: 0,
+            last_event_sequence: 0,
+            prompts: BTreeMap::new(),
+        };
+        let target = project.workspace.root.join("recovery-ready.txt");
+        assert!(!target.exists());
+        let prompt = PromptRequest {
+            api_version: 1,
+            prompt_id: "post-fault-create".into(),
+            idempotency_key: "post-fault-create".into(),
+            text: "Create an empty file named recovery-ready.txt.".into(),
+        };
+        let status = runtime.run_prompt(
+            &session,
+            &prompt,
+            &mut |kind, _, event| eprintln!("{kind:?} {event}"),
+            &|| false,
+            &|| true,
+        );
+        assert_eq!(status, PromptStatus::Completed);
+        assert_eq!(std::fs::read(target).unwrap(), b"");
+        let guest = runtime.runtime.as_ref().unwrap();
+        assert_eq!(guest.process.as_ref().unwrap().id(), pid);
+        assert!(!guest.vm_suspended);
+        for name in names {
+            assert_eq!(
+                std::fs::read(project.workspace.root.join(name)).unwrap(),
+                b""
+            );
+        }
+        eprintln!(
+            "{}",
+            json!({"gate":"native_transaction_fault",
+            "result":"fresh tool after both faults", "qemu_pid":pid})
+        );
     });
 }
 

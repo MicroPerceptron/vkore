@@ -12,11 +12,13 @@ The revision/hash table below still describes the earlier baseline;
 **new candidate pins and native/UI acceptance have not been promoted yet**.
 Do not treat those baseline hashes as validation of the overhaul.
 
-The existing `config/supervisor-candidate.lock.mk` is a superseded checkpoint
-and intentionally fails current-worktree preflight. New source and image pins
-must be sealed after the remaining native acceptance gates pass. Do not use
-that old lock to launch this source. See [current validation](supervisor-candidate-validation.md)
-for tested revisions and the unresolved gates. The default lock is not promoted.
+`config/supervisor-candidate.lock.mk` now identifies the refreshed, reproducible
+**unaccepted** candidate. It selects Kore artifact base `de6206941` and source
+`580a7c0ce`, with the exact enabled payload diff and ISO hash. `make dev-check`
+passes for that tuple and a correctly configured dedicated state. Native
+recovery, ordinary boot and kernel boot-test results are recorded in
+[current validation](supervisor-candidate-validation.md); final tool/authority,
+desktop and computer-use acceptance remains open. The default lock is unchanged.
 
 Ordinary Kore builds default to `KORE_AGENT_SUPERVISOR=0`. A vKore candidate
 must rebuild its kernel and user payloads with `KORE_AGENT_SUPERVISOR=1` and

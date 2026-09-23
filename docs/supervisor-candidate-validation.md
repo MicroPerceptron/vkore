@@ -55,8 +55,9 @@ new enabled image SHA-256
 `6a98af4aa9eff4005c08af874995145b33328b7ff9e04a3d107be9169f4608d3`.
 Its exact generated payload diff SHA-256 is
 `ed75af931c78f9408b44630e84cd09e71d2dde0f339dd087b6a0b73e8383cb3b`.
-Reproduction from the restored committed payload baseline is running.
-`sequence-files-03` tests this image with the focus fix; the full vKore
+Reproduction from the restored committed payload baseline PASSES with the
+exact ISO and generated diff. The release host/UI build and `make dev-check`
+also pass using the dedicated UI state. `sequence-files-03` tests this image with the focus fix; the full vKore
 workspace suite passes after that fix. Native uncertain-transaction fault
 gates are implemented and compile, but have not yet run.
 

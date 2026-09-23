@@ -138,3 +138,9 @@ the next generation in the same VM, preserved host bytes, unchanged transaction
 journal during recovery, and no stale frontend result. It never retries the
 interrupted prompt. This gate is not a replacement for live authority or UI
 acceptance.
+
+`native_no_project_refuses_files_and_answers_arithmetic` requires a separately
+pinned image built with `KORE_AGENT_SUPERVISOR_PROJECT=0`. It requires an explicit
+file-action refusal, then `42` and confirmed receipt/retirement in the same VM.
+Do not run it with the ordinary project-enabled candidate or count compilation
+as proof of the absent-authority boundary.

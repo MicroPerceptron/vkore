@@ -63,110 +63,158 @@ fn native_frontend_prompt_before_recovery() {
 #[test]
 #[ignore = "writes test.txt; requires an isolated backed-up project and exclusive QEMU use"]
 fn native_frontend_file_roundtrip() {
-    on_native_stack(|| {
-        let file = std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap();
-        let input: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
-        let project_id = input["file_project_id"].as_str().expect("file_project_id");
-        let backup = PathBuf::from(input["fixture_backup"].as_str().expect("fixture_backup"));
-        assert!(
-            backup.is_dir(),
-            "back up the isolated fixture before this gate"
-        );
-        let projects = PathBuf::from(input["project_root"].as_str().unwrap());
-        let project = ProjectStore::open(&projects)
-            .unwrap()
-            .get(project_id)
-            .unwrap();
-        assert_eq!(
-            project.workspace.access,
-            WorkspaceAccess::AutomaticWriteback
-        );
-        assert!(
-            project.workspace.state.is_dir(),
-            "project transaction state must exist (create the fixture through ProjectStore)"
-        );
-        let target = project.workspace.root.join("test.txt");
+    on_native_stack(|| run_file_gate(false));
+}
+
+#[test]
+#[ignore = "requires a backed-up existing test.txt fixture and exclusive real guest/model"]
+fn native_existing_file_collision_preserves_bytes() {
+    on_native_stack(|| run_file_gate(true));
+}
+
+fn run_file_gate(existing: bool) {
+    let file = std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap();
+    let input: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let project_id = input["file_project_id"].as_str().expect("file_project_id");
+    let backup = PathBuf::from(input["fixture_backup"].as_str().expect("fixture_backup"));
+    assert!(
+        backup.is_dir(),
+        "back up the isolated fixture before this gate"
+    );
+    let projects = PathBuf::from(input["project_root"].as_str().unwrap());
+    let project = ProjectStore::open(&projects)
+        .unwrap()
+        .get(project_id)
+        .unwrap();
+    assert_eq!(
+        project.workspace.access,
+        WorkspaceAccess::AutomaticWriteback
+    );
+    assert!(
+        project.workspace.state.is_dir(),
+        "project transaction state must exist (create the fixture through ProjectStore)"
+    );
+    let target = project.workspace.root.join("test.txt");
+    if existing {
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+        assert_eq!(std::fs::read(backup.join("test.txt")).unwrap(), b"hello");
+    } else {
         assert!(
             !target.exists() && !backup.join("test.txt").exists(),
             "test.txt must be absent; never delete a preexisting fixture"
         );
-        assert!(!project.workspace.root.join("missing-file.txt").exists());
-        let mut runtime = configured_runtime();
-        let session = SessionState {
+    }
+    assert!(!project.workspace.root.join("missing-file.txt").exists());
+    let mut runtime = configured_runtime();
+    let session = SessionState {
+        api_version: 1,
+        project_id: project_id.into(),
+        session_id: "native-file-gate".into(),
+        status: crate::SessionStatus::Open,
+        generation: 1,
+        backend_incarnation: 0,
+        last_event_sequence: 0,
+        prompts: BTreeMap::new(),
+    };
+    let collision_prompts = [
+        "Use the create tool to create a new empty file named test.txt. If creation fails because the file exists, report that error and leave its contents unchanged.",
+        "What is 17 plus 25? Answer with the number only.",
+    ];
+    let file_prompts = [
+        "Create a file named test.txt containing the word hello.",
+        "Read test.txt and reply with its exact contents.",
+        "Read missing-file.txt and reply with its contents.",
+        "What is 17 plus 25? Answer with the number only.",
+    ];
+    let prompts = if existing {
+        &collision_prompts[..]
+    } else {
+        &file_prompts[..]
+    };
+    let mut pid = None;
+    for (index, text) in prompts.iter().copied().enumerate() {
+        let prompt = PromptRequest {
             api_version: 1,
-            project_id: project_id.into(),
-            session_id: "native-file-gate".into(),
-            status: crate::SessionStatus::Open,
-            generation: 1,
-            backend_incarnation: 0,
-            last_event_sequence: 0,
-            prompts: BTreeMap::new(),
+            prompt_id: format!("file-gate-{index}"),
+            idempotency_key: format!("file-gate-{index}"),
+            text: text.into(),
         };
-        let prompts = [
-            "Create a file named test.txt containing the word hello.",
-            "Read test.txt and reply with its exact contents.",
-            "Read missing-file.txt and reply with its contents.",
-            "What is 17 plus 25? Answer with the number only.",
-        ];
-        for (index, text) in prompts.into_iter().enumerate() {
-            let prompt = PromptRequest {
-                api_version: 1,
-                prompt_id: format!("file-gate-{index}"),
-                idempotency_key: format!("file-gate-{index}"),
-                text: text.into(),
-            };
-            let mut events = Vec::new();
-            let status = runtime.run_prompt(&session, &prompt, &mut |kind, public, event| {
+        let mut events = Vec::new();
+        let status = runtime.run_prompt(&session, &prompt, &mut |kind, public, event| {
                 eprintln!("{}", json!({"gate":"native_files","prompt":index,"kind":format!("{kind:?}"),"public":public,"event":event}));
                 events.push((kind, event));
             }, &|| false, &|| true);
-            eprintln!(
-                "{}",
-                json!({"gate":"native_files","prompt":index,"status":format!("{status:?}")})
-            );
-            let text = events
-                .iter()
-                .filter(|(kind, _)| {
-                    matches!(
-                        kind,
-                        EventKind::Assistant | EventKind::Error | EventKind::ToolResult
-                    )
-                })
-                .map(|(_, event)| event.to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if index != 2 {
-                assert_eq!(status, PromptStatus::Completed, "{text}");
-            }
-            assert_eq!(
-                std::fs::read(&target).expect("real host writeback"),
-                b"hello"
-            );
-            match index {
-                1 => assert!(text.contains("hello"), "{text}"),
-                2 => {
-                    let lower = text.to_ascii_lowercase();
-                    assert!(
-                        lower.contains("not found")
-                            || lower.contains("does not exist")
-                            || lower.contains("no such file"),
-                        "missing-file refusal: {text}"
-                    );
-                }
-                3 => assert!(
-                    events
-                        .iter()
-                        .any(|(kind, event)| *kind == EventKind::Assistant
-                            && event["text"]
-                                .as_str()
-                                .is_some_and(|text| text.trim() == "42")),
-                    "{text}"
-                ),
-                _ => {}
-            }
-            assert!(!runtime.runtime.as_ref().unwrap().vm_suspended);
+        eprintln!(
+            "{}",
+            json!({"gate":"native_files","prompt":index,"status":format!("{status:?}")})
+        );
+        let text = events
+            .iter()
+            .filter(|(kind, _)| {
+                matches!(
+                    kind,
+                    EventKind::Assistant | EventKind::Error | EventKind::ToolResult
+                )
+            })
+            .map(|(_, event)| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if (existing && index == 1) || (!existing && index != 2) {
+            assert_eq!(status, PromptStatus::Completed, "{text}");
         }
-    });
+        assert_eq!(
+            std::fs::read(&target).expect("real host writeback"),
+            b"hello"
+        );
+        let current_pid = runtime
+            .runtime
+            .as_ref()
+            .unwrap()
+            .process
+            .as_ref()
+            .unwrap()
+            .id();
+        assert_eq!(*pid.get_or_insert(current_pid), current_pid);
+        if existing && index == 0 {
+            assert!(
+                events.iter().any(|(kind, event)| {
+                    *kind == EventKind::ToolResult
+                        && event
+                            .to_string()
+                            .to_ascii_lowercase()
+                            .contains("already exists")
+                }),
+                "native create must report the actual existing-name refusal: {text}"
+            );
+        }
+        match if existing {
+            if index == 1 { 3 } else { usize::MAX }
+        } else {
+            index
+        } {
+            1 => assert!(text.contains("hello"), "{text}"),
+            2 => {
+                let lower = text.to_ascii_lowercase();
+                assert!(
+                    lower.contains("not found")
+                        || lower.contains("does not exist")
+                        || lower.contains("no such file"),
+                    "missing-file refusal: {text}"
+                );
+            }
+            3 => assert!(
+                events
+                    .iter()
+                    .any(|(kind, event)| *kind == EventKind::Assistant
+                        && event["text"]
+                            .as_str()
+                            .is_some_and(|text| text.trim() == "42")),
+                "{text}"
+            ),
+            _ => {}
+        }
+        assert!(!runtime.runtime.as_ref().unwrap().vm_suspended);
+    }
 }
 
 #[test]
@@ -220,10 +268,16 @@ fn native_transaction_reply_faults_preserve_effects_and_vm() {
             while gate.load(Ordering::SeqCst) != 1 {
                 guest.daemon.tick().unwrap();
                 guest.drain_events(&mut |kind, _, e| eprintln!("{kind:?} {e}"));
-                assert!(
-                    guest.daemon.take_frontend_result().is_none(),
-                    "prompt ended before held transaction reply"
-                );
+                if let Some(result) = guest.daemon.take_frontend_result() {
+                    eprintln!(
+                        "{}",
+                        json!({"gate":"native_transaction_fault",
+                        "file":name,"intent":format!("{intent:?}"),
+                        "result_intent":format!("{:?}",result.intent_id),
+                        "kind":format!("{:?}",result.kind),"text":result.text})
+                    );
+                    panic!("prompt ended before held transaction reply");
+                }
                 assert!(
                     Instant::now() < deadline,
                     "transaction fault boundary not reached"
@@ -503,6 +557,13 @@ fn configured_runtime() -> KoreVmRuntime {
         "{}",
         json!({"gate":"native_supervisor", "iso":iso, "blake3":digest})
     );
+    // Attach a dedicated fixture before the first boot. Starting the empty
+    // application profile first only creates a throwaway VM/model context.
+    if let Some(project_id) = input["file_project_id"].as_str() {
+        runtime
+            .ensure_project(project_id, "", &mut |_, _, event| eprintln!("{event}"))
+            .unwrap();
+    }
     runtime
         .prepare(&mut |status| eprintln!("{status}"), &|| false)
         .unwrap();

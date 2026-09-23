@@ -3,7 +3,7 @@
 **Not merge-ready.** Native fresh-worker arithmetic and response retirement now
 pass. Recovery passes three idle restarts, idle disconnect and disconnect
 during real inference in the same VM. Termination after a published response and before receipt also passes.
-Final artifacts, isolation/tool and UI acceptance remain pending. The default
+The enabled artifact reproduces exactly and the four original native file/model prompts pass functionally. Full fault, authority, desktop/isolation and UI acceptance remain pending. The default
 real-stack lock has not been promoted.
 
 ## Current source refresh
@@ -77,6 +77,40 @@ Computer-use acceptance is blocked because the Mac is locked and CUA automatic
 unlock failed. The user has been asked to unlock it. A separate fresh UI state
 is prepared at `~/.local/state/vkore-supervisor-ui-20260923/`; `make dev-check`
 passed. Automated native desktop/fault/authority gates continue independently.
+
+
+### Current remaining native failures
+
+- `sequence-transaction-faults-01` and `-02` reach the real committed-create
+  boundary, withhold its original host reply, disconnect and recover in the
+  same VM at generation 2. File bytes and the durable journal are unchanged
+  by recovery. The next prompt fails during workspace discovery with
+  `tool founding refused`; the combined gate is **not passed**. A native
+  diagnostic preserves the underlying exec refusal instead of dropping it.
+- `sequence-desktop-01`: ordinary final disabled image; editor persistence and
+  all 12 terminal/Power recycling cycles pass. Power does not present when
+  Terminal plus Aftershock, Skylilt and Files are already active. Full gate
+  exits 2; 106 captures are preserved in `frames.tar.gz`.
+- Two-terminal retries exposed test-driver problems: day-only pixel decoding,
+  a pointer obscuring terminal cells, then an obsolete `help shutdown`
+  expectation. Actual catalogue power control is `pwctl`; shutdown/reboot are
+  arguments, not standalone commands. Decoder fixes pass 45 host tests;
+  full native isolation remains pending, not inferred from screenshots.
+- CI run `35828436910` initially fails AMD and Intel 4k57 provisioning with
+  `APP_PROJECTION_LINK` (74). The exact CI image SHA-256
+  `8fad587979f45036b29905cf77444e413a18845d14bf5f943f15338afdf977e0`
+  passes `sequence-ci-4k57-01` under macOS QEMU TCG (4 CPU, 4096 MiB,
+  `PAGING_PROFILE=4k57`), including all 35 app seeds and package manifest.
+  Intel production rerun passes; AMD's rerun is separately requested.
+  Local success does not erase the original native hardware failures.
+
+Native fixture gates now attach their dedicated project before the first boot,
+removing a throwaway application VM and model context. Existing-name collision
+coverage is implemented as `native_existing_file_collision_preserves_bytes`,
+with backed-up `test.txt = hello`, required native create refusal, unchanged
+host bytes, and a subsequent arithmetic prompt in the same VM. This new gate,
+live authority revocation and absent-project refusal compile; native executions
+are still pending.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

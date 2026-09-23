@@ -152,3 +152,13 @@ update removing filesystem and executable grants. Passing requires native
 Installed and Revoked observations, an Applied update receipt after resume,
 unchanged fixture bytes, and a subsequent `42` prompt in the same VM. An update
 that loses the completion race does not pass this gate.
+
+### Existing-name native acceptance
+
+`native_existing_file_collision_preserves_bytes` takes the same gate JSON as
+file roundtrip, but requires both the dedicated workspace and its backup to
+contain `test.txt` with exactly `hello`. It asks for a real create, requires the
+actual tool result to report the existing name, verifies unchanged host bytes,
+and follows with exact `42` in the same VM. Never prepare this by overwriting
+a user file; create a separate fixture. The gate compiles but has not passed
+native acceptance yet.

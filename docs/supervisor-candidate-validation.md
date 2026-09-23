@@ -16,14 +16,32 @@ exposed accumulating pinned filesystem views. A kernel-validated cleanup fix
 passes a focused response-stop native gate with unchanged view counts; final
 full-sequence, artifact and UI acceptance remain pending. The default real-stack lock has not been promoted.
 
-## Current correction
+## Current coordinated candidate
 
-The native owner is now `60e659644acf6e5e730b6b566a68765f8016563c`.
-The exact libkore export is under its required checks; coordinated source and
-artifact pins are still being refreshed. Kore's full host/architecture matrix
-passes, and vKore's locked workspace passes. The focused native correction
-uses the exact diagnostic source patch and image recorded below, not a final
-release image. No default lock promotion.
+Native owner `60e659644acf6e5e730b6b566a68765f8016563c` is mechanically exported by SDK
+`688d5bfb40db47a63d5e0f45593898b42d6f9d61`. All required local SDK checks, actual-Kore composition and
+all seven SDK GitHub checks pass. Kore consumer source is `e89901a1bf05c4f7949f085548b05c80765e1fc9`;
+committed disabled payload base is `a99e0c539a2578b6b973c003f318dfe3b855ec4a`.
+Kore's full host/architecture matrix and vKore's locked workspace pass;
+all three vKore release binaries build successfully.
+
+The disabled production image passes `canary-final-default-01` in 46.25 s,
+with all 35 applications seeded and shell startup verified. SHA-256:
+`5d54dca9b28abc7d40ca5efb8067a36f05d3c61f9ca07a408cda1154a14d0c3d`.
+The enabled image is built: SHA-256 `d3da72bf02df450ae51ee80d9a3629349e6ff8db0f9b2bc5d617529df178d3c5`,
+BLAKE3 `54416f36966195ef7a3d082b04bfe42bced124898c78da1f201ded5758599e66`, generated-payload diff SHA-256
+`9ba86caf28b901d79f6beac03097062f59f8b50bf7b0ea7098f426051d1d2af0`. The unaccepted candidate lock selects these identities.
+The documented `make artifacts` reproduction from the clean disabled artifact
+base passes: both ISO bytes and the full generated-payload patch are identical.
+Launcher `make dev-check` also passes against the isolated real-model UI state.
+Final enabled/kernel/desktop/full-fault/UI gates remain pending. No default lock
+promotion.
+
+Kore CI `35859572970` now passes its host job after the cache correction.
+Captured hardware failures persist, including AMD returning-main stopping
+before shell readiness. Current-main CI `35807492440` also fails, but captured
+Intel window-lifecycle and AMD returning-main/MMIO failures occur at different
+boundaries; they do not prove the branch's provisioning failures are inherited.
 
 ## Prior telemetry source tuple
 

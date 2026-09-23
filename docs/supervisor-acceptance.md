@@ -21,7 +21,8 @@ earlier intermittent Files-activation failure remains unexplained. Hardware CI h
 blocked by the locked Mac. The first refreshed file-revocation attempt was
 refused because the broker proposed creating a new agent. The corrected planning
 instruction and single-grant request pass native revocation, five denied reads
-and a same-VM follow-up prompt. The candidate lock now selects the latest driver-only Kore commit; its refreshed
+and a same-VM follow-up prompt. The resealed interrupted-write repetition also
+passes both faults and a fresh post-recovery tool operation without replay. The candidate lock now selects the latest driver-only Kore commit; its refreshed
 image contains exactly the same payload files. Clean reproduction and preflight
 pass at the refreshed revision. Host unit tests do not
 certify these gates.

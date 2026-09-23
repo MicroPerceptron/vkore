@@ -724,3 +724,35 @@ with one ignored, including exact outstanding-request recovery without replay.
 All three architecture checks and the native x86 exec-service check also pass.
 It is not part of the resealed guest image and needs its own source/export/build
 validation before publication. No default lock promotion or merge.
+
+
+### Resealed interrupted-write recovery confirmed
+
+`canary-resealed-transactions-01` PASSES in 662.71 s on the same `b8a6f1d8`
+candidate. At each fault, the host has committed the actual file creation and
+withholds its original reply. The test first disconnects HostLink, then repeats
+with supervisor termination. Generations 1–3 share QEMU PID 22865. Both original
+effects remain, and the transaction journal is byte-identical across each
+retirement: cleanup does not replay the operation. A fresh native create after
+both faults succeeds. Independent host readback confirms all three files are
+empty, including `recovery-ready.txt`. `observations.json` retains the boundaries,
+source patch hash and host bytes. The run starts at host `1bf3ebf55` plus the saved
+correction later committed as `e389274`; the guest/native/SDK pins are unchanged.
+
+Kore diagnostic source `93fefba5f2ba668555a06c73616a627b88d68322` is now published
+on PR #1015. Full `make test` passes: 178 Rust suites total 6,417 passed and
+34 ignored, including the 1,616-pass kernel suite; build-tool checks also pass.
+Architecture and native exec-service checks pass. CI `35878845333` has started
+for the diagnostic, and a local disabled guest build is running. This is a
+diagnostic source checkpoint, not a new coordinated SDK export or accepted
+replacement for the resealed candidate. Its seven-bit failure reporting is
+wire-compatible with the current client; final source/export/artifact convergence
+still remains.
+
+
+The corrected host's complete locked workspace test run passes 373 tests with
+12 native tests ignored by that command (46 suites). Its three launcher binaries
+(`vkore-harnessd`, `vkore`, `vkore-ui`) build successfully in release mode with the
+locked dependency graph (36.79 s). Native gate results above come from separate
+real guest/model executions. Logs are `broker-live-update-workspace.log` and
+`broker-live-update-release.log` in `/tmp/vkore-supervisor-evidence/`.

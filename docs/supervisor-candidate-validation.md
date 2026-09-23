@@ -13,29 +13,39 @@ unchanged host bytes and a successful follow-up. Recycled ordinary desktop now
 passes with repaired pointer delivery. A full desktop/fault diagnostic rerun
 also passes functionally, with its earlier timeout retained. New capacity checks
 exposed accumulating pinned filesystem views. A kernel-validated cleanup fix
-passes a focused response-stop native gate with unchanged view counts; final
-full-sequence, artifact and UI acceptance remain pending. The default real-stack lock has not been promoted.
+passes the final full fault gate with unchanged view counts through generation 7.
+The corrected kernel boot, returning-main and two-terminal gates pass. The extended desktop repeat passes; its earlier intermittent Files-activation failure remains unexplained. Hardware CI and native UI acceptance remain unresolved. The default real-stack lock has not been promoted.
 
 ## Current coordinated candidate
 
 Native owner `60e659644acf6e5e730b6b566a68765f8016563c` is mechanically exported by SDK
 `688d5bfb40db47a63d5e0f45593898b42d6f9d61`. All required local SDK checks, actual-Kore composition and
 all seven SDK GitHub checks pass. Kore consumer source is `e89901a1bf05c4f7949f085548b05c80765e1fc9`;
-committed disabled payload base is `a99e0c539a2578b6b973c003f318dfe3b855ec4a`.
+disabled payload commit is `a99e0c539a2578b6b973c003f318dfe3b855ec4a`.
+The current packaging base is `d65ddeb357a8fbb8004bff1c1690e682f07b811f`.
 Kore's full host/architecture matrix and vKore's locked workspace pass;
 all three vKore release binaries build successfully.
 
 The disabled production image passes `canary-final-default-01` in 46.25 s,
 with all 35 applications seeded and shell startup verified. SHA-256:
 `5d54dca9b28abc7d40ca5efb8067a36f05d3c61f9ca07a408cda1154a14d0c3d`.
-The enabled image is built: SHA-256 `d3da72bf02df450ae51ee80d9a3629349e6ff8db0f9b2bc5d617529df178d3c5`,
-BLAKE3 `54416f36966195ef7a3d082b04bfe42bced124898c78da1f201ded5758599e66`, generated-payload diff SHA-256
+The enabled image is built: SHA-256 `b8a6f1d8609d19365bc4fd00fce457f2af150eaab3c0532504cca2aebe599df1`,
+BLAKE3 `d9b9178af33b6b44a96281ccc102074d72de82de716181b7d255da90c80ed24c`, generated-payload diff SHA-256
 `9ba86caf28b901d79f6beac03097062f59f8b50bf7b0ea7098f426051d1d2af0`. The unaccepted candidate lock selects these identities.
-The documented `make artifacts` reproduction from the clean disabled artifact
-base passes: both ISO bytes and the full generated-payload patch are identical.
-Launcher `make dev-check` also passes against the isolated real-model UI state.
-Final enabled/kernel/desktop/full-fault/UI gates remain pending. No default lock
-promotion.
+The earlier `a99e0c539` packaging base passed clean reproduction and launcher
+preflight. The current `d65ddeb35` clean reproduction and `make dev-check`
+also pass against the dedicated real-model UI state. Both ISO filesystem
+inventories and the complete generated-payload patches are byte-identical
+between bases; only the deterministic ISO packaging metadata differs.
+The final full fault gate passes all thirteen probes through generations 1–7
+with stable FS capacity in one VM. Kernel boot, returning-main and two-terminal
+isolation also pass on their distinct recorded products. The extended desktop repeat passes with the earlier intermittent failure
+retained. UI and unresolved CI remain open. No default lock promotion.
+
+The latest Kore head `d65ddeb357a8fbb8004bff1c1690e682f07b811f` changes only
+the returning-main test driver, its regression and this project's evidence ledger.
+It does not alter guest payload source or SDK exports. The candidate has now been resealed for that exact commit and its lock updated.
+Preflight continues to require the recorded revision, image and generated diff.
 
 Kore CI `35859572970` now passes its host job after the cache correction.
 Captured hardware failures persist, including AMD returning-main stopping
@@ -259,7 +269,7 @@ results must not be described as passing in-flight fault coverage.
 The earlier checkpoint below records how startup was repaired; it is not the
 current final source/artifact tuple.
 
-## Current source checkpoint
+## Earlier source checkpoint
 
 | Component | Revision |
 | --- | --- |
@@ -536,3 +546,130 @@ suite (372 tests passed, 12 ignored) and release builds of `vkore-harnessd`,
 source entries. The initial release command mistook a binary name for a
 package name and stopped before compilation; the corrected explicit binary
 build is the passing check. The final artifact lock remains unpromoted.
+
+
+### Coordinated full fault and filesystem capacity acceptance — 2026-09-23
+
+`canary-final-desktop-faults-01` **passes**: 944.63 s native test, 958.38 s
+wrapper including compilation/setup. All thirteen Power/Terminal probes pass
+through three idle restarts, idle host disconnect/reconnect, disconnection
+during real inference and supervisor stop after the real response `42` but
+before receipt. Every generation 1–7 uses the same unparked QEMU PID 6691.
+
+Each snapshot reports exactly 3 FS sessions, 0 client pairs, 1 private view,
+2 pinned views and 4 retained exec rows. This verifies the FS cleanup correction
+against the earlier full-run baseline that accumulated 2 → 10 pinned views.
+MM class allocations remain 208.0 MiB (4K) and 600.0 MiB (2M). Reported physical
+usage increases 803.2 → 806.1 MiB and kernel heap 14.7 → 16.6 MiB; cumulative
+child supplies increase 94 → 372. These observations are retained, not turned
+into a claim that every kernel allocation or mapping has been reclaimed.
+
+Host source is `a49eff47c1ed06834e6c2b7eebb8c95ec8fff532`, native owner
+`60e659644acf6e5e730b6b566a68765f8016563c`; the tested enabled ISO is
+`d3da72bf02df450ae51ee80d9a3629349e6ff8db0f9b2bc5d617529df178d3c5`.
+The exact SDK/source/artifact tuple appears above. `capacity-verdict.json`
+records all provider snapshots; completed frame archives are byte-verified
+before loose copies are removed. No guest/model process remains after the run.
+
+Storage maintenance removed 277 compiled library/metadata objects belonging
+to ten obsolete SDK revisions absent from the current userland lock graph,
+reclaiming 260,017,308 bytes. Current SDK `688d5bf`, source, executables, models
+and fixtures remain. Exact dependency records and deleted-object paths are in
+`diagnostics/obsolete-sdk-codegen-cleanup-20260923.json`.
+
+
+### Final kernel, returning-main and terminal isolation gates
+
+- `canary-final-boottest-01`: PASS, 14.47 s, native kernel-test image SHA-256
+  `97e0a1a52cbce8ca1b51d71709f9aaf91ad7a6ef2f4288674140a70298e45316`.
+  This executes the actual boottest product, separate from production founding.
+  The capture helper initially selected the production filename; that metadata
+  was retained and corrected before the gate ran.
+- `canary-focused-returning-main-01`: PASS, native and wrapper exit 0, 216.52 s.
+  Twenty hello cycles, full-width status/exit results, main return/finalizers,
+  authority, nested/detached/controller workers and later status commands pass.
+  Driver SHA-256 `aa7ab4c76e9a27d52d1b8f0aa7c32db57168033028839ff677f7303f5f7d2a28`.
+  Hardware CI screenshots had shown the second terminal stealing focus before
+  the first Return. The driver now waits for both seats and stable first-seat
+  focus; all original guest assertions remain. Fifty driver tests pass, including
+  delayed seat presentation and stolen-focus coverage. The first native run also
+  reported PASS but its wrapper failed during capture; only this rerun records
+  both exit codes successfully.
+- `canary-final-two-terminal-01`: PASS, 469.94 s, driver checkout `d65ddeb35`.
+  Sibling tasks retain isolated input/exec, task-local help and private roots.
+  Explicit shared grants expose the same object, reject unauthorized writes,
+  creation and moves, and revoke access without damaging the owner's bytes.
+
+The last two gates use the interactive image SHA-256
+`4b6e00b96157beacf23a081002a480c0315946cce7cddffcd1e1eef5b9bca871`,
+built from source `e89901a1b` at artifact base `a99e0c539`. Run manifests,
+commands, logs and captures are retained under the dedicated acceptance
+state's `diagnostics/` directory. Hardware CI for `d65ddeb35` is still running;
+its three architecture checks pass. Native host computer use remains blocked
+by the locked Mac, independently of these guest desktop tests.
+
+
+### Final ordinary desktop failure retained
+
+`canary-final-desktop-01` fails on disabled production ISO
+`5d54dca9b28abc7d40ca5efb8067a36f05d3c61f9ca07a408cda1154a14d0c3d`.
+All twelve Power/Terminal recycling cycles pass with exactly three retained exec
+rows; spawned/reclaimed counts reach 77/74. Terminal output, unsaved editor text,
+post-layout keyboard input and saved-file reopening also pass. The final
+concurrent-window sequence opens Aftershock and Skylilt, but Files does not
+publish the required focused tile. The captured frame keeps Terminal focused,
+without a Files launch result. The bounded gate fails; this is not a final
+ordinary-desktop acceptance pass or proof of a specific guest/input defect.
+
+All 99 raw frame duplicates (270,830,903 bytes) were verified against the retained
+archive before removal. The run manifest, native failure, serial log and frame
+archive remain. A diagnostic repeat preserves the original assertion and adds
+failure-time window/provider observations; its result is still pending.
+
+An independent code review found pre-existing running-dock activation that
+selects by generic application kind, without the selected app identity. It is
+tracked separately in [Kore #1058](https://github.com/MicroPerceptron/kore/issues/1058);
+no causal link to this failure is claimed.
+
+
+`canary-desktop-capacity-diagnostic-01` subsequently **passes** in 537.46 s
+on the identical disabled production ISO, including all twelve recycle cycles,
+editor persistence and all five concurrent windows. The copied driver retains
+the original assertions and constrains the capacity phase to 120 s; its added
+failure-time diagnostic path is not executed. This is a complete passing run,
+not a causal fix for the prior intermittent Files-activation failure. Both runs
+remain part of the release evidence.
+
+Hardware CI `35867475708` passes host tests, all architecture checks, both user
+application cross-builds and both vendor kernel boot tests. Intel production
+and 1920x1200 display pass. AMD display fails with only 33/35 apps seeded and
+`APP_PROJECTION_LINK` (74); the exact filesystem cause is still collapsed by
+that verdict. The initial 4K57 interactive builder stops inside its compile
+action without a published job log; the workflow's On-Demand recovery succeeds.
+These results do not justify treating either failure as a passing gate.
+
+
+### Resealed candidate file prompts
+
+`canary-resealed-files-01` passes in 604.12 s (603.70 s native test), on ISO
+`b8a6f1d8609d19365bc4fd00fce457f2af150eaab3c0532504cca2aebe599df1`,
+source `e89901a1b`, packaging base `d65ddeb35`, SDK `688d5bfb`, native owner
+`60e659644`. The new isolated fixture was empty and backed up before use.
+Native create and write complete; independent host readback is exactly the
+five bytes `hello` (SHA-256
+`2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824`).
+The native read result is `hello\n`, and arithmetic returns exactly `42`.
+The absent-file response accurately says the file does not exist; the host
+confirms its absence. The same VM serves all four prompts.
+
+Formatting/status limits remain explicit: read-answer prose violates the
+number/content-only presentation instruction; the accurate missing-file reply
+is still marked Failed by the frontend. `observations.json` preserves exact
+tool results, user-visible answers and statuses. These are functional native
+checks, not computer-use acceptance. Separate collision, live-revocation and
+interrupted-write repetitions are running.
+
+Forty-one completed older fixture disks were compressed losslessly. Each
+`disk-archive.json` records the original byte hash and replacement gzip path;
+the original is removed only after streamed decompression matches that hash.
+Models and fixtures outside completed test evidence are untouched.

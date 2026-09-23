@@ -12,8 +12,15 @@ images. Live file revocation and existing-name collision also pass. The recycled
 ordinary desktop passes with the repaired pointer driver. A diagnostic full desktop/fault sequence now passes; an earlier final-recovery
 timeout remains unexplained. Fresh capacity snapshots subsequently exposed pinned
 filesystem views accumulating across restarts. The kernel-validated canary fix
-passes focused native response-stop recovery with unchanged FS occupancy; the
-final full fault sequence, artifact refresh and computer-use acceptance remain pending. Host unit tests do not
+passes the coordinated full native fault sequence through generations 1–7 with
+unchanged FS occupancy at all thirteen desktop probes. Candidate artifacts
+reproduce exactly and preflight passes at their pinned artifact base. The
+corrected kernel boot, returning-main and two-terminal gates pass. Extended
+desktop repeat passes all cycles, editor persistence and five windows. Its
+earlier intermittent Files-activation failure remains unexplained. Hardware CI
+and computer-use acceptance remain pending. The candidate lock now selects the latest driver-only Kore commit; its refreshed
+image contains exactly the same payload files. Clean reproduction and preflight
+pass at the refreshed revision. Host unit tests do not
 certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).

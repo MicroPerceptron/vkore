@@ -1,18 +1,30 @@
 # Optional supervisor acceptance — 2026-09-23
 
-**Not merge-ready.** Native idle recovery succeeds, but a subsequent prompt
-is refused during workspace admission before inference. This is an unresolved
-guest failure; final artifacts, fault injection and UI acceptance remain pending.
-The default real-stack lock has not been promoted.
+**Not merge-ready.** Native fresh-worker arithmetic and response retirement now
+pass. Recovery passes three idle restarts, idle disconnect and disconnect
+during real inference in the same VM. Response-before-receipt termination,
+final artifacts, isolation/tool and UI acceptance remain pending. The default
+real-stack lock has not been promoted.
 
-## Current-main refresh
+## Current source refresh
 
 Kore merged main `515ed58c4` in `9c9c08637461a9986abdf3841ee738d5ddf96a3f`.
-The PR no longer has merge conflicts. Native dependencies now pin that merge;
-the exact SDK export is `9d94def23eabcc916be7406d5c2152cacd280f82`. The full
-Kore host/architecture matrix, SDK required matrix plus actual-Kore composition,
-and vKore workspace tests passed. Guest diagnostics/source are at `9566b213e`;
-their enabled image and final payload refresh remain pending.
+Native owner pins now select `2dc4cf1e04436b0a0aeb89ba9f60cbdcef7b01fb`;
+its exact SDK export is `3a3f1ddf3d4dd594e1cd22976baf9888a9acbd2a`. The full
+Kore host/architecture matrix, SDK matrix, actual-Kore composition including
+mixed-owner rejection, and updated vKore workspace tests passed.
+
+The native fresh-worker refusal came from removing DERIVE on the supervisor's
+exec wake endpoint; child connection minting needs that authority. The repaired
+`wake-repair-fresh-01` returns exactly `42` and becomes ready after receipt.
+The separate recovery refusal was a workspace `list page` refresh after attach
+request IDs reset to 1. The affine connection now retains its request sequence
+and rejects future replies while draining older terminal control replies.
+The reattachment regression fails with the original ID reuse restored.
+`sequence-recovery-01` has reached supervisor generation 6 in the same QEMU
+process, including an actual inference disconnect; its remaining fault gate is
+still running. These are diagnostic images with exact saved source/diffs, not
+promoted release artifacts. Existing failed runs remain below for comparison.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

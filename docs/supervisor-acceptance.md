@@ -10,7 +10,10 @@ Disabled production/kernel boot, real file prompts, two-terminal isolation,
 absent-project refusal and committed-write recovery also pass on their recorded
 images. Live file revocation and existing-name collision also pass. The recycled
 ordinary desktop passes with the repaired pointer driver. A diagnostic full desktop/fault sequence now passes; an earlier final-recovery
-timeout remains unexplained. Final artifact refresh and computer-use acceptance remain pending. Host unit tests do not
+timeout remains unexplained. Fresh capacity snapshots subsequently exposed pinned
+filesystem views accumulating across restarts. The kernel-validated canary fix
+passes focused native response-stop recovery with unchanged FS occupancy; the
+final full fault sequence, artifact refresh and computer-use acceptance remain pending. Host unit tests do not
 certify these gates.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
@@ -91,6 +94,11 @@ QMP socket in `qemu_arguments` (keep the runtime's own QMP socket). For example:
 Create the output directory before running. The probe opens Power, decodes its
 controls, requires Escape to close the frame, then runs fresh `clear`, `time`
 and `status exec`, `status mem`, and `status fs` commands through Terminal.
+Ready-state probes now compare filesystem session, client-pair, private-view
+and pinned-view occupancy against the initial snapshot and fail on growth.
+They preserve the failed snapshot before reporting the verdict. MM supply
+counters remain cumulative and are not treated as live occupancy.
+
 Saved framebuffers and JSON retain observed task, supply and filesystem-client
 counts at each boundary. Every provider must return a fresh available snapshot.
 MM child-supply totals are cumulative successful grants, not outstanding

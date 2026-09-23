@@ -11,12 +11,23 @@ Live file-grant revocation also passes, including denied reads and a usable
 follow-up prompt in the same VM. Existing-name collision also passes with
 unchanged host bytes and a successful follow-up. Recycled ordinary desktop now
 passes with repaired pointer delivery. A full desktop/fault diagnostic rerun
-also passes, with its earlier timeout retained. Final artifacts, detailed
-capacity observations and UI acceptance remain pending. The default real-stack lock has not been promoted.
+also passes functionally, with its earlier timeout retained. New capacity checks
+exposed accumulating pinned filesystem views. A kernel-validated cleanup fix
+passes a focused response-stop native gate with unchanged view counts; final
+full-sequence, artifact and UI acceptance remain pending. The default real-stack lock has not been promoted.
 
-## Refreshed source tuple
+## Current correction
 
-The current native owner is `52493011e3491f955f478f92e895731af9fa9604`,
+The native owner is now `60e659644acf6e5e730b6b566a68765f8016563c`.
+The exact libkore export is under its required checks; coordinated source and
+artifact pins are still being refreshed. Kore's full host/architecture matrix
+passes, and vKore's locked workspace passes. The focused native correction
+uses the exact diagnostic source patch and image recorded below, not a final
+release image. No default lock promotion.
+
+## Prior telemetry source tuple
+
+The preceding native owner was `52493011e3491f955f478f92e895731af9fa9604`,
 with byte-exact SDK export `9ab4ee4b537c437cdc2a5e39ee34e8548358b157`.
 Kore consumer source freeze is `c0b7536026fbee512f17d32f54bd68aa53f5704b`;
 committed disabled ARM/x86 payload base is
@@ -421,3 +432,89 @@ kernel logging and payload changes were restored. This is not yet a final
 artifact or original returning-main acceptance result. All failed runs remain
 retained alongside the passing run, including the seven hardware scenarios
 that failed CI run 35847395393.
+
+
+### Final telemetry candidate exposes retained filesystem views — 2026-09-23
+
+The source-frozen disabled image passes the production boot gate
+(`final-default-boot-01`, 42.03 s, SHA-256
+`89ef0216e4236192b775fb91de2e845967a7200470a556a52cd378b5c60fc71f`).
+The enabled image passes launcher preflight and all thirteen Power/Terminal
+probes through supervisor generations 1–7 in the same QEMU PID 92680
+(`final-desktop-faults-01`, 1044.14 s wrapper, SHA-256
+`98fb97f89c371fbc1c6b93f0c334e3ebe10f54b35bd5e50489847e508c3ae1d9`).
+However, it **fails capacity acceptance**: pinned filesystem views increase
+from 2 initially to 3, 4 and 5 after the three idle restarts and keep increasing
+through the later faults. The process-level test's exit 0 proves its recorded
+functional assertions only. `capacity-verdict.json` retains every provider
+snapshot and the separate failed verdict. No lock promotion or merge.
+
+Cleanup used a read of the canary's immutable local capability record as a
+liveness test. Native ancestor revocation leaves that record unchanged; the
+kernel validates the lineage when the capability is used. The pending fix
+uses the existing same-kind derive/revoke probe pattern for send endpoints.
+A non-delegable live canary remains non-delegable and returns an uncertain
+probe result; only an explicit kernel Revoked result permits retirement.
+No notice is sent and no binder rights are broadened. The real kernel test
+proves live Denied, unchanged live canary, then Revoked after parent teardown.
+Runtime and filesystem host suites pass. Native correction validation is
+pending. Future recovery probes fail when ready-state filesystem session,
+client-pair or view occupancy exceeds its initial value.
+
+
+CI run `35855204535` at `00cf2d402` records successful kernel, userland and
+build-tool test steps, followed by a GitHub runner `No space left on device`
+exception while finishing the job. The exact job and annotations are retained
+in `diagnostics/ci-00cf2d402/`. Host tests now retain compiler/download caches
+but omit the multi-gigabyte build-output restore/save, avoiding that extra
+storage peak on a hosted runner. Hardware failures are separate: six captured
+lanes fail incomplete seeding, while both returning-main captures lack the
+first described witness. Intel's framebuffer contains a long repeated `l`;
+AMD's initial frame is the welcome screen. Returning-main now shares the
+already-tested explicit HID press/release implementation; 49 focused driver
+tests pass. This is not yet a native or CI confirmation of either correction.
+
+
+### Kernel-validated filesystem canary — native correction confirmed
+
+`canary-response-recovery-01` **passes** (353.67 s wrapper): a real worker
+responds exactly `42`, its supervisor is stopped before receipt, and the
+replacement reaches generation 2 in the same unparked QEMU PID 30392. Three
+Power/Terminal probes pass. Each fresh FS snapshot has exactly 3 sessions,
+0 client pairs, 1 private view and 2 pinned views, including after recovery;
+the new capacity assertion passes. The preceding candidate accumulated
+2 → 10 pinned views across the full fault sequence. The kernel regression
+separately proves live non-delegable denial versus ancestor-revoked closure.
+This establishes the targeted correction, not complete resource reclamation
+or final release acceptance.
+
+Diagnostic source base is `00cf2d40230f9da39198393899ee033a43dd4920`, saved
+source patch SHA-256 `27f7214b65db183382b95fe0ea0c4036eeada98c7db4c9a2ecb39942b1e79508`.
+ISO SHA-256 is `2200df55f85b8e7245c3d4ad522dba40185466d60cdf0c274ddd261f16cd5cc7`,
+BLAKE3 `83b2b31c9008e128eafd494d6dd2464be87c8ad9cba347d41a49e61c1e2eb62a`.
+Exact source/payload patches and all byte-verified framebuffer archives are
+retained. Generated payload edits were verified against the saved patch and
+restored before the next source cut. The run uses the recorded diagnostic
+image and host native owner `52493011e`; a new coordinated export, final
+artifacts and the full fault/ordinary-boot/UI acceptance still remain.
+
+Host checks before the full matrix: 1,031 runtime/filesystem tests passed,
+7 ignored; the new kernel regression passed; all 49 keyboard/returning-main
+driver tests passed; 9 build-cache tests passed, 1 skipped. The first host
+invocation accidentally selected stable Rust and failed on required nightly
+features; the preserved successful rerun uses the checked-in compiler. No
+result is inferred from the earlier empty test discovery.
+
+Storage cleanup removed 924 compiled library/metadata objects (1,576,298,417
+bytes) whose dependency records identified twelve obsolete native revisions
+absent from the current locked graph. Current owner 52493011e, executables,
+source, models and evidence were retained. The dependency records and paths
+are saved in `diagnostics/obsolete-native-codegen-cleanup-20260923.json`.
+
+
+vKore's updated native pin `60e659644` passes the complete locked workspace
+suite (372 tests passed, 12 ignored) and release builds of `vkore-harnessd`,
+`vkore`, and `vkore-ui` (25.68 s). Cargo changed only the nineteen native Git
+source entries. The initial release command mistook a binary name for a
+package name and stopped before compilation; the corrected explicit binary
+build is the passing check. The final artifact lock remains unpromoted.

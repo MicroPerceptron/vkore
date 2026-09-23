@@ -47,7 +47,7 @@ host bytes `hello`, then fails the read prompt. Personal discovery replaced the
 focus folder with hashed read-only aliases, removing `/project/test.txt` from
 the worker's view. The host now retains the selected focus root whenever a
 search result belongs to it. External-only and virtual-project discovery stay
-read-only. The focused discovery regression passes; native retest is pending.
+read-only. The focused discovery regression and the native retest pass.
 
 The unaccepted candidate lock now selects disabled artifact base
 `de6206941aad8e06616cd2b5290ebfb093118c7a`, source freeze `580a7c0ce`, and the
@@ -57,9 +57,26 @@ Its exact generated payload diff SHA-256 is
 `ed75af931c78f9408b44630e84cd09e71d2dde0f339dd087b6a0b73e8383cb3b`.
 Reproduction from the restored committed payload baseline PASSES with the
 exact ISO and generated diff. The release host/UI build and `make dev-check`
-also pass using the dedicated UI state. `sequence-files-03` tests this image with the focus fix; the full vKore
-workspace suite passes after that fix. Native uncertain-transaction fault
+also pass using the dedicated UI state. `sequence-files-03` passes on this image with the focus fix; the full vKore
+workspace suite also passes after that fix. Native uncertain-transaction fault
 gates are implemented and compile, but have not yet run.
+
+`sequence-files-03` completed all four original prompts through the real
+application runtime, guest tools and Qwen model. Create returned success and
+host `test.txt` stayed exactly `b"hello"` throughout. The read tool returned
+`hello`; the assistant added explanatory prose (strict answer formatting is
+not a pass). Missing-file text correctly reported absence, with the known
+failed-status chip. Arithmetic returned exactly `42`. Prompt elapsed times
+were 269.3, 121.9, 117.7 and 90.3 seconds on this unparked TCG/CPU-model run.
+The corrected focus attachment kept QEMU PID 73657 across prompts 1–4.
+Evidence: `sequence-files-03/results.json`, complete events in `gate.log`,
+source patch, pinned ISO digest, fixture backup and host file. The test exited
+0 and reaped its owned processes. This is native integration, not computer use.
+
+Computer-use acceptance is blocked because the Mac is locked and CUA automatic
+unlock failed. The user has been asked to unlock it. A separate fresh UI state
+is prepared at `~/.local/state/vkore-supervisor-ui-20260923/`; `make dev-check`
+passed. Automated native desktop/fault/authority gates continue independently.
 
 Before the main refresh, disabled production boot and release boottest passed
 at source freeze `1562f5b9b` (`repaired-default-boot-01`, `repaired-boottest-02`).

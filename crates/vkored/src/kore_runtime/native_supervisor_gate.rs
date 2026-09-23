@@ -340,6 +340,124 @@ fn native_no_project_refuses_files_and_answers_arithmetic() {
     });
 }
 
+#[test]
+#[ignore = "requires isolated authority.txt fixture, real model and exclusive QEMU"]
+fn native_live_authority_revocation_preserves_vm() {
+    on_native_stack(|| {
+        use std::cell::Cell;
+        let input: Value = serde_json::from_slice(
+            &std::fs::read(std::env::var_os("VKORE_SUPERVISOR_GATE_CONFIG").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let project_id = input["file_project_id"].as_str().unwrap();
+        let project = ProjectStore::open(input["project_root"].as_str().unwrap())
+            .unwrap()
+            .get(project_id)
+            .unwrap();
+        let fixture = project.workspace.root.join("authority.txt");
+        let before = std::fs::read(&fixture).unwrap();
+        assert_eq!(before, b"authority fixture");
+        assert!(
+            PathBuf::from(input["fixture_backup"].as_str().unwrap())
+                .join("authority.txt")
+                .is_file()
+        );
+        let mut runtime = configured_runtime();
+        runtime
+            .ensure_project(project_id, "", &mut |_, _, e| eprintln!("{e}"))
+            .unwrap();
+        runtime
+            .prepare(&mut |e| eprintln!("{e}"), &|| false)
+            .unwrap();
+        let pid = runtime
+            .runtime
+            .as_ref()
+            .unwrap()
+            .process
+            .as_ref()
+            .unwrap()
+            .id();
+        let session = SessionState {
+            api_version: 1,
+            project_id: project_id.into(),
+            session_id: "native-authority-gate".into(),
+            status: crate::SessionStatus::Open,
+            generation: 1,
+            backend_incarnation: 0,
+            last_event_sequence: 0,
+            prompts: BTreeMap::new(),
+        };
+        let prompt = PromptRequest { api_version:1, prompt_id:"authority-revoke".into(), idempotency_key:"authority-revoke".into(),
+            text:"Read authority.txt five times using five separate read tool calls, then report the last contents.".into() };
+        let worker_started = Cell::new(false);
+        let sent = Cell::new(false);
+        let applied = Cell::new(false);
+        let installed_file = Cell::new(false);
+        let revoked_file = Cell::new(false);
+        let status = runtime.run_prompt_with_updates(&session, &prompt, &mut |kind, public, event| {
+            eprintln!("{}", json!({"gate":"native_authority", "kind":format!("{kind:?}"), "public":public, "event":event}));
+            if event["kind"] == "Input" && event["role"] == "Agent" { worker_started.set(true); }
+            if kind == EventKind::AuthorityUpdate && event["status"] == "applied" { applied.set(true); }
+            if kind == EventKind::Capability && matches!(event["kind"].as_str(), Some("View" | "Object")) {
+                if event["state"] == "Installed" { installed_file.set(true); }
+                if event["state"] == "Revoked" { revoked_file.set(true); }
+            }
+        }, &|| false, &|| true, &|| {
+            if worker_started.get() && !sent.replace(true) {
+                Some(AuthorityUpdateRequest { api_version:1, prompt_id:prompt.prompt_id.clone(), update_id:"remove-all-files-and-tools".into(),
+                    text:"Revoke all filesystem resources and all executable tools from this agent. Use an empty resource set, empty executable set and zero tool calls. Finish conversationally without accessing any files.".into() })
+            } else { None }
+        });
+        assert!(
+            sent.get() && installed_file.get(),
+            "did not reach a real endowed worker"
+        );
+        assert!(
+            applied.get() && revoked_file.get(),
+            "native revoke and resumed-update receipt were not confirmed: {status:?}"
+        );
+        let guest = runtime.runtime.as_ref().unwrap();
+        assert_eq!(guest.process.as_ref().unwrap().id(), pid);
+        assert!(!guest.vm_suspended && !guest.recovering);
+        assert_eq!(std::fs::read(&fixture).unwrap(), before);
+        let mut answer = None;
+        let status = runtime.run_prompt(
+            &session,
+            &PromptRequest {
+                api_version: 1,
+                prompt_id: "authority-followup".into(),
+                idempotency_key: "authority-followup".into(),
+                text: "What is 17 plus 25? Answer with the number only.".into(),
+            },
+            &mut |kind, _, event| {
+                eprintln!("{kind:?} {event}");
+                if kind == EventKind::Assistant {
+                    answer = event["text"].as_str().map(str::to_owned);
+                }
+            },
+            &|| false,
+            &|| true,
+        );
+        assert_eq!(status, PromptStatus::Completed);
+        assert_eq!(answer.as_deref().map(str::trim), Some("42"));
+        assert_eq!(
+            runtime
+                .runtime
+                .as_ref()
+                .unwrap()
+                .process
+                .as_ref()
+                .unwrap()
+                .id(),
+            pid
+        );
+        eprintln!(
+            "{}",
+            json!({"gate":"native_authority", "result":"revoked, resumed and followup completed", "qemu_pid":pid})
+        );
+    });
+}
+
 fn on_native_stack(run: fn()) {
     // Debug workspace-image construction carries large bounded temporaries.
     // Match the workspace image tests instead of overflowing libtest's small

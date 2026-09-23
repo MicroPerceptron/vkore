@@ -144,3 +144,11 @@ pinned image built with `KORE_AGENT_SUPERVISOR_PROJECT=0`. It requires an explic
 file-action refusal, then `42` and confirmed receipt/retirement in the same VM.
 Do not run it with the ordinary project-enabled candidate or count compilation
 as proof of the absent-authority boundary.
+
+`native_live_authority_revocation_preserves_vm` requires a backed-up
+`authority.txt` containing `authority fixture`. It begins a multi-read task,
+waits for a real endowed worker's inference input, then submits an authenticated
+update removing filesystem and executable grants. Passing requires native
+Installed and Revoked observations, an Applied update receipt after resume,
+unchanged fixture bytes, and a subsequent `42` prompt in the same VM. An update
+that loses the completion race does not pass this gate.

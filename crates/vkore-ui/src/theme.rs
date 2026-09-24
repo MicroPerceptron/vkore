@@ -18,6 +18,8 @@ use iced_core::{Background, Border, Color, Shadow};
 pub const BACKGROUND: u32 = 0x0A0A0C;
 /// Panel and card fill.
 pub const PANEL: u32 = 0x131316;
+/// Recessed row inside the expanded work timeline.
+pub const CHAT_ROW: u32 = 0x101013;
 /// Topology directory node fill.
 pub const PANEL_DIR: u32 = 0x17171B;
 /// Topology file node fill.
@@ -30,16 +32,14 @@ pub const BORDER: u32 = 0x2A2A30;
 pub const BORDER_DIM: u32 = 0x3A3A42;
 /// Primary off-white text.
 pub const TEXT: u32 = 0xF2F0EC;
+/// Primary machine-readable text in work rows.
+pub const CHAT_TEXT: u32 = 0xDEDCD8;
 /// Secondary text.
 pub const TEXT_SECONDARY: u32 = 0xB9B9BE;
 /// Muted text, used for mono metadata.
 pub const TEXT_MUTED: u32 = 0x8B8B90;
 /// The single accent.
 pub const MAGENTA: u32 = 0xCE15C4;
-/// First dark accent step, used for completed wizard steps.
-pub const MAGENTA_DARK: u32 = 0xA410A0;
-/// Second dark accent step.
-pub const MAGENTA_DARKER: u32 = 0x7A0C77;
 /// Success.
 pub const SUCCESS: u32 = 0x3FCB6E;
 /// Warning, and the colour of external paths.

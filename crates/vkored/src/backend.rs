@@ -201,6 +201,7 @@ pub struct SequenceMetrics {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendMetrics {
+    pub process_id: Option<u32>,
     pub incarnation: u64,
     pub restarts: u64,
     pub stale_events: u64,
@@ -247,6 +248,15 @@ pub enum BackendError {
 }
 
 pub trait InferenceBackend {
+    /// Host-owned conversation facts, never transferable capabilities. The
+    /// runtime replaces this bounded context at each serialized prompt boundary.
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        if context.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::InvalidRole)
+        }
+    }
     fn reset(&mut self);
     fn open(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError>;
     fn close(&mut self, sequence: SequenceIdentity) -> Result<(), BackendError>;
@@ -279,7 +289,14 @@ pub trait InferenceBackend {
     ) -> Result<BackendEvent, BackendError>;
     fn poll(&mut self, tick: u64) -> Option<BackendEvent>;
     fn metrics(&self) -> BackendMetrics;
+    fn healthy(&mut self) -> bool {
+        true
+    }
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics>;
+    /// Whether this exact, open broker sequence can begin a fresh prompt.
+    /// Terminal delivery alone is insufficient: cancelled model work may still
+    /// own the sequence. Unknown/non-broker sequences must return false.
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool;
     /// Pop one bounded, non-authoritative observation produced by the real
     /// backend path. Implementations that do not expose model internals keep
     /// the default empty stream.
@@ -289,6 +306,9 @@ pub trait InferenceBackend {
 }
 
 impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        (**self).set_conversation_context(context)
+    }
     fn reset(&mut self) {
         (**self).reset();
     }
@@ -339,6 +359,9 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
     fn metrics(&self) -> BackendMetrics {
         (**self).metrics()
     }
+    fn healthy(&mut self) -> bool {
+        (**self).healthy()
+    }
 
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics> {
         (**self).sequence_metrics(sequence)
@@ -346,6 +369,10 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {
         (**self).take_observation()
+    }
+
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool {
+        (**self).broker_prompt_ready(sequence)
     }
 }
 
@@ -375,6 +402,8 @@ pub enum ObservationKind {
     ModelOutputChunk,
     RawModelCompletion,
     ReturnedModelFields,
+    /// Compact final server timings, retained independently of verbose SSE capture.
+    ModelTiming,
     Validation,
     AssistantMessage,
     ToolCall,
@@ -594,7 +623,6 @@ fn select_tools(
 enum BrokerPending {
     CreateConversation {
         plan: [u8; 16],
-        executable: [u8; 16],
         budget: TaskBudget,
     },
     Create {
@@ -723,26 +751,19 @@ impl DeterministicBackend {
         if let Some(broker) = broker {
             let mut wire = [0; kore_hostlink::INFERENCE_PART_MAX];
             let len = match broker {
-                BrokerPending::CreateConversation {
+                BrokerPending::CreateConversation { plan, budget } => BrokerPlanningReply {
                     plan,
-                    executable,
+                    action: BrokerActionKind::CreateAgent,
+                    target: [0; 16],
+                    subject: [0; 16],
                     budget,
-                } => {
-                    let selectors = [executable];
-                    BrokerPlanningReply {
-                        plan,
-                        action: BrokerActionKind::CreateAgent,
-                        target: [0; 16],
-                        subject: [0; 16],
-                        budget,
-                        rights: 0,
-                        limit: 0,
-                        reason: 0,
-                        label: "agent/prompt",
-                        selectors: &selectors,
-                    }
-                    .encode(&mut wire)
+                    rights: 0,
+                    limit: 0,
+                    reason: 0,
+                    label: "agent/prompt",
+                    selectors: &[],
                 }
+                .encode(&mut wire),
                 BrokerPending::Create {
                     plan,
                     object,
@@ -977,6 +998,23 @@ impl InferenceBackend for DeterministicBackend {
         let turn = decoded.turn;
         let input = decoded.input;
         let limits = self.registry.limits;
+        // A resident broker sequence is reused across interactive prompts, but
+        // each structured turn-one BrokerPlan is an independent authority
+        // transaction. Match the llama backend's prompt-boundary reset so a
+        // deterministic test broker cannot carry a prior prompt's plan state.
+        let reset_broker_context = identity.role == BackendRole::Broker
+            && turn == 1
+            && input
+                .get(..4)
+                .is_some_and(|magic| magic == kore_hostlink::BROKER_REQUEST_MAGIC.to_le_bytes())
+            && self.registry.get(identity).is_ok_and(|entry| {
+                entry.state.accepted_turn != 0
+                    && entry.state.pending.is_empty()
+                    && !entry.state.seen.contains(&request)
+            });
+        if reset_broker_context {
+            self.registry.get_mut(identity)?.state = DeterministicSequence::new(limits);
+        }
         let entry = self.registry.get_mut(identity)?;
         let sequence = &mut entry.state;
         if input.is_empty() || input.len() > kore_hostlink::INLINE_MAX {
@@ -1065,7 +1103,6 @@ impl InferenceBackend for DeterministicBackend {
             let mut fallback_object = None;
             let mut workspace_view = None;
             let mut executable = None;
-            let mut hello_executable = None;
             let mut useful_executables = [None; 12];
             let mut view = None;
             let mut agent = None;
@@ -1074,10 +1111,9 @@ impl InferenceBackend for DeterministicBackend {
                     && offer.permitted_ops != 0
                     && offer.max_uses != 0
                     && let Some(index) = useful_tool_index(offer.label)
+                    && useful_executables[index].replace(offer.reference).is_some()
                 {
-                    if useful_executables[index].replace(offer.reference).is_some() {
-                        return Err(BackendError::InvalidEncoding);
-                    }
+                    return Err(BackendError::InvalidEncoding);
                 }
                 match (planning.intent, offer.kind, offer.label) {
                     ("read X", BrokerOfferKind::Object, "workspace/X")
@@ -1112,11 +1148,6 @@ impl InferenceBackend for DeterministicBackend {
                         if offer.permitted_ops != 0 && offer.max_uses != 0 =>
                     {
                         if executable.replace(offer.reference).is_some() {
-                            return Err(BackendError::InvalidEncoding);
-                        }
-                    }
-                    ("hello", BrokerOfferKind::Executable, "hello") => {
-                        if hello_executable.replace(offer.reference).is_some() {
                             return Err(BackendError::InvalidEncoding);
                         }
                     }
@@ -1166,7 +1197,6 @@ impl InferenceBackend for DeterministicBackend {
             Some(match planning.intent {
                 "hello" => BrokerPending::CreateConversation {
                     plan: planning.plan,
-                    executable: hello_executable.ok_or(BackendError::InvalidEncoding)?,
                     budget: TaskBudget {
                         tool_calls: 0,
                         ..planning.ceiling
@@ -1491,6 +1521,14 @@ impl InferenceBackend for DeterministicBackend {
             .get(identity)
             .ok()
             .map(|entry| entry.state.metrics)
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self
+                .registry
+                .get(identity)
+                .is_ok_and(|entry| entry.state.pending.is_empty())
     }
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {

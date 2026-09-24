@@ -2,8 +2,12 @@
 # will have compiled files and executables
 debug
 target
+__pycache__/
+*.pyc
 # Runtime state and caller-selected artifacts are never source files.
 .vkore/
+.vkore-state/
+Makefile.local
 *.gguf
 *.kws
 *.kwr

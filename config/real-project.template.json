@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "id": "qwen9b-q4km-real",
+  "name": "Qwen 9B Q4_K_M - real Kore",
+  "workspace": {
+    "root": "WORKSPACE",
+    "state": "WORKSPACE_STATE",
+    "access": "automatic_writeback",
+    "exclusions": [
+      ".git/objects"
+    ]
+  },
+  "inference": {
+    "backend": "llama_cpp",
+    "kore_image": "KORE_IMAGE",
+    "llama_server": "LLAMA_SERVER",
+    "model": "MODEL",
+    "extra_args": [
+      "--n-gpu-layers",
+      "0"
+    ],
+    "context_tokens": 32768,
+    "output_tokens": 2048,
+    "threads": 6,
+    "slots": 3
+  },
+  "addons": [],
+  "approvals": {
+    "default_scope": "once",
+    "confirm_external_writes": true,
+    "confirm_destructive": true,
+    "standing_policy_enabled": false
+  },
+  "retention": {
+    "transcript_days": 30,
+    "clean_kv_on_close": true,
+    "retain_raw_model_output": false
+  },
+  "resources": {
+    "memory_mib": 2048,
+    "virtual_cpus": 2,
+    "prompt_seconds": 900,
+    "agent_limit": 4
+  },
+  "archived": false
+}

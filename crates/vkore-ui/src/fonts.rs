@@ -8,6 +8,12 @@
 use crate::theme;
 use axui_core::ResourceId;
 use iced_core::{Font, font};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const BODY_DESIGN_DEFAULT: u8 = 0;
+const BODY_ARCHIVO: u8 = 1;
+const BODY_JETBRAINS_MONO: u8 = 2;
+static BODY_PREFERENCE: AtomicU8 = AtomicU8::new(BODY_DESIGN_DEFAULT);
 
 /// The registered resource identities, in registration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +60,9 @@ pub const DISPLAY: Font = face(
 pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
 pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
+/// JetBrains Mono 500 without tracking. Timestamps use the heavier face but
+/// keep the compact spacing of ordinary metadata.
+pub const MONO_MEDIUM: Font = face(theme::MONO_FAMILY, font::Weight::Medium, 0.0);
 /// JetBrains Mono 500. Uppercase labels, metadata, navigation.
 pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_LABEL);
 
@@ -67,9 +76,73 @@ pub const SPLASH: Font = face(
     theme::TRACK_SPLASH,
 );
 
+/// Applies one persisted, registered body-family choice.
+pub fn set_body_preference(preference: &str) -> bool {
+    let value = match preference {
+        "design_default" => BODY_DESIGN_DEFAULT,
+        "archivo" => BODY_ARCHIVO,
+        "jetbrains_mono" => BODY_JETBRAINS_MONO,
+        _ => return false,
+    };
+    BODY_PREFERENCE.store(value, Ordering::Release);
+    true
+}
+
+/// The body face selected in application Settings.
+pub fn body() -> Font {
+    match BODY_PREFERENCE.load(Ordering::Acquire) {
+        BODY_ARCHIVO => face(theme::DISPLAY_FAMILY, font::Weight::Semibold, 0.0),
+        BODY_JETBRAINS_MONO => face(theme::MONO_FAMILY, font::Weight::Normal, 0.0),
+        _ => BODY,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shaping_selects_the_registered_faces() {
+        let faces = register().unwrap();
+        let mut system = iced_graphics::text::font_system().write().unwrap();
+        for (family, weight, resource) in [
+            (theme::DISPLAY_FAMILY, 600, faces.display),
+            (theme::BODY_FAMILY, 400, faces.body),
+            (theme::MONO_FAMILY, 400, faces.mono),
+            (theme::MONO_FAMILY, 500, faces.mono_label),
+        ] {
+            let selected = system.raw().db().query(&cosmic_text::fontdb::Query {
+                families: &[cosmic_text::fontdb::Family::Name(family)],
+                weight: cosmic_text::fontdb::Weight(weight),
+                ..Default::default()
+            });
+            let registered = axui_iced::font_face(resource);
+            assert_eq!(selected, registered, "{family} {weight}");
+            assert_eq!(
+                system.raw().db().face(selected.unwrap()).unwrap().weight.0,
+                weight
+            );
+            let mut buffer =
+                cosmic_text::Buffer::new(system.raw(), cosmic_text::Metrics::new(14.0, 20.0));
+            buffer.set_text(
+                "SESSION",
+                &cosmic_text::Attrs::new()
+                    .family(cosmic_text::Family::Name(family))
+                    .weight(cosmic_text::Weight(weight)),
+                cosmic_text::Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(system.raw(), false);
+            let mut glyph_count = 0;
+            for run in buffer.layout_runs() {
+                for glyph in run.glyphs {
+                    assert_eq!(Some(glyph.font_id), registered, "shaped {family} {weight}");
+                    glyph_count += 1;
+                }
+            }
+            assert_eq!(glyph_count, 7, "{family} {weight} must shape SESSION");
+        }
+    }
 
     #[test]
     fn registration_is_idempotent_and_gives_each_weight_its_own_identity() {
@@ -92,6 +165,7 @@ mod tests {
         // Prose is set solid; labels and wordmarks are tracked out.
         assert_eq!(BODY.tracking, font::Tracking::NONE);
         assert_eq!(MONO.tracking, font::Tracking::NONE);
+        assert_eq!(MONO_MEDIUM.tracking, font::Tracking::NONE);
         assert_eq!(MONO_LABEL.tracking, font::Tracking(theme::TRACK_LABEL));
         assert_eq!(MONO_NAV.tracking, font::Tracking(theme::TRACK_NAV));
         assert_eq!(DISPLAY.tracking, font::Tracking(theme::TRACK_WORDMARK));
@@ -113,6 +187,7 @@ mod tests {
         assert_eq!(BODY.family, font::Family::Name(theme::BODY_FAMILY));
         assert_eq!(MONO.family, font::Family::Name(theme::MONO_FAMILY));
         assert_eq!(MONO.weight, font::Weight::Normal);
+        assert_eq!(MONO_MEDIUM.weight, font::Weight::Medium);
         assert_eq!(MONO_LABEL.weight, font::Weight::Medium);
     }
 }

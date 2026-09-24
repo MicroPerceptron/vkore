@@ -11,7 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("-np", type=int, default=3)
 parser.add_argument("--port", type=int, required=True)
+parser.add_argument("--test-control-dir")
 args, _ = parser.parse_known_args()
+if args.test_control_dir and os.path.exists(os.path.join(args.test_control_dir, "fail-start")):
+    os._exit(74)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -29,6 +32,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/test/crash" and args.test_control_dir:
+            os._exit(75)
         if self.path == "/health":
             self.send_json({"status": "ok"})
         elif self.path == "/slots":
@@ -41,6 +46,15 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         if self.path.startswith("/slots/") and self.path.endswith("?action=erase"):
             self.send_json({"success": True, "n_erased": 1})
+            return
+        if self.path == "/apply-template":
+            # Protocol fixture only. Production uses the actual model template.
+            messages = json.loads(body)["messages"]
+            prompt = "\n".join(
+                ("Assistant: " if message["role"] == "assistant" else "User: " if message["role"] == "user" else "")
+                + message["content"] for message in messages
+            ) + "\nAssistant: "
+            self.send_json({"prompt": prompt})
             return
         if self.path != "/completion":
             self.send_json({"error": "unknown"}, 404)
@@ -70,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             slot = int(request.get("id_slot", -1))
             marker = prompt.rsplit("User: ", 1)[-1].split("\nAssistant:", 1)[0]
+            if marker.startswith("Validation correction:"):
+                marker = prompt.rsplit("\nUser: Validation correction:", 1)[0].rsplit("User: ", 1)[-1].split("\nAssistant:", 1)[0]
             if '"authenticated_task_intent"' in marker:
                 planning = json.loads(marker)
                 intent = planning["authenticated_task_intent"].lower()
@@ -77,41 +93,50 @@ class Handler(BaseHTTPRequestHandler):
                 objects = [
                     offer
                     for offer in catalog
-                    if offer[1] in ("o", "v") and offer[2].lower() in intent
+                    if offer["kind"] in ("object", "view")
+                    and offer["label"].lower() in intent
                 ]
                 executables = [
                     offer
                     for offer in catalog
-                    if offer[1] == "x" and offer[2] == "cat"
-                ]
-                hello_executables = [
-                    offer
-                    for offer in catalog
-                    if offer[1] == "x" and offer[2] == "hello"
+                    if offer["kind"] == "executable" and offer["label"] == "cat"
                 ]
                 ceiling = {"tool_calls": 2}
-                selectors = planning.get("trusted_resolution", {}).get(
-                    "required_selector_indices"
+                selected_executables = (
+                    [executables[0]["index"]]
+                    if objects
+                    else []
                 )
-                if selectors is None:
-                    selectors = (
-                        [executables[0][0], objects[0][0]]
-                        if objects
-                        else [hello_executables[0][0]]
-                    )
-                text = json.dumps(
-                    {
-                        "action": "create_agent",
-                        "label": "agent/catalog-selection",
-                        "selectors": selectors,
-                        "budget": {
-                            "tool_calls": min(2, ceiling["tool_calls"])
-                            if objects
-                            else 0
+                selected_resources = [objects[0]["index"]] if objects else []
+                if (
+                    "retry_invalid_broker" in intent
+                    and "Validation correction:" not in prompt
+                ):
+                    text = json.dumps(
+                        {
+                            "action": "create_agent",
+                            "label": "invalid-first-attempt",
+                            "executables": [executables[0]["index"]],
+                            "resources": [executables[0]["index"]],
+                            "budget": {"tool_calls": 0},
                         },
-                    },
-                    separators=(",", ":"),
-                )
+                        separators=(",", ":"),
+                    )
+                else:
+                    text = json.dumps(
+                        {
+                            "action": "create_agent",
+                            "label": "agent/catalog-selection",
+                            "executables": selected_executables,
+                            "resources": selected_resources,
+                            "budget": {
+                                "tool_calls": min(2, ceiling["tool_calls"])
+                                if objects
+                                else 0
+                            },
+                        },
+                        separators=(",", ":"),
+                    )
             elif marker.startswith("{"):
                 message = json.loads(marker)
                 if message.get("kind") == "user_text":
@@ -163,8 +188,10 @@ class Handler(BaseHTTPRequestHandler):
                         ).encode()
                         + b"\n\n"
                     )
-            events.append(b"data: {\"content\":\"\",\"tokens\":[],\"stop\":true}\n\n")
-            events.append(b"data: [DONE]\n\n")
+            hangs_after_json = "hang_after_complete_json" in prompt.lower()
+            if not hangs_after_json:
+                events.append(b"data: {\"content\":\"\",\"tokens\":[],\"stop\":true}\n\n")
+                events.append(b"data: [DONE]\n\n")
         for event in events:
             try:
                 self.wfile.write(f"{len(event):x}\r\n".encode())
@@ -175,6 +202,9 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.2)
             except (BrokenPipeError, ConnectionResetError):
                 return
+        if "hang_after_complete_json" in prompt.lower():
+            time.sleep(3)
+            return
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
 

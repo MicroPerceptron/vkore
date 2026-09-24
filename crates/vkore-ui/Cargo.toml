@@ -32,3 +32,9 @@ tempfile = "3.27"
 [[bin]]
 name = "vkore-ui"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-foundation = { version = "0.2.2", features = ["NSURL", "NSString"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "block2"] }
+block2 = "0.5.1"

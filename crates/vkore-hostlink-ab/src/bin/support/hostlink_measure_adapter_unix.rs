@@ -746,6 +746,18 @@ impl InferenceBackend for MeasurementBackend {
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<hostlinkd::SequenceMetrics> {
         self.inner.sequence_metrics(sequence)
     }
+
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool {
+        self.inner.broker_prompt_ready(sequence)
+            && !self
+                .waiting
+                .iter()
+                .any(|pending| pending.sequence == sequence)
+            && !self
+                .fences
+                .iter()
+                .any(|pending| pending.sequence == sequence)
+    }
 }
 
 enum Engine {

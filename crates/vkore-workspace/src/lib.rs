@@ -4,7 +4,7 @@ pub mod image;
 pub mod live;
 
 pub use image::{DEFAULT_IMAGE_BYTES, seed_image};
-pub use live::{LiveRoot, ServedRange, WatchHints};
+pub use live::{LiveRoot, SelectedFile, ServedRange, WatchHints};
 
 use std::{
     collections::{BTreeMap, BTreeSet},

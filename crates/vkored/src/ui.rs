@@ -67,6 +67,7 @@ impl LiveUi {
             ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
+            ObservationKind::ModelTiming => "model_timing",
             ObservationKind::Validation => "validation",
             ObservationKind::AssistantMessage => "assistant_message",
             ObservationKind::ToolCall => "tool_call",
@@ -222,25 +223,43 @@ mod tests {
             "rights": 1,
             "label": "workspace/docs-architecture.md",
         }));
-        let mut client = TcpStream::connect(ui.local_addr().unwrap()).unwrap();
+        let address = ui.local_addr().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_polling = stop.clone();
+        let poller = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !stop_polling.load(std::sync::atomic::Ordering::Relaxed)
+                && std::time::Instant::now() < deadline
+            {
+                ui.poll().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         client
             .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
-        ui.poll().unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("workspace/docs-architecture.md"));
         assert!(response.contains("authority_state"));
-        let mut discovery = TcpStream::connect(ui.local_addr().unwrap()).unwrap();
+        let mut discovery = TcpStream::connect(address).unwrap();
+        discovery
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         discovery
             .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
-        ui.poll().unwrap();
         let mut response = String::new();
         discovery.read_to_string(&mut response).unwrap();
         assert!(response.contains("application/json"));
         assert!(response.contains("vkore-ui"));
         assert!(response.contains("axiom"));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        poller.join().unwrap();
     }
 }

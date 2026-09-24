@@ -2,13 +2,14 @@
 
 use crate::{
     BackendEvent, BackendRole, InferenceBackend, InferenceObservation, ObservationKind,
-    ProjectConfig, ProjectStore, SequenceIdentity, UiApprovalService,
+    ProjectConfig, ProjectStore, SequenceIdentity, SettingsStore, UiApprovalService,
 };
 use kore_hostlink::{
-    AgentEventKind, AgentRequestKind, AgentRequestView, BrokerActionKind, BrokerOffer,
-    BrokerOfferKind, InferenceRequestKind, InferenceRequestView, RequestId, RouteId, TaskBudget,
-    TaskGeneration, TaskIntentRequest, ToolArgument, ToolResultKind, decode_agent_event,
-    decode_broker_reply,
+    AGENT_TEXT_MAX, AgentEventKind, AgentRequestKind, AgentRequestView, AgentToolDescriptor,
+    BrokerActionKind, BrokerOffer, BrokerOfferKind, InferenceRequestKind, InferenceRequestView,
+    RequestId, RouteId, TOOL_EFFECT_OBSERVE, TOOL_RESULT_WORKSPACE, TaskBudget, TaskGeneration,
+    TaskIntentRequest, ToolArgument, ToolArgumentKind, ToolInputSchema, ToolResultKind,
+    decode_agent_event, decode_broker_reply,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,8 +23,13 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod updates;
+pub use updates::{AuthorityUpdateRequest, AuthorityUpdateState, AuthorityUpdateStatus};
+
 pub const HARNESS_API_VERSION: u16 = 1;
-const EVENTS_MAX: usize = 4096;
+const EVENTS_MAX: usize = 512;
+const SESSIONS_MAX: usize = 64;
+const PROMPTS_PER_SESSION_MAX: usize = 4096;
 const PROMPT_BYTES_MAX: usize = kore_hostlink::TASK_INTENT_MAX;
 const PENDING_MAX: usize = 32;
 const POLL_TICKS_MAX: u64 = 30_000;
@@ -96,6 +102,7 @@ pub enum EventKind {
     Error,
     PromptTerminal,
     ConversationClosed,
+    AuthorityUpdate,
 }
 
 pub(crate) fn emit_inference_observation(
@@ -117,6 +124,9 @@ fn inference_observation_payload(observation: &InferenceObservation) -> Value {
         "role": format!("{:?}", observation.role),
         "kind": format!("{:?}", observation.kind),
         "turn": observation.turn,
+        "route": format!("{:?}", observation.route),
+        "generation": observation.generation.get(),
+        "request": format!("{:?}", observation.request),
         "payload": observation.payload,
         "accepted": observation.accepted,
         "detail": observation.detail,
@@ -160,7 +170,13 @@ pub enum HarnessError {
 
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::PromptTooLarge => write!(
+                f,
+                "Prompt must contain 1–{PROMPT_BYTES_MAX} UTF-8 bytes; shorten it or split it into separate chat turns."
+            ),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 
@@ -171,16 +187,75 @@ struct SessionData {
     events: VecDeque<HarnessEvent>,
     idempotency: BTreeMap<String, (String, String)>,
     cancellations: BTreeSet<String>,
+    updates: BTreeMap<String, AuthorityUpdateState>,
+    published_prompt: Option<String>,
 }
 
 struct Shared {
+    authority_updates_supported: bool,
+    shutting_down: bool,
+    runtime_status: Value,
     sessions: BTreeMap<String, SessionData>,
     next_sequence: u64,
+    next_generation: u64,
     queued: usize,
     transcript_root: PathBuf,
 }
 
 impl Shared {
+    fn publish_runtime(&mut self, mut status: Value) {
+        let mut history = self.runtime_status["startup_history"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if status["phase"] != self.runtime_status["phase"]
+            || status["detail"]["stage"] != self.runtime_status["detail"]["stage"]
+            || status["detail"]["detail"] != self.runtime_status["detail"]["detail"]
+            || status["restart"] == true
+        {
+            let mut checkpoint = status.clone();
+            checkpoint["timestamp_unix_ms"] = json!(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+            history.push(checkpoint);
+            if history.len() > 64 {
+                history.remove(0);
+            }
+        }
+        status["startup_history"] = json!(history);
+        self.runtime_status = status;
+    }
+
+    fn new_generation(&mut self) -> Result<u64, HarnessError> {
+        let next = self.next_generation;
+        self.next_generation = next.checked_add(1).ok_or(HarnessError::Backpressure)?;
+        Ok(next)
+    }
+
+    fn invalidate_runtime(&mut self, incarnation: u64) {
+        let ids: Vec<_> = self.sessions.keys().cloned().collect();
+        for id in ids {
+            let Ok(generation) = self.new_generation() else {
+                self.shutting_down = true;
+                return;
+            };
+            if let Some(data) = self.sessions.get_mut(&id) {
+                data.state.generation = generation;
+                data.state.backend_incarnation = incarnation;
+            }
+            let _ = self.emit(
+                &id,
+                None,
+                EventKind::Validation,
+                false,
+                json!({"stage":"runtime_generation_invalidated", "incarnation":incarnation}),
+            );
+        }
+    }
+
     fn emit(
         &mut self,
         session_id: &str,
@@ -214,12 +289,12 @@ impl Shared {
             .next_sequence
             .checked_add(1)
             .ok_or(HarnessError::Backpressure)?;
+        append_transcript(&self.transcript_root, &event)?;
         if session.events.len() == EVENTS_MAX {
             session.events.pop_front();
         }
         session.state.last_event_sequence = event.sequence;
         session.events.push_back(event.clone());
-        append_transcript(&self.transcript_root, &event)?;
         Ok(event)
     }
 }
@@ -246,20 +321,46 @@ enum Command {
     Close {
         session: SessionState,
     },
+    Prepare,
     Shutdown,
 }
 
 pub trait TaskRuntime: Send + 'static {
+    fn supports_authority_updates(&self) -> bool {
+        false
+    }
+    fn run_prompt_with_updates(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
+        _updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+    ) -> PromptStatus {
+        self.run_prompt(session, prompt, emit, cancelled, response_published)
+    }
+    fn prepare(
+        &mut self,
+        _status: &mut dyn FnMut(Value),
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn run_prompt(
         &mut self,
         session: &SessionState,
         prompt: &PromptRequest,
         emit: &mut dyn FnMut(EventKind, bool, Value),
         cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
     ) -> PromptStatus;
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value));
     fn backend_incarnation(&self) -> u64 {
         0
+    }
+    fn runtime_status(&mut self) -> Option<Value> {
+        None
     }
 }
 
@@ -277,12 +378,16 @@ pub struct HarnessHandle {
 impl HarnessService {
     pub fn start(runtime: impl TaskRuntime, transcript_root: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
+            authority_updates_supported: runtime.supports_authority_updates(),
+            shutting_down: false,
+            runtime_status: json!({"phase":"preparing"}),
             sessions: BTreeMap::new(),
             next_sequence: 1,
+            next_generation: 1,
             queued: 0,
             transcript_root: transcript_root.into(),
         }));
-        let (commands, receiver) = mpsc::sync_channel(PENDING_MAX);
+        let (commands, receiver) = mpsc::sync_channel(PENDING_MAX + SESSIONS_MAX + 1);
         let handle = HarnessHandle {
             shared: Arc::clone(&shared),
             commands,
@@ -299,6 +404,9 @@ impl HarnessService {
     }
 
     pub fn shutdown(mut self) {
+        if let Ok(mut shared) = self.handle.shared.lock() {
+            shared.shutting_down = true;
+        }
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -308,6 +416,9 @@ impl HarnessService {
 
 impl Drop for HarnessService {
     fn drop(&mut self) {
+        if let Ok(mut shared) = self.handle.shared.lock() {
+            shared.shutting_down = true;
+        }
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -320,24 +431,138 @@ fn worker_loop(
     shared: Arc<Mutex<Shared>>,
     receiver: mpsc::Receiver<Command>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    let prepare = |runtime: &mut _, shared: &Arc<Mutex<Shared>>| {
+        let mut publish = |status| {
+            if let Ok(mut shared) = shared.lock() {
+                shared.publish_runtime(status);
+            }
+        };
+        if let Err(error) = TaskRuntime::prepare(runtime, &mut publish, &|| {
+            shared.lock().map_or(true, |state| state.shutting_down)
+        }) {
+            publish(json!({"phase":"failed","message":error}));
+        }
+    };
+    prepare(&mut runtime, &shared);
+    let maintain = |runtime: &mut _, shared: &Arc<Mutex<Shared>>| {
+        let before = TaskRuntime::backend_incarnation(runtime);
+        let status = TaskRuntime::runtime_status(runtime);
+        let incarnation = TaskRuntime::backend_incarnation(runtime);
+        if let Ok(mut shared) = shared.lock() {
+            if let Some(status) = status {
+                shared.publish_runtime(status);
+            }
+            if before != incarnation {
+                shared.invalidate_runtime(incarnation);
+            }
+        }
+    };
+    let mut pending = VecDeque::new();
+    let mut last_project: Option<String> = None;
+    loop {
+        if pending.is_empty() {
+            match receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(command) => pending.push_back(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    maintain(&mut runtime, &shared);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while pending.len() < PENDING_MAX {
+            match receiver.try_recv() {
+                Ok(command) => pending.push_back(command),
+                Err(_) => break,
+            }
+        }
+        // Control actions retire stale queued generations before more work.
+        // Ready projects take round-robin turns through one bounded worker slot.
+        let index = pending
+            .iter()
+            .position(|command| !matches!(command, Command::Prompt { .. }))
+            .or_else(|| {
+                pending.iter().position(|command| {
+                    matches!(command, Command::Prompt { session, .. }
+                if Some(&session.project_id) != last_project.as_ref())
+                })
+            })
+            .unwrap_or(0);
+        let command = pending.remove(index).expect("nonempty bounded queue");
         match command {
             Command::Prompt { session, prompt } => {
-                if let Ok(mut shared) = shared.lock() {
+                let valid = if let Ok(mut shared) = shared.lock() {
                     shared.queued = shared.queued.saturating_sub(1);
+                    let valid = shared
+                        .sessions
+                        .get(&session.session_id)
+                        .is_some_and(|data| {
+                            data.state.generation == session.generation
+                                && !matches!(
+                                    data.state.status,
+                                    SessionStatus::Closing | SessionStatus::Closed
+                                )
+                                && !data.cancellations.contains(&prompt.prompt_id)
+                        });
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
-                        data.state.status = SessionStatus::Busy;
-                        data.state
-                            .prompts
-                            .insert(prompt.prompt_id.clone(), PromptStatus::Running);
+                        data.state.prompts.insert(
+                            prompt.prompt_id.clone(),
+                            if valid {
+                                PromptStatus::Running
+                            } else {
+                                PromptStatus::Cancelled
+                            },
+                        );
+                        if valid {
+                            data.state.status = SessionStatus::Busy;
+                        }
                     }
+                    if !valid {
+                        let _ = shared.emit(
+                            &session.session_id,
+                            Some(&prompt.prompt_id),
+                            EventKind::PromptTerminal,
+                            true,
+                            json!({"status":"cancelled","reason":"queued task scope retired"}),
+                        );
+                    }
+                    valid
+                } else {
+                    false
+                };
+                if !valid {
+                    continue;
                 }
+                last_project = Some(session.project_id.clone());
                 let shared_emit = Arc::clone(&shared);
                 let session_id = session.session_id.clone();
                 let prompt_id = prompt.prompt_id.clone();
+                let response_published = std::cell::Cell::new(false);
                 let mut emit = |kind, public, payload| {
                     if let Ok(mut shared) = shared_emit.lock() {
-                        let _ = shared.emit(&session_id, Some(&prompt_id), kind, public, payload);
+                        if kind == EventKind::AuthorityUpdate {
+                            let _ =
+                                shared.finish_authority_update(&session_id, &prompt_id, payload);
+                            return;
+                        }
+                        let response =
+                            public && matches!(kind, EventKind::Assistant | EventKind::Error);
+                        // Cleanup diagnostics remain visible in Working, but
+                        // must not become a second final response.
+                        let public = public && !(response && response_published.get());
+                        let published = shared
+                            .emit(&session_id, Some(&prompt_id), kind, public, payload)
+                            .is_ok();
+                        if response && public {
+                            response_published.set(published);
+                            if published {
+                                shared
+                                    .sessions
+                                    .get_mut(&session_id)
+                                    .unwrap()
+                                    .published_prompt = Some(prompt_id.clone());
+                            }
+                        }
                     }
                 };
                 let cancel_shared = Arc::clone(&shared);
@@ -348,16 +573,32 @@ fn worker_loop(
                         .lock()
                         .ok()
                         .and_then(|shared| {
-                            shared
-                                .sessions
-                                .get(&cancel_session)
-                                .map(|session| session.cancellations.contains(&cancel_prompt))
+                            shared.sessions.get(&cancel_session).map(|session| {
+                                shared.shutting_down
+                                    || session.cancellations.contains(&cancel_prompt)
+                            })
                         })
                         .unwrap_or(true)
                 };
-                let status = runtime.run_prompt(&session, &prompt, &mut emit, &cancelled);
+                let update_shared = Arc::clone(&shared);
+                let updates = || {
+                    update_shared
+                        .lock()
+                        .ok()?
+                        .take_authority_update(&session.session_id, &prompt.prompt_id)
+                };
+                let status = runtime.run_prompt_with_updates(
+                    &session,
+                    &prompt,
+                    &mut emit,
+                    &cancelled,
+                    &|| response_published.get(),
+                    &updates,
+                );
+                maintain(&mut runtime, &shared);
                 let backend_incarnation = runtime.backend_incarnation();
                 if let Ok(mut shared) = shared.lock() {
+                    shared.finish_pending_updates(&session.session_id, &prompt.prompt_id);
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
                         data.state.prompts.insert(prompt.prompt_id.clone(), status);
                         data.state.backend_incarnation = backend_incarnation;
@@ -388,9 +629,10 @@ fn worker_loop(
                 };
                 runtime.close(&session, &mut emit);
                 if let Ok(mut shared) = shared.lock() {
+                    let generation = shared.new_generation().unwrap_or(u64::MAX);
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
                         data.state.status = SessionStatus::Closed;
-                        data.state.generation = data.state.generation.saturating_add(1);
+                        data.state.generation = generation;
                     }
                     let _ = shared.emit(
                         &session.session_id,
@@ -401,7 +643,39 @@ fn worker_loop(
                     );
                 }
             }
-            Command::Shutdown => break,
+            Command::Prepare => {
+                let before = runtime.backend_incarnation();
+                prepare(&mut runtime, &shared);
+                if runtime.backend_incarnation() != before
+                    && let Ok(mut shared) = shared.lock()
+                {
+                    shared.invalidate_runtime(runtime.backend_incarnation());
+                }
+            }
+            Command::Shutdown => {
+                if let Ok(mut state) = shared.lock() {
+                    let mut cancelled = Vec::new();
+                    for (id, data) in &mut state.sessions {
+                        for (prompt, status) in &mut data.state.prompts {
+                            if matches!(status, PromptStatus::Queued | PromptStatus::Running) {
+                                *status = PromptStatus::Cancelled;
+                                cancelled.push((id.clone(), prompt.clone()));
+                            }
+                        }
+                    }
+                    for (id, prompt) in cancelled {
+                        let _ = state.emit(
+                            &id,
+                            Some(&prompt),
+                            EventKind::PromptTerminal,
+                            true,
+                            json!({"status":"cancelled", "reason":"application shutdown"}),
+                        );
+                    }
+                    state.queued = 0;
+                }
+                break;
+            }
         }
     }
 }
@@ -424,12 +698,26 @@ impl HarnessHandle {
             }
             return Err(HarnessError::DuplicatePrompt);
         }
+        if shared.sessions.len() >= SESSIONS_MAX {
+            let retired = shared
+                .sessions
+                .iter()
+                .filter(|(_, data)| data.state.status == SessionStatus::Closed)
+                .min_by_key(|(_, data)| data.state.last_event_sequence)
+                .map(|(id, _)| id.clone());
+            if let Some(retired) = retired {
+                shared.sessions.remove(&retired);
+            } else {
+                return Err(HarnessError::Backpressure);
+            }
+        }
+        let generation = shared.new_generation()?;
         let state = SessionState {
             api_version: HARNESS_API_VERSION,
             project_id: request.project_id,
             session_id: request.session_id.clone(),
             status: SessionStatus::Open,
-            generation: 1,
+            generation,
             backend_incarnation: 0,
             last_event_sequence: 0,
             prompts: BTreeMap::new(),
@@ -441,6 +729,8 @@ impl HarnessHandle {
                 events: VecDeque::with_capacity(EVENTS_MAX),
                 idempotency: BTreeMap::new(),
                 cancellations: BTreeSet::new(),
+                updates: BTreeMap::new(),
+                published_prompt: None,
             },
         );
         shared.emit(
@@ -500,6 +790,9 @@ impl HarnessHandle {
         }
         if data.state.prompts.contains_key(&prompt.prompt_id) {
             return Err(HarnessError::DuplicatePrompt);
+        }
+        if data.state.prompts.len() >= PROMPTS_PER_SESSION_MAX {
+            return Err(HarnessError::Backpressure);
         }
         data.idempotency.insert(
             prompt.idempotency_key.clone(),
@@ -573,14 +866,16 @@ impl HarnessHandle {
         if data.state.status == SessionStatus::Closed {
             return Ok(());
         }
+        let session = data.state.clone();
+        self.commands
+            .try_send(Command::Close { session })
+            .map_err(|_| HarnessError::Backpressure)?;
+        // The worker needs this same mutex, so it cannot consume Close before
+        // the accepted command and its cancellation state become visible.
         data.state.status = SessionStatus::Closing;
         data.cancellations
             .extend(data.state.prompts.keys().cloned());
-        let session = data.state.clone();
-        drop(shared);
-        self.commands
-            .try_send(Command::Close { session })
-            .map_err(|_| HarnessError::Backpressure)
+        Ok(())
     }
 
     pub fn state(&self, session_id: &str) -> Result<SessionState, HarnessError> {
@@ -653,7 +948,19 @@ pub struct BrokerDecision {
 pub struct GuestAgent {
     pub id: [u8; 16],
     pub generation: u64,
-    pub tools: Vec<String>,
+    pub tools: Vec<GuestTool>,
+    pub tool_calls: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct GuestTool {
+    pub name: String,
+    pub usage: String,
+    pub summary: String,
+    pub input: ToolInputSchema,
+    pub effects: u16,
+    pub result_sensitivity: u8,
+    pub remaining_uses: u32,
 }
 
 pub trait GuestBridge: Send + 'static {
@@ -679,6 +986,23 @@ pub enum OwnedArgument {
     Path(String),
     U64(u64),
     Bool(bool),
+}
+
+fn encode_guest_tools(tools: &[GuestTool], output: &mut [u8]) -> Option<usize> {
+    let mut length = 0;
+    for tool in tools {
+        length += (AgentToolDescriptor {
+            name: &tool.name,
+            usage: &tool.usage,
+            summary: &tool.summary,
+            input: tool.input,
+            effects: tool.effects,
+            result_sensitivity: tool.result_sensitivity,
+            remaining_uses: tool.remaining_uses,
+        })
+        .encode(output.get_mut(length..)?)?;
+    }
+    Some(length)
 }
 
 #[derive(Default)]
@@ -759,7 +1083,7 @@ impl GuestBridge for DeterministicGuest {
         prompt: &PromptRequest,
         decision: &BrokerDecision,
     ) -> Result<GuestAgent, String> {
-        if decision.action != BrokerActionKind::CreateAgent || decision.selectors.is_empty() {
+        if decision.action != BrokerActionKind::CreateAgent {
             return Err("resident broker refused non-create deterministic plan".into());
         }
         let offered: BTreeSet<_> = self
@@ -774,7 +1098,8 @@ impl GuestBridge for DeterministicGuest {
         {
             return Err("proposal selected a non-offered resource".into());
         }
-        if !decision.selectors.contains(&OFFER_CAT) {
+        let cat_selected = decision.selectors.contains(&OFFER_CAT);
+        if decision.budget.tool_calls != 0 && !cat_selected {
             return Err("proposal omitted the executable scope".into());
         }
         let mut paths = BTreeSet::new();
@@ -791,17 +1116,38 @@ impl GuestBridge for DeterministicGuest {
             b"vkore.guest.agent",
             &[session.session_id.as_bytes(), prompt.prompt_id.as_bytes()],
         );
+        let tool_calls = u32::try_from(decision.budget.tool_calls).unwrap_or(u32::MAX);
+        let tools = if cat_selected && tool_calls != 0 {
+            vec![GuestTool {
+                name: "cat".into(),
+                usage: "cat /absolute/path".into(),
+                summary: "Read one object from the installed filesystem view.".into(),
+                input: ToolInputSchema {
+                    minimum: 1,
+                    maximum: 1,
+                    kinds: [ToolArgumentKind::Path.mask(), 0, 0, 0],
+                    whitespace: 0,
+                },
+                effects: TOOL_EFFECT_OBSERVE,
+                result_sensitivity: TOOL_RESULT_WORKSPACE,
+                remaining_uses: tool_calls,
+            }]
+        } else {
+            Vec::new()
+        };
+        let installed_tools = tools.iter().map(|tool| tool.name.clone()).collect();
         let agent = GuestAgent {
             id,
             generation: session.generation,
-            tools: vec!["cat".into()],
+            tool_calls,
+            tools,
         };
         self.agents.insert(
             id,
             DeterministicAgent {
                 generation: agent.generation,
                 paths,
-                tools: ["cat".into()].into_iter().collect(),
+                tools: installed_tools,
             },
         );
         Ok(agent)
@@ -846,8 +1192,10 @@ impl GuestBridge for DeterministicGuest {
 
 struct RuntimeSession {
     broker: SequenceIdentity,
+    // The inference sequence owns bounded conversation history, not
+    // authority. Prompt-scoped GuestAgents below can therefore rotate without
+    // erasing the user's prior turns.
     agent_sequence: SequenceIdentity,
-    guest_agent: GuestAgent,
     turn: u64,
     incarnation: u64,
 }
@@ -873,13 +1221,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
         self.backend.reset();
     }
 
-    fn found_session(
-        &mut self,
-        session: &SessionState,
-        prompt: &PromptRequest,
-        emit: &mut dyn FnMut(EventKind, bool, Value),
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(), String> {
+    fn open_session(&mut self, session: &SessionState) -> Result<(), String> {
         let generation = TaskGeneration::new(session.generation).ok_or("invalid generation")?;
         let broker = SequenceIdentity {
             route: RouteId(digest16(b"broker", &[session.session_id.as_bytes()])),
@@ -889,6 +1231,39 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
         self.backend
             .open(broker)
             .map_err(|error| format!("open broker: {error:?}"))?;
+        let agent_sequence = SequenceIdentity {
+            route: RouteId(digest16(b"agent", &[session.session_id.as_bytes()])),
+            generation,
+            role: BackendRole::Agent,
+        };
+        if let Err(error) = self.backend.open(agent_sequence) {
+            let _ = self.backend.close(broker);
+            return Err(format!("open agent: {error:?}"));
+        }
+        self.sessions.insert(
+            session.session_id.clone(),
+            RuntimeSession {
+                broker,
+                agent_sequence,
+                turn: 0,
+                incarnation: self.backend.metrics().incarnation,
+            },
+        );
+        Ok(())
+    }
+
+    fn lease_prompt_authority(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<GuestAgent, String> {
+        let broker = self
+            .sessions
+            .get(&session.session_id)
+            .ok_or("runtime session is not open")?
+            .broker;
         let offers = self.guest.offers(session);
         let borrowed: Vec<_> = offers
             .iter()
@@ -953,31 +1328,51 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> BackendHarness<B, G> 
             }),
         );
         let guest_agent = self.guest.admit(session, prompt, &decision)?;
+        let capabilities = offers
+            .iter()
+            .filter(|offer| decision.selectors.contains(&offer.reference))
+            .map(|offer| {
+                json!({
+                    "kind": match offer.kind {
+                        BrokerOfferKind::Object => "object",
+                        BrokerOfferKind::View => "view",
+                        BrokerOfferKind::Executable => "executable",
+                        BrokerOfferKind::Budget => "budget",
+                        BrokerOfferKind::ExistingAgent => "existing_agent",
+                        BrokerOfferKind::ExistingGrant => "existing_grant",
+                    },
+                    "label": offer.label,
+                })
+            })
+            .collect::<Vec<_>>();
         emit(
             EventKind::Capability,
             false,
             json!({
                 "state":"installed", "agent":hex16(&guest_agent.id), "generation":guest_agent.generation,
-                "tools":guest_agent.tools, "committed_by":"resident_broker_bridge"
+                "tools":guest_agent.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+                "capabilities": capabilities,
+                "scope":"prompt", "prompt_id":prompt.prompt_id,
+                "committed_by":"resident_broker_bridge"
             }),
         );
-        let agent_sequence = SequenceIdentity {
-            route: RouteId(digest16(b"agent", &[session.session_id.as_bytes()])),
-            generation,
-            role: BackendRole::Agent,
-        };
-        self.backend
-            .open(agent_sequence)
-            .map_err(|error| format!("open agent: {error:?}"))?;
-        self.sessions.insert(
-            session.session_id.clone(),
-            RuntimeSession {
-                broker,
-                agent_sequence,
-                guest_agent,
-                turn: 0,
-                incarnation: self.backend.metrics().incarnation,
-            },
+        Ok(guest_agent)
+    }
+
+    fn release_prompt_authority(
+        &mut self,
+        prompt: &PromptRequest,
+        agent: &GuestAgent,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+    ) -> Result<(), String> {
+        self.guest.close(agent)?;
+        emit(
+            EventKind::Capability,
+            false,
+            json!({
+                "state":"teardown", "agent":hex16(&agent.id), "generation":agent.generation,
+                "scope":"prompt", "prompt_id":prompt.prompt_id,
+            }),
         );
         Ok(())
     }
@@ -1050,9 +1445,10 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
         prompt: &PromptRequest,
         emit: &mut dyn FnMut(EventKind, bool, Value),
         cancelled: &dyn Fn() -> bool,
+        _response_published: &dyn Fn() -> bool,
     ) -> PromptStatus {
         if !self.sessions.contains_key(&session.session_id)
-            && let Err(error) = self.found_session(session, prompt, emit, cancelled)
+            && let Err(error) = self.open_session(session)
         {
             emit(
                 EventKind::Error,
@@ -1065,11 +1461,10 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 PromptStatus::Failed
             };
         }
-        let (sequence, agent, incarnation, turn) = {
+        let (sequence, incarnation, turn) = {
             let runtime = &self.sessions[&session.session_id];
             (
                 runtime.agent_sequence,
-                runtime.guest_agent.clone(),
                 runtime.incarnation,
                 runtime.turn + 1,
             )
@@ -1082,17 +1477,41 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             );
             return PromptStatus::Failed;
         }
-        let tools = agent.tools.join("\0");
-        let mut last_tool_result = None;
-        let next = AgentRequestView {
-            kind: AgentRequestKind::UserText,
-            turn,
-            call_id: 0,
-            result: None,
-            tools: &tools,
-            text: &prompt.text,
+        let mut agent = match self.lease_prompt_authority(session, prompt, emit, cancelled) {
+            Ok(agent) => agent,
+            Err(error) => {
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"stage":"broker", "error":error}),
+                );
+                return if cancelled() {
+                    PromptStatus::Cancelled
+                } else {
+                    PromptStatus::Failed
+                };
+            }
         };
-        {
+        let status = (|| {
+            let mut tools = [0_u8; AGENT_TEXT_MAX];
+            let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+                emit(
+                    EventKind::Error,
+                    true,
+                    json!({"error":"agent tool catalog exceeded bounds"}),
+                );
+                return PromptStatus::Failed;
+            };
+            let mut last_tool_result = None;
+            let next = AgentRequestView {
+                kind: AgentRequestKind::UserText,
+                turn,
+                call_id: 0,
+                result: None,
+                tools: &tools[..tools_len],
+                resources: &[],
+                text: &prompt.text,
+            };
             let mut inner = [0u8; kore_hostlink::INFERENCE_PART_MAX];
             let Some(inner_len) = next.encode(&mut inner) else {
                 emit(
@@ -1156,6 +1575,14 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
             }
             match event.kind {
                 AgentEventKind::ToolCall => {
+                    if !consume_tool(&mut agent, event.command) {
+                        emit(
+                            EventKind::Error,
+                            true,
+                            json!({"error":"agent exceeded an installed tool-use limit"}),
+                        );
+                        return PromptStatus::Failed;
+                    }
                     let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                     emit(
                         EventKind::ToolCall,
@@ -1180,7 +1607,7 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                         emit,
                         cancelled,
                         sequence,
-                        &agent,
+                        &mut agent,
                         event.turn + 1,
                         event.call_id,
                         kind,
@@ -1215,18 +1642,26 @@ impl<B: InferenceBackend + Send + 'static, G: GuestBridge> TaskRuntime for Backe
                 }
                 AgentEventKind::Cancelled => PromptStatus::Cancelled,
             }
+        })();
+        if let Err(error) = self.release_prompt_authority(prompt, &agent, emit) {
+            emit(
+                EventKind::Error,
+                true,
+                json!({"stage":"authority_teardown", "error":error}),
+            );
+            return PromptStatus::Failed;
         }
+        status
     }
 
     fn close(&mut self, session: &SessionState, emit: &mut dyn FnMut(EventKind, bool, Value)) {
         if let Some(runtime) = self.sessions.remove(&session.session_id) {
             let _ = self.backend.close(runtime.agent_sequence);
             let _ = self.backend.close(runtime.broker);
-            let _ = self.guest.close(&runtime.guest_agent);
             emit(
                 EventKind::Capability,
                 false,
-                json!({"state":"teardown","agent":hex16(&runtime.guest_agent.id),"generation":runtime.guest_agent.generation}),
+                json!({"state":"teardown","scope":"session","generation":session.generation}),
             );
         }
     }
@@ -1244,20 +1679,26 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
     emit: &mut dyn FnMut(EventKind, bool, Value),
     cancelled: &dyn Fn() -> bool,
     sequence: SequenceIdentity,
-    agent: &GuestAgent,
+    agent: &mut GuestAgent,
     mut turn: u64,
     mut call_id: u64,
     mut result_kind: ToolResultKind,
     mut owned_text: String,
     last_tool_result: &mut Option<String>,
 ) -> PromptStatus {
-    for _ in 0..8 {
+    let mut remaining_tool_calls = agent.tool_calls.saturating_sub(1);
+    for _ in 0..agent.tool_calls {
+        let mut tools = [0_u8; AGENT_TEXT_MAX];
+        let Some(tools_len) = encode_guest_tools(&agent.tools, &mut tools) else {
+            return PromptStatus::Failed;
+        };
         let request_view = AgentRequestView {
             kind: AgentRequestKind::ToolResult,
             turn,
             call_id,
             result: Some(result_kind),
-            tools: "",
+            tools: &tools[..tools_len],
+            resources: &[],
             text: &owned_text,
         };
         let mut inner = [0u8; kore_hostlink::INFERENCE_PART_MAX];
@@ -1304,6 +1745,15 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         );
         match event.kind {
             AgentEventKind::ToolCall => {
+                if remaining_tool_calls == 0 || !consume_tool(agent, event.command) {
+                    emit(
+                        EventKind::Error,
+                        true,
+                        json!({"error":"agent exceeded an installed tool-use limit"}),
+                    );
+                    return PromptStatus::Failed;
+                }
+                remaining_tool_calls -= 1;
                 let arguments: Vec<_> = event.arguments().map(owned_argument).collect();
                 emit(
                     EventKind::ToolCall,
@@ -1352,6 +1802,17 @@ fn run_tool_continuation<B: InferenceBackend + Send + 'static, G: GuestBridge>(
         json!({"error":"tool loop limit reached"}),
     );
     PromptStatus::Failed
+}
+
+fn consume_tool(agent: &mut GuestAgent, command: &str) -> bool {
+    let Some(tool) = agent.tools.iter_mut().find(|tool| tool.name == command) else {
+        return false;
+    };
+    if tool.remaining_uses == 0 {
+        return false;
+    }
+    tool.remaining_uses -= 1;
+    true
 }
 
 fn owned_argument(argument: ToolArgument<'_>) -> OwnedArgument {
@@ -1436,6 +1897,8 @@ pub struct HarnessHttpServer {
     address: SocketAddr,
     projects: Arc<ProjectStore>,
     approvals: Arc<UiApprovalService>,
+    settings: Arc<SettingsStore>,
+    transcript_root: PathBuf,
 }
 
 impl HarnessHttpServer {
@@ -1453,17 +1916,13 @@ impl HarnessHttpServer {
             return Err(HarnessError::NonLoopback);
         }
         let project_root = project_root.into();
+        let state_root = project_root.parent().unwrap_or(&project_root).to_path_buf();
         let server = tiny_http::Server::http(address)
             .map_err(|error| HarnessError::Http(error.to_string()))?;
-        let address = match server.server_addr() {
-            tiny_http::ListenAddr::IP(address) => address,
-            #[cfg(unix)]
-            tiny_http::ListenAddr::Unix(_) => {
-                return Err(HarnessError::Http(
-                    "TCP harness unexpectedly bound a Unix socket".into(),
-                ));
-            }
-        };
+        let address = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| HarnessError::Http("HTTP server did not bind an IP address".into()))?;
         Ok(Self {
             server,
             handle,
@@ -1475,6 +1934,11 @@ impl HarnessHttpServer {
             approvals: Arc::new(
                 UiApprovalService::open(&project_root.join("policy")).map_err(HarnessError::Io)?,
             ),
+            settings: Arc::new(
+                SettingsStore::open(state_root.join("settings.json"))
+                    .map_err(|error| HarnessError::Io(error.to_string()))?,
+            ),
+            transcript_root: state_root.join("transcripts"),
         })
     }
 
@@ -1510,9 +1974,13 @@ impl HarnessHttpServer {
         )
         .and_then(|_| {
             route_http(
-                &self.handle,
-                &self.projects,
-                &self.approvals,
+                HttpRouteState {
+                    handle: &self.handle,
+                    projects: &self.projects,
+                    approvals: &self.approvals,
+                    settings: &self.settings,
+                    transcript_root: &self.transcript_root,
+                },
                 &method,
                 &url,
                 &body,
@@ -1531,7 +1999,7 @@ impl HarnessHttpServer {
                 (
                     status,
                     "application/json",
-                    serde_json::to_vec(&json!({"error":format!("{error:?}")})).unwrap_or_default(),
+                    serde_json::to_vec(&json!({"error":error.to_string()})).unwrap_or_default(),
                 )
             }
         };
@@ -1549,15 +2017,29 @@ impl HarnessHttpServer {
     }
 }
 
+struct HttpRouteState<'a> {
+    handle: &'a HarnessHandle,
+    projects: &'a ProjectStore,
+    approvals: &'a UiApprovalService,
+    settings: &'a SettingsStore,
+    transcript_root: &'a Path,
+}
+
 fn route_http(
-    handle: &HarnessHandle,
-    projects: &ProjectStore,
-    approvals: &UiApprovalService,
+    state: HttpRouteState<'_>,
     method: &str,
     url: &str,
     body: &[u8],
 ) -> Result<(&'static str, Vec<u8>), HarnessError> {
-    if method == "GET" && url == "/" {
+    let HttpRouteState {
+        handle,
+        projects,
+        approvals,
+        settings,
+        transcript_root,
+    } = state;
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    if method == "GET" && path == "/" {
         return Ok((
             "application/json",
             serde_json::to_vec(&json!({
@@ -1569,19 +2051,34 @@ fn route_http(
             .unwrap(),
         ));
     }
-    if method == "GET" && url == "/api/v1/health" {
+    if method == "GET" && path == "/api/v1/health" {
         return Ok((
             "application/json",
             serde_json::to_vec(&json!({"ok":true,"api_version":HARNESS_API_VERSION})).unwrap(),
         ));
     }
-    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    if path == "/api/v1/runtime" && method == "GET" {
+        let shared = handle
+            .shared
+            .lock()
+            .map_err(|_| HarnessError::Runtime("state poisoned".into()))?;
+        return Ok((
+            "application/json",
+            serde_json::to_vec(&shared.runtime_status).unwrap(),
+        ));
+    }
+    if path == "/api/v1/runtime/retry" && method == "POST" {
+        handle
+            .commands
+            .try_send(Command::Prepare)
+            .map_err(|_| HarnessError::Backpressure)?;
+        return Ok(("application/json", b"{\"accepted\":true}".to_vec()));
+    }
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let value = match (method, segments.as_slice()) {
         ("GET", ["api", "v1", "catalog"]) => json!({
             "api_version": HARNESS_API_VERSION,
             "backends": [
-                {"id":"deterministic","name":"Deterministic security oracle","real_inference":false,"status":"installed"},
                 {"id":"llama_cpp","name":"llama.cpp","real_inference":true,"status":"caller_supplied"}
             ],
             "addons": [
@@ -1607,6 +2104,28 @@ fn route_http(
             "package_actions":{"install":"Use vkore-packages verified local import or download APIs","automatic_download":false}
         }),
         ("GET", ["api", "v1", "projects"]) => serde_json::to_value(projects.list()).unwrap(),
+        ("GET", ["api", "v1", "settings"]) => settings.view(projects).map_err(settings_error)?,
+        ("POST", ["api", "v1", "settings"]) => {
+            let patch: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let previous = settings.get().map_err(settings_error)?.default_inference;
+            let updated = settings.update(&patch, projects).map_err(settings_error)?;
+            if settings.get().map_err(settings_error)?.default_inference != previous {
+                handle
+                    .commands
+                    .try_send(Command::Prepare)
+                    .map_err(|_| HarnessError::Backpressure)?;
+                if let Ok(mut shared) = handle.shared.lock() {
+                    shared.publish_runtime(
+                        json!({"phase":"preparing", "reason":"application model changed"}),
+                    );
+                }
+            }
+            updated
+        }
+        ("GET", ["api", "v1", "activity"]) => serde_json::to_value(
+            crate::settings::recent_activity(transcript_root, projects).map_err(settings_error)?,
+        )
+        .unwrap(),
         ("GET", ["api", "v1", "approvals"]) => approvals.state().map_err(HarnessError::Io)?,
         ("POST", ["api", "v1", "projects", project, "approvals"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;
@@ -1658,6 +2177,35 @@ fn route_http(
             }
             serde_json::to_value(projects.save(config).map_err(project_error)?).unwrap()
         }
+        ("POST", ["api", "v1", "projects", "virtual"]) => {
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let inference = settings
+                .default_inference(projects)
+                .map_err(settings_error)?;
+            serde_json::to_value(
+                projects
+                    .create_virtual(value["name"].as_str().unwrap_or("New project"), inference)
+                    .map_err(project_error)?,
+            )
+            .unwrap()
+        }
+        ("POST", ["api", "v1", "projects", "from-workspace"]) => {
+            let value: Value = serde_json::from_slice(body).map_err(http_json)?;
+            let root = PathBuf::from(
+                value["root"]
+                    .as_str()
+                    .ok_or(HarnessError::InvalidIdentity)?,
+            );
+            let inference = settings
+                .default_inference(projects)
+                .map_err(settings_error)?;
+            serde_json::to_value(
+                projects
+                    .create_from_workspace(&root, inference)
+                    .map_err(project_error)?,
+            )
+            .unwrap()
+        }
         ("GET", ["api", "v1", "projects", project]) => {
             serde_json::to_value(projects.get(project).map_err(project_error)?).unwrap()
         }
@@ -1684,10 +2232,10 @@ fn route_http(
             .unwrap()
         }
         ("POST", ["api", "v1", "picker"]) => {
-            let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-            let kind = value["kind"].as_str().unwrap_or("directory");
-            let path = native_picker(kind == "directory")?;
-            json!({"path":path})
+            // A headless service must never own a desktop modal dialog.
+            return Err(HarnessError::Http(
+                "Use the desktop application's local folder picker".into(),
+            ));
         }
         ("POST", ["api", "v1", "artifacts", "inspect"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;
@@ -1728,6 +2276,38 @@ fn route_http(
             handle.cancel_prompt(session, request)?;
             json!({"cancelled":true})
         }
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "sessions",
+                session,
+                "prompts",
+                prompt_id,
+                "updates",
+            ],
+        ) => {
+            let request: AuthorityUpdateRequest =
+                serde_json::from_slice(body).map_err(http_json)?;
+            if request.prompt_id != *prompt_id {
+                return Err(HarnessError::InvalidIdentity);
+            }
+            serde_json::to_value(handle.submit_authority_update(session, request)?).unwrap()
+        }
+        (
+            "GET",
+            [
+                "api",
+                "v1",
+                "sessions",
+                session,
+                "prompts",
+                prompt_id,
+                "updates",
+                update_id,
+            ],
+        ) => serde_json::to_value(handle.authority_update(session, prompt_id, update_id)?).unwrap(),
         ("GET", ["api", "v1", "sessions", session]) => {
             serde_json::to_value(handle.state(session)?).unwrap()
         }
@@ -1821,6 +2401,9 @@ fn http_json(error: serde_json::Error) -> HarnessError {
 fn project_error(error: crate::project::ProjectError) -> HarnessError {
     HarnessError::Http(error.to_string())
 }
+fn settings_error(error: crate::settings::SettingsError) -> HarnessError {
+    HarnessError::Http(error.to_string())
+}
 
 fn inspect_artifact(path: &Path) -> Result<Value, HarnessError> {
     let mut file =
@@ -1863,61 +2446,6 @@ fn inspect_artifact(path: &Path) -> Result<Value, HarnessError> {
         "license": "read from verified package manifest when installed",
         "context_tokens": "configured by project; verify against GGUF metadata"
     }))
-}
-
-#[cfg(target_os = "windows")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.SelectedPath)}"
-    } else {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}"
-    };
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Err(HarnessError::Io(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "linux")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let mut command = std::process::Command::new("zenity");
-    command.arg("--file-selection");
-    if directory {
-        command.arg("--directory");
-    }
-    let output = command
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "macos")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "POSIX path of (choose folder)"
-    } else {
-        "POSIX path of (choose file)"
-    };
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
 }
 
 fn encode_sse(events: &[HarnessEvent]) -> Vec<u8> {

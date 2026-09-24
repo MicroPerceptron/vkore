@@ -1,25 +1,31 @@
+mod authority_updates;
 mod fonts;
 mod logo;
+mod model_timing;
+mod picker;
 mod render_backend;
 mod splash;
 mod theme;
 mod topology;
+mod transcript;
 
 use crate::topology::{filesystem, inspector, layout, model, view};
+use crate::transcript::{
+    AssistantBlock, InlineMarkdownHighlighter, assistant_blocks, inline_markdown_format,
+    user_message_width,
+};
 mod widgets;
 
 use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Background, Border, Color, Element, Length, Size, Theme, alignment, border, keyboard, mouse,
+    Background, Border, Element, Length, Size, Theme, alignment, border, keyboard, mouse,
     renderer::{self, Scale},
     shell,
 };
 use iced_runtime::user_interface::{self, UserInterface};
-use iced_widget::{
-    button, column, container, row, scrollable, space, stack, text, text_editor, text_input,
-};
+use iced_widget::{button, column, container, row, scrollable, space, stack, text, text_editor};
 use iced_winit::{conversion, winit};
 use serde_json::{Value, json};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -29,6 +35,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     num::NonZeroU32,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
     thread,
@@ -54,32 +61,40 @@ const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 fn native_renderer() -> AxRenderer<System> {
+    // Register before shaping, not only when constructing the presentation
+    // backend. Headless callers use the same font resources as the app.
+    fonts::register().expect("register native UI fonts");
     AxRenderer::new_in(renderer::Settings::default(), System)
 }
 
 #[derive(Debug, Clone)]
 enum Message {
+    RetryRuntime,
     SelectProject(usize),
     NewProject,
-    EditProject,
-    ConfigAction(iced_core::text::editor::Action),
-    WizardField(&'static str, String),
-    WizardToggle(&'static str),
-    WizardChoice(&'static str, &'static str),
-    WizardAddon(String),
-    WizardPage(u8),
-    Preflight,
-    SaveProject,
-    Browse(RequestKind),
-    CloseEditor,
+    NewVirtualProject,
+    ChooseWorkspaceFolder,
+    DropWorkspaceFolder(PathBuf),
+    CancelWorkspaceSelection,
+    OpenSettings,
+    AddSearchLocation,
+    RemoveSearchLocation(String),
+    CloseSettings,
+    ChooseDefaultModel(String),
+    ChooseBodyFont(String),
+    ToggleShowWorking,
+    ToggleWorkingExpanded,
+    ToggleAutomaticWriteback,
     ToggleSession,
     #[allow(dead_code)]
     CleanSession,
     PromptAction(iced_core::text::editor::Action),
     SelectText(String, iced_core::text::editor::Action),
     SendPrompt,
+    SendPermissionUpdate,
     CancelPrompt,
     ToggleWorking(String),
+    ToggleWorkOutput(String),
     ArchiveProject,
     DuplicateProject,
     ExportProject,
@@ -107,15 +122,22 @@ enum View {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestKind {
+    Runtime,
+    RetryRuntime,
     Health,
     Catalog,
     Projects,
     Approvals,
-    Preflight,
-    SaveProject,
+    Settings,
+    SaveSettings,
+    PickSearchLocation,
+    SaveProjectSettings,
+    Activity,
+    CreateProject,
     StartSession,
     StopSession,
     SendPrompt,
+    PermissionUpdate(u64),
     CancelPrompt,
     RequestApproval,
     DecideApproval,
@@ -123,24 +145,22 @@ enum RequestKind {
     ArchiveProject,
     DuplicateProject,
     PickWorkspace,
-    PickKore,
-    PickLlama,
-    PickModel,
-}
-
-fn rgb(hex: u32) -> Color {
-    Color::from_rgb8(
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkRow {
     speaker: String,
+    context: Option<String>,
     body: String,
     kind: String,
+    output: Option<WorkOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkOutput {
+    summary: String,
+    body: String,
+    failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -179,23 +199,6 @@ fn format_elapsed(milliseconds: u64) -> String {
     }
 }
 
-fn message_meta(label: &str, event: &Value, started_at: Option<u64>) -> String {
-    let timestamp = event_timestamp(event);
-    let mut parts = vec![label.to_owned()];
-    if let Some(time) = timestamp.and_then(format_event_time) {
-        parts.push(time);
-    }
-    if let (Some(started), Some(finished)) = (started_at, timestamp)
-        && finished >= started
-    {
-        parts.push(format!(
-            "responded in {}",
-            format_elapsed(finished - started)
-        ));
-    }
-    parts.join(" · ")
-}
-
 fn embedded_json(value: &Value) -> Option<Value> {
     match value {
         Value::String(value) => serde_json::from_str(value).ok(),
@@ -216,15 +219,33 @@ fn broker_catalog(events: &[&Value]) -> BTreeMap<u64, CatalogEntry> {
         let Some(input) = embedded_json(&event["payload"]["payload"]) else {
             continue;
         };
-        for tuple in input["offer_catalog"].as_array().into_iter().flatten() {
-            let Some(tuple) = tuple.as_array() else {
-                continue;
+        for offer in input["offer_catalog"].as_array().into_iter().flatten() {
+            let decoded = if let Some(tuple) = offer.as_array() {
+                match (
+                    tuple.first().and_then(Value::as_u64),
+                    tuple.get(1).and_then(Value::as_str),
+                    tuple.get(2).and_then(Value::as_str),
+                ) {
+                    (Some(index), Some(kind), Some(label)) => Some((index, kind, label)),
+                    _ => None,
+                }
+            } else {
+                match (
+                    offer["index"].as_u64(),
+                    offer["kind"].as_str(),
+                    offer["label"].as_str(),
+                ) {
+                    (Some(index), Some(kind), Some(label)) => Some((index, kind, label)),
+                    _ => None,
+                }
             };
-            if let (Some(index), Some(kind), Some(label)) = (
-                tuple.first().and_then(Value::as_u64),
-                tuple.get(1).and_then(Value::as_str),
-                tuple.get(2).and_then(Value::as_str),
-            ) {
+            if let Some((index, kind, label)) = decoded {
+                let kind = match kind {
+                    "executable" => "x",
+                    "object" => "o",
+                    "view" => "v",
+                    other => other,
+                };
                 entries.insert(
                     index,
                     CatalogEntry {
@@ -239,11 +260,11 @@ fn broker_catalog(events: &[&Value]) -> BTreeMap<u64, CatalogEntry> {
 }
 
 fn display_resource(label: &str) -> String {
-    label
-        .strip_prefix("workspace/")
-        .unwrap_or(label)
-        .trim_start_matches('/')
-        .to_owned()
+    if let Some(path) = label.strip_prefix("/workspace/") {
+        format!("/{path}")
+    } else {
+        label.strip_prefix("workspace/").unwrap_or(label).to_owned()
+    }
 }
 
 fn scalar(value: &Value) -> Option<String> {
@@ -255,47 +276,146 @@ fn scalar(value: &Value) -> Option<String> {
     }
 }
 
+fn compact_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => {
+            if value.is_empty() || value.chars().any(char::is_whitespace) {
+                serde_json::to_string(value).unwrap_or_else(|_| value.clone())
+            } else {
+                value.clone()
+            }
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(compact_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", compact_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+fn canonical_action_name(name: &str) -> String {
+    let mut output = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index != 0 {
+                output.push('_');
+            }
+            output.push(character.to_ascii_lowercase());
+        } else {
+            output.push(character.to_ascii_lowercase());
+        }
+    }
+    output
+}
+
 fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> String {
-    let action_name = action["action"].as_str().unwrap_or("decision");
+    let action_name = canonical_action_name(action["action"].as_str().unwrap_or("decision"));
+    if action_name == "intent_claimed" {
+        let objects = action["objects"].as_u64().unwrap_or_default();
+        let turns = action["turns"].as_u64().unwrap_or_default();
+        return format!("intent claimed · ceiling {objects} objects, {turns} turns");
+    }
+    if action_name == "install_scoped_object" {
+        let path = action["path"].as_str().unwrap_or("workspace object");
+        return format!("install scoped object · {path}");
+    }
     if action_name == "create_agent" {
-        let selected = action["selectors"]
-            .as_array()
+        let indices = |field: &str| {
+            action[field]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect::<Vec<_>>()
+        };
+        let split_schema = action.get("executables").is_some() || action.get("resources").is_some();
+        let selectors = indices("selectors");
+        let executable_indices = if split_schema {
+            indices("executables")
+        } else {
+            selectors
+                .iter()
+                .copied()
+                .filter(|index| catalog.get(index).is_some_and(|entry| entry.kind == "x"))
+                .collect()
+        };
+        let resource_indices = if split_schema {
+            indices("resources")
+        } else {
+            selectors
+                .iter()
+                .copied()
+                .filter(|index| {
+                    catalog
+                        .get(index)
+                        .is_none_or(|entry| matches!(entry.kind.as_str(), "o" | "v"))
+                })
+                .collect()
+        };
+        let tools = executable_indices
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .filter_map(|index| catalog.get(&index).map(|entry| (index, entry)))
+            .map(|index| {
+                catalog
+                    .get(&index)
+                    .filter(|entry| entry.kind == "x")
+                    .map_or_else(
+                        || format!("#{index}"),
+                        |entry| display_resource(&entry.label),
+                    )
+            })
             .collect::<Vec<_>>();
-        let tools = selected
-            .iter()
-            .filter(|(_, entry)| entry.kind == "x")
-            .map(|(_, entry)| display_resource(&entry.label))
-            .collect::<Vec<_>>();
-        let resources = selected
-            .iter()
-            .filter(|(_, entry)| matches!(entry.kind.as_str(), "o" | "v"))
-            .map(|(_, entry)| display_resource(&entry.label))
-            .collect::<Vec<_>>();
-        let unresolved = action["selectors"]
-            .as_array()
+        let resources = resource_indices
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .filter(|index| !catalog.contains_key(index))
-            .map(|index| format!("#{index}"))
+            .map(|index| {
+                catalog
+                    .get(&index)
+                    .filter(|entry| matches!(entry.kind.as_str(), "o" | "v"))
+                    .map_or_else(
+                        || format!("#{index}"),
+                        |entry| display_resource(&entry.label),
+                    )
+            })
             .collect::<Vec<_>>();
-        let mut visible_resources = resources;
-        visible_resources.extend(unresolved);
-        return format!(
-            "Tool_use: create_agent(Agent 1, [{}], [{}])",
-            tools.join(", "),
-            visible_resources.join(", ")
-        );
+        let label = action["label"].as_str().unwrap_or("agent");
+        let tool_calls = action["budget"]["tool_calls"].as_u64();
+        let selected = action["selectors"].as_array().map_or(0, Vec::len);
+        let mut details = vec![label.to_owned()];
+        if !tools.is_empty() {
+            details.push(format!("tools [{}]", tools.join(", ")));
+        }
+        if !resources.is_empty() {
+            details.push(format!("resources [{}]", resources.join(", ")));
+        }
+        if tools.is_empty() && resources.is_empty() && selected != 0 {
+            details.push(format!("{selected} capabilities"));
+        }
+        if let Some(tool_calls) = tool_calls {
+            details.push(format!(
+                "{tool_calls} tool call{}",
+                if tool_calls == 1 { "" } else { "s" }
+            ));
+        }
+        return format!("Tool_use: create_agent({})", details.join(" · "));
     }
     if action_name == "refused" {
         let reason = action["reason"]
             .as_str()
             .or_else(|| action["detail"].as_str())
-            .unwrap_or("the requested authority was not available");
+            .map(str::to_owned)
+            .or_else(|| scalar(&action["reason"]))
+            .unwrap_or_else(|| "the requested authority was not available".into());
         return format!("Refused: {reason}");
     }
 
@@ -304,50 +424,197 @@ fn format_broker_action(action: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -
         .into_iter()
         .flat_map(|object| object.iter())
         .filter(|(key, _)| key.as_str() != "action")
-        .filter_map(|(key, value)| scalar(value).map(|value| format!("{key}: {value}")))
+        .map(|(key, value)| format!("{key}: {}", compact_value(value)))
         .collect::<Vec<_>>();
     format!("Tool_use: {action_name}({})", arguments.join(", "))
 }
 
 fn clean_tool_argument(argument: &str) -> String {
     let argument = argument.trim();
-    for prefix in ["Path(\"", "Object(\"", "Text(\""] {
+    for wrapper in ["Path", "Utf8", "Object", "Text", "U64", "Bool"] {
         if let Some(value) = argument
-            .strip_prefix(prefix)
-            .and_then(|value| value.strip_suffix("\")"))
+            .strip_prefix(wrapper)
+            .and_then(|value| value.strip_prefix('('))
+            .and_then(|value| value.strip_suffix(')'))
         {
-            return display_resource(value);
+            let value = serde_json::from_str::<String>(value).unwrap_or_else(|_| {
+                value
+                    .trim_matches('"')
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+            });
+            return display_resource(&value);
         }
     }
-    display_resource(argument.trim_matches('"'))
+    let argument = argument.trim_matches('"');
+    display_resource(argument)
+}
+
+fn split_legacy_arguments(arguments: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in arguments.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(arguments[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < arguments.len() {
+        parts.push(arguments[start..].trim());
+    }
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
 fn tool_arguments(value: &Value) -> Vec<String> {
     if let Some(arguments) = value.as_array() {
         return arguments
             .iter()
-            .filter_map(|argument| match argument {
-                Value::String(argument) => Some(clean_tool_argument(argument)),
-                Value::Object(argument) => argument
-                    .get("value")
-                    .or_else(|| argument.get("path"))
-                    .and_then(Value::as_str)
-                    .map(clean_tool_argument),
-                _ => scalar(argument),
+            .map(|argument| match argument {
+                Value::String(argument) => clean_tool_argument(argument),
+                Value::Object(argument)
+                    if argument.contains_key("kind") && argument.contains_key("value") =>
+                {
+                    if argument["kind"]
+                        .as_str()
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("path"))
+                    {
+                        argument["value"]
+                            .as_str()
+                            .map(clean_tool_argument)
+                            .unwrap_or_else(|| compact_value(&argument["value"]))
+                    } else {
+                        compact_value(&argument["value"])
+                    }
+                }
+                _ => compact_value(argument),
             })
+            .collect();
+    }
+    if let Some(arguments) = value.as_object() {
+        return arguments
+            .iter()
+            .map(|(name, value)| format!("{name}={}", compact_value(value)))
             .collect();
     }
     let Some(arguments) = value.as_str() else {
         return Vec::new();
     };
-    arguments
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(", ")
-        .filter(|argument| !argument.is_empty())
+    let arguments = arguments.trim();
+    let arguments = arguments
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(arguments);
+    split_legacy_arguments(arguments)
+        .into_iter()
         .map(clean_tool_argument)
         .collect()
+}
+
+fn call_arguments(call: &Value) -> Vec<String> {
+    let arguments = tool_arguments(&call["arguments"]);
+    if !arguments.is_empty() {
+        return arguments;
+    }
+    call.as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "action" | "command" | "tool" | "arguments" | "call_id" | "execution_domain"
+            )
+        })
+        .map(|(name, value)| {
+            if name == "path" {
+                clean_tool_argument(&compact_value(value))
+            } else {
+                format!("{name}={}", compact_value(value))
+            }
+        })
+        .collect()
+}
+
+fn debug_path_argument(argument: &str) -> Option<String> {
+    let value = argument.trim().strip_prefix("Path(")?.strip_suffix(')')?;
+    serde_json::from_str::<String>(value)
+        .ok()
+        .or_else(|| Some(value.trim_matches('"').to_owned()))
+}
+
+fn call_path_arguments(call: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = call["path"].as_str() {
+        paths.push(path.to_owned());
+    }
+    match &call["arguments"] {
+        Value::Array(arguments) => {
+            for argument in arguments {
+                match argument {
+                    Value::String(argument) => {
+                        if let Some(path) = debug_path_argument(argument) {
+                            paths.push(path);
+                        }
+                    }
+                    Value::Object(argument)
+                        if argument["kind"]
+                            .as_str()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("path")) =>
+                    {
+                        if let Some(path) = argument["value"].as_str() {
+                            paths.push(path.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Object(arguments) => {
+            for (name, value) in arguments {
+                if name.to_ascii_lowercase().contains("path") {
+                    if let Some(path) = value.as_str() {
+                        paths.push(path.to_owned());
+                    } else if let Some(values) = value.as_array() {
+                        paths.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                }
+            }
+        }
+        Value::String(arguments) => {
+            let arguments = arguments.trim();
+            let arguments = arguments
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(arguments);
+            paths.extend(
+                split_legacy_arguments(arguments)
+                    .into_iter()
+                    .filter_map(debug_path_argument),
+            );
+        }
+        _ => {}
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn decision_payload(event: &Value) -> Option<Value> {
@@ -369,7 +636,7 @@ fn format_agent_tool_call(call: &Value) -> Option<String> {
         return None;
     }
     let command = call["command"].as_str().or_else(|| call["tool"].as_str())?;
-    let arguments = tool_arguments(&call["arguments"]);
+    let arguments = call_arguments(call);
     Some(format!(
         "{command}{}",
         if arguments.is_empty() {
@@ -411,21 +678,45 @@ fn raw_model_proposal(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) -> O
     let role = payload["role"].as_str()?;
     let action = embedded_json(&payload["payload"])?;
     let action_name = action["action"].as_str()?;
-    if role.eq_ignore_ascii_case("broker") {
-        if action_name == "respond" {
-            return None;
-        }
-    } else if !role.eq_ignore_ascii_case("agent") || action_name != "tool_call" {
+    if !role.eq_ignore_ascii_case("broker") || action_name == "respond" {
         return None;
     }
     Some(WorkRow {
-        speaker: if role.eq_ignore_ascii_case("broker") {
-            "Broker".into()
-        } else {
-            "Agent 1".into()
-        },
-        body: format!("Proposed: {}", action_summary(role, &action, catalog)?),
+        speaker: "Broker".into(),
+        context: None,
+        body: action_summary(role, &action, catalog)?,
         kind: "decision".into(),
+        output: None,
+    })
+}
+
+fn broker_validation_status(events: &[&Value], proposal_index: usize) -> Option<bool> {
+    events.iter().skip(proposal_index + 1).find_map(|event| {
+        let payload = &event["payload"];
+        if payload["kind"] == "Validation"
+            && payload["role"]
+                .as_str()
+                .is_some_and(|role| role.eq_ignore_ascii_case("broker"))
+        {
+            payload["accepted"].as_bool()
+        } else {
+            None
+        }
+    })
+}
+
+fn broker_selection_pending(events: &[&Value]) -> bool {
+    !events.iter().any(|event| {
+        let payload = &event["payload"];
+        (payload["kind"] == "Validation"
+            && payload["role"]
+                .as_str()
+                .is_some_and(|role| role.eq_ignore_ascii_case("broker"))
+            && payload["accepted"].as_bool() == Some(true))
+            || matches!(
+                event["kind"].as_str(),
+                Some("broker_proposal" | "capability" | "tool_call" | "tool_result" | "assistant")
+            )
     })
 }
 
@@ -435,28 +726,171 @@ fn model_validation_row(event: &Value, catalog: &BTreeMap<u64, CatalogEntry>) ->
         return None;
     }
     let accepted = payload["accepted"].as_bool()?;
+    if accepted {
+        return None;
+    }
     let role = payload["role"].as_str()?;
     let action = embedded_json(&payload["payload"])?;
     let summary = action_summary(role, &action, catalog)?;
     let detail = payload["detail"].as_str().unwrap_or("policy validation");
     Some(WorkRow {
-        speaker: "Kore".into(),
-        body: if accepted {
-            format!("Allowed: {summary}")
-        } else {
-            format!("Denied: {summary} — {detail}")
-        },
-        kind: if accepted { "authority" } else { "error" }.into(),
+        speaker: "Denied".into(),
+        context: None,
+        body: format!("{summary} refused\n{detail}"),
+        kind: "error".into(),
+        output: None,
     })
 }
 
-fn bounded_work_text(value: &str) -> String {
-    const MAX_CHARS: usize = 512;
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= MAX_CHARS {
-        compact
-    } else {
-        format!("{}…", compact.chars().take(MAX_CHARS).collect::<String>())
+fn agent_name(event: &Value) -> String {
+    for candidate in [
+        &event["agent_name"],
+        &event["payload"]["agent_name"],
+        &event["payload"]["agent_label"],
+    ] {
+        if let Some(name) = candidate.as_str().filter(|name| !name.is_empty()) {
+            return name.to_owned();
+        }
+    }
+    let generation = event["generation"]
+        .as_u64()
+        .or_else(|| event["payload"]["generation"].as_u64())
+        .unwrap_or(1);
+    format!("Agent {generation}")
+}
+
+fn work_output(result: &Value) -> WorkOutput {
+    let status = result["result"]
+        .as_str()
+        .or_else(|| result["status"].as_str())
+        .unwrap_or("output")
+        .to_ascii_lowercase();
+    let body = result
+        .get("text")
+        .or_else(|| result.get("output"))
+        .or_else(|| result.get("data"))
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| compact_value(value))
+        })
+        .unwrap_or_default();
+    let lines = body.lines().count();
+    let failed = matches!(
+        status.as_str(),
+        "refused" | "revoked" | "cancelled" | "failed" | "error"
+    );
+    WorkOutput {
+        summary: format!(
+            "{status} · {lines} line{}",
+            if lines == 1 { "" } else { "s" }
+        ),
+        body,
+        failed,
+    }
+}
+
+fn work_output_height(text: &str) -> f32 {
+    let lines = text.lines().count().max(1) as f32;
+    (lines * 19.2 + 16.0).clamp(35.2, 180.0)
+}
+
+fn capability_row(event: &Value) -> WorkRow {
+    let payload = &event["payload"];
+    let state = payload["state"]
+        .as_str()
+        .unwrap_or("installed")
+        .to_ascii_lowercase();
+    let has_capability_set = payload["capabilities"].is_array();
+    let mut details = payload["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| {
+            let kind = capability["kind"].as_str()?;
+            let label = capability["label"].as_str().unwrap_or_default();
+            Some(if label.is_empty() {
+                kind.to_ascii_lowercase()
+            } else {
+                format!("{} {label}", kind.to_ascii_lowercase())
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(kind) = payload["kind"]
+        .as_str()
+        .or_else(|| payload["capability"].as_str())
+    {
+        let label = payload["label"].as_str().unwrap_or_default();
+        details.push(if label.is_empty() {
+            kind.to_ascii_lowercase()
+        } else {
+            format!("{} {label}", kind.to_ascii_lowercase())
+        });
+    }
+    let mut rights = payload["rights"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(right) = payload["rights"].as_str() {
+        rights.push(right.to_ascii_lowercase());
+    }
+    details.extend(rights);
+    let tools = payload["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !has_capability_set {
+        if details.is_empty() && !tools.is_empty() {
+            details.push("executable".into());
+        }
+        details.extend(tools);
+    }
+    WorkRow {
+        speaker: "Authority".into(),
+        context: None,
+        body: if details.is_empty() {
+            if state == "installed" {
+                "installed no tool or resource capabilities".into()
+            } else {
+                state
+            }
+        } else {
+            let first = details.remove(0);
+            let remainder = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", details.join(" · "))
+            };
+            format!("{state} {first}{remainder}")
+        },
+        kind: "authority".into(),
+        output: None,
+    }
+}
+
+fn same_tool_exchange(call: &Value, result: &Value) -> bool {
+    if let (Some(call_generation), Some(result_generation)) =
+        (call["generation"].as_u64(), result["generation"].as_u64())
+        && call_generation != result_generation
+    {
+        return false;
+    }
+    let call_payload = decision_payload(call).unwrap_or(Value::Null);
+    let result_payload = decision_payload(result).unwrap_or(Value::Null);
+    match (
+        call_payload["call_id"].as_u64(),
+        result_payload["call_id"].as_u64(),
+    ) {
+        (Some(call), Some(result)) => call == result,
+        _ => true,
     }
 }
 
@@ -465,6 +899,7 @@ fn meaningful_error(event: &Value) -> String {
     payload["message"]
         .as_str()
         .or_else(|| payload["detail"].as_str())
+        .or_else(|| payload["error"].as_str())
         .or_else(|| payload.as_str())
         .unwrap_or("The request could not be completed.")
         .to_owned()
@@ -472,70 +907,140 @@ fn meaningful_error(event: &Value) -> String {
 
 fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
     let catalog = broker_catalog(events);
-    let mut rows = Vec::new();
-    let mut seen = BTreeSet::new();
-    let has_raw_broker_proposal = events.iter().any(|event| {
-        event["kind"] == "inference"
-            && event["payload"]["kind"] == "RawModelCompletion"
-            && event["payload"]["role"] == "Broker"
+    let mut rows: Vec<WorkRow> = Vec::new();
+    let mut authority_blocks = BTreeMap::<String, usize>::new();
+    let has_validated_raw_broker_proposal = events.iter().enumerate().any(|(index, event)| {
+        raw_model_proposal(event, &catalog).is_some()
+            && broker_validation_status(events, index) == Some(true)
     });
 
-    for event in events {
+    let mut consumed_results = BTreeSet::new();
+    let mut seen_tool_calls: BTreeMap<(String, String), Option<u64>> = BTreeMap::new();
+    for (event_index, event) in events.iter().enumerate() {
         let event_kind = event["kind"].as_str().unwrap_or("event");
-        let row = raw_model_proposal(event, &catalog)
+        if event_kind == "capability" {
+            let mut row = capability_row(event);
+            let prompt = event["prompt_id"].as_str().unwrap_or_default().to_owned();
+            if let Some(index) = authority_blocks.get(&prompt) {
+                rows[*index].body.push('\n');
+                rows[*index].body.push_str(&row.body);
+            } else {
+                row.context = Some("Broker capability management".into());
+                authority_blocks.insert(prompt, rows.len());
+                rows.push(row);
+            }
+            continue;
+        }
+        let row = (broker_validation_status(events, event_index) == Some(true))
+            .then(|| raw_model_proposal(event, &catalog))
+            .flatten()
             .or_else(|| model_validation_row(event, &catalog))
             .or_else(|| match event_kind {
-                "broker_proposal" if !has_raw_broker_proposal => {
-                    decision_payload(event).map(|action| WorkRow {
+                "broker_proposal" if !has_validated_raw_broker_proposal => decision_payload(event)
+                    .map(|action| WorkRow {
                         speaker: "Broker".into(),
+                        context: None,
                         body: format_broker_action(&action, &catalog),
                         kind: "decision".into(),
+                        output: None,
+                    }),
+                "tool_call" => decision_payload(event).and_then(|call| {
+                    let agent = agent_name(event);
+                    let body = format_agent_tool_call(&call).unwrap_or_else(|| "tool".into());
+                    let call_id = call["call_id"].as_u64();
+                    let signature = (agent.clone(), body.clone());
+                    if seen_tool_calls
+                        .get(&signature)
+                        .is_some_and(|seen_id| call_id.is_none() || *seen_id == call_id)
+                    {
+                        return None;
+                    }
+                    seen_tool_calls.insert(signature, call_id);
+                    let result = events
+                        .iter()
+                        .enumerate()
+                        .skip(event_index + 1)
+                        .find(|(index, candidate)| {
+                            !consumed_results.contains(index)
+                                && candidate["kind"] == "tool_result"
+                                && same_tool_exchange(event, candidate)
+                        })
+                        .and_then(|(index, result)| {
+                            consumed_results.insert(index);
+                            decision_payload(result)
+                        });
+                    let domain = call["execution_domain"]
+                        .as_str()
+                        .unwrap_or("guest")
+                        .replace('_', " ");
+                    let output = result.as_ref().map(work_output);
+                    let denied = output.as_ref().is_some_and(|output| output.failed);
+                    WorkRow {
+                        speaker: if denied {
+                            "Denied".into()
+                        } else {
+                            agent.clone()
+                        },
+                        context: Some(if denied {
+                            format!("{agent} · tool · {domain}")
+                        } else {
+                            format!("tool · {domain}")
+                        }),
+                        body,
+                        kind: if denied {
+                            "error".into()
+                        } else {
+                            "decision".into()
+                        },
+                        output,
+                    }
+                    .into()
+                }),
+                "tool_result" if !consumed_results.contains(&event_index) => {
+                    decision_payload(event).map(|result| {
+                        let agent = agent_name(event);
+                        let output = work_output(&result);
+                        let denied = output.failed;
+                        let domain = result["execution_domain"]
+                            .as_str()
+                            .unwrap_or("guest")
+                            .replace('_', " ");
+                        WorkRow {
+                            speaker: if denied {
+                                "Denied".into()
+                            } else {
+                                agent.clone()
+                            },
+                            context: Some(if denied {
+                                format!("{agent} · tool · {domain}")
+                            } else {
+                                format!("tool · {domain}")
+                            }),
+                            body: "Tool response".into(),
+                            kind: if denied {
+                                "error".into()
+                            } else {
+                                "result".into()
+                            },
+                            output: Some(output),
+                        }
                     })
                 }
-                "tool_call" => decision_payload(event).map(|call| WorkRow {
-                    speaker: "Agent 1".into(),
-                    body: format!(
-                        "Executing: {}",
-                        format_agent_tool_call(&call).unwrap_or_else(|| "tool".into())
-                    ),
-                    kind: "decision".into(),
-                }),
-                "tool_result" => decision_payload(event).map(|result| {
-                    let status = result["result"]
-                        .as_str()
-                        .or_else(|| result["status"].as_str())
-                        .unwrap_or("result");
-                    let text = result["text"]
-                        .as_str()
-                        .map(bounded_work_text)
-                        .unwrap_or_default();
-                    let failed = matches!(
-                        status.to_ascii_lowercase().as_str(),
-                        "refused" | "revoked" | "cancelled" | "failed" | "error"
-                    );
-                    WorkRow {
-                        speaker: "Tool".into(),
-                        body: format!(
-                            "Result ({status}){}",
-                            if text.is_empty() {
-                                String::new()
-                            } else {
-                                format!(": {text}")
-                            }
-                        ),
-                        kind: if failed { "error" } else { "result" }.into(),
-                    }
-                }),
+                "authority_update" => authority_updates::work_row(event),
                 "error" => Some(WorkRow {
-                    speaker: "Error".into(),
+                    speaker: if event["payload"]["stage"] == "agent_failure" {
+                        "Agent failed".into()
+                    } else {
+                        "Error".into()
+                    },
+                    context: None,
                     body: meaningful_error(event),
                     kind: "error".into(),
+                    output: None,
                 }),
                 _ => None,
             });
-        if let Some(row) = row
-            && seen.insert((row.speaker.clone(), row.body.clone()))
-        {
+        if let Some(row) = row {
             rows.push(row);
         }
     }
@@ -742,6 +1247,29 @@ fn glass_header<'a>(
         .into()
 }
 
+fn settings_header<'a>() -> UiElement<'a> {
+    container(
+        row![
+            text("Settings")
+                .font(fonts::DISPLAY)
+                .size(theme::SIZE_DISPLAY)
+                .line_height(iced_core::text::LineHeight::Relative(1.25))
+                .color(theme::rgb(theme::TEXT)),
+            space::horizontal(),
+            button(widgets::control("x"))
+                .height(26)
+                .padding([0, 9])
+                .style(widgets::button_style(widgets::Button::Ghost))
+                .on_press(Message::CloseSettings),
+        ]
+        .align_y(alignment::Vertical::Center),
+    )
+    .padding([14, 20])
+    .width(Length::Fill)
+    .style(|_| glass_bottom_edge())
+    .into()
+}
+
 fn divider_right(background: u32) -> iced_widget::container::Style {
     theme::panel(background, None, 0.0)
         .border_sides(border::Sides::default().right(border::side(theme::rgb(theme::BORDER), 1.0)))
@@ -757,27 +1285,95 @@ fn divider_left(background: u32) -> iced_widget::container::Style {
         .border_sides(border::Sides::default().left(border::side(theme::rgb(theme::BORDER), 1.0)))
 }
 
-fn divider_top(background: u32) -> iced_widget::container::Style {
-    theme::panel(background, None, 0.0)
-        .border_sides(border::Sides::default().top(border::side(theme::rgb(theme::BORDER), 1.0)))
+fn settings_section<'a>(title: &'static str, body: UiElement<'a>) -> UiElement<'a> {
+    column![
+        text(title)
+            .font(fonts::DISPLAY)
+            .size(theme::SIZE_MD)
+            .line_height(iced_core::text::LineHeight::Relative(1.25))
+            .color(theme::rgb(theme::TEXT)),
+        body,
+    ]
+    .spacing(theme::SPACE_2)
+    .width(Length::Fill)
+    .into()
 }
 
-fn input_style(
-    _theme: &Theme,
-    status: iced_widget::text_input::Status,
-) -> iced_widget::text_input::Style {
-    let focused = matches!(status, iced_widget::text_input::Status::Focused { .. });
-    iced_widget::text_input::Style {
-        background: Background::Color(theme::rgb(theme::BACKGROUND)),
-        border: Border {
-            color: rgb(if focused { 0x596573 } else { 0x343b45 }),
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        placeholder: theme::rgb(theme::BORDER_DIM),
-        value: theme::rgb(theme::TEXT),
-        selection: theme::rgb(theme::MAGENTA),
-    }
+fn settings_row<'a>(
+    title: impl Into<String>,
+    description: impl Into<String>,
+    control: UiElement<'a>,
+) -> UiElement<'a> {
+    column![
+        row![
+            column![
+                widgets::body(title, theme::SIZE_SM, theme::TEXT),
+                widgets::body(description, theme::SIZE_SM, theme::TEXT_MUTED),
+            ]
+            .spacing(theme::SPACE_1)
+            .width(Length::Fill),
+            control,
+        ]
+        .spacing(theme::SPACE_6)
+        .align_y(alignment::Vertical::Center),
+        container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
+            theme::BORDER,
+            None,
+            0.0
+        )),
+    ]
+    .spacing(theme::SPACE_4)
+    .padding(iced_core::Padding {
+        top: theme::SPACE_4,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    })
+    .width(Length::Fill)
+    .into()
+}
+
+fn model_option_selectable(status: &str, selected: bool, busy: bool) -> bool {
+    status == "installed" && !selected && !busy
+}
+
+fn new_project_selectable(busy: bool) -> bool {
+    !busy
+}
+
+fn working_panel_visible(settings: &Value) -> bool {
+    settings["show_working"].as_bool().unwrap_or(true)
+}
+
+fn opens_settings(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Character(key),
+            modifiers,
+            ..
+        }) if modifiers.control() && key == ","
+    )
+}
+
+fn closes_workspace_selection(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        })
+    )
+}
+
+fn closes_settings(event: &iced_core::Event) -> bool {
+    matches!(
+        event,
+        iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        })
+    )
 }
 
 struct Request {
@@ -791,6 +1387,7 @@ struct Request {
 enum UserEvent {
     Response(RequestKind, Result<ApiResponse, String>),
     Poll(Result<Vec<Value>, String>),
+    PickDirectory(RequestKind),
 }
 
 #[derive(Debug)]
@@ -821,6 +1418,13 @@ impl Network {
         let request_proxy = proxy.clone();
         thread::spawn(move || {
             while let Ok(request) = receiver.recv() {
+                if matches!(
+                    request.kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    let _ = request_proxy.send_event(UserEvent::PickDirectory(request.kind));
+                    continue;
+                }
                 let result = http(server, request.method, &request.path, request.body.as_ref());
                 let _ = request_proxy.send_event(UserEvent::Response(request.kind, result));
             }
@@ -831,7 +1435,18 @@ impl Network {
             let mut session = None;
             let mut active = false;
             let mut cursor = 0u64;
+            let mut next_runtime = Instant::now();
             loop {
+                if Instant::now() >= next_runtime {
+                    let result = http(server, "GET", "/api/v1/runtime", None);
+                    if proxy
+                        .send_event(UserEvent::Response(RequestKind::Runtime, result))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    next_runtime = Instant::now() + IDLE_POLL_INTERVAL;
+                }
                 while let Ok(next) = session_receiver.try_recv() {
                     if session != next.session {
                         session = next.session;
@@ -840,7 +1455,7 @@ impl Network {
                     active = next.active;
                 }
                 let Some(id) = session.as_deref() else {
-                    match session_receiver.recv() {
+                    match session_receiver.recv_timeout(IDLE_POLL_INTERVAL) {
                         Ok(next) => {
                             if session != next.session {
                                 session = next.session;
@@ -849,7 +1464,8 @@ impl Network {
                             active = next.active;
                             continue;
                         }
-                        Err(_) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 };
                 match http(
@@ -898,22 +1514,41 @@ impl Network {
     }
 }
 
+struct CachedProjectChat {
+    permission_update: Option<authority_updates::Submission>,
+    session: String,
+    prompt_id: Option<String>,
+    draft: String,
+    events: Vec<Value>,
+}
+
 struct Model {
     network: Network,
     connected: bool,
+    runtime_status: Value,
     projects: Vec<Value>,
     catalog: Value,
     approvals: Value,
+    settings: Value,
+    settings_loaded: bool,
+    activity: Option<Result<Vec<Value>, String>>,
     selected: Option<usize>,
     launch_project: Option<String>,
     auto_open_pending: bool,
     session: Option<String>,
     prompt_id: Option<String>,
+    submitted_prompt: Option<String>,
+    permission_update: Option<authority_updates::Submission>,
+    next_permission_update: u64,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
+    assistant_blocks: BTreeMap<String, Vec<AssistantBlock>>,
+    model_timings: BTreeMap<String, Vec<model_timing::CallTiming>>,
     expanded_work: BTreeSet<String>,
+    expanded_outputs: BTreeSet<String>,
     view: View,
+    settings_open: bool,
     topology: view::State,
     /// When the process started, so the splash knows how far along it is.
     booted_at: Option<Instant>,
@@ -923,38 +1558,69 @@ struct Model {
     topology_agent_bands: Vec<layout::Placement>,
     topology_path_bands: Vec<layout::Placement>,
     viewport: Size,
-    editor: Option<text_editor::Content<AxRenderer<System>>>,
-    wizard_page: u8,
-    preflight: Option<String>,
     approval: Option<Value>,
+    workspace_selection_open: bool,
+    workspace_drop_hovered: bool,
+    workspace_error: Option<String>,
     status: String,
     busy: bool,
     restart_after_stop: bool,
+    project_chats: BTreeMap<String, CachedProjectChat>,
 }
 
 impl Model {
     #[cfg(test)]
     fn new(network: Network) -> Self {
-        Self::with_launch_project(network, None)
+        let mut model = Self::with_launch_project(network, None);
+        model.settings_loaded = true;
+        model.settings = json!({
+            "schema_version":1,
+            "default_model_id":"llama_cpp:fixture",
+            "default_inference":{
+                "backend":"llama_cpp","kore_image":"/fixture/kore.iso","llama_server":"/fixture/llama-server",
+                "model":"/fixture/Qwen3.5-9B-Q4_K_M.gguf","extra_args":[],"context_tokens":32768,
+                "output_tokens":512,"threads":2,"slots":3
+            },
+            "body_font":"design_default",
+            "show_working":true,
+            "working_expanded_default":false,
+            "models":[{
+                "id":"llama_cpp:fixture","display_name":"Qwen3.5-9B-Q4_K_M.gguf",
+                "backend":"llama_cpp","provider":"llama.cpp","path":"/fixture/Qwen3.5-9B-Q4_K_M.gguf",
+                "status":"installed"
+            }]
+        });
+        model
     }
 
     fn with_launch_project(network: Network, launch_project: Option<String>) -> Self {
         let model = Self {
             network,
             connected: false,
+            runtime_status: Value::Null,
             projects: Vec::new(),
             catalog: Value::Null,
             approvals: Value::Null,
+            settings: Value::Null,
+            settings_loaded: false,
+            activity: None,
             selected: None,
             launch_project,
             auto_open_pending: true,
             session: None,
             prompt_id: None,
+            submitted_prompt: None,
+            permission_update: None,
+            next_permission_update: 0,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
+            assistant_blocks: BTreeMap::new(),
+            model_timings: BTreeMap::new(),
             expanded_work: BTreeSet::new(),
+            expanded_outputs: BTreeSet::new(),
             view: View::Session,
+            settings_open: false,
             topology: view::State::default(),
             booted_at: Some(Instant::now()),
             topology_graph: model::Graph::default(),
@@ -963,16 +1629,42 @@ impl Model {
             topology_agent_bands: Vec::new(),
             topology_path_bands: Vec::new(),
             viewport: Size::new(1280.0, 800.0),
-            editor: None,
-            wizard_page: 0,
-            preflight: None,
             approval: None,
+            workspace_selection_open: false,
+            workspace_drop_hovered: false,
+            workspace_error: None,
             status: "Connecting to the vKore daemon…".into(),
             busy: false,
             restart_after_stop: false,
+            project_chats: BTreeMap::new(),
         };
         model.reload();
         model
+    }
+
+    fn remember_current_chat(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(id) = self
+            .project()
+            .and_then(|p| p["id"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let mut events: Vec<_> = self.events.iter().rev().take(512).cloned().collect();
+        events.reverse();
+        self.project_chats.insert(
+            id,
+            CachedProjectChat {
+                permission_update: self.permission_update.clone(),
+                session,
+                prompt_id: self.prompt_id.clone(),
+                draft: self.prompt.text(),
+                events,
+            },
+        );
     }
 
     fn reload(&self) {
@@ -981,6 +1673,8 @@ impl Model {
             (RequestKind::Catalog, "/api/v1/catalog"),
             (RequestKind::Projects, "/api/v1/projects"),
             (RequestKind::Approvals, "/api/v1/approvals"),
+            (RequestKind::Settings, "/api/v1/settings"),
+            (RequestKind::Activity, "/api/v1/activity"),
         ] {
             self.network.request(Request {
                 kind,
@@ -999,6 +1693,25 @@ impl Model {
     fn events_changed(&mut self) {
         self.sync_selectable_text();
         self.refresh_topology();
+        if let Some(prompt_id) = self.prompt_id.as_deref() {
+            let prompt_events = self
+                .events
+                .iter()
+                .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
+                .collect::<Vec<_>>();
+            self.status = if prompt_events.iter().all(|event| {
+                matches!(
+                    event["kind"].as_str(),
+                    Some("user_prompt" | "session_opened")
+                )
+            }) {
+                "Task queued for the shared assistant…".into()
+            } else if broker_selection_pending(&prompt_events) {
+                "Broker selecting capabilities…".into()
+            } else {
+                "Agent working with Kore-provided capabilities…".into()
+            };
+        }
     }
 
     /// Rebuilds the derived graph and its placement.
@@ -1022,7 +1735,10 @@ impl Model {
             self.topology.selected = None;
         }
         if self.topology.selected.is_none()
-            && let Some(root) = self.topology_graph.agents.first()
+            && let Some(root) =
+                self.topology_graph.agents.iter().find(|agent| {
+                    self.view != View::Filesystem || agent.role != model::Role::Broker
+                })
         {
             self.topology.selected = Some(root.id.clone());
         }
@@ -1034,9 +1750,9 @@ impl Model {
         let inspector = if self.topology.inspector { 300.0 } else { 0.0 };
         Size::new(
             (viewport.width - sidebar - inspector).max(1.0),
-            // The graph sits below both the 64px harness header and the 52px
-            // embedded topology toolbar.
-            (viewport.height - 116.0).max(1.0),
+            // The graph sits below the 64px header, 28px status line, and
+            // 52px embedded topology toolbar.
+            (viewport.height - 144.0).max(1.0),
         )
     }
 
@@ -1064,6 +1780,7 @@ impl Model {
             self.topology_agent_bands
                 .iter()
                 .chain(self.topology_path_bands.iter())
+                .filter(|placement| placement.width > 0.0 && placement.height > 0.0)
                 .copied()
                 .collect()
         };
@@ -1076,82 +1793,172 @@ impl Model {
 
     fn update(&mut self, message: Message) {
         match message {
+            Message::RetryRuntime => self.network.request(Request {
+                kind: RequestKind::RetryRuntime,
+                method: "POST",
+                path: "/api/v1/runtime/retry".into(),
+                body: None,
+            }),
             Message::SelectProject(index) => {
-                if self.session.is_none() {
-                    self.selected = Some(index);
-                    self.events.clear();
-                    self.selectable_text.clear();
-                    self.status = "Opening a fresh isolated Kore sandbox…".into();
+                if self.busy || index >= self.projects.len() {
+                    return;
+                }
+                if self.selected == Some(index) && self.session.is_some() {
+                    return;
+                }
+                self.remember_current_chat();
+                self.selected = Some(index);
+                self.events.clear();
+                self.expanded_work.clear();
+                self.expanded_outputs.clear();
+                self.selectable_text.clear();
+                self.assistant_blocks.clear();
+                self.submitted_prompt = None;
+                self.prompt_id = None;
+                let project_id = self.projects[index]["id"].as_str().unwrap_or_default();
+                self.permission_update = None;
+                if let Some(chat) = self.project_chats.get(project_id) {
+                    self.permission_update = chat.permission_update.clone();
+                    self.session = Some(chat.session.clone());
+                    self.prompt_id = chat.prompt_id.clone();
+                    self.prompt = text_editor::Content::with_text(&chat.draft);
+                    self.events = chat.events.clone();
+                    self.network
+                        .poll(self.session.clone(), self.prompt_id.is_some());
+                    self.status = "Chat restored.".into();
+                    self.events_changed();
+                } else {
+                    self.session = None;
+                    self.prompt = text_editor::Content::new();
+                    self.events_changed();
+                    self.status = "Opening a chat in the shared assistant…".into();
                     self.update(Message::ToggleSession);
                 }
             }
             Message::NewProject => {
-                // The published control stays visually available while a
-                // session is active, but its handler is intentionally a no-op.
-                if self.session.is_some() {
+                if self.busy {
                     return;
                 }
-                let root = std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                self.editor = Some(
-                    text_editor::Content::with_text(&serde_json::to_string_pretty(&json!({
-                        "schema_version":1,
-                        "id":"my-project",
-                        "name":"My project",
-                        "workspace":{"root":root,"state":"","access":"read_only","exclusions":[".git/objects"],"max_write_bytes":0,"max_write_files":0},
-                        "inference":{"backend":"deterministic","kore_image":null,"llama_server":null,"model":null,"extra_args":[],"context_tokens":32768,"output_tokens":512,"threads":4,"slots":3},
-                        "addons":[],
-                        "approvals":{"default_scope":"once","confirm_external_writes":true,"confirm_destructive":true,"standing_policy_enabled":false},
-                        "retention":{"transcript_days":30,"clean_kv_on_close":true,"retain_raw_model_output":false},
-                        "resources":{"memory_mib":2048,"virtual_cpus":2,"prompt_seconds":300,"agent_limit":4},
-                        "archived":false
-                    }))
-                    .unwrap()),
-                );
-                self.wizard_page = 0;
-                self.preflight = None;
+                self.workspace_selection_open = true;
+                self.workspace_drop_hovered = false;
+                self.workspace_error = None;
+                self.status = "Create a project, with an optional focus folder.".into();
             }
-            Message::EditProject => {
-                if let Some(project) = self.project() {
-                    self.editor = Some(text_editor::Content::with_text(
-                        &serde_json::to_string_pretty(project).unwrap_or_default(),
-                    ));
-                    self.wizard_page = 0;
-                    self.preflight = None;
+            Message::NewVirtualProject => {
+                if !self.workspace_selection_open || self.busy {
+                    return;
                 }
-            }
-            Message::ConfigAction(action) => {
-                if let Some(editor) = self.editor.as_mut() {
-                    editor.perform(action);
-                    self.preflight = None;
-                }
-            }
-            Message::WizardField(pointer, value) => self.update_config(pointer, &value),
-            Message::WizardToggle(pointer) => self.toggle_config(pointer),
-            Message::WizardChoice(pointer, value) => self.update_config(pointer, value),
-            Message::WizardAddon(id) => self.toggle_addon(&id),
-            Message::WizardPage(page) => {
-                self.wizard_page = page.min(4);
-                if self.wizard_page == 4 {
-                    self.preflight = None;
-                }
-            }
-            Message::Preflight => self.submit_editor(RequestKind::Preflight),
-            Message::SaveProject => self.submit_editor(RequestKind::SaveProject),
-            Message::Browse(kind) => {
-                let directory = kind == RequestKind::PickWorkspace;
+                self.busy = true;
                 self.network.request(Request {
-                    kind,
+                    kind: RequestKind::CreateProject,
                     method: "POST",
-                    path: "/api/v1/picker".into(),
-                    body: Some(json!({"kind":if directory {"directory"} else {"file"}})),
+                    path: "/api/v1/projects/virtual".into(),
+                    body: Some(json!({"name":"New project"})),
                 });
             }
-            Message::CloseEditor => {
-                self.editor = None;
-                self.preflight = None;
+            Message::ChooseWorkspaceFolder => {
+                if !self.workspace_selection_open || self.busy {
+                    return;
+                }
+                self.busy = true;
+                self.workspace_error = None;
+                self.status = "Waiting for the system folder picker…".into();
+                self.network.request(Request {
+                    kind: RequestKind::PickWorkspace,
+                    method: "POST",
+                    path: "/api/v1/picker".into(),
+                    body: Some(json!({"kind":"directory"})),
+                });
+            }
+            Message::DropWorkspaceFolder(path) => {
+                if !self.workspace_selection_open {
+                    return;
+                }
+                self.workspace_drop_hovered = false;
+                if self.busy {
+                    return;
+                }
+                self.select_workspace(&path);
+            }
+            Message::CancelWorkspaceSelection => {
+                if !self.busy {
+                    self.workspace_selection_open = false;
+                    self.workspace_drop_hovered = false;
+                    self.workspace_error = None;
+                    self.status = "New project cancelled.".into();
+                }
+            }
+            Message::AddSearchLocation => {
+                if self.busy {
+                    return;
+                }
+                self.busy = true;
+                self.network.request(Request {
+                    kind: RequestKind::PickSearchLocation,
+                    method: "POST",
+                    path: "/api/v1/picker".into(),
+                    body: Some(json!({"kind":"directory"})),
+                });
+            }
+            Message::RemoveSearchLocation(path) => {
+                let locations: Vec<_> = self.settings["authorized_locations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|value| value.as_str() != Some(path.as_str()))
+                    .cloned()
+                    .collect();
+                self.save_settings(json!({"authorized_locations":locations}));
+            }
+            Message::OpenSettings => {
+                self.settings_open = true;
+                self.activity = None;
+                self.network.request(Request {
+                    kind: RequestKind::Activity,
+                    method: "GET",
+                    path: "/api/v1/activity".into(),
+                    body: None,
+                });
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
+            }
+            Message::ChooseDefaultModel(id) => {
+                self.save_settings(json!({"default_model_id": id}));
+            }
+            Message::ChooseBodyFont(font) => {
+                self.save_settings(json!({"body_font": font}));
+            }
+            Message::ToggleShowWorking => {
+                let show = !self.settings["show_working"].as_bool().unwrap_or(true);
+                self.save_settings(json!({"show_working": show}));
+            }
+            Message::ToggleWorkingExpanded => {
+                let expanded = !self.settings["working_expanded_default"]
+                    .as_bool()
+                    .unwrap_or(false);
+                self.save_settings(json!({"working_expanded_default": expanded}));
+            }
+            Message::ToggleAutomaticWriteback => {
+                if self.busy {
+                    return;
+                }
+                let Some(mut project) = self.project().cloned() else {
+                    return;
+                };
+                let automatic = project["workspace"]["access"] == "automatic_writeback";
+                project["workspace"]["access"] = json!(if automatic {
+                    "review_changes"
+                } else {
+                    "automatic_writeback"
+                });
+                self.busy = true;
+                self.network.request(Request {
+                    kind: RequestKind::SaveProjectSettings,
+                    method: "POST",
+                    path: "/api/v1/projects".into(),
+                    body: Some(project),
+                });
             }
             Message::ToggleSession => {
                 if let Some(session) = self.session.clone() {
@@ -1204,6 +2011,7 @@ impl Model {
                 }
             }
             Message::SendPrompt => self.send_prompt(),
+            Message::SendPermissionUpdate => self.send_permission_update(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
                     self.network.request(Request {
@@ -1217,6 +2025,11 @@ impl Model {
             Message::ToggleWorking(prompt_id) => {
                 if !self.expanded_work.remove(&prompt_id) {
                     self.expanded_work.insert(prompt_id);
+                }
+            }
+            Message::ToggleWorkOutput(key) => {
+                if !self.expanded_outputs.remove(&key) {
+                    self.expanded_outputs.insert(key);
                 }
             }
             Message::ArchiveProject => {
@@ -1265,6 +2078,19 @@ impl Model {
                     self.topology.fitted = false;
                 }
                 self.view = value;
+                if value == View::Filesystem
+                    && self
+                        .topology
+                        .selected
+                        .as_deref()
+                        .and_then(|id| self.topology_graph.index_of(id))
+                        .is_some_and(|index| {
+                            self.topology_graph.agents[index].role == model::Role::Broker
+                        })
+                {
+                    self.topology.selected = None;
+                }
+                self.topology.fitted = false;
             }
             Message::TopologySelectPath(index) => {
                 self.topology.selected = None;
@@ -1316,108 +2142,14 @@ impl Model {
         }
     }
 
-    fn submit_editor(&mut self, kind: RequestKind) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        match serde_json::from_str(&source.text()) {
-            Ok(body) => {
-                self.busy = true;
-                self.network.request(Request {
-                    kind,
-                    method: "POST",
-                    path: if kind == RequestKind::Preflight {
-                        "/api/v1/projects/preflight".into()
-                    } else {
-                        "/api/v1/projects".into()
-                    },
-                    body: Some(body),
-                });
-            }
-            Err(error) => self.preflight = Some(format!("Invalid JSON: {error}")),
-        }
-    }
-
-    fn update_config(&mut self, pointer: &str, value: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(slot) = config.pointer_mut(pointer) else {
-            return;
-        };
-        *slot = match slot {
-            Value::Number(_) => value
-                .parse::<u64>()
-                .map(Value::from)
-                .unwrap_or_else(|_| Value::from(0)),
-            Value::Array(_) if pointer == "/inference/extra_args" => Value::Array(
-                value
-                    .split_whitespace()
-                    .map(|part| Value::String(part.to_owned()))
-                    .collect(),
-            ),
-            Value::Null if value.is_empty() => Value::Null,
-            _ => Value::String(value.to_owned()),
-        };
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
-    }
-
-    fn toggle_config(&mut self, pointer: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(slot) = config.pointer_mut(pointer) else {
-            return;
-        };
-        *slot = Value::Bool(!slot.as_bool().unwrap_or(false));
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
-    }
-
-    fn toggle_addon(&mut self, id: &str) {
-        let Some(source) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&source.text()) else {
-            return;
-        };
-        let Some(addons) = config["addons"].as_array_mut() else {
-            return;
-        };
-        if let Some(addon) = addons.iter_mut().find(|addon| addon["id"] == id) {
-            addon["enabled"] = Value::Bool(!addon["enabled"].as_bool().unwrap_or(false));
-        } else if let Some(catalog) = self.catalog["addons"]
-            .as_array()
-            .and_then(|entries| entries.iter().find(|addon| addon["id"] == id))
-        {
-            let tools = catalog["tools"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|tool| tool["name"].as_str())
-                .collect::<Vec<_>>();
-            addons.push(json!({
-                "id": id,
-                "enabled": true,
-                "mediation": catalog["domain"].as_str().unwrap_or("host"),
-                "tool_ceiling": tools,
-            }));
-        }
-        self.editor = Some(text_editor::Content::with_text(
-            &serde_json::to_string_pretty(&config).unwrap_or_default(),
-        ));
-        self.preflight = None;
+    fn save_settings(&mut self, patch: Value) {
+        self.busy = true;
+        self.network.request(Request {
+            kind: RequestKind::SaveSettings,
+            method: "POST",
+            path: "/api/v1/settings".into(),
+            body: Some(patch),
+        });
     }
 
     fn start_session(&mut self) {
@@ -1445,8 +2177,15 @@ impl Model {
             return;
         }
         let prompt_id = format!("p-{}", now_id());
-        self.expanded_work.insert(prompt_id.clone());
+        if working_panel_visible(&self.settings)
+            && self.settings["working_expanded_default"]
+                .as_bool()
+                .unwrap_or(false)
+        {
+            self.expanded_work.insert(prompt_id.clone());
+        }
         self.prompt_id = Some(prompt_id.clone());
+        self.submitted_prompt = Some(self.prompt.text());
         self.busy = true;
         self.network.poll(Some(session.clone()), true);
         self.network.request(Request {
@@ -1460,25 +2199,91 @@ impl Model {
                 "text":text
             })),
         });
-        self.prompt = text_editor::Content::new();
+    }
+
+    fn select_workspace(&mut self, path: &Path) {
+        let error = if !path.exists() {
+            Some("The selected workspace no longer exists.")
+        } else if !path.is_dir() {
+            Some("Select a workspace folder, not a file.")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.workspace_error = Some(error.into());
+            self.status = error.into();
+            return;
+        }
+
+        self.busy = true;
+        self.workspace_error = None;
+        self.network.request(Request {
+            kind: RequestKind::CreateProject,
+            method: "POST",
+            path: "/api/v1/projects/from-workspace".into(),
+            body: Some(json!({"root": path})),
+        });
+        self.status = "Validating workspace and applying application defaults…".into();
     }
 
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
         let result = result.and_then(ApiResponse::json);
         match (kind, result) {
+            (RequestKind::PermissionUpdate(token), result) => {
+                self.permission_update_response(token, result)
+            }
+            (RequestKind::Runtime, Ok(value)) => {
+                self.runtime_status = value;
+            }
+            (RequestKind::Runtime, Err(error)) => {
+                self.runtime_status = json!({"phase":"unavailable", "message":error});
+            }
+            (RequestKind::RetryRuntime, Ok(_)) => {
+                self.runtime_status = json!({"phase":"preparing"});
+            }
             (RequestKind::Health, Ok(_)) => {
                 self.connected = true;
                 self.status = "Connected to the resident vKore broker.".into();
             }
             (RequestKind::Catalog, Ok(value)) => self.catalog = value,
-            (RequestKind::Projects, Ok(Value::Array(projects))) => {
-                self.projects = projects;
-                if self
-                    .selected
-                    .is_some_and(|index| index >= self.projects.len())
+            (kind @ (RequestKind::Settings | RequestKind::SaveSettings), Ok(value)) => {
+                self.busy = false;
+                self.settings = value;
+                self.settings_loaded = true;
+                let preference = self.settings["body_font"]
+                    .as_str()
+                    .unwrap_or("design_default");
+                fonts::set_body_preference(preference);
+                self.status = if kind == RequestKind::SaveSettings {
+                    "Application settings saved.".into()
+                } else {
+                    "Application settings loaded.".into()
+                };
+            }
+            (RequestKind::Activity, Ok(Value::Array(activity))) => {
+                self.activity = Some(Ok(activity));
+            }
+            (RequestKind::SaveProjectSettings, Ok(project)) => {
+                self.busy = false;
+                if let Some(index) = self
+                    .projects
+                    .iter()
+                    .position(|saved| saved["id"] == project["id"])
                 {
-                    self.selected = None;
+                    self.projects[index] = project;
                 }
+                self.status =
+                    "Workspace writeback setting saved. Close and reopen the project to apply it."
+                        .into();
+            }
+            (RequestKind::Projects, Ok(Value::Array(projects))) => {
+                let selected_id = self
+                    .project()
+                    .and_then(|p| p["id"].as_str())
+                    .map(str::to_owned);
+                self.projects = projects;
+                self.selected =
+                    selected_id.and_then(|id| self.projects.iter().position(|p| p["id"] == id));
                 if self.auto_open_pending {
                     self.auto_open_pending = false;
                     let requested = self.launch_project.take();
@@ -1506,29 +2311,42 @@ impl Model {
                     }
                 }
             }
-            (RequestKind::Approvals, Ok(value)) => self.approvals = value,
-            (RequestKind::Preflight, Ok(value)) => {
+            (RequestKind::PickSearchLocation, Ok(value)) => {
                 self.busy = false;
-                self.preflight = Some(serde_json::to_string_pretty(&value).unwrap_or_default());
-                self.status = "Preflight passed.".into();
+                if let Some(path) = value["path"].as_str() {
+                    let mut locations = self.settings["authorized_locations"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if !locations.iter().any(|existing| existing == path) {
+                        locations.push(json!(path));
+                    }
+                    self.save_settings(json!({"authorized_locations":locations}));
+                }
             }
-            (RequestKind::SaveProject, Ok(value)) => {
+            (RequestKind::Approvals, Ok(value)) => self.approvals = value,
+            (RequestKind::CreateProject, Ok(value)) => {
                 self.busy = false;
-                let id = value["id"].as_str().unwrap_or_default();
-                if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
-                    self.projects[index] = value;
-                    self.selected = Some(index);
+                self.workspace_selection_open = false;
+                self.workspace_drop_hovered = false;
+                self.workspace_error = None;
+                let project = value["project"].clone();
+                let id = project["id"].as_str().unwrap_or_default();
+                let index =
+                    if let Some(index) = self.projects.iter().position(|item| item["id"] == id) {
+                        self.projects[index] = project;
+                        index
+                    } else {
+                        self.projects.push(project);
+                        self.projects.len() - 1
+                    };
+                self.status = if value["created"].as_bool().unwrap_or(false) {
+                    "Project created and opened.".into()
                 } else {
-                    self.projects.push(value);
-                    self.selected = Some(self.projects.len() - 1);
-                }
-                self.editor = None;
-                self.preflight = None;
-                self.status = "Project saved after daemon preflight. Starting sandbox…".into();
-                if self.session.is_some() {
-                    self.restart_after_stop = true;
-                }
-                self.update(Message::ToggleSession);
+                    "This workspace already has a project. Opening it instead.".into()
+                };
+                self.view = View::Session;
+                self.update(Message::SelectProject(index));
             }
             (RequestKind::StartSession, Ok(value)) => {
                 self.busy = false;
@@ -1538,24 +2356,38 @@ impl Model {
                     .or_else(|| value["id"].as_str().map(str::to_owned));
                 self.events.clear();
                 self.selectable_text.clear();
+                self.assistant_blocks.clear();
                 self.expanded_work.clear();
+                self.expanded_outputs.clear();
                 self.prompt_id = None;
                 self.network.poll(self.session.clone(), false);
-                self.status = "Chat session ready. Kore starts with the first message.".into();
+                self.status = "Chat opened. Messages use the shared assistant runtime.".into();
             }
             (RequestKind::StopSession, Ok(_)) => {
+                let closed_project = self
+                    .project()
+                    .and_then(|p| p["id"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                self.project_chats.remove(&closed_project);
                 self.busy = false;
                 self.network.poll(None, false);
                 self.session = None;
                 self.prompt_id = None;
                 self.expanded_work.clear();
-                self.selectable_text.clear();
-                self.status = "Routes retired and session KV erased.".into();
+                self.expanded_outputs.clear();
+                // Keep the completed transcript readable after closing. Its
+                // selectable text and topology must remain in sync with events.
+                self.events_changed();
+                self.status = "Chat closed.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|grant| grant["committed"].as_bool().unwrap_or(false))
+                    .filter(|grant| {
+                        grant["committed"].as_bool().unwrap_or(false)
+                            && grant["agent"]["id"] == format!("worker-{closed_project}")
+                    })
                 {
                     if let Some(id) = grant["id"].as_str() {
                         self.network.request(Request {
@@ -1574,8 +2406,11 @@ impl Model {
                 }
             }
             (RequestKind::SendPrompt, Ok(_)) => {
+                if self.submitted_prompt.take().as_deref() == Some(self.prompt.text().as_str()) {
+                    self.prompt = text_editor::Content::new();
+                }
                 self.busy = false;
-                self.status = "Prompt accepted by the broker.".into();
+                self.status = "Task queued for the shared assistant…".into();
             }
             (RequestKind::CancelPrompt, Ok(_)) => {
                 self.status = "Cancellation requested.".into();
@@ -1602,24 +2437,34 @@ impl Model {
                 self.status = "Project duplicated. Starting sandbox…".into();
                 self.update(Message::ToggleSession);
             }
-            (
-                kind @ (RequestKind::PickWorkspace
-                | RequestKind::PickKore
-                | RequestKind::PickLlama
-                | RequestKind::PickModel),
-                Ok(value),
-            ) => {
+            (RequestKind::PickWorkspace, Ok(value)) => {
                 if let Some(path) = value["path"].as_str() {
-                    self.apply_picker(kind, path);
+                    self.busy = false;
+                    self.select_workspace(Path::new(path));
+                } else {
+                    self.busy = false;
+                    self.status =
+                        "Folder selection cancelled. Choose a folder or drop one here.".into();
                 }
             }
             (_, Err(error)) => {
                 self.busy = false;
+                if matches!(
+                    kind,
+                    RequestKind::PickWorkspace | RequestKind::CreateProject
+                ) && self.workspace_selection_open
+                {
+                    self.workspace_error = Some(error.clone());
+                }
                 self.status = format!("Request refused: {error}");
-                if kind == RequestKind::Preflight {
-                    self.preflight = Some(self.status.clone());
+                if kind == RequestKind::Settings {
+                    self.settings_loaded = true;
+                }
+                if kind == RequestKind::Activity {
+                    self.activity = Some(Err(error.clone()));
                 }
                 if kind == RequestKind::SendPrompt {
+                    self.submitted_prompt = None;
                     self.prompt_id = None;
                     self.network.poll(self.session.clone(), false);
                 }
@@ -1633,11 +2478,32 @@ impl Model {
             Ok(events) => {
                 let mut prompt_finished = false;
                 for event in events {
+                    if event["session_id"]
+                        .as_str()
+                        .is_some_and(|id| Some(id) != self.session.as_deref())
+                    {
+                        continue;
+                    }
+                    if let Some(sequence) = event["sequence"].as_u64()
+                        && self.events.iter().any(|prior| {
+                            prior["sequence"].as_u64() == Some(sequence)
+                                && prior["session_id"] == event["session_id"]
+                        })
+                    {
+                        continue;
+                    }
+                    self.permission_update_event(&event);
                     if event["kind"] == "prompt_terminal"
                         && event["prompt_id"].as_str() == self.prompt_id.as_deref()
                     {
                         self.prompt_id = None;
                         self.busy = false;
+                        self.status = match event["payload"]["status"].as_str() {
+                            Some("completed") => "Task completed.",
+                            Some("cancelled") => "Task cancelled.",
+                            _ => "Task failed. See its activity for details.",
+                        }
+                        .into();
                         prompt_finished = true;
                     }
                     self.events.push(event);
@@ -1653,14 +2519,16 @@ impl Model {
 
     fn sync_selectable_text(&mut self) {
         let mut desired = BTreeMap::new();
+        let mut assistant_blocks_by_prompt = BTreeMap::new();
+        let mut model_timings = BTreeMap::new();
         for user in self
             .events
             .iter()
             .filter(|event| event["kind"] == "user_prompt")
         {
             let prompt_id = user["prompt_id"].as_str().unwrap_or_default();
-            // The meta line is drawn above the card as its own mono label, so
-            // the selectable content is the message body alone.
+            // Timestamp and message text are drawn separately so the body
+            // stays selectable without pulling metadata into copied text.
             desired.insert(
                 format!("prompt:{prompt_id}:user"),
                 user["payload"]["text"]
@@ -1673,21 +2541,30 @@ impl Model {
                 .iter()
                 .filter(|event| event["prompt_id"].as_str() == Some(prompt_id))
                 .collect::<Vec<_>>();
+            model_timings.insert(prompt_id.to_owned(), model_timing::calls(&prompt_events));
             for (index, row) in work_rows(&prompt_events).into_iter().enumerate() {
                 // The speaker is drawn as its own label above the body so it
                 // can carry the row's colour; only the body is selectable.
                 desired.insert(format!("prompt:{prompt_id}:work:{index}"), row.body);
+                if let Some(output) = row.output {
+                    desired.insert(
+                        format!("prompt:{prompt_id}:work:{index}:output"),
+                        output.body,
+                    );
+                }
             }
             if let Some(assistant) = prompt_events.iter().find(|event| {
                 event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
             }) {
-                desired.insert(
-                    format!("prompt:{prompt_id}:assistant"),
-                    assistant["payload"]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
+                let response = assistant["payload"]["text"].as_str().unwrap_or_default();
+                let blocks = assistant_blocks(response);
+                for (index, block) in blocks.iter().enumerate() {
+                    desired.insert(
+                        format!("prompt:{prompt_id}:assistant:{index}"),
+                        block.text().to_owned(),
+                    );
+                }
+                assistant_blocks_by_prompt.insert(prompt_id.to_owned(), blocks);
             }
         }
 
@@ -1717,6 +2594,8 @@ impl Model {
                     .insert(key, text_editor::Content::with_text(&value));
             }
         }
+        self.assistant_blocks = assistant_blocks_by_prompt;
+        self.model_timings = model_timings;
     }
 
     /// Read-only conversation text the reader can select and copy.
@@ -1725,6 +2604,53 @@ impl Model {
     /// while machine-shaped content -- logs, tool arguments, JSON -- carries
     /// mono so its columns line up.
     fn selectable<'a>(
+        &'a self,
+        key: &str,
+        size: f32,
+        color: u32,
+        face: iced_core::Font,
+        line_height: f32,
+    ) -> UiElement<'a> {
+        let key_owned = key.to_owned();
+        let content = self
+            .selectable_text
+            .get(key)
+            .expect("selectable conversation text must be synchronized");
+        text_editor(content)
+            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+            .padding(0)
+            .size(size)
+            .line_height(iced_core::text::LineHeight::Relative(line_height))
+            .font(face)
+            .style(widgets::selectable(color))
+            .into()
+    }
+
+    fn selectable_width<'a>(
+        &'a self,
+        key: &str,
+        width: f32,
+        size: f32,
+        color: u32,
+        face: iced_core::Font,
+    ) -> UiElement<'a> {
+        let key_owned = key.to_owned();
+        let content = self
+            .selectable_text
+            .get(key)
+            .expect("selectable conversation text must be synchronized");
+        text_editor(content)
+            .on_action(move |action| Message::SelectText(key_owned.clone(), action))
+            .padding(0)
+            .width(width)
+            .size(size)
+            .line_height(iced_core::text::LineHeight::Relative(1.55))
+            .font(face)
+            .style(widgets::selectable(color))
+            .into()
+    }
+
+    fn selectable_markdown<'a>(
         &'a self,
         key: &str,
         size: f32,
@@ -1740,44 +2666,36 @@ impl Model {
             .on_action(move |action| Message::SelectText(key_owned.clone(), action))
             .padding(0)
             .size(size)
+            .line_height(iced_core::text::LineHeight::Relative(1.7))
             .font(face)
+            .highlight_with::<InlineMarkdownHighlighter>((), inline_markdown_format)
             .style(widgets::selectable(color))
             .into()
     }
 
-    fn apply_picker(&mut self, kind: RequestKind, path: &str) {
-        let Some(editor) = self.editor.as_ref() else {
-            return;
-        };
-        let Ok(mut config) = serde_json::from_str::<Value>(&editor.text()) else {
-            self.preflight = Some("Fix the project JSON before applying a selected path.".into());
-            return;
-        };
-        let pointer = match kind {
-            RequestKind::PickWorkspace => "/workspace/root",
-            RequestKind::PickKore => "/inference/kore_image",
-            RequestKind::PickLlama => "/inference/llama_server",
-            RequestKind::PickModel => "/inference/model",
-            _ => return,
-        };
-        if let Some(slot) = config.pointer_mut(pointer) {
-            *slot = Value::String(path.into());
-            self.editor = Some(text_editor::Content::with_text(
-                &serde_json::to_string_pretty(&config).unwrap_or_default(),
-            ));
-            self.preflight = None;
-        }
-    }
-
     fn view(&self, viewport: Size) -> UiElement<'_> {
-        let base: UiElement<'_> = if viewport.width <= 720.0 {
-            self.main_panel()
+        let base: UiElement<'_> = if !self.settings_loaded {
+            container(
+                column![
+                    widgets::display("Loading settings"),
+                    widgets::mono(
+                        "Application preferences are loaded before project content.",
+                        theme::TEXT_MUTED,
+                    ),
+                ]
+                .spacing(theme::SPACE_2),
+            )
+            .center(Length::Fill)
+            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
+            .into()
+        } else if viewport.width <= 720.0 {
+            self.main_panel(viewport)
         } else if viewport.width <= 1050.0 {
-            row![self.sidebar(210.0), self.main_panel()]
+            row![self.sidebar(210.0), self.main_panel(viewport)]
                 .height(Length::Fill)
                 .into()
         } else {
-            row![self.sidebar(248.0), self.main_panel()]
+            row![self.sidebar(248.0), self.main_panel(viewport)]
                 .height(Length::Fill)
                 .into()
         };
@@ -1787,13 +2705,18 @@ impl Model {
                 .height(Length::Fill)
                 .into();
         }
-        if self.editor.is_some() {
-            stack![base, self.modal_layer(self.editor_panel())]
+        if self.approval.is_some() {
+            stack![base, self.modal_layer(self.approval_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
-        } else if self.approval.is_some() {
-            stack![base, self.modal_layer(self.approval_panel())]
+        } else if self.workspace_selection_open {
+            stack![base, self.modal_layer(self.workspace_selection_panel())]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if self.settings_open {
+            stack![base, self.modal_layer(self.settings_panel())]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -1846,7 +2769,7 @@ impl Model {
             let active = self.selected == Some(index);
             let backend = project["inference"]["backend"]
                 .as_str()
-                .unwrap_or("deterministic")
+                .unwrap_or("unconfigured")
                 .replace('_', " ");
             let access = project["workspace"]["access"]
                 .as_str()
@@ -1891,7 +2814,6 @@ impl Model {
             );
         }
         let project_idle = self.project().is_some() && self.session.is_none();
-        let project_editable = self.project().is_some() && self.prompt_id.is_none() && !self.busy;
         let nav = |label, message| {
             button(widgets::nav(label))
                 .height(34)
@@ -1928,7 +2850,7 @@ impl Model {
                 .height(theme::CONTROL_SM)
                 .padding([0, 10])
                 .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press(Message::NewProject)
+                .on_press_maybe(new_project_selectable(self.busy).then_some(Message::NewProject),)
             )
             .padding(10),
             container(space::Space::new().height(1).width(Length::Fill)).style(|_| theme::panel(
@@ -1939,8 +2861,9 @@ impl Model {
             container(
                 column![
                     nav(
-                        "Project settings",
-                        project_editable.then_some(Message::EditProject)
+                        "Close chat",
+                        (self.session.is_some() && !self.busy && self.prompt_id.is_none())
+                            .then_some(Message::ToggleSession)
                     ),
                     nav(
                         "Duplicate project",
@@ -1955,6 +2878,7 @@ impl Model {
                         project_idle.then_some(Message::ArchiveProject)
                     ),
                     nav("Transcript & audit", Some(Message::View(View::Session))),
+                    nav("Settings  Ctrl+,", Some(Message::OpenSettings)),
                 ]
                 .spacing(3)
             )
@@ -1972,7 +2896,7 @@ impl Model {
             .into()
     }
 
-    fn main_panel(&self) -> UiElement<'_> {
+    fn main_panel(&self, viewport: Size) -> UiElement<'_> {
         let project_name = self
             .project()
             .and_then(|p| p["name"].as_str())
@@ -1984,14 +2908,18 @@ impl Model {
             Some(project) => {
                 let backend = project["inference"]["backend"]
                     .as_str()
-                    .unwrap_or("deterministic")
+                    .unwrap_or("unconfigured")
                     .replace('_', " ");
-                let root = project["workspace"]["root"]
-                    .as_str()
-                    .unwrap_or("no workspace");
+                let root = if project["workspace"]["virtual_only"] == true {
+                    "No focus folder"
+                } else {
+                    project["workspace"]["root"]
+                        .as_str()
+                        .unwrap_or("No focus folder")
+                };
                 match self.session.as_deref() {
                     Some(session) => format!("{backend} · {root} · {session}"),
-                    None => format!("{backend} · {root} · sandbox stopped"),
+                    None => format!("{backend} · {root} · No chat open"),
                 }
             }
         };
@@ -2004,31 +2932,104 @@ impl Model {
                 )))
                 .on_press(Message::View(target))
         };
-        let top = container(
-            row![
-                column![
-                    widgets::body(project_name.to_owned(), theme::SIZE_SM, theme::TEXT)
-                        .wrapping(iced_core::text::Wrapping::None)
-                        .ellipsis(iced_core::text::Ellipsis::End),
-                    widgets::mono(subtitle, theme::TEXT_MUTED)
-                        .wrapping(iced_core::text::Wrapping::None)
-                        .ellipsis(iced_core::text::Ellipsis::End),
-                ]
-                .spacing(2)
-                .width(Length::Fill)
-                .clip(true),
-                view_button("Session", View::Session),
-                view_button("Agents", View::Agents),
-                view_button("Filesystem", View::Filesystem),
+        let mut top_content = row![
+            column![
+                widgets::body(project_name.to_owned(), theme::SIZE_SM, theme::TEXT)
+                    .wrapping(iced_core::text::Wrapping::None)
+                    .ellipsis(iced_core::text::Ellipsis::End),
+                widgets::mono(subtitle, theme::TEXT_MUTED)
+                    .wrapping(iced_core::text::Wrapping::None)
+                    .ellipsis(iced_core::text::Ellipsis::End),
             ]
-            .spacing(6)
-            .align_y(alignment::Vertical::Center),
-        )
-        .padding([0, 22])
-        .height(64)
-        .width(Length::Fill)
-        .align_y(alignment::Vertical::Center)
-        .style(|_| divider_bottom(theme::BACKGROUND));
+            .spacing(2)
+            .width(Length::Fill)
+            .clip(true)
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center);
+        if self.project().is_some() {
+            top_content = top_content.push(
+                button(widgets::control("New chat"))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press_maybe(
+                        (!self.busy && self.prompt_id.is_none()).then_some(Message::CleanSession),
+                    ),
+            );
+        }
+        top_content = top_content.push(view_button("Session", View::Session));
+        if self.viewport.width > 720.0 {
+            top_content = top_content
+                .push(view_button("Agents", View::Agents))
+                .push(view_button("Filesystem", View::Filesystem));
+        } else {
+            if self.project().is_none() {
+                top_content = top_content.push(
+                    button(widgets::control_upper("New project"))
+                        .height(30)
+                        .padding([0, 12])
+                        .style(widgets::button_style(widgets::Button::Secondary))
+                        .on_press_maybe(
+                            new_project_selectable(self.busy).then_some(Message::NewProject),
+                        ),
+                );
+            }
+            top_content = top_content.push(
+                button(widgets::control_upper("Settings"))
+                    .height(30)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Choice(false)))
+                    .on_press(Message::OpenSettings),
+            );
+        }
+        let top = container(top_content)
+            .padding([0, 22])
+            .height(64)
+            .width(Length::Fill)
+            .align_y(alignment::Vertical::Center)
+            .style(|_| divider_bottom(theme::BACKGROUND));
+        let status_color = if self.status.contains("refused")
+            || self.status.contains("failed")
+            || self.status.contains("unavailable")
+        {
+            theme::ERROR
+        } else {
+            theme::TEXT_MUTED
+        };
+        let runtime_label = match self.runtime_status["phase"].as_str() {
+            Some("model_starting") => "Loading AI model…",
+            Some("model_ready" | "preparing") => "Preparing assistant…",
+            Some("vm_booting") => "Starting Kore…",
+            Some("hostlink_connected") => "Connected to Kore…",
+            Some("supervisor_starting" | "bootstrap_ready") => "Starting assistant…",
+            Some("supervisor_ready" | "broker_ready") => "Assistant ready",
+            Some("unavailable") => "Assistant connection unavailable",
+            Some("failed") => self.runtime_status["message"]
+                .as_str()
+                .unwrap_or("Assistant startup failed"),
+            _ => "Checking assistant readiness…",
+        };
+        let mut status_content = row![
+            widgets::mono(runtime_label.to_owned(), theme::TEXT_MUTED),
+            widgets::mono(self.status.clone(), status_color),
+        ]
+        .spacing(12);
+        if self.runtime_status["phase"] == "failed" {
+            status_content = status_content.push(
+                button(widgets::control_upper("Retry"))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press(Message::RetryRuntime),
+            );
+        }
+        let status_bar = container(status_content)
+            .padding([0, 22])
+            .height(28)
+            .width(Length::Fill)
+            .align_y(alignment::Vertical::Center)
+            .style(|_| divider_bottom(theme::BACKGROUND));
 
         if self.view != View::Session {
             let graph = &self.topology_graph;
@@ -2040,7 +3041,12 @@ impl Model {
                 _ => inspector::agents(
                     graph,
                     &self.topology_filesystem,
-                    self.topology.selected.as_deref(),
+                    self.topology.selected.as_deref().filter(|id| {
+                        self.view != View::Filesystem
+                            || graph.index_of(id).is_some_and(|index| {
+                                graph.agents[index].role != model::Role::Broker
+                            })
+                    }),
                 ),
             };
             let canvas: UiElement<'_> = if self.view == View::Agents {
@@ -2065,6 +3071,7 @@ impl Model {
             }
             return container(column![
                 top,
+                status_bar,
                 self.topology_controls(),
                 layers.height(Length::Fill)
             ])
@@ -2079,7 +3086,7 @@ impl Model {
         let conversation: UiElement<'_> = if self.events.is_empty() {
             container(space::vertical()).height(Length::Fill).into()
         } else {
-            let mut items = column![].spacing(theme::SPACE_4);
+            let mut items = column![].spacing(44.0);
             let prompts = self
                 .events
                 .iter()
@@ -2093,28 +3100,41 @@ impl Model {
                     .collect::<Vec<_>>();
                 let started_at = event_timestamp(user);
                 let user_key = format!("prompt:{prompt_id}:user");
-                items = items.push(
-                    column![
-                        widgets::label(message_meta("You", user, None), theme::TEXT_MUTED),
-                        container(self.selectable(
-                            &user_key,
-                            theme::SIZE_SM,
-                            theme::TEXT,
-                            fonts::BODY
-                        ))
-                        .padding([13, 15])
-                        .width(Length::Fill)
-                        .style(|_| theme::panel(
-                            theme::PANEL,
-                            Some(theme::BORDER),
-                            theme::RADIUS_LG
-                        )),
-                    ]
-                    .spacing(theme::SPACE_2),
+                let sidebar_width = if viewport.width <= 720.0 {
+                    0.0
+                } else if viewport.width <= 1050.0 {
+                    210.0
+                } else {
+                    248.0
+                };
+                let transcript_width = (viewport.width - sidebar_width - 80.0).max(160.0);
+                let message_width = user_message_width(
+                    user["payload"]["text"].as_str().unwrap_or_default(),
+                    transcript_width,
                 );
+                let user_time = started_at.and_then(format_event_time).unwrap_or_default();
+                let user_block = container(
+                    column![
+                        self.selectable_width(
+                            &user_key,
+                            message_width,
+                            theme::SIZE_SM,
+                            theme::TEXT_MUTED,
+                            fonts::body()
+                        ),
+                        text(user_time)
+                            .font(fonts::MONO_MEDIUM)
+                            .size(theme::SIZE_MONO)
+                            .line_height(iced_core::text::LineHeight::Relative(1.0))
+                            .color(theme::rgb(theme::TEXT_MUTED)),
+                    ]
+                    .spacing(theme::SPACE_2)
+                    .align_x(alignment::Horizontal::Right),
+                )
+                .align_right(Length::Fill);
+                let mut turn = column![user_block].spacing(18.0);
 
                 let rows = work_rows(&prompt_events);
-                let step_count = rows.len();
                 let terminal = prompt_events
                     .iter()
                     .find(|event| event["kind"] == "prompt_terminal");
@@ -2129,9 +3149,16 @@ impl Model {
                     })
                     .or(started_at);
                 let work_title = if active {
-                    "Working".to_owned()
+                    "Working…".to_owned()
                 } else if failed {
-                    "Stopped · failed".to_owned()
+                    format!(
+                        "Failed after {}",
+                        format_elapsed(
+                            ended_at
+                                .unwrap_or_default()
+                                .saturating_sub(started_at.unwrap_or_default())
+                        )
+                    )
                 } else {
                     format!(
                         "Worked for {}",
@@ -2142,126 +3169,291 @@ impl Model {
                         )
                     )
                 };
-                let state_color = if active {
+                let work_color = if active {
                     theme::MAGENTA
                 } else if failed {
                     theme::ERROR
                 } else {
-                    theme::SUCCESS
+                    theme::TEXT_MUTED
                 };
                 let expanded = self.expanded_work.contains(prompt_id);
                 let work_header = button(
                     row![
-                        container(space::Space::new().width(5).height(5))
-                            .style(move |_| theme::panel(state_color, None, 1.0)),
-                        widgets::label(work_title, theme::TEXT),
-                        space::horizontal(),
-                        widgets::mono(
-                            format!(
-                                "{step_count} step{}",
-                                if step_count == 1 { "" } else { "s" }
-                            ),
-                            theme::TEXT_MUTED
-                        ),
-                        widgets::mono(
-                            if expanded { "\u{25b2}" } else { "\u{25bc}" },
-                            theme::TEXT_MUTED
-                        ),
+                        text(work_title)
+                            .font(fonts::body())
+                            .size(theme::SIZE_SM)
+                            .line_height(iced_core::text::LineHeight::Relative(1.5)),
+                        text(if expanded { "\u{25be}" } else { "\u{25b8}" })
+                            .font(fonts::MONO)
+                            .size(9)
+                            .color(theme::rgb(theme::TEXT_MUTED)),
                     ]
-                    .spacing(9)
+                    .spacing(7)
                     .align_y(alignment::Vertical::Center),
                 )
-                .padding([10, 13])
-                .width(Length::Fill)
-                .style(widgets::button_style(widgets::Button::Ghost))
+                .padding(0)
+                .style(widgets::disclosure_button_style(work_color))
                 .on_press(Message::ToggleWorking(prompt_id.to_owned()));
-                let mut timeline = column![work_header].spacing(0);
+                let mut timeline = column![work_header].spacing(12);
                 if expanded {
-                    let mut details = column![].spacing(theme::SPACE_2);
+                    let mut details = column![].spacing(10);
+                    let timings = self
+                        .model_timings
+                        .get(prompt_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !timings.is_empty() {
+                        details = details.push(widgets::body(
+                            "Model speed",
+                            theme::SIZE_SM,
+                            theme::TEXT_SECONDARY,
+                        ));
+                        details = details.push(widgets::mono(
+                            "Completed calls · input processing and output generation",
+                            theme::TEXT_MUTED,
+                        ));
+                        for timing in timings {
+                            details = details.push(
+                                column![
+                                    widgets::body(
+                                        timing.role.clone(),
+                                        theme::SIZE_SM,
+                                        theme::TEXT_SECONDARY
+                                    ),
+                                    widgets::mono(
+                                        format!("Input (prefill): {}", timing.input),
+                                        theme::TEXT_MUTED
+                                    ),
+                                    widgets::mono(
+                                        format!("Output: {}", timing.output),
+                                        theme::TEXT_MUTED
+                                    ),
+                                    widgets::mono(timing.cached.clone(), theme::TEXT_MUTED),
+                                ]
+                                .spacing(4),
+                            );
+                        }
+                    }
                     if rows.is_empty() {
-                        details = details
-                            .push(widgets::mono("waiting for the sandbox", theme::TEXT_MUTED));
+                        let phase = if broker_selection_pending(&prompt_events) {
+                            "Broker selecting capabilities…"
+                        } else {
+                            "Kore preparing the agent…"
+                        };
+                        details = details.push(widgets::mono(phase, theme::TEXT_MUTED));
                     }
                     for (index, work) in rows.into_iter().enumerate() {
-                        // The label carries the row's meaning: the accent for
-                        // authority and broker activity, error red for a
-                        // failure, off-white for ordinary progress.
                         let label_color = match work.kind.as_str() {
                             "error" => theme::ERROR,
-                            "authority" | "broker_proposal" | "capability" => theme::MAGENTA,
-                            _ => theme::TEXT,
+                            "authority" | "decision" if work.speaker == "Broker" => theme::MAGENTA,
+                            "authority" => theme::MAGENTA,
+                            _ => theme::TEXT_MUTED,
                         };
                         let body_color = if work.kind == "error" {
                             theme::ERROR
                         } else {
-                            theme::TEXT_SECONDARY
+                            theme::CHAT_TEXT
                         };
                         let work_key = format!("prompt:{prompt_id}:work:{index}");
-                        details = details.push(
-                            container(
-                                column![
-                                    widgets::label(&work.speaker, label_color),
-                                    self.selectable(
-                                        &work_key,
-                                        theme::SIZE_MONO,
-                                        body_color,
-                                        fonts::MONO
-                                    ),
-                                ]
-                                .spacing(theme::SPACE_1),
+                        let mut label = row![
+                            text(work.speaker.clone())
+                                .font(fonts::body())
+                                .size(13)
+                                .line_height(iced_core::text::LineHeight::Relative(1.45))
+                                .color(theme::rgb(label_color))
+                        ]
+                        .spacing(theme::SPACE_1);
+                        if let Some(context) = &work.context {
+                            label = label.push(
+                                text(format!("· {context}"))
+                                    .font(fonts::body())
+                                    .size(13)
+                                    .line_height(iced_core::text::LineHeight::Relative(1.45))
+                                    .color(theme::rgb(theme::TEXT_MUTED)),
+                            );
+                        }
+                        let mut card = column![self.selectable(
+                            &work_key,
+                            theme::SIZE_MONO,
+                            body_color,
+                            fonts::MONO,
+                            1.6,
+                        )]
+                        .spacing(theme::SPACE_1);
+                        if let Some(output) = &work.output {
+                            let output_key = format!("{work_key}:output");
+                            let output_expanded = self.expanded_outputs.contains(&output_key);
+                            let output_button = button(
+                                text(format!(
+                                    "{} {}",
+                                    if output_expanded {
+                                        "\u{25be}"
+                                    } else {
+                                        "\u{25b8}"
+                                    },
+                                    output.summary
+                                ))
+                                .font(fonts::MONO_NAV)
+                                .size(11)
+                                .line_height(iced_core::text::LineHeight::Relative(1.6)),
                             )
-                            .padding([8, 10])
-                            .width(Length::Fill)
-                            .style(|_| {
-                                theme::panel(
-                                    theme::BACKGROUND,
-                                    Some(theme::BORDER),
-                                    theme::RADIUS_SM,
-                                )
-                            }),
+                            .padding(0)
+                            .style(widgets::disclosure_button_style(theme::TEXT_MUTED))
+                            .on_press(Message::ToggleWorkOutput(output_key.clone()));
+                            let mut output_group = column![output_button].spacing(6);
+                            if output_expanded {
+                                output_group = output_group.push(
+                                    container(
+                                        scrollable(self.selectable(
+                                            &output_key,
+                                            theme::SIZE_MONO,
+                                            if output.failed {
+                                                theme::ERROR
+                                            } else {
+                                                theme::TEXT_SECONDARY
+                                            },
+                                            fonts::MONO,
+                                            1.6,
+                                        ))
+                                        .height(Length::Fill)
+                                        .direction(scrollable::Direction::Vertical(
+                                            scrollable::Scrollbar::hidden(),
+                                        ))
+                                        .style(widgets::hidden_scrollbar),
+                                    )
+                                    .padding([8, 10])
+                                    .height(work_output_height(&output.body))
+                                    .width(Length::Fill)
+                                    .style(|_| {
+                                        theme::panel(
+                                            theme::BACKGROUND,
+                                            Some(theme::BORDER),
+                                            theme::RADIUS_SM,
+                                        )
+                                    }),
+                                );
+                            }
+                            card = card.push(output_group);
+                        }
+                        details = details.push(
+                            column![
+                                label,
+                                container(card)
+                                    .padding([9, 11])
+                                    .width(Length::Fill)
+                                    .style(|_| {
+                                        theme::panel(theme::CHAT_ROW, None, theme::RADIUS_SM)
+                                    }),
+                            ]
+                            .spacing(6),
                         );
                     }
                     timeline = timeline.push(
                         container(details)
-                            .padding([12, 13])
-                            .width(Length::Fill)
-                            .style(|_| divider_top(theme::PANEL)),
+                            .padding(iced_core::Padding {
+                                top: 0.0,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: 22.0,
+                            })
+                            .width(Length::Fill),
                     );
                 }
-                items =
-                    items.push(container(timeline).width(Length::Fill).style(|_| {
-                        theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG)
-                    }));
+                if working_panel_visible(&self.settings) {
+                    turn = turn.push(timeline);
+                }
 
-                if let Some(assistant) = prompt_events.iter().find(|event| {
+                if prompt_events.iter().any(|event| {
                     event["kind"] == "assistant" && event["public"].as_bool().unwrap_or(false)
-                }) {
-                    let assistant_key = format!("prompt:{prompt_id}:assistant");
-                    items = items.push(
-                        column![
-                            widgets::label(
-                                message_meta("Validated assistant", assistant, started_at),
-                                theme::TEXT_MUTED
-                            ),
-                            // The one magenta border in the turn: a validated
-                            // answer is the only thing that earns the accent.
-                            container(self.selectable(
-                                &assistant_key,
-                                theme::SIZE_SM,
+                }) && let Some(blocks) = self.assistant_blocks.get(prompt_id)
+                {
+                    let mut response_blocks = column![].spacing(theme::SPACE_4);
+                    for (index, block) in blocks.iter().enumerate() {
+                        let key = format!("prompt:{prompt_id}:assistant:{index}");
+                        let element: UiElement<'_> = match block {
+                            AssistantBlock::Heading { level, .. } => self.selectable_markdown(
+                                &key,
+                                if *level <= 2 {
+                                    theme::SIZE_DISPLAY
+                                } else {
+                                    theme::SIZE_MD
+                                },
                                 theme::TEXT,
-                                fonts::BODY
+                                fonts::body(),
+                            ),
+                            AssistantBlock::Paragraph(_) => self.selectable_markdown(
+                                &key,
+                                theme::SIZE_MD,
+                                theme::TEXT,
+                                fonts::body(),
+                            ),
+                            AssistantBlock::List(_) => container(self.selectable_markdown(
+                                &key,
+                                theme::SIZE_MD,
+                                theme::TEXT,
+                                fonts::body(),
                             ))
-                            .padding([13, 15])
+                            .padding(iced_core::Padding {
+                                top: 0.0,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: 12.0,
+                            })
+                            .into(),
+                            AssistantBlock::Quote(_) => container(self.selectable_markdown(
+                                &key,
+                                theme::SIZE_MD,
+                                theme::TEXT_SECONDARY,
+                                fonts::body(),
+                            ))
+                            .padding(iced_core::Padding {
+                                top: 4.0,
+                                right: 0.0,
+                                bottom: 4.0,
+                                left: 12.0,
+                            })
+                            .style(|_| divider_left(theme::BACKGROUND))
+                            .into(),
+                            AssistantBlock::Code { language, .. } => container(
+                                column![
+                                    widgets::label(
+                                        if language.is_empty() {
+                                            "Code"
+                                        } else {
+                                            language
+                                        },
+                                        theme::TEXT_MUTED
+                                    ),
+                                    self.selectable(
+                                        &key,
+                                        theme::SIZE_MONO,
+                                        theme::TEXT_SECONDARY,
+                                        fonts::MONO,
+                                        1.6,
+                                    ),
+                                ]
+                                .spacing(theme::SPACE_2),
+                            )
+                            .padding([12, 14])
                             .width(Length::Fill)
-                            .style(|_| theme::panel(
-                                theme::PANEL,
-                                Some(theme::MAGENTA),
-                                theme::RADIUS_LG
-                            )),
-                        ]
-                        .spacing(theme::SPACE_2),
-                    );
+                            .style(|_| {
+                                theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_MD)
+                            })
+                            .into(),
+                        };
+                        response_blocks = response_blocks.push(element);
+                    }
+                    turn = turn.push(container(response_blocks).padding(iced_core::Padding {
+                        top: 0.0,
+                        right: 64.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    }));
                 }
+                items = items.push(
+                    container(container(turn).width(transcript_width.min(820.0)))
+                        .center_x(Length::Fill),
+                );
             }
             container(
                 scrollable(items)
@@ -2314,11 +3506,36 @@ impl Model {
             .height(96)
             .padding([14, 16])
             .size(theme::SIZE_SM)
-            .font(fonts::BODY)
+            .font(fonts::body())
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .style(widgets::composer_editor);
+        let update_button: UiElement<'_> = if self.prompt_id.is_some() {
+            button(widgets::control(self.permission_update_label()))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    self.can_update_permissions()
+                        .then_some(Message::SendPermissionUpdate),
+                )
+                .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
+        let update_status: UiElement<'_> = if let Some(message) = self.permission_update_message() {
+            container(widgets::body(
+                message,
+                theme::SIZE_SM,
+                theme::TEXT_SECONDARY,
+            ))
+            .padding([4, 16])
+            .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
         let composer = container(column![
             prompt,
+            update_status,
             container(
                 row![
                     space::horizontal(),
@@ -2329,6 +3546,7 @@ impl Model {
                             Some(theme::BORDER),
                             theme::RADIUS_SM
                         )),
+                    update_button,
                     send,
                 ]
                 .spacing(theme::SPACE_2)
@@ -2343,7 +3561,16 @@ impl Model {
             .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0)),
         ])
         .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG));
-        let composer_wrap = container(composer)
+        let sidebar_width = if viewport.width <= 720.0 {
+            0.0
+        } else if viewport.width <= 1050.0 {
+            210.0
+        } else {
+            248.0
+        };
+        let composer_width = (viewport.width - sidebar_width - 80.0).clamp(160.0, 820.0);
+        let composer_wrap = container(container(composer).width(composer_width))
+            .center_x(Length::Fill)
             .padding(iced_core::Padding {
                 top: 10.0,
                 right: 40.0,
@@ -2352,7 +3579,7 @@ impl Model {
             })
             .width(Length::Fill)
             .style(|_| theme::panel(theme::BACKGROUND, None, 0.0));
-        container(column![top, conversation, composer_wrap])
+        container(column![top, status_bar, conversation, composer_wrap])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
@@ -2488,530 +3715,250 @@ impl Model {
         .into()
     }
 
-    fn editor_panel(&self) -> UiElement<'_> {
-        let source = self.editor.as_ref().expect("editor panel requires content");
-        let config = serde_json::from_str::<Value>(&source.text()).unwrap_or(Value::Null);
-        let value = |pointer: &str| {
-            config
-                .pointer(pointer)
-                .map(|value| match value {
-                    Value::String(value) => value.clone(),
-                    Value::Null => String::new(),
-                    Value::Array(values) => values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default()
-        };
-        let field = |label: &'static str, pointer: &'static str, placeholder: &'static str| {
-            column![
-                text(label)
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_SECONDARY)),
-                text_input(placeholder, value(pointer))
-                    .on_input(move |value| Message::WizardField(pointer, value))
-                    .padding([9, 10])
-                    .size(12)
-                    .style(input_style),
-            ]
-            .spacing(6)
-        };
-        let picker = |label: &'static str,
-                      pointer: &'static str,
-                      placeholder: &'static str,
-                      kind: RequestKind| {
-            column![
-                text(label)
-                    .size(11)
-                    .color(theme::rgb(theme::TEXT_SECONDARY)),
-                row![
-                    text_input(placeholder, value(pointer))
-                        .on_input(move |value| Message::WizardField(pointer, value))
-                        .padding([9, 10])
-                        .size(12)
-                        .style(input_style),
-                    button(widgets::control("Browse"))
-                        .height(34)
-                        .padding([0, 10])
-                        .style(widgets::button_style(widgets::Button::Secondary))
-                        .on_press(Message::Browse(kind)),
-                ]
-                .spacing(6),
-            ]
-            .spacing(6)
-        };
-        let toggle = |label: &'static str, pointer: &'static str| {
-            let checked = config
-                .pointer(pointer)
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            button(
-                row![
-                    container(widgets::mono(
-                        if checked { "\u{2713}" } else { " " },
-                        theme::MAGENTA,
-                    ))
-                    .width(16)
-                    .height(16)
-                    .align_x(alignment::Horizontal::Center)
-                    .align_y(alignment::Vertical::Center)
-                    .style(move |_| theme::panel(
-                        theme::BACKGROUND,
-                        Some(if checked {
-                            theme::MAGENTA
-                        } else {
-                            theme::BORDER
-                        }),
-                        theme::RADIUS_SM,
-                    )),
-                    widgets::body(
-                        label.to_owned(),
-                        theme::SIZE_SM,
-                        if checked {
-                            theme::TEXT
-                        } else {
-                            theme::TEXT_SECONDARY
-                        }
-                    ),
-                ]
-                .spacing(theme::SPACE_2)
-                .align_y(alignment::Vertical::Center),
-            )
-            .padding([7, 8])
-            .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Ghost))
-            .on_press(Message::WizardToggle(pointer))
-        };
-        let choice = |label: &'static str, pointer: &'static str, option: &'static str| {
-            let selected = config.pointer(pointer).and_then(Value::as_str) == Some(option);
-            button(widgets::control(label))
+    fn settings_panel(&self) -> UiElement<'_> {
+        let selected_model = self.settings["default_model_id"].as_str().unwrap_or("");
+        let mut model_choices = column![];
+        if let Some(models) = self.settings["models"].as_array() {
+            for model in models {
+                let id = model["id"].as_str().unwrap_or_default().to_owned();
+                let name = model["display_name"]
+                    .as_str()
+                    .unwrap_or("Unnamed model")
+                    .to_owned();
+                let backend = model["backend"].as_str().unwrap_or("unknown");
+                let provider = model["provider"].as_str().unwrap_or("unknown");
+                let path = model["path"].as_str().unwrap_or("built in");
+                let status = model["status"].as_str().unwrap_or("unavailable");
+                let detail = model["detail"]
+                    .as_str()
+                    .unwrap_or("Restore the model files or choose another installed model.");
+                let selected = id == selected_model;
+                let selectable = model_option_selectable(status, selected, self.busy);
+                let description = if status == "installed" {
+                    format!("{provider} · {backend} · {path}")
+                } else {
+                    format!("{provider} · {backend} · {detail}")
+                };
+                let action = button(widgets::control(if selected {
+                    "Active"
+                } else if status == "installed" {
+                    "Use model"
+                } else {
+                    "Unavailable"
+                }))
                 .height(theme::CONTROL_SM)
                 .padding([0, 12])
                 .style(widgets::button_style(widgets::Button::Choice(selected)))
-                .on_press(Message::WizardChoice(pointer, option))
-        };
-
-        let page: UiElement<'_> = match self.wizard_page {
-            0 => column![
-                row![
-                    field("Project name", "/name", "My project"),
-                    field("Portable project ID", "/id", "my-project"),
-                ]
-                .spacing(13),
-                picker(
-                    "Workspace root",
-                    "/workspace/root",
-                    "Choose a project folder",
-                    RequestKind::PickWorkspace,
-                ),
-                field(
-                    "vKore state directory",
-                    "/workspace/state",
-                    "Outside the workspace"
-                ),
-                column![
-                    text("Workspace access")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_SECONDARY)),
-                    row![
-                        choice("Read only", "/workspace/access", "read_only"),
-                        choice("Review changes", "/workspace/access", "review_changes"),
-                        choice(
-                            "Automatic writeback",
-                            "/workspace/access",
-                            "automatic_writeback"
-                        ),
-                    ]
-                    .spacing(6),
-                ]
-                .spacing(6),
-                row![
-                    field("Maximum write bytes", "/workspace/max_write_bytes", "0"),
-                    field("Maximum write files", "/workspace/max_write_files", "0"),
-                ]
-                .spacing(13),
-            ]
-            .spacing(13)
-            .into(),
-            1 => {
-                let real = config.pointer("/inference/backend").and_then(Value::as_str)
-                    == Some("llama_cpp");
-                let mut form = column![
-                    column![
-                        text("Inference backend")
-                            .size(11)
-                            .color(theme::rgb(theme::TEXT_SECONDARY)),
-                        row![
-                            choice(
-                                "Deterministic security oracle",
-                                "/inference/backend",
-                                "deterministic"
-                            ),
-                            choice("llama.cpp", "/inference/backend", "llama_cpp"),
-                        ]
-                        .spacing(6),
-                    ]
-                    .spacing(6),
-                    picker(
-                        "Kore guest image",
-                        "/inference/kore_image",
-                        "Optional for deterministic testing",
-                        RequestKind::PickKore
-                    ),
-                ]
-                .spacing(13);
-                if real {
-                    form = form
-                        .push(picker(
-                            "llama-server executable",
-                            "/inference/llama_server",
-                            "llama-server",
-                            RequestKind::PickLlama,
-                        ))
-                        .push(picker(
-                            "GGUF model",
-                            "/inference/model",
-                            "Model file",
-                            RequestKind::PickModel,
-                        ))
-                        .push(field(
-                            "Advanced llama.cpp arguments",
-                            "/inference/extra_args",
-                            "--device none",
-                        ));
-                }
-                form.push(
-                    row![
-                        field("Context tokens", "/inference/context_tokens", "32768"),
-                        field("Output tokens", "/inference/output_tokens", "512"),
-                        field("Threads", "/inference/threads", "4"),
-                        field("Inference slots", "/inference/slots", "3"),
-                    ]
-                    .spacing(10),
-                )
-                .push(
-                    container(text(if real {
-                        "llama.cpp runs behind the authenticated Kore bridge; paths remain host-side configuration."
-                    } else {
-                        "Deterministic mode tests the complete authenticated broker, agent, tool, and UI flow without downloading a model."
-                    }).size(11).color(theme::rgb(theme::MAGENTA)))
-                    .padding(10)
-                    .style(|_| theme::panel(theme::PANEL, Some(theme::SUCCESS), theme::RADIUS_MD)),
-                )
-                .into()
+                .on_press_maybe(selectable.then_some(Message::ChooseDefaultModel(id)));
+                model_choices = model_choices.push(settings_row(name, description, action.into()));
             }
-            2 => {
-                let mut addons = column![
-                    widgets::display("Host and guest add-ons"),
-                    text("Enable only the bounded capabilities this project needs. Authority is still proposed per prompt.")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                ]
-                .spacing(8);
-                if let Some(entries) = self.catalog["addons"].as_array() {
-                    for addon in entries {
-                        let id = addon["id"].as_str().unwrap_or_default().to_owned();
-                        let name = addon["name"].as_str().unwrap_or("Add-on");
-                        let domain = addon["domain"].as_str().unwrap_or("bounded");
-                        let enabled = config["addons"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|selected| selected["id"] == id && selected["enabled"] == true);
-                        let mut detail = addon["tools"]
-                            .as_array()
-                            .map(|tools| {
-                                tools
-                                    .iter()
-                                    .map(|tool| {
-                                        format!(
-                                            "{} ({})",
-                                            tool["name"].as_str().unwrap_or("tool"),
-                                            tool["risk"]
-                                                .as_str()
-                                                .unwrap_or("bounded")
-                                                .replace('_', " ")
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .filter(|tools| !tools.is_empty())
-                            .unwrap_or_else(|| "No declared tools".into());
-                        let destinations = addon["network_destinations"]
-                            .as_array()
-                            .map(|entries| {
-                                entries
-                                    .iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .filter(|entries| !entries.is_empty())
-                            .unwrap_or_else(|| "no network destinations".into());
-                        detail.push_str(" · ");
-                        detail.push_str(&destinations);
-                        addons = addons.push(
-                            button(
-                                row![
-                                    container(widgets::mono(
-                                        if enabled { "✓" } else { "" },
-                                        theme::MAGENTA,
-                                    ))
-                                    .width(16)
-                                    .height(16)
-                                    .align_x(alignment::Horizontal::Center)
-                                    .align_y(alignment::Vertical::Center)
-                                    .style(move |_| {
-                                        theme::panel(
-                                            theme::BACKGROUND,
-                                            Some(if enabled {
-                                                theme::MAGENTA
-                                            } else {
-                                                theme::BORDER
-                                            }),
-                                            3.0,
-                                        )
-                                    }),
-                                    column![
-                                        text(domain.to_uppercase())
-                                            .size(9)
-                                            .color(theme::rgb(theme::TEXT_MUTED)),
-                                        text(name.to_owned())
-                                            .size(12)
-                                            .color(theme::rgb(theme::TEXT)),
-                                        text(detail).size(11).color(theme::rgb(theme::TEXT_MUTED)),
-                                    ]
-                                    .spacing(4),
-                                ]
-                                .spacing(12)
-                                .align_y(alignment::Vertical::Top),
-                            )
-                            .padding(12)
-                            .width(Length::Fill)
-                            .style(widgets::button_style(widgets::Button::Choice(enabled)))
-                            .on_press(Message::WizardAddon(id)),
-                        );
-                    }
-                }
-                addons.into()
-            }
-            3 => column![
-                text("Authority defaults")
-                    .size(13)
-                    .color(theme::rgb(theme::TEXT)),
-                row![
-                    choice("Allow once", "/approvals/default_scope", "once"),
-                    choice("For this session", "/approvals/default_scope", "session"),
-                ]
-                .spacing(6),
-                toggle(
-                    "Confirm external writes",
-                    "/approvals/confirm_external_writes"
-                ),
-                toggle(
-                    "Confirm destructive operations",
-                    "/approvals/confirm_destructive"
-                ),
-                toggle(
-                    "Enable standing policy",
-                    "/approvals/standing_policy_enabled"
-                ),
-                container(space::Space::new().height(1).width(Length::Fill))
-                    .style(|_| theme::panel(theme::BORDER, None, 0.0)),
-                text("Retention and project limits")
-                    .size(13)
-                    .color(theme::rgb(theme::TEXT)),
-                row![
-                    field("Transcript days", "/retention/transcript_days", "30"),
-                    field("Memory (MiB)", "/resources/memory_mib", "2048"),
-                    field("Virtual CPUs", "/resources/virtual_cpus", "2"),
-                ]
-                .spacing(10),
-                row![
-                    field("Prompt timeout (s)", "/resources/prompt_seconds", "300"),
-                    field("Agent limit", "/resources/agent_limit", "4"),
-                ]
-                .spacing(10),
-                toggle(
-                    "Clean Kore KV state on close",
-                    "/retention/clean_kv_on_close"
-                ),
-                toggle(
-                    "Retain raw model output",
-                    "/retention/retain_raw_model_output"
-                ),
-            ]
-            .spacing(10)
-            .into(),
-            _ => {
-                let report = self.preflight.as_deref().unwrap_or(
-                    "Run preflight to resolve paths, scan workspace bounds, and verify the selected runtime before saving.",
-                );
-                column![
-                    text("Review and preflight")
-                        .size(13)
-                        .color(theme::rgb(theme::TEXT)),
-                    container(
-                        column![
-                            text(value("/name")).size(16).color(theme::rgb(theme::TEXT)),
-                            text(format!(
-                                "{} · {}",
-                                value("/workspace/access"),
-                                value("/inference/backend")
-                            ))
-                            .size(11)
-                            .color(theme::rgb(theme::TEXT_MUTED)),
-                            text(value("/workspace/root"))
-                                .size(11)
-                                .color(theme::rgb(theme::TEXT_SECONDARY)),
-                        ]
-                        .spacing(6),
-                    )
-                    .padding(13)
-                    .width(Length::Fill)
-                    .style(|_| theme::panel(
-                        theme::BACKGROUND,
-                        Some(theme::BORDER),
-                        theme::RADIUS_SM
-                    )),
-                    container(text(report.to_owned()).size(11).color(rgb(
-                        if self.preflight.is_some() {
-                            0xb8ef6a
-                        } else {
-                            0xf5c66a
-                        }
-                    )))
-                    .padding(11)
-                    .width(Length::Fill)
-                    // Warning before a preflight has run, success after it.
-                    .style(|_| theme::panel(
-                        theme::PANEL,
-                        Some(if self.preflight.is_some() {
-                            theme::SUCCESS
-                        } else {
-                            theme::WARNING
-                        }),
-                        theme::RADIUS_MD
-                    )),
-                    text("Advanced portable configuration")
-                        .size(11)
-                        .color(theme::rgb(theme::TEXT_MUTED)),
-                    text_editor(source)
-                        .on_action(Message::ConfigAction)
-                        .height(150)
-                        .size(11)
-                        .style(widgets::editor),
-                ]
-                .spacing(11)
-                .into()
-            }
-        };
-
-        // The strip names each step and says where the reader is, rather
-        // than showing five anonymous rules.
-        const STEPS: [&str; 5] = [
-            "01 workspace",
-            "02 runtime",
-            "03 add-ons",
-            "04 policy",
-            "05 review",
-        ];
-        let mut steps = row![].spacing(6);
-        for (index, label) in STEPS.iter().enumerate() {
-            let position = match index.cmp(&usize::from(self.wizard_page)) {
-                core::cmp::Ordering::Equal => widgets::Step::Current,
-                core::cmp::Ordering::Less => widgets::Step::Complete,
-                core::cmp::Ordering::Greater => widgets::Step::Upcoming,
-            };
-            steps = steps.push(
-                button(widgets::control_upper(label))
-                    .height(28)
-                    .padding([0, 8])
-                    .width(Length::Fill)
-                    .style(widgets::button_style(widgets::Button::Step(position)))
-                    .on_press(Message::WizardPage(index as u8)),
-            );
         }
-        let back = button(widgets::control("Back"))
-            .height(theme::CONTROL_SM)
-            .padding([0, 12])
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press_maybe(self.wizard_page.checked_sub(1).map(Message::WizardPage));
-        let next: UiElement<'_> = if self.wizard_page < 4 {
-            button(widgets::control("Next"))
+        let general = settings_section("General", model_choices.into());
+        let mut locations = column![settings_row(
+            "Search authorized documents",
+            "Read-only discovery across selected folders. Only files granted to a task appear in its filesystem.",
+            button(widgets::control("Add folder"))
                 .height(theme::CONTROL_SM)
-                .padding([0, 14])
-                .style(widgets::button_style(widgets::Button::Primary))
-                .on_press(Message::WizardPage(self.wizard_page + 1))
-                .into()
-        } else {
-            row![
-                button(widgets::control("Run preflight"))
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe((!self.busy).then_some(Message::AddSearchLocation))
+                .into(),
+        )];
+        for location in self.settings["authorized_locations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            locations = locations.push(settings_row(
+                location.to_owned(),
+                "Read-only search",
+                button(widgets::control("Remove"))
                     .height(theme::CONTROL_SM)
                     .padding([0, 12])
                     .style(widgets::button_style(widgets::Button::Secondary))
-                    .on_press_maybe((!self.busy).then_some(Message::Preflight)),
-                // Saving stays closed until a preflight has actually run.
-                button(widgets::control("Save project"))
-                    .height(theme::CONTROL_SM)
-                    .padding([0, 14])
-                    .style(widgets::button_style(widgets::Button::Primary))
                     .on_press_maybe(
-                        (!self.busy && self.preflight.is_some()).then_some(Message::SaveProject)
-                    ),
-            ]
-            .spacing(theme::SPACE_2)
-            .into()
-        };
-        let dialog = column![
-            glass_header(
-                "Project configuration",
-                "portable vkore schema · no credentials or capabilities are stored here",
-                Some(Message::CloseEditor),
+                        (!self.busy).then_some(Message::RemoveSearchLocation(location.to_owned())),
+                    )
+                    .into(),
+            ));
+        }
+        let discovery = settings_section("Document access", locations.into());
+
+        let automatic = self
+            .project()
+            .is_some_and(|project| project["workspace"]["access"] == "automatic_writeback");
+        let workspace = settings_section(
+            "Workspace",
+            settings_row(
+                "Apply file changes automatically",
+                "Current project only. Off blocks host writeback; an interactive review/apply workflow is not yet available. Changes take effect when the project is reopened.",
+                button(widgets::control(if automatic { "On" } else { "Off" }))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Choice(automatic)))
+                    .on_press_maybe(
+                        (self.project().is_some() && !self.busy)
+                            .then_some(Message::ToggleAutomaticWriteback),
+                    )
+                    .into(),
             ),
-            container(steps).padding(iced_core::Padding {
-                top: 14.0,
-                right: 20.0,
-                bottom: 0.0,
-                left: 20.0,
-            }),
-            container(
-                scrollable(page)
-                    .direction(scrollable::Direction::Vertical(
-                        scrollable::Scrollbar::hidden()
-                    ))
-                    .style(widgets::hidden_scrollbar)
-                    .height(Length::Fill)
-            )
-            .padding(20),
-            container(
-                row![
-                    button(widgets::control("Cancel"))
-                        .height(theme::CONTROL_SM)
-                        .padding([0, 12])
-                        .style(widgets::button_style(widgets::Button::Ghost))
-                        .on_press(Message::CloseEditor),
-                    space::horizontal(),
-                    back,
-                    next,
-                ]
-                .spacing(theme::SPACE_2)
-                .align_y(alignment::Vertical::Center),
-            )
-            .padding([14, 20])
-            .width(Length::Fill)
-            .style(|_| glass_top_edge()),
-        ];
+        );
+
+        let selected_font = self.settings["body_font"]
+            .as_str()
+            .unwrap_or("design_default");
+        let mut font_choices = row![].spacing(theme::SPACE_2);
+        for (id, label) in [
+            ("design_default", "Design default"),
+            ("archivo", "Archivo"),
+            ("jetbrains_mono", "JetBrains Mono"),
+        ] {
+            let selected = id == selected_font;
+            font_choices = font_choices.push(
+                button(widgets::control(label))
+                    .height(theme::CONTROL_SM)
+                    .padding([0, 12])
+                    .style(widgets::button_style(widgets::Button::Choice(selected)))
+                    .on_press_maybe(
+                        (!selected && !self.busy).then_some(Message::ChooseBodyFont(id.to_owned())),
+                    ),
+            );
+        }
+        let appearance = settings_section(
+            "Appearance",
+            settings_row(
+                "Body font",
+                "Choose the application body face. Machine-shaped activity stays monospace.",
+                font_choices.into(),
+            ),
+        );
+
+        let show_working = self.settings["show_working"].as_bool().unwrap_or(true);
+        let expanded = self.settings["working_expanded_default"]
+            .as_bool()
+            .unwrap_or(false);
+        let show_working_control = button(widgets::control(if show_working {
+            "Shown"
+        } else {
+            "Hidden"
+        }))
+        .height(theme::CONTROL_SM)
+        .padding([0, 12])
+        .style(widgets::button_style(widgets::Button::Choice(show_working)))
+        .on_press_maybe((!self.busy).then_some(Message::ToggleShowWorking));
+        let expanded_control = button(widgets::control(if expanded {
+            "Expanded"
+        } else {
+            "Collapsed"
+        }))
+        .height(theme::CONTROL_SM)
+        .padding([0, 12])
+        .style(widgets::button_style(widgets::Button::Choice(expanded)))
+        .on_press_maybe((show_working && !self.busy).then_some(Message::ToggleWorkingExpanded));
+        let interface = settings_section(
+            "Interface",
+            column![
+                settings_row(
+                    "Show Working panel",
+                    "Hiding Working changes presentation only; transcript and audit data remain intact.",
+                    show_working_control.into(),
+                ),
+                settings_row(
+                    "Expand Working by default",
+                    "Open the Working panel automatically when it is shown.",
+                    expanded_control.into(),
+                ),
+            ]
+            .into(),
+        );
+
+        let mut activity_rows = column![];
+        match &self.activity {
+            None => {
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
+                    "Loading bounded local activity summaries…",
+                    widgets::label("Loading", theme::TEXT_MUTED).into(),
+                ));
+            }
+            Some(Err(error)) => {
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
+                    format!("Activity unavailable: {error}"),
+                    widgets::label("Unavailable", theme::ERROR).into(),
+                ));
+            }
+            Some(Ok(entries)) if entries.is_empty() => {
+                activity_rows = activity_rows.push(settings_row(
+                    "Recent sessions",
+                    "No local sessions have been recorded yet.",
+                    widgets::label("Empty", theme::TEXT_MUTED).into(),
+                ));
+            }
+            Some(Ok(entries)) => {
+                for entry in entries {
+                    let status = entry["status"].as_str().unwrap_or("unknown");
+                    let color = match status {
+                        "failed" => theme::ERROR,
+                        "cancelled" => theme::WARNING,
+                        "completed" | "closed" => theme::SUCCESS,
+                        _ => theme::MAGENTA,
+                    };
+                    let time = entry["updated_at_unix_ms"]
+                        .as_u64()
+                        .and_then(format_event_time)
+                        .unwrap_or_else(|| "time unavailable".into());
+                    let prompts = entry["prompts"].as_u64().unwrap_or_default();
+                    activity_rows = activity_rows.push(settings_row(
+                        entry["project_name"]
+                            .as_str()
+                            .unwrap_or("Unknown project")
+                            .to_owned(),
+                        format!(
+                            "{} · {} · {} prompt{} · session {}",
+                            entry["model"].as_str().unwrap_or("Unavailable"),
+                            time,
+                            prompts,
+                            if prompts == 1 { "" } else { "s" },
+                            entry["session_id"].as_str().unwrap_or("unavailable"),
+                        ),
+                        widgets::label(status, color).into(),
+                    ));
+                }
+            }
+        }
+        let activity = settings_section("Activity", activity_rows.into());
+
+        let content = column![
+            general, discovery, workspace, appearance, interface, activity,
+        ]
+        .spacing(theme::SPACE_8);
+        let modal_width = (self.viewport.width - 64.0).clamp(280.0, 920.0);
+        let modal_height = (self.viewport.height - 64.0).clamp(240.0, 720.0);
         backdrop_filter(
-            container(dialog)
-                .width(760)
-                .height(Length::FillPortion(9))
-                .style(|_| glass_surface())
-                .into(),
+            container(column![
+                settings_header(),
+                scrollable(
+                    container(content)
+                        .padding(iced_core::Padding {
+                            top: theme::SPACE_6,
+                            right: theme::SPACE_8,
+                            bottom: theme::SPACE_8,
+                            left: theme::SPACE_8,
+                        })
+                        .width(Length::Fill),
+                )
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::hidden(),
+                ))
+                .style(widgets::hidden_scrollbar)
+                .height(Length::Fill),
+            ])
+            .width(modal_width)
+            .height(modal_height)
+            .style(|_| glass_surface())
+            .into(),
             14.0,
             theme::RADIUS_GLASS,
         )
@@ -3077,10 +4024,100 @@ impl Model {
         .style(|_| glass_surface())
         .into(), 14.0, theme::RADIUS_GLASS)
     }
+
+    fn workspace_selection_panel(&self) -> UiElement<'_> {
+        let target_message = if self.busy {
+            None
+        } else {
+            Some(Message::ChooseWorkspaceFolder)
+        };
+        let target_hint = if self.workspace_drop_hovered {
+            "Release to use this folder"
+        } else {
+            "Click to open the system folder picker"
+        };
+        let target = button(
+            container(
+                column![
+                    widgets::body("Select or drop a folder here", theme::SIZE_MD, theme::TEXT,),
+                    widgets::mono(target_hint, theme::TEXT_MUTED),
+                ]
+                .spacing(theme::SPACE_2)
+                .align_x(alignment::Horizontal::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(132)
+        .padding(theme::SPACE_4)
+        .style(widgets::button_style(widgets::Button::Choice(
+            self.workspace_drop_hovered,
+        )))
+        .on_press_maybe(target_message);
+
+        let feedback: UiElement<'_> = if let Some(error) = &self.workspace_error {
+            widgets::body(error.clone(), theme::SIZE_SM, theme::ERROR).into()
+        } else {
+            widgets::mono(self.status.clone(), theme::TEXT_MUTED).into()
+        };
+        let details = column![
+            button(widgets::control("Create without a folder"))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe((!self.busy).then_some(Message::NewVirtualProject)),
+            target,
+            feedback
+        ]
+        .spacing(theme::SPACE_2);
+
+        backdrop_filter(
+            container(
+                column![
+                    glass_header(
+                        "New project",
+                        "An optional focus folder helps organize your task",
+                        (!self.busy).then_some(Message::CancelWorkspaceSelection),
+                    ),
+                    container(details).padding(20),
+                    container(
+                        row![
+                            widgets::mono(
+                                "Folders are validated before a project is opened.",
+                                theme::TEXT_MUTED,
+                            ),
+                            space::horizontal(),
+                            button(widgets::control("Cancel"))
+                                .height(theme::CONTROL_SM)
+                                .padding([0, 12])
+                                .style(widgets::button_style(widgets::Button::Secondary))
+                                .on_press_maybe(
+                                    (!self.busy).then_some(Message::CancelWorkspaceSelection),
+                                ),
+                        ]
+                        .spacing(theme::SPACE_2)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .padding([14, 20])
+                    .width(Length::Fill)
+                    .style(|_| glass_top_edge()),
+                ]
+                .width(Length::Fill),
+            )
+            .width(520)
+            .style(|_| glass_surface())
+            .into(),
+            14.0,
+            theme::RADIUS_GLASS,
+        )
+    }
 }
 
 struct App {
     model: Model,
+    proxy: EventLoopProxy<UserEvent>,
+    picker: Option<picker::Picker>,
     context: SoftContext<OwnedDisplayHandle>,
     surface: Option<SoftSurface<OwnedDisplayHandle, Rc<Window>>>,
     renderer: AxRenderer<System>,
@@ -3093,12 +4130,28 @@ struct App {
     redraw_requested: bool,
     last_frame: Option<Instant>,
     profile: bool,
+    render_error: Option<String>,
 }
 
 impl App {
     fn process_events(&mut self, window: &Rc<Window>) {
         if self.events.is_empty() {
             return;
+        }
+        if self.events.iter().any(opens_settings) {
+            self.model.update(if self.model.settings_open {
+                Message::CloseSettings
+            } else {
+                Message::OpenSettings
+            });
+        } else if self.model.settings_open && self.events.iter().any(closes_settings) {
+            self.model.update(Message::CloseSettings);
+        }
+        if self.model.workspace_selection_open
+            && !self.model.busy
+            && self.events.iter().any(closes_workspace_selection)
+        {
+            self.model.update(Message::CancelWorkspaceSelection);
         }
         let size = logical_size(window);
         self.model.fit_topology(size);
@@ -3183,13 +4236,17 @@ impl App {
             &mut self.renderer,
             &mut messages,
         );
-        let animate = matches!(
-            state,
-            user_interface::State::Updated {
-                redraw_request: iced_core::window::RedrawRequest::NextFrame,
-                ..
-            }
-        );
+        let animate = self
+            .model
+            .booted_at
+            .is_some_and(|at| at.elapsed() < splash::LENGTH)
+            || matches!(
+                state,
+                user_interface::State::Updated {
+                    redraw_request: iced_core::window::RedrawRequest::NextFrame,
+                    ..
+                }
+            );
         interface.draw(
             &mut self.renderer,
             &Theme::Dark,
@@ -3304,7 +4361,28 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Response(kind, result) => self.model.response(kind, result),
+            UserEvent::Response(kind, result) => {
+                if matches!(
+                    kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    self.picker.take();
+                }
+                self.model.response(kind, result);
+            }
+            UserEvent::PickDirectory(kind) => {
+                let proxy = self.proxy.clone();
+                match picker::Picker::open(move |result| {
+                    let result = result.map(|path| ApiResponse {
+                        content_type: "application/json".into(),
+                        body: serde_json::to_vec(&json!({"path":path})).unwrap(),
+                    });
+                    let _ = proxy.send_event(UserEvent::Response(kind, result));
+                }) {
+                    Ok(picker) => self.picker = Some(picker),
+                    Err(error) => self.model.response(kind, Err(error)),
+                }
+            }
             UserEvent::Poll(result) => self.model.poll_result(result),
         }
         self.redraw = true;
@@ -3328,7 +4406,24 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match &event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.picker.take();
+                event_loop.exit();
+            }
+            WindowEvent::HoveredFile(path) if self.model.workspace_selection_open => {
+                self.model.workspace_drop_hovered = path.is_dir() && !self.model.busy;
+                self.redraw = true;
+            }
+            WindowEvent::HoveredFileCancelled if self.model.workspace_selection_open => {
+                self.model.workspace_drop_hovered = false;
+                self.redraw = true;
+            }
+            WindowEvent::DroppedFile(path) if self.model.workspace_selection_open => {
+                self.model
+                    .update(Message::DropWorkspaceFolder(path.clone()));
+                self.redraw = true;
+                return;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = mouse::Cursor::Available(conversion::cursor_position(
                     *position,
@@ -3343,7 +4438,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.redraw
                     && let Err(error) = self.draw(&window)
                 {
-                    self.model.status = format!("Axiom render failed: {error}");
+                    // A message inside the broken renderer cannot report its
+                    // own failure. Stop instead of spinning on the last frame.
+                    eprintln!("vkore-ui: Axiom render failed: {error}");
+                    self.render_error = Some(error);
+                    self.redraw = false;
+                    event_loop.exit();
                 }
                 return;
             }
@@ -3416,6 +4516,10 @@ fn http(
     stream
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    parse_http_response(&bytes)
+}
+
+fn parse_http_response(bytes: &[u8]) -> Result<ApiResponse, String> {
     let split = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -3435,10 +4539,8 @@ fn http(
         })
         .map(|(_, value)| value.trim().to_owned())
         .unwrap_or_default();
-    let response = ApiResponse {
-        content_type,
-        body: bytes[split + 4..].to_vec(),
-    };
+    let body = decode_http_body(&headers, &bytes[split + 4..])?;
+    let response = ApiResponse { content_type, body };
     if (200..300).contains(&status) {
         Ok(response)
     } else {
@@ -3447,6 +4549,63 @@ fn http(
             .and_then(|value| value["error"].as_str().map(str::to_owned))
             .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
         Err(format!("HTTP {status}: {detail}"))
+    }
+}
+
+fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let transfer_encodings: Vec<_> = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(',').map(str::trim))
+        .collect();
+    match transfer_encodings.as_slice() {
+        [] => Ok(body.to_vec()),
+        [encoding] if encoding.eq_ignore_ascii_case("chunked") => decode_chunked_body(body),
+        _ => Err("unsupported HTTP transfer encoding".into()),
+    }
+}
+
+/// HTTP framing can split an SSE record or even a UTF-8 character. Reassemble
+/// bytes before either JSON or SSE parsing, including for HTTP error responses.
+fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>, String> {
+    fn line<'a>(body: &mut &'a [u8]) -> Result<&'a [u8], String> {
+        let end = body
+            .windows(2)
+            .position(|pair| pair == b"\r\n")
+            .ok_or("truncated HTTP chunk line")?;
+        let result = &body[..end];
+        *body = &body[end + 2..];
+        Ok(result)
+    }
+
+    let mut decoded = Vec::new();
+    loop {
+        let size_line = line(&mut body)?;
+        let size_text = size_line
+            .split(|byte| *byte == b';')
+            .next()
+            .unwrap_or_default();
+        if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_hexdigit) {
+            return Err("invalid HTTP chunk size".into());
+        }
+        let size = usize::from_str_radix(
+            std::str::from_utf8(size_text).map_err(|_| "invalid HTTP chunk size")?,
+            16,
+        )
+        .map_err(|_| "invalid HTTP chunk size")?;
+        if size == 0 {
+            // Consume optional trailers and require their terminating blank line.
+            while !line(&mut body)?.is_empty() {}
+            return Ok(decoded);
+        }
+        let end = size.checked_add(2).ok_or("invalid HTTP chunk size")?;
+        let chunk = body.get(..end).ok_or("truncated HTTP chunk data")?;
+        if &chunk[size..] != b"\r\n" {
+            return Err("malformed HTTP chunk terminator".into());
+        }
+        decoded.extend_from_slice(&chunk[..size]);
+        body = &body[end..];
     }
 }
 
@@ -3518,6 +4677,8 @@ fn main() {
         .expect("create software presentation context");
     let mut app = App {
         model: Model::with_launch_project(network, options.project),
+        proxy: event_loop.create_proxy(),
+        picker: None,
         context,
         surface: None,
         renderer: native_renderer(),
@@ -3533,17 +4694,297 @@ fn main() {
         redraw_requested: false,
         last_frame: None,
         profile: std::env::var_os("VKORE_UI_PROFILE").is_some(),
+        render_error: None,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
+    if app.render_error.is_some() {
+        std::process::exit(2);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authority_updates_expand_one_block_and_worker_failure_is_visible() {
+        let events = vec![
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Agent","label":"agent/prompt"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Budget","label":"budget/prompt"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Installed","kind":"Executable","label":"touch"}}),
+            json!({"kind":"error","prompt_id":"p","payload":{"stage":"agent_failure","message":"Agent failed before responding: RunnerExited(41)"}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"Teardown","kind":"Agent","label":"agent/frontend"}}),
+        ];
+        for count in 1..=events.len() {
+            let refs = events[..count].iter().collect::<Vec<_>>();
+            let rows = work_rows(&refs);
+            assert_eq!(
+                rows.iter().filter(|row| row.speaker == "Authority").count(),
+                1
+            );
+            let lines = rows[0].body.lines().count();
+            assert_eq!(
+                lines,
+                events[..count]
+                    .iter()
+                    .filter(|event| event["kind"] == "capability")
+                    .count()
+            );
+            if count >= 4 {
+                assert_eq!(rows[1].speaker, "Agent failed");
+                assert_eq!(rows[1].kind, "error");
+                assert!(rows[1].body.contains("RunnerExited(41)"));
+            }
+        }
+    }
     use hostlinkd::{
         BackendHarness, DeterministicBackend, DeterministicGuest, HarnessHttpServer, HarnessService,
     };
+
+    #[test]
+    fn rejected_submission_preserves_draft_and_admission_does_not_erase_new_edits() {
+        let mut model = populated_fixture_model();
+        model.session = Some("draft-test".into());
+        model.prompt_id = None;
+        let draft = "a".repeat(134);
+        model.prompt = text_editor::Content::with_text(&draft);
+        model.send_prompt();
+        assert_eq!(model.prompt.text(), draft);
+        model.response(
+            RequestKind::SendPrompt,
+            Err("Prompt must contain 1–128 UTF-8 bytes".into()),
+        );
+        assert_eq!(model.prompt.text(), draft);
+        assert!(model.prompt_id.is_none());
+        model.prompt = text_editor::Content::with_text("Hello");
+        model.send_prompt();
+        model.prompt = text_editor::Content::with_text("My next draft");
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        assert_eq!(model.prompt.text(), "My next draft");
+        model.prompt_id = None;
+        model.send_prompt();
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        assert!(model.prompt.text().is_empty());
+    }
+
+    fn permission_fixture() -> (Model, mpsc::Receiver<Request>) {
+        let mut model = populated_fixture_model();
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        model.network = Network {
+            sender: requests,
+            session: sessions,
+        };
+        model.session = Some("permission-session".into());
+        model.prompt_id = Some("permission-prompt".into());
+        model.events.clear();
+        model.prompt = text_editor::Content::with_text("Revoke input.");
+        (model, receiver)
+    }
+
+    fn permission_reply(request: &Request, status: &str) -> ApiResponse {
+        ApiResponse {
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&json!({
+                "request": request.body, "status": status, "revision": 7,
+                "message": if status == "applied" { "Input revoked." } else { "Update queued." }
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn permission_event(request: &Request, status: &str) -> Value {
+        json!({"kind": "authority_update", "session_id": "permission-session",
+        "prompt_id": "permission-prompt", "public": true, "payload": {
+            "update_id": request.body.as_ref().unwrap()["update_id"], "status": status,
+            "revision": 7, "message": "Input revoked."
+        }})
+    }
+
+    #[test]
+    fn permission_update_delivery_state_survives_background_chat_navigation() {
+        let (mut model, requests) = permission_fixture();
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                session: "chat-b".into(),
+                prompt_id: None,
+                draft: "B draft".into(),
+                events: vec![],
+                permission_update: None,
+            },
+        );
+        model.send_permission_update();
+        let first = requests.try_recv().unwrap();
+        model.update(Message::SelectProject(1));
+        model.response(first.kind, Err("reply lost after navigation".into()));
+        assert_eq!(model.prompt.text(), "B draft");
+        assert!(model.permission_update_message().is_none());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.permission_update_label(), "Retry update");
+        model.send_permission_update();
+        let retry = requests.try_recv().unwrap();
+        assert_eq!(retry.body, first.body);
+        model.update(Message::SelectProject(1));
+        model.response(retry.kind, Ok(permission_reply(&retry, "queued")));
+        assert_eq!(model.prompt.text(), "B draft");
+        model.update(Message::SelectProject(0));
+        assert!(model.prompt.text().is_empty());
+        model.poll_result(Ok(vec![permission_event(&retry, "applied")]));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+    }
+
+    #[test]
+    fn permission_update_retries_exact_request_and_preserves_new_draft() {
+        let (mut model, requests) = permission_fixture();
+        model.update(Message::SendPermissionUpdate);
+        let first = requests.try_recv().unwrap();
+        assert!(matches!(first.kind, RequestKind::PermissionUpdate(_)));
+        assert_eq!(
+            first.path,
+            "/api/v1/sessions/permission-session/prompts/permission-prompt/updates"
+        );
+        assert_eq!(first.body.as_ref().unwrap()["text"], "Revoke input.");
+        model.update(Message::SendPermissionUpdate);
+        assert!(requests.try_recv().is_err());
+        model.response(first.kind, Err("response lost".into()));
+        assert_eq!(model.prompt.text(), "Revoke input.");
+        assert_eq!(model.permission_update_label(), "Retry update");
+        model.prompt = text_editor::Content::with_text("My next chat draft");
+        model.update(Message::SendPermissionUpdate);
+        let retry = requests.try_recv().unwrap();
+        assert_eq!(
+            (retry.kind, &retry.path, &retry.body),
+            (first.kind, &first.path, &first.body)
+        );
+        model.response(retry.kind, Ok(permission_reply(&retry, "queued")));
+        assert_eq!(model.prompt.text(), "My next chat draft");
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.can_update_permissions());
+        let mut foreign = permission_event(&retry, "applied");
+        foreign["session_id"] = json!("another-session");
+        model.permission_update_event(&foreign);
+        assert!(!model.can_update_permissions());
+        model.poll_result(Ok(vec![permission_event(&retry, "applied")]));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.events.iter().any(|event| matches!(
+            event["kind"].as_str(),
+            Some("assistant" | "error" | "prompt_terminal")
+        )));
+        let rows = work_rows(&model.events.iter().collect::<Vec<_>>());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].context.as_deref(), Some("Update applied"));
+    }
+
+    #[test]
+    fn permission_update_ignores_stale_replies_and_clears_only_acknowledged_unchanged_drafts() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let first = requests.try_recv().unwrap();
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert!(model.prompt.text().is_empty());
+        model.permission_update_event(&permission_event(&first, "applied"));
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        model.send_permission_update();
+        let next = requests.try_recv().unwrap();
+        assert_ne!(first.kind, next.kind);
+        assert_ne!(
+            first.body.as_ref().unwrap()["update_id"],
+            next.body.as_ref().unwrap()["update_id"]
+        );
+        model.response(first.kind, Ok(permission_reply(&first, "applied")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.session = Some("new-session".into());
+        model.prompt_id = Some("new-prompt".into());
+        model.response(next.kind, Ok(permission_reply(&next, "queued")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert!(model.permission_update_message().is_none());
+    }
+
+    #[test]
+    fn permission_update_requires_active_prompt_and_validates_bound_and_testimony() {
+        let (mut model, requests) = permission_fixture();
+        model.prompt_id = None;
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt_id = Some("permission-prompt".into());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(129));
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(128));
+        model.send_permission_update();
+        let request = requests.try_recv().unwrap();
+        let mut malformed = permission_event(&request, "applied");
+        malformed["payload"]["revision"] = json!(0);
+        model.permission_update_event(&malformed);
+        assert!(authority_updates::work_row(&malformed).is_none());
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.permission_update_event(&permission_event(&request, "failed"));
+        assert!(model.can_update_permissions());
+        model.events.push(json!({"kind":"assistant", "session_id":"permission-session", "prompt_id":"permission-prompt", "public":true}));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        let rows = work_rows(&[
+            &permission_event(&request, "refused"),
+            &permission_event(&request, "failed"),
+            &permission_event(&request, "cancelled"),
+        ]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.context.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Update refused", "Update unconfirmed", "Update cancelled"]
+        );
+    }
+
+    #[test]
+    fn permission_update_tracks_external_pending_and_hides_old_prompt_status() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let own = requests.try_recv().unwrap();
+        model.response(own.kind, Ok(permission_reply(&own, "applied")));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        let mut other = permission_event(&own, "queued");
+        other["payload"]["update_id"] = json!("another-client");
+        model.poll_result(Ok(vec![other.clone()]));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        other["payload"]["status"] = json!("cancelled");
+        model.poll_result(Ok(vec![other]));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt_id = Some("a-new-prompt".into());
+        assert!(model.permission_update_message().is_none());
+        assert!(model.can_update_permissions());
+    }
 
     fn populated_fixture_model() -> Model {
         let (requests, _request_receiver) = mpsc::channel();
@@ -3597,12 +5038,15 @@ mod tests {
         model.session = Some("session-5f37cccc".into());
         model.expanded_work.insert("native-prompt".into());
         model.events = vec![
-            json!({"kind":"user_prompt","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_000_000_u64,"payload":{"text":"Read the verification file and explain the result."}}),
-            json!({"kind":"inference","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_001_000_u64,"payload":{"kind":"ModelOutputChunk","role":"broker","turn":1,"payload":"Granting the exact read capability."}}),
-            json!({"kind":"tool_call","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_002_000_u64,"payload":{"tool":"read_workspace","path":"tool-test.txt"}}),
-            json!({"kind":"tool_result","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_003_000_u64,"payload":{"text":"MANIFOLD-ORANGE-742"}}),
-            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"text":"The verification code is MANIFOLD-ORANGE-742. The read stayed inside the project workspace and used prompt-scoped authority."}}),
-            json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"status":"completed"}}),
+            json!({"kind":"user_prompt","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_000_000_u64,"payload":{"text":"The broker keeps refusing the second tool call on the ingress project. Walk the transcript: widen the workspace to review_changes, the agent asks for cat on config/ingress.toml, that lands, then the follow-up write is denied with policy:write-tracked. I want to know whether the denial comes from workspace access mode, the add-on tool ceiling, or the standing policy being off, and what the smallest change is that lets the write through without granting blanket write access to the whole tree."}}),
+            json!({"kind":"broker_proposal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_002_000_u64,"payload":{"action":"intent_claimed","objects":3,"turns":8}}),
+            json!({"kind":"broker_proposal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_004_000_u64,"payload":{"action":"install_scoped_object","path":"workspace/config/ingress.toml"}}),
+            json!({"kind":"capability","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_006_000_u64,"payload":{"state":"installed","kind":"object","tools":["read","cat"]}}),
+            json!({"kind":"tool_call","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_008_000_u64,"payload":{"command":"cat","arguments":["Path(\"/config/ingress.toml\")"],"call_id":1,"execution_domain":"guest"}}),
+            json!({"kind":"tool_result","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_010_000_u64,"payload":{"call_id":1,"result":"output","text":"[gate]\nmode = \"review_changes\"\ntracked = true"}}),
+            json!({"kind":"error","prompt_id":"native-prompt","generation":1,"timestamp_unix_ms":1_750_000_012_000_u64,"payload":{"message":"write workspace file /config/ingress.generated.toml refused\npolicy:write-tracked · tool not present in add-on ceiling"}}),
+            json!({"kind":"assistant","prompt_id":"native-prompt","public":true,"timestamp_unix_ms":1_750_000_030_000_u64,"payload":{"text":"The denial is not the workspace access mode. `review_changes` already permits a staged write; it only requires the diff be held for review instead of applied in place.\n\nThe refusal comes from the add-on tool ceiling. The broker can install a read object for `config/ingress.toml` through the built-in cat path, but there is no ceiling entry that covers a write tool.\n\nStanding policy being off is not the cause either. The smallest change is to add the tracked write tool for the generated file only."}}),
+            json!({"kind":"prompt_terminal","prompt_id":"native-prompt","timestamp_unix_ms":1_750_000_031_000_u64,"payload":{"status":"completed"}}),
         ];
         // Events set directly bypass the update path that keeps the selectable
         // conversation editors in step, and the view expects them present.
@@ -3787,6 +5231,7 @@ mod tests {
             path: path.into(),
             name: name.into(),
             kind,
+            object_kind: kind,
             parent,
         };
         model.topology_filesystem = filesystem::Filesystem {
@@ -3956,6 +5401,28 @@ mod tests {
     }
 
     #[test]
+    fn native_http_decodes_chunk_boundaries_inside_large_unicode_events() {
+        let event = json!({"text": "é".repeat(20_000)});
+        let data = format!("data: {}\n\n", event).into_bytes();
+        let mut wire = Vec::new();
+        for chunk in data.chunks(127) {
+            wire.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            wire.extend_from_slice(chunk);
+            wire.extend_from_slice(b"\r\n");
+        }
+        wire.extend_from_slice(b"0\r\n\r\n");
+        let body =
+            decode_http_body("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked", &wire).unwrap();
+        let parsed = parse_sse(ApiResponse {
+            content_type: "text/event-stream".into(),
+            body,
+        })
+        .unwrap();
+        assert_eq!(parsed, vec![event]);
+        assert!(decode_http_body("Transfer-Encoding: chunked", b"20\r\nshort").is_err());
+    }
+
+    #[test]
     fn control_labels_follow_the_vertical_center_of_their_button_shape() {
         fonts::register().expect("MONOLITH faces register");
         for height in [26.0, 28.0, 30.0, 32.0, 34.0] {
@@ -3980,6 +5447,8 @@ mod tests {
                 mouse::Cursor::Unavailable,
             );
             let frame = renderer.take_frame().expect("a control frame");
+            let errors = renderer.take_text_errors();
+            assert!(errors.is_empty(), "control text errors: {errors:?}");
             let quad = frame.quads().first().expect("the button shape");
             let label = frame.glyph_runs().first().expect("the button label");
             let shape_center = quad.bounds.y + quad.bounds.height / 2.0;
@@ -3993,13 +5462,6 @@ mod tests {
 
     #[test]
     fn shared_dividers_are_single_edges_instead_of_nested_boxes() {
-        let top = divider_top(theme::PANEL);
-        assert_eq!(top.border.width, 0.0);
-        assert_eq!(top.border_sides.top.width, 1.0);
-        assert_eq!(top.border_sides.right.width, 0.0);
-        assert_eq!(top.border_sides.bottom.width, 0.0);
-        assert_eq!(top.border_sides.left.width, 0.0);
-
         let right = divider_right(theme::BACKGROUND);
         assert_eq!(right.border.width, 0.0);
         assert_eq!(right.border_sides.top.width, 0.0);
@@ -4016,9 +5478,56 @@ mod tests {
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
+        if let Ok(state) = std::env::var("VKORE_UI_PERMISSION_UPDATE") {
+            let (mut active, requests) = permission_fixture();
+            active.events.push(json!({"kind":"user_prompt", "session_id":"permission-session",
+                "prompt_id":"permission-prompt", "payload":{"text":"Inspect the project input files."}}));
+            active.send_permission_update();
+            let request = requests.try_recv().unwrap();
+            if state == "uncertain" {
+                active.response(request.kind, Err("capture: response lost".into()));
+            } else {
+                active.response(request.kind, Ok(permission_reply(&request, "queued")));
+                active.poll_result(Ok(vec![permission_event(&request, &state)]));
+            }
+            active.expanded_work.insert("permission-prompt".into());
+            active.events_changed();
+            model = active;
+        }
+        if let Ok(path) = std::env::var("VKORE_UI_TRACE") {
+            model.events = std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            model.session = model
+                .events
+                .first()
+                .and_then(|event| event["session_id"].as_str())
+                .map(str::to_owned);
+            model.projects = vec![
+                json!({"id":"trace-replay","name":"Recorded chat","inference":{"backend":"llama_cpp"},"workspace":{"virtual_only":true}}),
+            ];
+            model.expanded_work = model
+                .events
+                .iter()
+                .filter_map(|event| event["prompt_id"].as_str().map(str::to_owned))
+                .collect();
+            model.status = "Recorded trace preview".into();
+            model.events_changed();
+        }
         if std::env::var_os("VKORE_UI_EMPTY").is_some() {
             model.events.clear();
             model.selectable_text.clear();
+        }
+        if std::env::var_os("VKORE_UI_EXPAND_OUTPUTS").is_some() {
+            model.expanded_outputs.extend(
+                model
+                    .selectable_text
+                    .keys()
+                    .filter(|key| key.ends_with(":output"))
+                    .cloned(),
+            );
         }
         if let Ok(view) = std::env::var("VKORE_UI_VIEW") {
             model.view = match view.as_str() {
@@ -4026,16 +5535,14 @@ mod tests {
                 "filesystem" => View::Filesystem,
                 _ => View::Session,
             };
+            model.settings_open = view == "settings";
         }
         if let Ok(ms) = std::env::var("VKORE_UI_SPLASH") {
             let elapsed = std::time::Duration::from_millis(ms.parse().unwrap_or(0));
             model.booted_at = Instant::now().checked_sub(elapsed);
         }
-        if std::env::var("VKORE_UI_WIZARD").is_ok() {
-            model.update(Message::EditProject);
-            if let Ok(page) = std::env::var("VKORE_UI_WIZARD_PAGE") {
-                model.wizard_page = page.parse().unwrap_or(0);
-            }
+        if std::env::var("VKORE_UI_SETTINGS").is_ok() {
+            model.settings_open = true;
         }
         if std::env::var_os("VKORE_UI_APPROVAL").is_some() {
             model.approval = Some(json!({
@@ -4052,16 +5559,33 @@ mod tests {
         if let Ok(selected) = std::env::var("VKORE_UI_SELECT") {
             model.topology.selected = Some(selected);
         }
-        let size = Size::new(1280.0, 800.0);
+        let capture_fast = std::env::var_os("VKORE_UI_CAPTURE_FAST").is_some();
+        let capture_width = capture_fast
+            .then(|| std::env::var("VKORE_UI_WIDTH").ok()?.parse().ok())
+            .flatten()
+            .unwrap_or(1280_u32);
+        let capture_height = capture_fast
+            .then(|| std::env::var("VKORE_UI_HEIGHT").ok()?.parse().ok())
+            .flatten()
+            .unwrap_or(800_u32);
+        let capture_scale: f32 = std::env::var("VKORE_UI_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+        assert!(capture_scale.is_finite() && (1.0..=4.0).contains(&capture_scale));
+        let size = Size::new(
+            capture_width as f32 / capture_scale,
+            capture_height as f32 / capture_scale,
+        );
         model.fit_topology(size);
-        let extent = Extent2d::new(1280, 800).unwrap();
+        let extent = Extent2d::new(capture_width, capture_height).unwrap();
         let mut renderer = native_renderer();
         renderer.hint(Scale {
-            window: 1.0,
+            window: capture_scale,
             application: 1.0,
         });
         let mut cache = user_interface::Cache::new();
-        let mut target = vec![0u32; 1280 * 800];
+        let mut target = vec![0u32; capture_width as usize * capture_height as usize];
         let mut record_ns = Vec::new();
         let mut kernel_full_ns = Vec::new();
         let mut reference_full_ns = Vec::new();
@@ -4085,7 +5609,6 @@ mod tests {
             .map(|(x, y)| mouse::Cursor::Available(iced_core::Point::new(x, y)))
             .unwrap_or(mouse::Cursor::Unavailable);
         let capture_press = std::env::var_os("VKORE_UI_PRESS").is_some();
-        let capture_fast = std::env::var_os("VKORE_UI_CAPTURE_FAST").is_some();
 
         for iteration in 0..if capture_fast { 1 } else { 70 } {
             let started = Instant::now();
@@ -4134,7 +5657,7 @@ mod tests {
             backend.invalidate_for_measurement();
             assert!(backend.begin_frame(&frame));
             let stats = backend
-                .render_changed(&frame, &mut target, extent, 1280)
+                .render_changed(&frame, &mut target, extent, capture_width as usize)
                 .unwrap();
             benchmark_frame = Some(frame.clone());
             benchmark_masks = masks.clone();
@@ -4152,8 +5675,8 @@ mod tests {
             write_ppm(
                 &std::env::var("VKORE_UI_CAPTURE")
                     .expect("VKORE_UI_CAPTURE_FAST requires VKORE_UI_CAPTURE"),
-                1280,
-                800,
+                capture_width as usize,
+                capture_height as usize,
                 &target,
             );
             return;
@@ -4353,13 +5876,31 @@ mod tests {
     }
 
     #[test]
+    fn prompt_phase_distinguishes_broker_selection_from_agent_work() {
+        let selecting = [
+            json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"create a file"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelOutputChunk","role":"Broker","payload":"{\"action\":"}}),
+        ];
+        let selecting = selecting.iter().collect::<Vec<_>>();
+        assert!(broker_selection_pending(&selecting));
+
+        let working = [
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Validation","role":"Broker","accepted":true,"payload":""}}),
+            json!({"kind":"capability","prompt_id":"p","payload":{"state":"installed","tools":["touch"]}}),
+        ];
+        let working = working.iter().collect::<Vec<_>>();
+        assert!(!broker_selection_pending(&working));
+    }
+
+    #[test]
     fn working_rows_show_sanitized_proposal_execution_and_result() {
-        let events = vec![
+        let events = [
             json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"read X"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read X\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",[],1,null],[31,\"x\",\"cat\",[],2,null]]}"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelPrompt","role":"Broker","payload":"SECRET SYSTEM PROMPT"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"ModelOutputChunk","role":"Broker","payload":"{\"action\":"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"selectors\":[31,18]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"accepted":true,"detail":"accepted by strict KBR1 validation","kind":"Validation","role":"Broker","payload":""}}),
             json!({"kind":"broker_proposal","prompt_id":"p","payload":{"kind":"BrokerProposal","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":2},\"label\":\"agent/prompt\",\"selectors\":[31,18]}"}}),
             json!({"kind":"tool_call","prompt_id":"p","payload":{"kind":"ToolCall","role":"Agent","payload":"{\"arguments\":[\"Path(\\\"/X\\\")\"],\"call_id\":1,\"command\":\"cat\"}"}}),
             json!({"kind":"tool_call","prompt_id":"p","payload":{"command":"cat","arguments":"[Path(\"/X\")]"}}),
@@ -4372,18 +5913,31 @@ mod tests {
 
         assert_eq!(
             rows.len(),
-            3,
+            2,
             "duplicate calls and hidden records stay hidden"
         );
         assert_eq!(rows[0].speaker, "Broker");
-        assert_eq!(rows[0].body, "Proposed: create_agent(Agent 1, [cat], [X])");
+        assert_eq!(
+            rows[0].body,
+            "create_agent(agent · tools [cat] · resources [X])"
+        );
         assert_eq!(rows[1].speaker, "Agent 1");
-        assert_eq!(rows[1].body, "Executing: cat X");
-        assert_eq!(rows[2].speaker, "Tool");
-        assert_eq!(rows[2].body, "Result (result): MANIFOLD-ORANGE-742");
+        assert_eq!(rows[1].context.as_deref(), Some("tool · guest"));
+        assert_eq!(rows[1].body, "cat /X");
+        assert_eq!(rows[1].output.as_ref().unwrap().body, "MANIFOLD-ORANGE-742");
         let visible = rows
             .iter()
-            .map(|row| format!("{}: {}", row.speaker, row.body))
+            .map(|row| {
+                format!(
+                    "{}: {}\n{}",
+                    row.speaker,
+                    row.body,
+                    row.output
+                        .as_ref()
+                        .map(|output| output.body.as_str())
+                        .unwrap_or_default()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!visible.contains("SECRET SYSTEM PROMPT"));
@@ -4392,8 +5946,49 @@ mod tests {
     }
 
     #[test]
-    fn rejected_raw_broker_proposal_is_visible_before_validation_failure() {
-        let events = vec![
+    fn validated_llama_broker_schema_resolves_tools_and_resources() {
+        let events = [
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"create secret\",\"offer_catalog\":[{\"index\":0,\"kind\":\"executable\",\"label\":\"touch\",\"permitted_ops\":4,\"max_uses\":2},{\"index\":1,\"kind\":\"executable\",\"label\":\"write\",\"permitted_ops\":4,\"max_uses\":2},{\"index\":2,\"kind\":\"view\",\"label\":\"workspace/root\",\"permitted_ops\":7,\"max_uses\":4}]}"}}),
+            json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"label\":\"writer\",\"executables\":[0,1],\"resources\":[2],\"budget\":{\"tool_calls\":3}}"}}),
+            json!({"kind":"validation","prompt_id":"p","payload":{"accepted":true,"detail":"accepted by strict KBR1 validation","kind":"Validation","role":"Broker","payload":""}}),
+            json!({"kind":"broker_proposal","prompt_id":"p","payload":{"action":"CreateAgent","selectors":["00","01","02"],"label":"writer"}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].speaker, "Broker");
+        assert_eq!(
+            rows[0].body,
+            "create_agent(writer · tools [touch, write] · resources [root] · 3 tool calls)"
+        );
+    }
+
+    #[test]
+    fn authority_rows_render_the_current_prompt_selection_without_inventing_a_tool() {
+        let events = [
+            json!({"kind":"capability","prompt_id":"hello","payload":{"state":"installed","tools":[],"capabilities":[],"scope":"prompt"}}),
+            json!({"kind":"capability","prompt_id":"read","payload":{"state":"installed","tools":["cat"],"capabilities":[
+                {"kind":"object","label":"workspace/X"},
+                {"kind":"executable","label":"cat"}
+            ],"scope":"prompt"}}),
+        ];
+
+        let greeting = capability_row(&events[0]);
+        let reading = capability_row(&events[1]);
+
+        assert_eq!(greeting.body, "installed no tool or resource capabilities");
+        assert_eq!(
+            reading.body,
+            "installed object workspace/X · executable cat"
+        );
+        assert!(!greeting.body.contains("cat"));
+    }
+
+    #[test]
+    fn rejected_raw_broker_proposal_is_only_presented_as_denied() {
+        let events = [
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"Input","role":"Broker","payload":"{\"authenticated_task_intent\":\"read archetecture.md\",\"offer_catalog\":[[18,\"o\",\"workspace/X\",1,0,null],[19,\"o\",\"workspace/Y\",1,0,null],[20,\"o\",\"workspace/V\",1,0,null],[21,\"x\",\"hello\",1,4096,null],[22,\"x\",\"time\",1,4096,null],[23,\"x\",\"sleep\",1,4096,null],[24,\"x\",\"status\",1,4096,null],[25,\"x\",\"help\",1,4096,null]]}"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"kind":"RawModelCompletion","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":0},\"label\":\"agent/prompt\",\"selectors\":[18,19,20,21,22,23,24,25]}"}}),
             json!({"kind":"inference","prompt_id":"p","payload":{"accepted":false,"detail":"broker action fields do not match the offered authority kinds or ceilings","kind":"Validation","role":"Broker","payload":"{\"action\":\"create_agent\",\"budget\":{\"tool_calls\":0},\"label\":\"agent/prompt\",\"selectors\":[18,19,20,21,22,23,24,25]}"}}),
@@ -4402,30 +5997,111 @@ mod tests {
 
         let rows = work_rows(&refs);
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].speaker, "Broker");
-        assert_eq!(
-            rows[0].body,
-            "Proposed: create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V])"
-        );
-        assert_eq!(rows[1].speaker, "Kore");
-        assert!(rows[1].body.starts_with(
-            "Denied: create_agent(Agent 1, [hello, time, sleep, status, help], [X, Y, V])"
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].speaker, "Denied");
+        assert!(rows[0].body.starts_with(
+            "create_agent(agent/prompt · tools [hello, time, sleep, status, help] · resources [X, Y, V] · 0 tool calls) refused"
         ));
-        assert!(rows[1].body.contains("do not match"));
+        assert!(rows[0].body.contains("do not match"));
     }
 
     #[test]
-    fn message_metadata_includes_timestamp_and_end_to_end_duration() {
-        let assistant = json!({
-            "timestamp_unix_ms": 1_750_000_002_500_u64,
-            "prompt_id": "p"
+    fn arbitrary_typed_tool_arguments_are_preserved_without_comma_splitting() {
+        let call = json!({
+            "action":"tool_call",
+            "command":"publish_release",
+            "arguments":"[Utf8(\"release, candidate\"), U64(7), Bool(true), Path(\"/workspace/releases/a b.txt\")]"
         });
+        assert_eq!(
+            format_agent_tool_call(&call).as_deref(),
+            Some("publish_release release, candidate 7 true /releases/a b.txt")
+        );
 
-        let metadata = message_meta("AGENT 1", &assistant, Some(1_750_000_000_000));
+        let structured = json!({
+            "tool":"http_request",
+            "arguments":{
+                "method":"POST",
+                "headers":{"x-trace":"abc"},
+                "retry":true
+            }
+        });
+        assert_eq!(
+            format_agent_tool_call(&structured).as_deref(),
+            Some("http_request headers={x-trace: abc} method=POST retry=true")
+        );
+    }
 
-        assert!(metadata.starts_with("AGENT 1 · "));
-        assert!(metadata.contains("responded in 2.5 s"));
+    #[test]
+    fn every_assistant_block_remains_selectable_and_read_only() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"p","payload":{"text":"Show code"}}),
+            json!({"kind":"assistant","prompt_id":"p","public":true,"payload":{"text":"Answer.\n\n```rs\nlet x = 1;\n```"}}),
+        ];
+        model.events_changed();
+
+        assert_eq!(model.assistant_blocks["p"].len(), 2);
+
+        for key in ["prompt:p:assistant:0", "prompt:p:assistant:1"] {
+            let original = model.selectable_text[key].text();
+            model.update(Message::SelectText(
+                key.into(),
+                iced_core::text::editor::Action::SelectAll,
+            ));
+            assert_eq!(
+                model.selectable_text[key].selection(),
+                Some(original.clone())
+            );
+            model.update(Message::SelectText(
+                key.into(),
+                iced_core::text::editor::Action::Edit(iced_core::text::editor::Edit::Insert('!')),
+            ));
+            assert_eq!(model.selectable_text[key].text(), original);
+        }
+    }
+
+    #[test]
+    fn conversation_layout_records_at_narrow_wide_and_scaled_sizes() {
+        let mut model = populated_fixture_model();
+        model.events[0]["payload"]["text"] = Value::String(
+            "Explain how this deliberately long user request wraps without occupying the full transcript width on every display size."
+                .into(),
+        );
+        model.events_changed();
+
+        for (size, scale) in [
+            (Size::new(800.0, 600.0), 1.0),
+            (Size::new(1280.0, 800.0), 1.0),
+            (Size::new(800.0, 600.0), 1.5),
+        ] {
+            let mut renderer = native_renderer();
+            renderer.hint(Scale {
+                window: scale,
+                application: 1.0,
+            });
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().expect("conversation frame");
+            axgfx::frame_requirements(frame.view()).expect("supported conversation display list");
+            let errors = renderer.take_text_errors();
+            assert!(errors.is_empty(), "conversation text errors: {errors:?}");
+            assert!(frame.glyphs().len() > 30);
+        }
     }
 
     #[test]
@@ -4443,6 +6119,81 @@ mod tests {
 
         model.update(Message::ToggleWorking("p".into()));
         assert!(model.expanded_work.contains("p"));
+    }
+
+    #[test]
+    fn tool_calls_pair_with_full_outputs_under_the_specific_agent() {
+        let long_output = (0..80)
+            .map(|line| format!("line {line}: complete tool response"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = [
+            json!({"kind":"tool_call","generation":1,"agent_name":"Reader","payload":{"command":"cat","arguments":["Path(\"/one\")"],"call_id":11,"execution_domain":"guest"}}),
+            json!({"kind":"tool_result","generation":1,"payload":{"call_id":11,"result":"output","text":long_output}}),
+            json!({"kind":"tool_call","generation":2,"payload":{"command":"grep","arguments":["Text(\"needle\")","Path(\"/two\")"],"call_id":12,"execution_domain":"host"}}),
+            json!({"kind":"tool_result","generation":2,"payload":{"call_id":12,"result":"output","text":"match"}}),
+            json!({"kind":"tool_call","generation":3,"agent_name":"Writer","payload":{"command":"write","arguments":["Path(\"/secret\")","Text(\"value\")"],"call_id":13,"execution_domain":"guest"}}),
+            json!({"kind":"tool_result","generation":3,"payload":{"call_id":13,"result":"refused","text":"object is outside the installed filesystem view"}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].speaker, "Reader");
+        assert_eq!(rows[0].context.as_deref(), Some("tool · guest"));
+        assert_eq!(rows[0].output.as_ref().unwrap().body, long_output);
+        assert_eq!(
+            rows[0].output.as_ref().unwrap().summary,
+            "output · 80 lines"
+        );
+        assert_eq!(rows[1].speaker, "Agent 2");
+        assert_eq!(rows[1].context.as_deref(), Some("tool · host"));
+        assert_eq!(rows[1].output.as_ref().unwrap().body, "match");
+        assert_eq!(rows[2].speaker, "Denied");
+        assert_eq!(rows[2].context.as_deref(), Some("Writer · tool · guest"));
+        assert_eq!(rows[2].kind, "error");
+        assert_eq!(rows[2].body, "write /secret value");
+        assert_eq!(
+            rows[2].output.as_ref().unwrap().body,
+            "object is outside the installed filesystem view"
+        );
+        assert_eq!(work_output_height(&long_output), 180.0);
+    }
+
+    #[test]
+    fn repeated_identical_calls_with_distinct_ids_are_all_visible() {
+        let events = [
+            json!({"kind":"tool_call","generation":9,"payload":{"command":"status","arguments":[],"call_id":1}}),
+            json!({"kind":"tool_result","generation":9,"payload":{"call_id":1,"result":"output","data":{"state":"starting"}}}),
+            json!({"kind":"tool_call","generation":9,"payload":{"command":"status","arguments":[],"call_id":2}}),
+            json!({"kind":"tool_result","generation":9,"payload":{"call_id":2,"result":"output","data":{"state":"ready"}}}),
+        ];
+        let refs = events.iter().collect::<Vec<_>>();
+        let rows = work_rows(&refs);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body, "status");
+        assert_eq!(rows[1].body, "status");
+        assert_eq!(rows[0].output.as_ref().unwrap().body, "{state: starting}");
+        assert_eq!(rows[1].output.as_ref().unwrap().body, "{state: ready}");
+    }
+
+    #[test]
+    fn nested_tool_output_toggle_is_reversible() {
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        let key = "prompt:p:work:0:output".to_owned();
+
+        model.update(Message::ToggleWorkOutput(key.clone()));
+        assert!(model.expanded_outputs.contains(&key));
+
+        model.update(Message::ToggleWorkOutput(key.clone()));
+        assert!(!model.expanded_outputs.contains(&key));
     }
 
     #[test]
@@ -4477,58 +6228,6 @@ mod tests {
             iced_core::text::editor::Action::Edit(iced_core::text::editor::Edit::Insert('!')),
         ));
         assert_eq!(model.selectable_text[key].text(), original);
-    }
-
-    #[test]
-    fn saving_an_open_project_restarts_its_chat_session() {
-        let (requests, request_receiver) = mpsc::channel();
-        let (sessions, _session_receiver) = mpsc::channel();
-        let mut model = Model::new(Network {
-            sender: requests,
-            session: sessions,
-        });
-        request_receiver.try_iter().for_each(drop);
-        model.projects = vec![json!({
-            "id":"saved-project",
-            "name":"Saved project",
-            "archived":false,
-            "addons":[],
-            "inference":{"backend":"deterministic"},
-        })];
-        model.selected = Some(0);
-        model.session = Some("old-session".into());
-
-        let saved = model.projects[0].clone();
-        model.response(
-            RequestKind::SaveProject,
-            Ok(ApiResponse {
-                content_type: "application/json".into(),
-                body: serde_json::to_vec(&saved).unwrap(),
-            }),
-        );
-
-        assert!(model.restart_after_stop);
-        let stop = request_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(stop.kind, RequestKind::StopSession);
-        assert_eq!(stop.path, "/api/v1/sessions/old-session");
-
-        model.response(
-            RequestKind::StopSession,
-            Ok(ApiResponse {
-                content_type: "application/json".into(),
-                body: br#"{"closed":true}"#.to_vec(),
-            }),
-        );
-
-        assert!(!model.restart_after_stop);
-        let start = request_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(start.kind, RequestKind::StartSession);
-        assert_eq!(start.path, "/api/v1/sessions");
-        assert_eq!(start.body.unwrap()["project_id"], "saved-project");
     }
 
     #[test]
@@ -4585,6 +6284,47 @@ mod tests {
     }
 
     #[test]
+    fn workspace_selection_modal_records_a_supported_native_frame() {
+        fonts::register().expect("MONOLITH faces register");
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.update(Message::NewProject);
+
+        let size = Size::new(900.0, 600.0);
+        let mut renderer = native_renderer();
+        renderer.hint(Scale {
+            window: 1.0,
+            application: 1.0,
+        });
+        let mut interface = UserInterface::build(
+            model.view(size),
+            size,
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        interface.draw(
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style::default(),
+            mouse::Cursor::Unavailable,
+        );
+
+        let frame = renderer.take_frame().expect("workspace selector frame");
+        axgfx::frame_requirements(frame.view()).expect("supported workspace selector display list");
+        let errors = renderer.take_text_errors();
+        assert!(
+            errors.is_empty(),
+            "workspace selector text errors: {errors:?}"
+        );
+        assert!(renderer.take_geometry_errors().is_empty());
+        assert!(frame.glyphs().len() > 20);
+    }
+
+    #[test]
     fn expanded_and_collapsed_working_panel_render_directly() {
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
@@ -4638,29 +6378,31 @@ mod tests {
     }
 
     #[test]
-    fn every_native_wizard_page_records_and_renders() {
+    fn settings_modal_records_over_the_app_at_wide_and_narrow_widths() {
+        fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
             sender: requests,
             session: sessions,
         });
-        model.catalog = json!({
-            "addons":[
-                {"id":"reference.host","name":"Reference host add-on","domain":"host","tools":[{"name":"echo"}]},
-                {"id":"reference.guest","name":"Reference guest add-on","domain":"guest","tools":[{"name":"list_workspace"}]}
-            ]
-        });
-        model.update(Message::NewProject);
+        model.settings_open = true;
+        model.booted_at = None;
+        model.activity = Some(Ok(vec![json!({
+            "project_id":"project","project_name":"Project","session_id":"session",
+            "model":"Qwen3.5-9B-Q4_K_M.gguf","updated_at_unix_ms":1_750_000_000_000_u64,
+            "status":"completed","prompts":1
+        })]));
 
-        for page in 0..5 {
-            model.wizard_page = page;
+        for (width, height) in [(1180.0, 760.0), (700.0, 640.0)] {
+            model.topology.fitted = false;
             let mut renderer = native_renderer();
             renderer.hint(Scale {
                 window: 1.25,
                 application: 1.0,
             });
-            let size = Size::new(1024.0, 640.0);
+            let size = Size::new(width, height);
+            model.fit_topology(size);
             let mut interface = UserInterface::build(
                 model.view(size),
                 size,
@@ -4678,27 +6420,739 @@ mod tests {
             let frame = renderer.take_frame().unwrap();
             let masks = renderer.take_images();
             axgfx::frame_requirements(frame.view()).unwrap();
-            assert!(frame.glyphs().len() > 20, "wizard page {page} lost text");
+            assert!(frame.glyphs().len() > 25, "settings screen lost text");
 
-            let mut target = vec![0u32; 1280 * 800];
-            let stats = render_test_frame(&frame, masks, &mut target, 1280, 800);
-            assert!(stats.pixels_written > 1280 * 800 / 5);
+            let physical_width = (width * 1.25) as u32;
+            let physical_height = (height * 1.25) as u32;
+            let mut target = vec![0u32; (physical_width * physical_height) as usize];
+            let stats =
+                render_test_frame(&frame, masks, &mut target, physical_width, physical_height);
+            assert!(stats.pixels_written > 0);
+            assert!(
+                stats.scratch_high_water_pixels > 0,
+                "settings must render as a blurred modal over application content"
+            );
         }
     }
 
     #[test]
-    fn new_project_control_is_a_no_op_during_a_live_session() {
+    fn project_content_is_gated_until_settings_finish_loading() {
+        fonts::register().unwrap();
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::with_launch_project(
+            Network {
+                sender: requests,
+                session: sessions,
+            },
+            None,
+        );
+        model.booted_at = None;
+        model.projects = vec![json!({"id":"private-project","name":"Must not render yet"})];
+        model.selected = Some(0);
+        assert!(!model.settings_loaded);
+
+        let mut renderer = native_renderer();
+        let size = Size::new(900.0, 600.0);
+        let mut interface = UserInterface::build(
+            model.view(size),
+            size,
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        interface.draw(
+            &mut renderer,
+            &Theme::Dark,
+            &renderer::Style::default(),
+            mouse::Cursor::Unavailable,
+        );
+        let frame = renderer.take_frame().unwrap();
+        assert_eq!(
+            frame.glyphs().len(),
+            67,
+            "only the two fixed settings-gate strings may render"
+        );
+    }
+
+    #[test]
+    fn workspace_writeback_toggle_saves_only_the_selected_project() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.projects = vec![
+            json!({"id":"project-a","workspace":{"root":"/project-a","access":"automatic_writeback"}}),
+        ];
+        model.selected = Some(0);
+        while receiver.try_recv().is_ok() {}
+        model.update(Message::ToggleAutomaticWriteback);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.kind, RequestKind::SaveProjectSettings);
+        assert_eq!(request.path, "/api/v1/projects");
+        let body = request.body.unwrap();
+        assert_eq!(body["workspace"]["root"], "/project-a");
+        assert_eq!(body["workspace"]["access"], "review_changes");
+        assert_eq!(
+            model.projects[0]["workspace"]["access"], "automatic_writeback",
+            "wait for server confirmation"
+        );
+    }
+
+    #[test]
+    fn activity_loading_empty_error_and_populated_states_render() {
+        fonts::register().unwrap();
         let (requests, _request_receiver) = mpsc::channel();
         let (sessions, _session_receiver) = mpsc::channel();
         let mut model = Model::new(Network {
             sender: requests,
             session: sessions,
         });
-        model.session = Some("session-live".into());
+        model.settings_open = true;
+        model.booted_at = None;
+        let states = [
+            None,
+            Some(Ok(Vec::new())),
+            Some(Err("transcript directory unavailable".into())),
+            Some(Ok(vec![json!({
+                "project_name":"Project","model":"Qwen3.5-9B-Q4_K_M.gguf",
+                "updated_at_unix_ms":1_750_000_000_000_u64,"status":"completed",
+                "prompts":1
+            })])),
+        ];
+        let size = Size::new(700.0, 640.0);
+        model.fit_topology(size);
+        for state in states {
+            model.activity = state;
+            let mut renderer = native_renderer();
+            let mut interface = UserInterface::build(
+                model.view(size),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().unwrap();
+            assert!(frame.glyphs().len() > 20);
+        }
+    }
+
+    #[test]
+    fn settings_controls_persist_response_state_without_erasing_activity() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.events = vec![json!({"kind":"user_prompt","payload":{"text":"private"}})];
+        let events_before = model.events.clone();
+
+        model.update(Message::ToggleShowWorking);
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::SaveSettings);
+        assert_eq!(request.body.unwrap(), json!({"show_working":false}));
+        assert!(working_panel_visible(&model.settings));
+
+        let mut saved = model.settings.clone();
+        saved["show_working"] = Value::Bool(false);
+        model.response(
+            RequestKind::SaveSettings,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&saved).unwrap(),
+            }),
+        );
+        assert!(!working_panel_visible(&model.settings));
+        assert_eq!(model.events, events_before);
+        assert_eq!(model.status, "Application settings saved.");
+    }
+
+    #[test]
+    fn settings_open_and_close_without_replacing_the_active_view() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.view = View::Filesystem;
+
+        model.update(Message::OpenSettings);
+
+        assert!(model.settings_open);
+        assert_eq!(model.view, View::Filesystem);
+        let activity = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(activity.kind, RequestKind::Activity);
+        assert_eq!(activity.path, "/api/v1/activity");
+
+        model.update(Message::CloseSettings);
+        assert!(!model.settings_open);
+        assert_eq!(model.view, View::Filesystem);
+    }
+
+    #[test]
+    fn settings_modal_does_not_render_unrelated_application_status() {
+        fonts::register().unwrap();
+        let (requests, _request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.viewport = Size::new(920.0, 720.0);
+        model.activity = Some(Ok(Vec::new()));
+        let glyph_count = |model: &Model| {
+            let mut renderer = native_renderer();
+            let mut interface = UserInterface::build(
+                model.settings_panel(),
+                model.viewport,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            interface.draw(
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style::default(),
+                mouse::Cursor::Unavailable,
+            );
+            renderer.take_frame().unwrap().glyphs().len()
+        };
+
+        model.status = "Cancellation requested.".into();
+        let cancellation = glyph_count(&model);
+        model.status = "An unrelated project status with a very different length.".into();
+
+        assert_eq!(cancellation, glyph_count(&model));
+    }
+
+    #[test]
+    fn unavailable_and_busy_settings_controls_are_not_activatable() {
+        assert!(!model_option_selectable("unavailable", false, false));
+        assert!(!model_option_selectable("installed", true, false));
+        assert!(!model_option_selectable("installed", false, true));
+        assert!(model_option_selectable("installed", false, false));
+        assert!(!new_project_selectable(true));
+        assert!(new_project_selectable(false));
+    }
+
+    #[test]
+    fn settings_has_a_shell_keyboard_shortcut() {
+        let shortcut = iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(",".into()),
+            modified_key: keyboard::Key::Character(",".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Comma),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::CTRL,
+            text: Some(",".into()),
+            repeat: false,
+        });
+        assert!(opens_settings(&shortcut));
+
+        let escape = iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        assert!(closes_settings(&escape));
+    }
+
+    #[test]
+    fn new_project_opens_compact_workspace_target_before_the_native_picker() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
 
         model.update(Message::NewProject);
 
-        assert!(model.editor.is_none());
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert!(request_receiver.try_recv().is_err());
+
+        model.update(Message::ChooseWorkspaceFolder);
+
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::PickWorkspace);
+        assert_eq!(request.path, "/api/v1/picker");
+        assert_eq!(request.body.unwrap(), json!({"kind":"directory"}));
+        assert!(request_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn validated_folder_project_opens_immediately() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
+        model.response(
+            RequestKind::PickWorkspace,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"path":workspace})).unwrap(),
+            }),
+        );
+        let create = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(create.kind, RequestKind::CreateProject);
+        assert_eq!(create.body.unwrap(), json!({"root":workspace}));
+
+        let project = json!({
+            "id":"workspace-123","name":"workspace","archived":false,"addons":[],
+            "workspace":{"root":"C:/workspace","access":"review_changes"},
+            "inference":{"backend":"deterministic"}
+        });
+        model.response(
+            RequestKind::CreateProject,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"created":true,"project":project})).unwrap(),
+            }),
+        );
+        let start = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(start.kind, RequestKind::StartSession);
+        assert_eq!(start.body.unwrap()["project_id"], "workspace-123");
+        assert_eq!(model.view, View::Session);
+        assert!(!model.workspace_selection_open);
+    }
+
+    #[test]
+    fn dropped_folder_uses_the_same_validated_project_creation_flow() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("dropped-workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+
+        model.update(Message::NewProject);
+        model.update(Message::DropWorkspaceFolder(workspace.clone()));
+
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(request.kind, RequestKind::CreateProject);
+        assert_eq!(request.body.unwrap(), json!({"root":workspace}));
+        assert!(model.busy);
+        assert!(model.workspace_selection_open);
+    }
+
+    #[test]
+    fn dropped_file_is_rejected_in_the_selector_without_a_request() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("not-a-folder.txt");
+        std::fs::write(&file, "not a workspace").unwrap();
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+
+        model.update(Message::NewProject);
+        model.update(Message::DropWorkspaceFolder(file));
+
+        assert!(request_receiver.try_recv().is_err());
+        assert_eq!(
+            model.workspace_error.as_deref(),
+            Some("Select a workspace folder, not a file.")
+        );
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+    }
+
+    #[test]
+    fn daemon_workspace_validation_error_stays_visible_in_the_selector() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
+        model.busy = true;
+
+        model.response(
+            RequestKind::CreateProject,
+            Err("This workspace is too broad or sensitive.".into()),
+        );
+
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert_eq!(
+            model.workspace_error.as_deref(),
+            Some("This workspace is too broad or sensitive.")
+        );
+    }
+
+    #[test]
+    fn cancelling_native_picker_keeps_the_folder_target_available() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.update(Message::NewProject);
+        model.update(Message::ChooseWorkspaceFolder);
+        request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        model.response(
+            RequestKind::PickWorkspace,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!({"path":null})).unwrap(),
+            }),
+        );
+
+        assert!(model.workspace_selection_open);
+        assert!(!model.busy);
+        assert!(model.status.contains("Folder selection cancelled"));
+    }
+
+    #[test]
+    fn new_project_can_open_while_a_prompt_continues() {
+        let (requests, request_receiver) = mpsc::channel();
+        let (sessions, _session_receiver) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        request_receiver.try_iter().for_each(drop);
+        model.session = Some("session-live".into());
+        model.prompt_id = Some("running-prompt".into());
+
+        model.update(Message::NewProject);
+
+        assert!(request_receiver.try_recv().is_err());
+        assert!(model.workspace_selection_open);
+        assert_eq!(model.prompt_id.as_deref(), Some("running-prompt"));
+    }
+
+    #[test]
+    fn idle_project_switch_preserves_chat_draft_and_replay_without_closing_it() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.prompt = text_editor::Content::with_text("unsent A");
+        model.events = vec![
+            json!({"session_id":"chat-a","sequence":1,"kind":"assistant","payload":{"text":"answer A"}}),
+        ];
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                permission_update: None,
+                session: "chat-b".into(),
+                prompt_id: None,
+                draft: "unsent B".into(),
+                events: vec![],
+            },
+        );
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.session.as_deref(), Some("chat-b"));
+        assert_eq!(model.prompt.text(), "unsent B");
+        assert!(model.events.is_empty());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.session.as_deref(), Some("chat-a"));
+        assert_eq!(model.prompt.text(), "unsent A");
+        let event = model.events[0].clone();
+        model.poll_result(Ok(vec![event]));
+        assert_eq!(model.events.len(), 1);
+        assert!(
+            receiver.try_recv().is_err(),
+            "switching must not send close/start"
+        );
+        model.update(Message::NewProject);
+        assert!(model.workspace_selection_open);
+        assert_eq!(model.session.as_deref(), Some("chat-a"));
+        model.response(
+            RequestKind::CreateProject,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: br#"{"created":true,"project":{"id":"c"}}"#.to_vec(),
+            }),
+        );
+        assert_eq!(model.project_chats["a"].session, "chat-a");
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.kind, RequestKind::StartSession);
+        assert_eq!(request.body.unwrap()["project_id"], "c");
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn working_chat_survives_switching_and_replays_completion_in_its_own_scope() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, polling) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.prompt_id = Some("prompt-a".into());
+        model.prompt = text_editor::Content::with_text("A next draft");
+        model.events = vec![
+            json!({"session_id":"chat-a","sequence":1,"kind":"user_prompt","prompt_id":"prompt-a","payload":{"text":"hello"}}),
+        ];
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                permission_update: None,
+                session: "chat-b".into(),
+                prompt_id: None,
+                draft: "hello B".into(),
+                events: vec![],
+            },
+        );
+
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.session.as_deref(), Some("chat-b"));
+        assert!(model.prompt_id.is_none());
+        assert_eq!(
+            model.project_chats["a"].prompt_id.as_deref(),
+            Some("prompt-a")
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "navigation must not close or cancel A"
+        );
+        model.update(Message::SendPrompt);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(request.path, "/api/v1/sessions/chat-b/prompts");
+        let prompt_b = model.prompt_id.clone();
+        model.response(
+            RequestKind::SendPrompt,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        let answer = json!({"session_id":"chat-a","sequence":2,"kind":"assistant","prompt_id":"prompt-a","payload":{"text":"Hello A"}});
+        let terminal = json!({"session_id":"chat-a","sequence":3,"kind":"prompt_terminal","prompt_id":"prompt-a","payload":{"status":"completed"}});
+        // A's in-flight poll may arrive after navigation. It cannot finish B.
+        model.poll_result(Ok(vec![answer.clone(), terminal.clone()]));
+        assert_eq!(model.prompt_id, prompt_b);
+        assert!(model.events.is_empty());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.prompt_id.as_deref(), Some("prompt-a"));
+        assert_eq!(model.prompt.text(), "A next draft");
+        let target = polling.try_iter().last().unwrap();
+        assert_eq!(target.session.as_deref(), Some("chat-a"));
+        assert!(target.active);
+        // Returning resets the network cursor and replays durable session events.
+        model.poll_result(Ok(vec![
+            model.events[0].clone(),
+            answer.clone(),
+            terminal.clone(),
+        ]));
+        assert!(model.prompt_id.is_none());
+        assert_eq!(model.status, "Task completed.");
+        assert_eq!(model.events.len(), 3);
+        model.poll_result(Ok(vec![answer, terminal]));
+        assert_eq!(model.events.len(), 3);
+        model.update(Message::SelectProject(1));
+        assert_eq!(model.prompt_id, prompt_b);
+        model.update(Message::CancelPrompt);
+        let request = receiver.try_recv().unwrap();
+        assert_eq!(
+            request.path,
+            format!(
+                "/api/v1/sessions/chat-b/prompts/{}/cancel",
+                prompt_b.unwrap()
+            )
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn close_chat_keeps_completed_transcript_renderable() {
+        let (requests, _) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.auto_open_pending = false;
+        model.projects = vec![json!({"id":"a", "name":"A"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"p","public":true,"payload":{"text":"6 plus 7"}}),
+            json!({"kind":"assistant","prompt_id":"p","public":true,"payload":{"text":"13"}}),
+            json!({"kind":"prompt_terminal","prompt_id":"p","public":true,"payload":{"status":"completed"}}),
+        ];
+        model.events_changed();
+        model.response(
+            RequestKind::StopSession,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        assert!(model.session.is_none());
+        assert_eq!(model.events.len(), 3);
+        // Building the actual closed-chat view used to panic when it looked
+        // up the retained user/assistant events in an emptied text cache.
+        let _ = model.view(Size::new(1182.0, 768.0));
+    }
+
+    #[test]
+    fn close_chat_revokes_only_that_projects_approvals() {
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        receiver.try_iter().for_each(drop);
+        model.projects = vec![json!({"id":"a"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.approvals = json!({"grants":[
+            {"id":"grant-a","committed":true,"agent":{"id":"worker-a"}},
+            {"id":"grant-b","committed":true,"agent":{"id":"worker-b"}}
+        ]});
+        model.response(
+            RequestKind::StopSession,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        let revoked: Vec<_> = receiver
+            .try_iter()
+            .filter(|r| r.kind == RequestKind::RevokeGrant)
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(revoked, vec!["/api/v1/grants/grant-a/revoke"]);
+    }
+
+    #[test]
+    fn reordered_project_catalog_retains_selection_by_identity() {
+        let (requests, _) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.auto_open_pending = false;
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.response(
+            RequestKind::Projects,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: serde_json::to_vec(&json!([{"id":"b"},{"id":"a"}])).unwrap(),
+            }),
+        );
+        assert_eq!(model.project().unwrap()["id"], "a");
+    }
+
+    #[test]
+    fn native_transport_decodes_chunked_events_before_parsing_json() {
+        let answer = json!({"sequence": 1, "kind": "assistant", "payload": {
+            "text": format!("{}heron 🐦", "x".repeat(10_000))
+        }});
+        let terminal = json!({"sequence": 2, "kind": "prompt_terminal",
+            "payload": {"status": "completed"}});
+        let body = format!("data: {answer}\n\ndata: {terminal}\n\n").into_bytes();
+        // Split both a large JSON record and the UTF-8 bytes of the bird.
+        let bird = body.windows(4).position(|b| b == "🐦".as_bytes()).unwrap();
+        let boundaries = [0, 8192, bird + 1, body.len()];
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\ntRaNsFeR-EnCoDiNg: ChUnKeD\r\n\r\n".to_vec();
+        for bounds in boundaries.windows(2) {
+            let chunk = &body[bounds[0]..bounds[1]];
+            write!(response, "{:x};test=extension\r\n", chunk.len()).unwrap();
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\nX-Test: trailer\r\n\r\n");
+        let events = parse_sse(parse_http_response(&response).unwrap()).unwrap();
+        assert_eq!(events, vec![answer, terminal]);
+    }
+
+    #[test]
+    fn native_transport_preserves_plain_bodies_and_decodes_chunked_errors() {
+        let response = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}",
+        ).unwrap();
+        assert_eq!(response.json().unwrap(), json!({"ok": true}));
+        let error = parse_http_response(
+            b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"error\":\"busy\"}\r\n0\r\n\r\n",
+        ).unwrap_err();
+        assert_eq!(error, "HTTP 409: busy");
+    }
+
+    #[test]
+    fn native_transport_rejects_incomplete_or_invalid_chunk_framing() {
+        for body in [
+            "",
+            "xyz\r\n",
+            "+1\r\na\r\n0\r\n\r\n",
+            "ffffffffffffffffffffffffffffffff\r\n",
+            "5\r\nhi",
+            "1\r\naXX0\r\n\r\n",
+            "1\r\na\r\n",
+            "0\r\n",
+            "0\r\nX-Test: missing-final-blank-line\r\n",
+        ] {
+            assert!(decode_chunked_body(body.as_bytes()).is_err(), "{body:?}");
+        }
+        assert!(
+            parse_http_response(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]

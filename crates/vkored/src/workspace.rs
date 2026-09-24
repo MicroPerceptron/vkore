@@ -59,6 +59,10 @@ pub struct WorkspaceBackend<B = DeterministicBackend> {
     events: VecDeque<BackendEvent>,
     grant: Option<StandingGrant>,
     blobs: Vec<StagedBlob>,
+    // Native fault gate: delay only the real committed write's reply. No
+    // fabricated result or tool execution; production builds have no hook.
+    #[cfg(test)]
+    transaction_reply_gate: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl WorkspaceBackend<DeterministicBackend> {
@@ -124,7 +128,77 @@ impl<B> WorkspaceBackend<B> {
             events: VecDeque::with_capacity(EVENTS_MAX),
             grant,
             blobs: Vec::with_capacity(BLOBS_MAX),
+            #[cfg(test)]
+            transaction_reply_gate: None,
         })
+    }
+
+    /// Called only at the daemon's authenticated, fully reclaimed broker idle
+    /// barrier. No model state is reset and no worker can retain the old root.
+    pub(crate) fn attach_task_root(
+        &mut self,
+        root: &Path,
+        state: &Path,
+        allow_writeback: bool,
+    ) -> Result<(), WorkspaceBackendError> {
+        let workspace = LiveRoot::open_with_state(root, [0; 32], state)?;
+        let grant = if allow_writeback {
+            Some(
+                StandingGrant::new(
+                    fresh_grant_id(workspace.manifest().snapshot_id()),
+                    workspace.manifest().snapshot_id(),
+                    GrantOperations::ALL,
+                    kore_workspace_sync::bounds::MAX_CHANGES as u16,
+                    kore_workspace_sync::bounds::MAX_OVERLAY_BYTES,
+                    0,
+                    &[],
+                )
+                .expect("bounded write grant geometry"),
+            )
+        } else {
+            None
+        };
+        self.workspace = workspace;
+        self.grant = grant;
+        self.pending_delta = None;
+        self.blobs.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_next_transaction_reply(
+        &mut self,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        self.transaction_reply_gate = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) fn task_catalog(&self) -> Vec<(String, bool)> {
+        self.workspace
+            .manifest()
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.as_str().to_owned(),
+                    entry.kind == kore_workspace_sync::EntryKind::Directory,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn attach_selected(
+        &mut self,
+        empty: &Path,
+        files: Vec<workspacectl::SelectedFile>,
+    ) -> Result<(), WorkspaceBackendError> {
+        let workspace = LiveRoot::open_selected(empty, files)?;
+        self.workspace = workspace;
+        self.grant = None;
+        self.pending_delta = None;
+        self.blobs.clear();
+        Ok(())
     }
 
     fn enqueue(&mut self, event: BackendEvent) -> Result<(), BackendError> {
@@ -402,12 +476,19 @@ fn fresh_grant_id(snapshot: [u8; 32]) -> [u8; 16] {
 }
 
 impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
+    fn set_conversation_context(&mut self, context: &[(bool, String)]) -> Result<(), BackendError> {
+        self.inference.set_conversation_context(context)
+    }
     fn reset(&mut self) {
         self.inference.reset();
         self.workspace_route = None;
         self.pending_delta = None;
         self.events.clear();
         self.blobs.clear();
+        #[cfg(test)]
+        {
+            self.transaction_reply_gate = None;
+        }
     }
 
     fn open(&mut self, identity: SequenceIdentity) -> Result<(), BackendError> {
@@ -576,9 +657,26 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
                 // transaction retry succeeds after its staging blob has been
                 // retired, while a new transaction with a missing blob still
                 // fails closed during content validation.
+                // Guest counters restart with a new route. Scope durable
+                // replay identity to that authenticated route and standing
+                // grant, so a new prompt cannot collide with an older VM's
+                // completed or interrupted transaction. Wire receipts still
+                // echo the exact caller-supplied transaction id.
+                let mut identity = blake3::Hasher::new();
+                identity.update(b"vkore.workspace.transaction.v2\0");
+                identity.update(&route.0);
+                identity.update(&transaction.grant);
+                identity.update(&transaction.id);
+                let journal_transaction = *identity.finalize().as_bytes();
                 let outcome = self
                     .workspace
-                    .apply_transaction(transaction.id, &transaction.changes, &contents, grant, tick)
+                    .apply_transaction(
+                        journal_transaction,
+                        &transaction.changes,
+                        &contents,
+                        grant,
+                        tick,
+                    )
                     .unwrap_or(TransactionOutcome::Refused);
                 let (status, snapshot, applied) = match outcome {
                     TransactionOutcome::Applied { snapshot } => (
@@ -658,9 +756,27 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
     }
 
     fn poll(&mut self, tick: u64) -> Option<BackendEvent> {
+        #[cfg(test)]
+        if let Some(gate) = self.transaction_reply_gate.as_ref()
+            && let Some(BackendEvent::Completed { payload, .. }) = self.events.front()
+            && let Ok(result) = TransactionResultV1::read_from_bytes(payload)
+            && result.magic == TRANSACTION_RESULT_MAGIC
+            && result.status.get() == WorkspaceStatus::Ok as u16
+        {
+            use std::sync::atomic::Ordering;
+            if gate.load(Ordering::SeqCst) != 2 {
+                gate.store(1, Ordering::SeqCst);
+                return self.inference.poll(tick);
+            }
+            self.transaction_reply_gate = None;
+        }
         self.events
             .pop_front()
             .or_else(|| self.inference.poll(tick))
+    }
+
+    fn healthy(&mut self) -> bool {
+        self.inference.healthy()
     }
 
     fn metrics(&self) -> BackendMetrics {
@@ -677,6 +793,10 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
 
     fn take_observation(&mut self) -> Option<crate::backend::InferenceObservation> {
         self.inference.take_observation()
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        self.inference.broker_prompt_ready(identity)
     }
 }
 
@@ -844,6 +964,7 @@ mod tests {
         };
         let mut encoded = [0u8; kore_workspace_sync::MAX_WRITE_TRANSACTION_BYTES];
         let len = encode_write_transaction(&transaction, &mut encoded).unwrap();
+        let reply_gate = backend.gate_next_transaction_reply();
         for request in [RequestId([5; 16]), RequestId([6; 16])] {
             backend
                 .submit_bulk(
@@ -855,6 +976,16 @@ mod tests {
                     3,
                 )
                 .unwrap();
+            if request == RequestId([5; 16]) {
+                use std::sync::atomic::Ordering;
+                assert!(backend.poll(3).is_none());
+                assert_eq!(reply_gate.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    std::fs::read(root.path().join("file")).unwrap(),
+                    replacement
+                );
+                reply_gate.store(2, Ordering::SeqCst);
+            }
             let BackendEvent::Completed { payload, .. } = backend.poll(3).unwrap() else {
                 panic!("transaction must complete inline");
             };

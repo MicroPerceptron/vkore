@@ -21,16 +21,16 @@ license = "MPL-2.0"
 repository = "https://github.com/MicroPerceptron/vkore"
 rust-version = "1.97"
 
-# PR #722 is the integration source for the initial extraction. These shared
-# crates remain Kore-owned wire/guest contracts; vKore consumes one exact
-# revision instead of copying protocol definitions into the host repository.
+# Shared contracts remain Kore-owned and pin the integrated guest source.
+# scripts/local-kore.py can override the complete direct dependency set for
+# development; the committed graph builds without local checkout paths.
 [workspace.dependencies]
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
-kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
+kore-driver = { git = "https://github.com/MicroPerceptron/kore.git", rev = "60e659644acf6e5e730b6b566a68765f8016563c" }
+kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "60e659644acf6e5e730b6b566a68765f8016563c" }
+kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "60e659644acf6e5e730b6b566a68765f8016563c" }
+kore-svc-dagfs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "60e659644acf6e5e730b6b566a68765f8016563c" }
+kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "60e659644acf6e5e730b6b566a68765f8016563c" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

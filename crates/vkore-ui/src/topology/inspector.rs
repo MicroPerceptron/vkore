@@ -318,6 +318,11 @@ pub fn path<'a>(
                 theme::TEXT_SECONDARY
             },
         ),
+        meta(
+            "type",
+            node.object_kind.label().into(),
+            theme::TEXT_SECONDARY
+        ),
         meta("direct grants", direct.to_string(), theme::MAGENTA),
     ]
     .spacing(theme::SPACE_2);
@@ -417,8 +422,8 @@ mod tests {
     #[test]
     fn a_path_reports_where_it_lives_and_who_reaches_it() {
         let events = [
-            json!({"kind": "tool_call", "generation": 1, "payload": {"tool": "read", "path": "src"}}),
-            json!({"kind": "tool_call", "generation": 2, "payload": {"tool": "read", "path": "src/main.rs"}}),
+            json!({"kind":"capability","generation":1,"payload":{"state":"installed","kind":"view","label":"src","rights":"read"}}),
+            json!({"kind":"capability","generation":2,"payload":{"state":"installed","kind":"object","label":"src/main.rs","rights":"read"}}),
         ];
         let graph = Graph::from_events(&events, false);
         let filesystem = Filesystem::from_events(&events, &graph);

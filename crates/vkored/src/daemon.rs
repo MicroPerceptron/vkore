@@ -33,6 +33,8 @@ use crate::bulk::{
     BulkError, BulkManager, CompletedBulk, HOST_BULK_BYTE_CREDITS_PER_ROUTE,
     HOST_BULK_CHUNK_CREDITS_PER_ROUTE,
 };
+pub use crate::frontend_updates::FrontendUpdateResultOwned;
+use crate::frontend_updates::{FrontendUpdates, Receipt as UpdateReceipt};
 use crate::protocol::*;
 
 const ROUTES_MAX: usize = SEQUENCES_MAX + 1;
@@ -45,6 +47,9 @@ const AUTHORITY_OBSERVATIONS_MAX: usize = 4096;
 const FRONTEND_INTENTS_MAX: usize = 8;
 const FRONTEND_POLLS_MAX: usize = 8;
 const FRONTEND_RESULTS_MAX: usize = 8;
+// Each terminal result can have its worker and its owning broker awaiting
+// publication. They share one result, but retain independent route requests.
+const FRONTEND_RECEIPTS_MAX: usize = FRONTEND_RESULTS_MAX * 2;
 const READ_SIZE: usize = 16 * 1024;
 const FRAMES_PER_TICK: usize = 64;
 const COMPLETED_BULK_MAX: usize = 12;
@@ -176,8 +181,17 @@ pub enum FrontendQueueError {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontendCancelOutcome {
+    QueuedRemoved,
+    Requested,
+    AlreadySettled,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendResultOwned {
+    /// Authenticated source; never inferred from model text.
     pub intent_id: FrontendIntentId,
     pub kind: FrontendResultKind,
     pub text: String,
@@ -188,12 +202,17 @@ enum FrontendIntentState {
     Queued,
     BrokerClaimed,
     AgentClaimed(SequenceIdentity),
+    /// Delivery may have produced guest effects. A new link cannot replay it.
+    Disconnected,
 }
 
 struct FrontendIntentOwned {
     intent_id: FrontendIntentId,
     text: String,
     state: FrontendIntentState,
+    broker: Option<SequenceIdentity>,
+    cancel_requested: bool,
+    inference_failed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -204,6 +223,39 @@ struct PendingFrontendPoll {
     poll: FrontendPoll,
     submitted_tick: u64,
 }
+
+struct PendingFrontendReceipt {
+    intent_id: FrontendIntentId,
+    identity: SequenceIdentity,
+    request: RequestId,
+    turn: u64,
+    submitted_tick: u64,
+}
+
+struct FrontendCompletion {
+    intent_id: FrontendIntentId,
+    source: SequenceIdentity,
+    broker: Option<SequenceIdentity>,
+    worker: Option<SequenceIdentity>,
+    published: bool,
+    broker_joined: bool,
+    retired: bool,
+    ready: bool,
+    cancel_requested: bool,
+    connection_lost: bool,
+}
+
+impl FrontendCompletion {
+    fn accepts_fallback(&self, identity: SequenceIdentity, result: FrontendResultKind) -> bool {
+        !self.connection_lost
+            && self.source.role == BackendRole::Agent
+            && identity.role == BackendRole::Broker
+            && self.broker == Some(identity)
+            && (result == FrontendResultKind::Failed
+                || (self.cancel_requested && result == FrontendResultKind::Cancelled))
+            && !self.broker_joined
+    }
+}
 impl BenchmarkSink for () {
     fn observe(&mut self, _: BenchmarkEvent) {}
 }
@@ -212,6 +264,10 @@ struct Route {
     state: RouteState,
     identity: SequenceIdentity,
     stream_parts: Vec<(RequestId, u16)>,
+    // A cancellation can arrive after the terminal model reply was queued but
+    // before the guest consumed it. Retain bounded exact-generation evidence
+    // so that race neither disconnects the link nor emits a second terminal.
+    completed_requests: VecDeque<RequestId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -370,29 +426,27 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 }
             }
             BULK_FINISH => {
-                if self.completed_bulk.len() == COMPLETED_BULK_MAX {
-                    Err(BulkError::Backpressure)
-                } else {
-                    match self
-                        .bulk
-                        .finish(envelope_in.route_id, envelope_in.request_id, payload)
-                    {
-                        Ok((completed, bytes, chunks, _opened_request)) => {
-                            let id = completed.bulk_id.0.to_vec();
-                            let _ = self.routes[index].state.replenish_bulk(bytes, chunks);
-                            // FINISH is transport-terminal, but a completed
-                            // upload is still awaiting its role-specific
-                            // backend's typed application result. Keep the
-                            // request live until `finish` emits that result;
-                            // otherwise the generation-aware backend event is
-                            // discarded as late and the guest sees READY with
-                            // no WORKSPACE_REPLY.
-                            backend_bulk = Some(completed.clone());
-                            self.completed_bulk.push_back(completed);
-                            Ok((BULK_READY, id))
+                match self
+                    .bulk
+                    .finish(envelope_in.route_id, envelope_in.request_id, payload)
+                {
+                    Ok((completed, bytes, chunks, _opened_request)) => {
+                        let id = completed.bulk_id.0.to_vec();
+                        let _ = self.routes[index].state.replenish_bulk(bytes, chunks);
+                        // The typed backend owns processing; this queue is only
+                        // a bounded diagnostic copy. Unread observations must
+                        // never block the application-owned broker after its
+                        // twelfth prompt.
+                        if self.completed_bulk.len() == COMPLETED_BULK_MAX {
+                            self.completed_bulk.pop_front();
                         }
-                        Err(error) => Err(error),
+                        // Keep the request live until the backend emits its
+                        // typed result, even though transport FINISH is terminal.
+                        backend_bulk = Some(completed.clone());
+                        self.completed_bulk.push_back(completed);
+                        Ok((BULK_READY, id))
                     }
+                    Err(error) => Err(error),
                 }
             }
             BULK_ABORT => {
@@ -594,8 +648,12 @@ pub struct LinkCore<B, S = ()> {
     transcript: VecDeque<String>,
     authority_observations: VecDeque<AuthorityObservation>,
     frontend_intents: VecDeque<FrontendIntentOwned>,
+    frontend_updates: FrontendUpdates,
     frontend_polls: VecDeque<PendingFrontendPoll>,
+    supervisor_contract: Option<SequenceIdentity>,
     frontend_results: VecDeque<FrontendResultOwned>,
+    frontend_receipts: VecDeque<PendingFrontendReceipt>,
+    frontend_completions: VecDeque<FrontendCompletion>,
     next_frontend_intent: u128,
     metrics: Metrics,
     tick: u64,
@@ -622,8 +680,12 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             transcript: VecDeque::with_capacity(TRANSCRIPT_MAX),
             authority_observations: VecDeque::with_capacity(AUTHORITY_OBSERVATIONS_MAX),
             frontend_intents: VecDeque::with_capacity(FRONTEND_INTENTS_MAX),
+            frontend_updates: FrontendUpdates::default(),
             frontend_polls: VecDeque::with_capacity(FRONTEND_POLLS_MAX),
+            supervisor_contract: None,
             frontend_results: VecDeque::with_capacity(FRONTEND_RESULTS_MAX),
+            frontend_receipts: VecDeque::with_capacity(FRONTEND_RECEIPTS_MAX),
+            frontend_completions: VecDeque::with_capacity(FRONTEND_RESULTS_MAX),
             next_frontend_intent: 0,
             metrics: Metrics::default(),
             tick: 0,
@@ -680,12 +742,181 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             intent_id,
             text,
             state: FrontendIntentState::Queued,
+            broker: None,
+            cancel_requested: false,
+            inference_failed: false,
         });
         self.service_frontend_polls();
         Ok(intent_id)
     }
     pub fn pop_frontend_result(&mut self) -> Option<FrontendResultOwned> {
         self.frontend_results.pop_front()
+    }
+
+    pub fn queue_frontend_update(
+        &mut self,
+        intent_id: FrontendIntentId,
+        text: impl Into<String>,
+    ) -> Result<u32, FrontendQueueError> {
+        let broker = self
+            .frontend_intents
+            .iter()
+            .find(|intent| {
+                intent.intent_id == intent_id
+                    && matches!(intent.state, FrontendIntentState::AgentClaimed(_))
+                    && !intent.cancel_requested
+                    && !intent.inference_failed
+            })
+            .and_then(|intent| intent.broker)
+            .ok_or(FrontendQueueError::InvalidIntent)?;
+        let revision = self
+            .frontend_updates
+            .queue(intent_id, broker, text.into())?;
+        self.service_frontend_polls();
+        Ok(revision)
+    }
+
+    pub fn pop_frontend_update_result(&mut self) -> Option<FrontendUpdateResultOwned> {
+        self.frontend_updates.pop()
+    }
+
+    pub fn pop_frontend_update_result_for(
+        &mut self,
+        intent: FrontendIntentId,
+        revision: u32,
+    ) -> Option<FrontendUpdateResultOwned> {
+        self.frontend_updates.pop_for(intent, revision)
+    }
+    /// Failed/cancelled work and accepted terminal outcomes need guest CPU to
+    /// settle their native ownership, even if another model sequence is busy.
+    pub fn frontend_requires_progress(&self) -> bool {
+        self.frontend_updates.requires_progress()
+            || self
+                .frontend_intents
+                .iter()
+                .any(|intent| intent.cancel_requested || intent.inference_failed)
+            || self
+                .frontend_completions
+                .iter()
+                .any(|completion| !completion.ready)
+    }
+    /// Cancel only this host intent. Claimed work is settled by its owning
+    /// guest broker; this operation neither kills the VM nor guesses which
+    /// inference requests on a shared broker sequence belong to the intent.
+    pub fn request_frontend_cancellation(&mut self, id: FrontendIntentId) -> FrontendCancelOutcome {
+        if self
+            .frontend_completions
+            .iter()
+            .any(|completion| completion.intent_id == id)
+        {
+            return FrontendCancelOutcome::AlreadySettled;
+        }
+        let Some(index) = self
+            .frontend_intents
+            .iter()
+            .position(|intent| intent.intent_id == id)
+        else {
+            return FrontendCancelOutcome::Unknown;
+        };
+        if self.frontend_intents[index].state == FrontendIntentState::Queued {
+            self.frontend_intents.remove(index);
+            return FrontendCancelOutcome::QueuedRemoved;
+        }
+        self.frontend_intents[index].cancel_requested = true;
+        self.frontend_updates.cancel_undelivered(id);
+        FrontendCancelOutcome::Requested
+    }
+
+    fn frontend_control(
+        &self,
+        identity: SequenceIdentity,
+        id: FrontendIntentId,
+    ) -> Option<kore_hostlink::FrontendControl> {
+        use kore_hostlink::FrontendControl;
+        if let Some(intent) = self
+            .frontend_intents
+            .iter()
+            .find(|intent| intent.intent_id == id && intent.broker == Some(identity))
+        {
+            return Some(if intent.cancel_requested {
+                FrontendControl::CancelRequested
+            } else {
+                FrontendControl::Active
+            });
+        }
+        self.frontend_completions
+            .iter()
+            .any(|completion| completion.intent_id == id && completion.broker == Some(identity))
+            .then_some(FrontendControl::Settled)
+    }
+    pub fn frontend_ready(&self, intent_id: FrontendIntentId) -> bool {
+        self.frontend_completions.iter().any(|completion| {
+            completion.intent_id == intent_id
+                && !completion.connection_lost
+                && completion.published
+                && completion.retired
+                && completion.ready
+        })
+    }
+
+    /// This prompt crossed into the guest, but its connection ended before
+    /// execution/cleanup was settled. The VM owner must contain that guest;
+    /// reconnecting transport is not proof that its effects can be replayed.
+    pub fn frontend_interrupted(&self, intent_id: FrontendIntentId) -> bool {
+        self.frontend_intents.iter().any(|intent| {
+            intent.intent_id == intent_id && intent.state == FrontendIntentState::Disconnected
+        }) || self
+            .frontend_completions
+            .iter()
+            .any(|completion| completion.intent_id == intent_id && completion.connection_lost)
+    }
+    /// The runtime releases its bounded completion record only after observing
+    /// this intent's native retirement and subsequent broker readiness.
+    pub fn finish_frontend_intent(&mut self, intent_id: FrontendIntentId) -> bool {
+        if !self.frontend_ready(intent_id) {
+            return false;
+        }
+        self.frontend_completions
+            .retain(|completion| completion.intent_id != intent_id);
+        true
+    }
+    /// Release the guest's result acknowledgement only after the harness has
+    /// published the final response. Until then its worker remains alive.
+    pub fn acknowledge_frontend_result(&mut self, intent_id: FrontendIntentId) -> bool {
+        let Some(completion) = self
+            .frontend_completions
+            .iter_mut()
+            .find(|completion| completion.intent_id == intent_id)
+        else {
+            return false;
+        };
+        if completion.connection_lost {
+            return false;
+        }
+        completion.published = true;
+        let mut acknowledged = false;
+        let mut index = 0;
+        while index < self.frontend_receipts.len() {
+            let receipt = &self.frontend_receipts[index];
+            if receipt.intent_id == intent_id
+                && self.finish_frontend_request(
+                    receipt.identity,
+                    receipt.request,
+                    receipt.turn,
+                    receipt.submitted_tick,
+                    &[],
+                )
+            {
+                self.frontend_receipts.remove(index);
+                acknowledged = true;
+            } else {
+                index += 1;
+            }
+        }
+        if acknowledged {
+            self.log("frontend response published; teardown acknowledged");
+        }
+        acknowledged
     }
     pub fn cancel_frontend_intent(&mut self, intent_id: FrontendIntentId) -> bool {
         let before = self.frontend_intents.len();
@@ -695,6 +926,10 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             .retain(|pending| pending.poll.intent_id != intent_id);
         self.frontend_results
             .retain(|result| result.intent_id != intent_id);
+        self.frontend_receipts
+            .retain(|receipt| receipt.intent_id != intent_id);
+        self.frontend_completions
+            .retain(|completion| completion.intent_id != intent_id);
         self.frontend_intents.len() != before
     }
     pub fn pop_control_frame(&mut self) -> Option<Vec<u8>> {
@@ -707,6 +942,8 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         self.bulk_out.bytes -= frame.len();
         Some(frame)
     }
+    /// Drain retained diagnostic uploads (oldest entries may be evicted).
+    /// Typed backend processing does not depend on this observation queue.
     pub fn pop_completed_bulk(&mut self) -> Option<CompletedBulk> {
         self.completed_bulk.pop_front()
     }
@@ -759,6 +996,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
+            ObservationKind::ModelTiming => "model_timing",
             ObservationKind::Validation => "validation",
             ObservationKind::AssistantMessage => "assistant_message",
             ObservationKind::ToolCall => "tool_call",
@@ -843,12 +1081,38 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         };
         if !matches!(
             request.kind,
-            InferenceRequestKind::FrontendPoll | InferenceRequestKind::FrontendResult
+            InferenceRequestKind::FrontendPoll
+                | InferenceRequestKind::FrontendResult
+                | InferenceRequestKind::FrontendUpdateResult
         ) {
             return false;
         }
         let identity = self.routes[route_index].identity;
         let accepted = match request.kind {
+            InferenceRequestKind::FrontendUpdateResult => {
+                let Some(result) = kore_hostlink::decode_frontend_update_result(request.input)
+                else {
+                    self.refuse(
+                        &envelope,
+                        RefusalCode::InvalidEncoding,
+                        RetryClass::NewRequest,
+                        b"frontend update result",
+                    );
+                    return true;
+                };
+                if identity.role != BackendRole::Broker
+                    || !self.frontend_updates.accepts(identity, result)
+                {
+                    self.refuse(
+                        &envelope,
+                        RefusalCode::SelectorUnknown,
+                        RetryClass::Never,
+                        b"frontend update owner",
+                    );
+                    return true;
+                }
+                None
+            }
             InferenceRequestKind::FrontendPoll => {
                 let Some(poll) = decode_frontend_poll(request.input) else {
                     self.refuse(
@@ -862,8 +1126,71 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 let role_matches = matches!(
                     (identity.role, poll.phase),
                     (BackendRole::Broker, FrontendPollPhase::BrokerNext)
+                        | (BackendRole::Broker, FrontendPollPhase::SupervisorNextV1)
+                        | (BackendRole::Broker, FrontendPollPhase::BrokerReadyNext)
+                        | (BackendRole::Broker, FrontendPollPhase::BrokerRetired)
+                        | (BackendRole::Broker, FrontendPollPhase::BrokerControl)
                         | (BackendRole::Agent, FrontendPollPhase::AgentClaim)
                 );
+                if poll.phase == FrontendPollPhase::BrokerReadyNext
+                    && !self.frontend_completions.iter().any(|completion| {
+                        completion.intent_id == poll.intent_id
+                            && completion.broker == Some(identity)
+                            && completion.published
+                            && completion.retired
+                            && !completion.ready
+                    })
+                {
+                    self.refuse(
+                        &envelope,
+                        RefusalCode::SelectorUnknown,
+                        RetryClass::Never,
+                        b"frontend readiness",
+                    );
+                    return true;
+                }
+                if poll.phase == FrontendPollPhase::BrokerControl
+                    && (self.frontend_control(identity, poll.intent_id).is_none()
+                        || self.frontend_polls.iter().any(|pending| {
+                            pending.poll.phase == poll.phase
+                                && pending.poll.intent_id == poll.intent_id
+                        }))
+                {
+                    self.refuse(
+                        &envelope,
+                        RefusalCode::SelectorUnknown,
+                        RetryClass::Never,
+                        b"frontend control",
+                    );
+                    return true;
+                }
+                if poll.phase == FrontendPollPhase::BrokerRetired
+                    && !self.frontend_completions.iter().any(|completion| {
+                        completion.intent_id == poll.intent_id
+                            && completion.broker == Some(identity)
+                            && completion.published
+                            && !completion.retired
+                            && !self.frontend_polls.iter().any(|pending| {
+                                pending.poll.phase == FrontendPollPhase::BrokerRetired
+                                    && pending.poll.intent_id == poll.intent_id
+                            })
+                            && !completion.worker.is_some_and(|worker| {
+                                self.routes.iter().any(|route| route.identity == worker)
+                            })
+                            && !self
+                                .frontend_receipts
+                                .iter()
+                                .any(|receipt| receipt.intent_id == poll.intent_id)
+                    })
+                {
+                    self.refuse(
+                        &envelope,
+                        RefusalCode::SelectorUnknown,
+                        RetryClass::Never,
+                        b"frontend retirement",
+                    );
+                    return true;
+                }
                 if !role_matches || self.frontend_polls.len() == FRONTEND_POLLS_MAX {
                     self.refuse(
                         &envelope,
@@ -895,12 +1222,39 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                     );
                     return true;
                 };
-                let route_matches = identity.role == BackendRole::Agent
-                    && self.frontend_intents.iter().any(|intent| {
+                let joining = self.frontend_completions.iter().any(|completion| {
+                    completion.intent_id == result.intent_id
+                        && completion.accepts_fallback(identity, result.kind)
+                });
+                let route_matches = joining
+                    || self.frontend_intents.iter().any(|intent| {
                         intent.intent_id == result.intent_id
-                            && intent.state == FrontendIntentState::AgentClaimed(identity)
+                            && match identity.role {
+                                BackendRole::Agent => {
+                                    intent.state == FrontendIntentState::AgentClaimed(identity)
+                                }
+                                // Only the resident broker can report a worker's startup
+                                // failure when that worker cannot produce its own result.
+                                BackendRole::Broker => {
+                                    (result.kind == FrontendResultKind::Failed
+                                        || (intent.cancel_requested
+                                            && result.kind == FrontendResultKind::Cancelled))
+                                        && intent.broker == Some(identity)
+                                        && matches!(
+                                            intent.state,
+                                            FrontendIntentState::BrokerClaimed
+                                                | FrontendIntentState::AgentClaimed(_)
+                                        )
+                                }
+                                _ => false,
+                            }
                     });
-                if !route_matches || self.frontend_results.len() == FRONTEND_RESULTS_MAX {
+                if !route_matches
+                    || self.frontend_receipts.len() == FRONTEND_RECEIPTS_MAX
+                    || (!joining
+                        && (self.frontend_results.len() == FRONTEND_RESULTS_MAX
+                            || self.frontend_completions.len() == FRONTEND_RESULTS_MAX))
+                {
                     self.refuse(
                         &envelope,
                         if route_matches {
@@ -948,50 +1302,223 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             tick: self.tick,
         });
         if let Some(pending) = accepted {
+            if pending.poll.phase == FrontendPollPhase::SupervisorNextV1 {
+                self.supervisor_contract = Some(identity);
+            }
+            if pending.poll.phase == FrontendPollPhase::BrokerReadyNext {
+                for completion in &mut self.frontend_completions {
+                    if completion.intent_id == pending.poll.intent_id
+                        && completion.broker == Some(identity)
+                        && completion.retired
+                    {
+                        completion.ready = true;
+                    }
+                }
+            }
             self.frontend_polls.push_back(pending);
             self.service_frontend_polls();
-            if pending.poll.phase == FrontendPollPhase::BrokerNext
-                && self.frontend_polls.iter().any(|candidate| {
-                    candidate.identity == pending.identity && candidate.request == pending.request
-                })
-            {
+            if matches!(
+                pending.poll.phase,
+                FrontendPollPhase::BrokerNext
+                    | FrontendPollPhase::SupervisorNextV1
+                    | FrontendPollPhase::BrokerReadyNext
+            ) && self.frontend_polls.iter().any(|candidate| {
+                candidate.identity == pending.identity && candidate.request == pending.request
+            }) {
                 self.log("frontend broker poll parked");
             }
+        } else if request.kind == InferenceRequestKind::FrontendUpdateResult {
+            let result = kore_hostlink::decode_frontend_update_result(request.input)
+                .expect("validated update result");
+            let accepted = self.frontend_updates.accept(
+                UpdateReceipt {
+                    identity,
+                    request: envelope.request_id,
+                    turn: request.turn,
+                    submitted_tick: self.tick,
+                },
+                result,
+            );
+            debug_assert!(accepted);
+            self.service_frontend_update_receipts();
         } else {
             let result = decode_frontend_result(request.input)
                 .expect("frontend result was validated before request admission");
-            self.frontend_results.push_back(FrontendResultOwned {
+            let published = if let Some(completion) = self
+                .frontend_completions
+                .iter_mut()
+                .find(|completion| completion.intent_id == result.intent_id)
+            {
+                completion.broker_joined = true;
+                completion.published
+            } else {
+                let index = self
+                    .frontend_intents
+                    .iter()
+                    .position(|intent| intent.intent_id == result.intent_id)
+                    .expect("frontend result retained its claimed intent");
+                let intent = self.frontend_intents.remove(index).unwrap();
+                self.frontend_updates.cancel_undelivered(intent.intent_id);
+                self.frontend_completions.push_back(FrontendCompletion {
+                    intent_id: result.intent_id,
+                    source: identity,
+                    broker: intent.broker,
+                    worker: match intent.state {
+                        FrontendIntentState::AgentClaimed(worker) => Some(worker),
+                        _ => None,
+                    },
+                    published: false,
+                    broker_joined: identity.role == BackendRole::Broker,
+                    retired: false,
+                    ready: false,
+                    cancel_requested: intent.cancel_requested,
+                    connection_lost: false,
+                });
+                self.frontend_results.push_back(FrontendResultOwned {
+                    intent_id: result.intent_id,
+                    // Cancellation accepted before a terminal result fixes
+                    // the outcome. A late worker completion cannot undo it.
+                    kind: if intent.cancel_requested {
+                        FrontendResultKind::Cancelled
+                    } else {
+                        result.kind
+                    },
+                    text: if intent.cancel_requested {
+                        "Prompt cancelled.".to_owned()
+                    } else {
+                        result.text.to_owned()
+                    },
+                });
+                false
+            };
+            self.frontend_receipts.push_back(PendingFrontendReceipt {
                 intent_id: result.intent_id,
-                kind: result.kind,
-                text: result.text.to_owned(),
-            });
-            self.frontend_intents
-                .retain(|intent| intent.intent_id != result.intent_id);
-            self.finish_frontend_request(
                 identity,
-                envelope.request_id,
-                request.turn,
-                self.tick,
-                &[],
-            );
+                request: envelope.request_id,
+                turn: request.turn,
+                submitted_tick: self.tick,
+            });
             self.log("frontend result accepted");
+            if published {
+                self.acknowledge_frontend_result(result.intent_id);
+            }
         }
         true
     }
 
     fn service_frontend_polls(&mut self) {
+        self.service_frontend_update_receipts();
         let mut index = 0;
         while index < self.frontend_polls.len() {
             let pending = self.frontend_polls[index];
-            let intent_index = match pending.poll.phase {
-                FrontendPollPhase::BrokerNext => self
+            if pending.poll.phase == FrontendPollPhase::BrokerControl {
+                let mut wire = [0; INFERENCE_PART_MAX];
+                let planning = self
                     .frontend_intents
                     .iter()
-                    .position(|intent| intent.state == FrontendIntentState::Queued),
+                    .any(|intent| intent.state == FrontendIntentState::BrokerClaimed)
+                    || !self.backend.broker_prompt_ready(pending.identity);
+                let update = self
+                    .frontend_updates
+                    .pending(pending.identity, pending.poll.intent_id)
+                    .filter(|_| !planning)
+                    .and_then(|update| Some((update.revision, update.encode(&mut wire)?)));
+                if let Some((revision, len)) = update {
+                    if self.finish_frontend_request(
+                        pending.identity,
+                        pending.request,
+                        pending.turn,
+                        pending.submitted_tick,
+                        &wire[..len],
+                    ) {
+                        self.frontend_updates
+                            .delivered(pending.poll.intent_id, revision);
+                        self.frontend_polls.remove(index);
+                    } else {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if let Some(control) =
+                    self.frontend_control(pending.identity, pending.poll.intent_id)
+                    && self.finish_frontend_request(
+                        pending.identity,
+                        pending.request,
+                        pending.turn,
+                        pending.submitted_tick,
+                        &[control as u8],
+                    )
+                {
+                    self.frontend_polls.remove(index);
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if pending.poll.phase == FrontendPollPhase::BrokerRetired {
+                // Drain the broker's earlier control exchange first. Its reply
+                // is one byte larger and can hit backpressure even when the
+                // empty retirement acknowledgement would fit.
+                if self.frontend_polls.iter().any(|other| {
+                    other.poll.phase == FrontendPollPhase::BrokerControl
+                        && other.poll.intent_id == pending.poll.intent_id
+                }) {
+                    index += 1;
+                    continue;
+                }
+                // Admission checked the exact broker, published outcome and
+                // closed worker route. Output backpressure retains the request.
+                if self.finish_frontend_request(
+                    pending.identity,
+                    pending.request,
+                    pending.turn,
+                    pending.submitted_tick,
+                    &[],
+                ) {
+                    if let Some(completion) = self
+                        .frontend_completions
+                        .iter_mut()
+                        .find(|completion| completion.intent_id == pending.poll.intent_id)
+                    {
+                        completion.retired = true;
+                    }
+                    self.frontend_polls.remove(index);
+                    self.log("frontend native retirement confirmed");
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            let intent_index = match pending.poll.phase {
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => {
+                    // Worker lanes share one broker inference sequence. Keep
+                    // planning/founding serial until the worker claims its
+                    // intent, then allow the next plan alongside that worker.
+                    // Backend cancellation can acknowledge before cleanup, so
+                    // require the sequence owner to be idle as well.
+                    if self.frontend_updates.requires_progress()
+                        || !self.backend.broker_prompt_ready(pending.identity)
+                        || self.frontend_intents.iter().any(|intent| {
+                            intent.broker == Some(pending.identity)
+                                && intent.state == FrontendIntentState::BrokerClaimed
+                        })
+                    {
+                        None
+                    } else {
+                        self.frontend_intents
+                            .iter()
+                            .position(|intent| intent.state == FrontendIntentState::Queued)
+                    }
+                }
                 FrontendPollPhase::AgentClaim => self.frontend_intents.iter().position(|intent| {
                     intent.intent_id == pending.poll.intent_id
                         && intent.state == FrontendIntentState::BrokerClaimed
                 }),
+                FrontendPollPhase::BrokerRetired | FrontendPollPhase::BrokerControl => {
+                    unreachable!()
+                }
             };
             let Some(intent_index) = intent_index else {
                 index += 1;
@@ -1019,16 +1546,44 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 continue;
             }
             self.frontend_intents[intent_index].state = match pending.poll.phase {
-                FrontendPollPhase::BrokerNext => FrontendIntentState::BrokerClaimed,
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => {
+                    self.frontend_intents[intent_index].broker = Some(pending.identity);
+                    FrontendIntentState::BrokerClaimed
+                }
                 FrontendPollPhase::AgentClaim => {
                     FrontendIntentState::AgentClaimed(pending.identity)
+                }
+                FrontendPollPhase::BrokerRetired | FrontendPollPhase::BrokerControl => {
+                    unreachable!()
                 }
             };
             self.frontend_polls.remove(index);
             self.log(match pending.poll.phase {
-                FrontendPollPhase::BrokerNext => "frontend intent claimed by broker",
+                FrontendPollPhase::BrokerNext
+                | FrontendPollPhase::SupervisorNextV1
+                | FrontendPollPhase::BrokerReadyNext => "frontend intent claimed by broker",
                 FrontendPollPhase::AgentClaim => "frontend intent claimed by agent",
+                FrontendPollPhase::BrokerRetired | FrontendPollPhase::BrokerControl => {
+                    unreachable!()
+                }
             });
+        }
+    }
+
+    fn service_frontend_update_receipts(&mut self) {
+        while let Some((revision, receipt)) = self.frontend_updates.receipt() {
+            if !self.finish_frontend_request(
+                receipt.identity,
+                receipt.request,
+                receipt.turn,
+                receipt.submitted_tick,
+                &[],
+            ) {
+                break;
+            }
+            self.frontend_updates.acknowledged(revision);
         }
     }
 
@@ -1040,6 +1595,10 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         submitted_tick: u64,
         payload: &[u8],
     ) -> bool {
+        // A delayed receipt must never be sent to a replacement generation.
+        if !self.routes.iter().any(|route| route.identity == identity) {
+            return false;
+        }
         let mut encoded = [0; INFERENCE_EVENT_HEADER_LEN + INFERENCE_PART_MAX];
         let Some(length) = (InferenceEventView {
             kind: InferenceEventKind::TurnFinished,
@@ -1314,7 +1873,30 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 }
                 let identity = self.routes[index].identity;
                 let _ = self.backend.close(identity);
+                self.frontend_updates.close_broker(identity);
                 self.routes.swap_remove(index);
+                if self.supervisor_contract == Some(identity) {
+                    self.supervisor_contract = None;
+                }
+                self.frontend_polls.retain(|poll| poll.identity != identity);
+                if identity.role == BackendRole::Broker {
+                    // Reap of the exact supervisor ends its claims. A new
+                    // incarnation must never inherit or replay uncertain work.
+                    for intent in &mut self.frontend_intents {
+                        if intent.broker == Some(identity) {
+                            intent.state = FrontendIntentState::Disconnected;
+                        }
+                    }
+                    for completion in &mut self.frontend_completions {
+                        if completion.broker == Some(identity) && !completion.ready {
+                            completion.connection_lost = true;
+                        }
+                    }
+                }
+                // A confirmed route close ends only this generation's pending
+                // receipt delivery. Never redirect it to a replacement route.
+                self.frontend_receipts
+                    .retain(|receipt| receipt.identity != identity);
                 self.log("route closed");
             }
             _ => {
@@ -1386,6 +1968,18 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             .cancel(identity, envelope_in.request_id, self.tick)
             .ok();
         if !retired && backend_event.is_none() {
+            if self.routes[index]
+                .completed_requests
+                .contains(&envelope_in.request_id)
+            {
+                if let Err(error) = self.routes[index].state.commit_received(&envelope_in) {
+                    let (code, retry) = admission_refusal(error);
+                    self.refuse(&envelope_in, code, retry, b"");
+                }
+                // The original terminal reply is the completion of this
+                // request. Sending CANCELLED as well would replay its terminal.
+                return;
+            }
             self.refuse(
                 &envelope_in,
                 RefusalCode::SelectorUnknown,
@@ -1666,6 +2260,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             state,
             identity,
             stream_parts: Vec::with_capacity(16),
+            completed_requests: VecDeque::new(),
         });
         self.enqueue(SocketPlane::Control, frame(&out, payload));
         self.log(format!(
@@ -1819,6 +2414,17 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             self.log("discarded stale backend event");
             return;
         };
+        let request = event.request();
+        if !matches!(&event, BackendEvent::Chunk { .. })
+            && matches!(identity.role, BackendRole::Broker | BackendRole::Agent)
+            && self.routes[index].state.has_request(request)
+        {
+            let history = &mut self.routes[index].completed_requests;
+            if history.len() == crate::backend::REQUEST_HISTORY_MAX {
+                history.pop_front();
+            }
+            history.push_back(request);
+        }
         match event {
             BackendEvent::Chunk {
                 sequence,
@@ -2081,7 +2687,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                 request,
                 submitted_tick,
                 failure,
-                ..
+                turn,
             } => {
                 if !self.routes[index].state.has_request(request) {
                     self.metrics.stale_backend_events =
@@ -2089,7 +2695,12 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                     self.log("discarded duplicate backend failure");
                     return;
                 }
-                if !self.reply_backend_failure(sequence.route, request, failure) {
+                let part = self.routes[index]
+                    .stream_parts
+                    .iter()
+                    .find_map(|(candidate, part)| (*candidate == request).then_some(*part))
+                    .unwrap_or(0);
+                if !self.reply_backend_failure(sequence, request, failure, turn, part) {
                     self.disconnect();
                     return;
                 }
@@ -2101,6 +2712,14 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
                     .stream_parts
                     .retain(|(candidate, _)| *candidate != request);
                 self.metrics.failed = self.metrics.failed.saturating_add(1);
+                for intent in &mut self.frontend_intents {
+                    if intent.state == FrontendIntentState::AgentClaimed(sequence)
+                        || (intent.state == FrontendIntentState::BrokerClaimed
+                            && intent.broker == Some(sequence))
+                    {
+                        intent.inference_failed = true;
+                    }
+                }
                 self.sink.observe(BenchmarkEvent::Failed {
                     route: sequence.route,
                     request,
@@ -2114,9 +2733,11 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
 
     fn reply_backend_failure(
         &mut self,
-        route: RouteId,
+        sequence: SequenceIdentity,
         request: RequestId,
         failure: BackendFailure,
+        turn: u64,
+        part: u16,
     ) -> bool {
         let code = match failure {
             BackendFailure::TimedOut => RefusalCode::TimedOut,
@@ -2140,10 +2761,33 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         let len = refusal
             .encode(&mut payload)
             .expect("fixed refusal header is large enough");
+        if matches!(sequence.role, BackendRole::Broker | BackendRole::Agent) {
+            let mut event = [0; INFERENCE_EVENT_HEADER_LEN + REFUSAL_HEADER_LEN];
+            let Some(length) = (InferenceEventView {
+                kind: InferenceEventKind::TurnFailed,
+                terminal: true,
+                part,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                turn,
+                payload: &payload[..len],
+            })
+            .encode(&mut event) else {
+                return false;
+            };
+            return self.reply_routed_with_priority(
+                SocketPlane::Control,
+                INFER_REPLY,
+                sequence.route,
+                request,
+                &event[..length],
+                true,
+            );
+        }
         self.reply_routed_with_priority(
             SocketPlane::Control,
             REFUSED,
-            route,
+            sequence.route,
             request,
             &payload[..len],
             true,
@@ -2166,6 +2810,7 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
             // may append another same-epoch frame after a routed refusal.
             return;
         }
+        self.service_frontend_polls();
         if self.epoch.is_none()
             && self.tick >= self.next_hello_retry_tick
             && let Some(nonce) = self.negotiation_nonce
@@ -2187,6 +2832,19 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         }
     }
     pub fn disconnect(&mut self) {
+        // The bounded transcript can wrap during a long inference turn. Keep
+        // the immediate failure boundary visible even if a consumer's cursor
+        // has reached the buffer's capacity.
+        if std::env::var_os("VKORE_HOSTLINK_TRACE").is_some() {
+            eprintln!("hostlink: disconnect metrics={:?}", self.metrics);
+            for entry in self
+                .transcript
+                .iter()
+                .skip(self.transcript.len().saturating_sub(12))
+            {
+                eprintln!("hostlink: disconnect context: {entry}");
+            }
+        }
         self.metrics.disconnects += 1;
         self.sink
             .observe(BenchmarkEvent::Disconnected { tick: self.tick });
@@ -2194,14 +2852,26 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         self.log("disconnected");
     }
     fn reset_session(&mut self, clear_output: bool) {
+        self.frontend_updates.disconnect();
         self.backend.reset();
         self.bulk.reset();
         self.completed_bulk.clear();
         self.outbound_bulk.clear();
         self.routes.clear();
         self.frontend_polls.clear();
+        self.supervisor_contract = None;
+        self.frontend_receipts.clear();
+        for completion in &mut self.frontend_completions {
+            if !completion.ready {
+                completion.connection_lost = true;
+                completion.broker = None;
+            }
+        }
         for intent in &mut self.frontend_intents {
-            intent.state = FrontendIntentState::Queued;
+            if intent.state != FrontendIntentState::Queued {
+                intent.state = FrontendIntentState::Disconnected;
+            }
+            intent.broker = None;
         }
         self.epoch = None;
         self.negotiation_nonce = None;
@@ -2516,6 +3186,118 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
             bulk_write_chunk: usize::MAX,
         })
     }
+    pub(crate) fn with_idle_backend<T>(
+        &mut self,
+        use_backend: impl FnOnce(&mut B) -> T,
+    ) -> Result<T, BackendError> {
+        if !self.broker_idle() {
+            return Err(BackendError::OutOfOrder);
+        }
+        Ok(use_backend(&mut self.core.backend))
+    }
+
+    /// Only the runtime owner may use this after confirming its guest exited.
+    /// Disconnection alone is not proof that a guest has released authority.
+    pub(crate) fn with_disconnected_backend<T>(
+        &mut self,
+        use_backend: impl FnOnce(&mut B) -> T,
+    ) -> Result<T, BackendError> {
+        if self.control.is_some()
+            || self.bulk.is_some()
+            || self.core.epoch.is_some()
+            || self.core.negotiation_nonce.is_some()
+            || !self.core.routes.is_empty()
+            || !self.core.frontend_intents.is_empty()
+            || !self.core.frontend_receipts.is_empty()
+            || !self.core.frontend_completions.is_empty()
+        {
+            return Err(BackendError::OutOfOrder);
+        }
+        Ok(use_backend(&mut self.core.backend))
+    }
+
+    pub(crate) fn broker_idle(&self) -> bool {
+        self.core.frontend_intents.is_empty()
+            && self.core.frontend_receipts.is_empty()
+            && self.core.frontend_completions.is_empty()
+            && self.broker_poll().is_some()
+    }
+
+    /// A transport connection or route advertisement is insufficient. The
+    /// exact broker must have submitted an authenticated frontend poll.
+    pub(crate) fn supervisor_ready(&self) -> Option<SequenceIdentity> {
+        self.broker_poll()
+            .filter(|identity| self.core.supervisor_contract == Some(*identity))
+    }
+
+    fn broker_poll(&self) -> Option<SequenceIdentity> {
+        self.core
+            .frontend_polls
+            .iter()
+            .find(|poll| {
+                matches!(
+                    poll.poll.phase,
+                    FrontendPollPhase::BrokerNext
+                        | FrontendPollPhase::SupervisorNextV1
+                        | FrontendPollPhase::BrokerReadyNext
+                ) && poll.identity.role == BackendRole::Broker
+                    && self
+                        .core
+                        .routes
+                        .iter()
+                        .any(|route| route.identity == poll.identity)
+            })
+            .map(|poll| poll.identity)
+    }
+
+    /// Request containment of one incarnation. The surviving guest launcher
+    /// performs task/descendant reap; only its route closure confirms that step.
+    pub(crate) fn stop_supervisor(&mut self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self
+                .core
+                .routes
+                .iter()
+                .any(|route| route.identity == identity)
+            && self.core.reply_routed(
+                SocketPlane::Control,
+                SUPERVISOR_STOP,
+                identity.route,
+                RequestId::ZERO,
+                &[],
+            )
+    }
+
+    pub(crate) fn supervisor_identity(&self) -> Option<SequenceIdentity> {
+        self.core
+            .routes
+            .iter()
+            .find(|route| route.identity.role == BackendRole::Broker)
+            .map(|route| route.identity)
+    }
+
+    /// The harness has already terminalized interrupted prompts. Release only
+    /// their host bookkeeping after a replacement has proved readiness; never
+    /// requeue text or reinterpret an unknown write outcome as a failed write.
+    pub(crate) fn release_interrupted_frontend(&mut self) {
+        let ids: Vec<_> = self
+            .core
+            .frontend_intents
+            .iter()
+            .map(|row| row.intent_id)
+            .chain(
+                self.core
+                    .frontend_completions
+                    .iter()
+                    .map(|row| row.intent_id),
+            )
+            .filter(|id| self.core.frontend_interrupted(*id))
+            .collect();
+        for id in ids {
+            self.core.cancel_frontend_intent(id);
+        }
+    }
+
     pub fn core(&self) -> &LinkCore<B, S> {
         &self.core
     }
@@ -2645,8 +3427,31 @@ impl<B: InferenceBackend, S: BenchmarkSink> HostLinkDaemon<B, S> {
         self.core.queue_frontend_intent(text)
     }
 
+    pub fn set_conversation_context(
+        &mut self,
+        context: &[(bool, String)],
+    ) -> Result<(), BackendError> {
+        self.core.backend.set_conversation_context(context)
+    }
+
     pub fn take_frontend_result(&mut self) -> Option<FrontendResultOwned> {
         self.core.pop_frontend_result()
+    }
+
+    pub fn queue_frontend_update(
+        &mut self,
+        intent_id: FrontendIntentId,
+        text: impl Into<String>,
+    ) -> Result<u32, FrontendQueueError> {
+        self.core.queue_frontend_update(intent_id, text)
+    }
+
+    pub fn take_frontend_update_result(&mut self) -> Option<FrontendUpdateResultOwned> {
+        self.core.pop_frontend_update_result()
+    }
+
+    pub fn acknowledge_frontend_result(&mut self, intent_id: FrontendIntentId) -> bool {
+        self.core.acknowledge_frontend_result(intent_id)
     }
 
     pub fn cancel_frontend_intent(&mut self, intent_id: FrontendIntentId) -> bool {
@@ -2886,7 +3691,30 @@ mod tests {
                 role: backend_role,
             },
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
+    }
+
+    #[test]
+    fn disconnected_attachment_rejects_queued_intent_and_live_epoch() {
+        let (mut daemon, _) =
+            HostLinkDaemon::bind_dynamic_tcp(crate::backend::DeterministicBackend::new(1), ())
+                .unwrap();
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
+        let intent = daemon.queue_frontend_intent("pending task").unwrap();
+        assert!(matches!(
+            daemon.with_disconnected_backend(|_| panic!("mutated pending task")),
+            Err(BackendError::OutOfOrder)
+        ));
+        daemon.cancel_frontend_intent(intent);
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
+        daemon.core.epoch = Some(LinkEpoch([7; 16]));
+        assert!(matches!(
+            daemon.with_disconnected_backend(|_| panic!("mutated live epoch")),
+            Err(BackendError::OutOfOrder)
+        ));
+        daemon.force_disconnect();
+        assert!(daemon.with_disconnected_backend(|_| ()).is_ok());
     }
 
     #[test]
@@ -2956,6 +3784,1862 @@ mod tests {
     }
 
     #[test]
+    fn only_the_claiming_broker_can_report_worker_failure_once() {
+        for (claiming, kind, accepted) in [
+            (true, FrontendResultKind::Failed, true),
+            (false, FrontendResultKind::Failed, false),
+            (true, FrontendResultKind::Completed, false),
+        ] {
+            let epoch = LinkEpoch([61; 16]);
+            let route = RouteId([62; 16]);
+            let generation = TaskGeneration::new(2).unwrap();
+            let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
+            core.epoch = Some(epoch);
+            install_frontend_route(
+                &mut core,
+                epoch,
+                route,
+                generation,
+                RouteRole::Broker,
+                BackendRole::Broker,
+            );
+            let intent_id = core.queue_frontend_intent("hello").unwrap();
+            let intent = &mut core.frontend_intents[0];
+            intent.state = FrontendIntentState::BrokerClaimed;
+            intent.broker = Some(SequenceIdentity {
+                route: if claiming { route } else { RouteId([63; 16]) },
+                generation,
+                role: BackendRole::Broker,
+            });
+            let mut inner = [0; INFERENCE_PART_MAX];
+            let length = kore_hostlink::FrontendResult {
+                intent_id,
+                kind,
+                text: "Agent failed before responding: RunnerExited(41)",
+            }
+            .encode(&mut inner)
+            .unwrap();
+            let payload =
+                frontend_request(InferenceRequestKind::FrontendResult, 1, &inner[..length]);
+            core.control_out.clear();
+            core.receive(
+                SocketPlane::Control,
+                envelope(
+                    INFER_REQUEST,
+                    epoch,
+                    route,
+                    generation.get(),
+                    0,
+                    RequestId([64; 16]),
+                    payload.len(),
+                ),
+                &payload,
+            );
+            assert_eq!(core.frontend_results.len(), usize::from(accepted));
+            if accepted {
+                assert!(core.control_out.frames.is_empty());
+                core.pop_frontend_result().unwrap();
+                // A duplicate failure cannot produce a second final response.
+                core.receive(
+                    SocketPlane::Control,
+                    envelope(
+                        INFER_REQUEST,
+                        epoch,
+                        route,
+                        generation.get(),
+                        1,
+                        RequestId([65; 16]),
+                        payload.len(),
+                    ),
+                    &payload,
+                );
+                assert!(core.frontend_results.is_empty());
+                assert_eq!(core.frontend_receipts.len(), 1);
+                assert!(core.acknowledge_frontend_result(intent_id));
+                assert!(!core.acknowledge_frontend_result(intent_id));
+            }
+        }
+    }
+
+    #[test]
+    fn frontend_updates_deliver_on_exact_broker_and_ack_separately_from_prompt_results() {
+        use kore_hostlink::{FrontendUpdateOutcome, FrontendUpdateResult};
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        let queued = core.queue_frontend_intent("unclaimed").unwrap();
+        assert_eq!(
+            core.queue_frontend_update(queued, "change authority"),
+            Err(FrontendQueueError::InvalidIntent)
+        );
+        let revision = core.queue_frontend_update(intent, "Revoke input.").unwrap();
+        assert!(core.frontend_requires_progress());
+        assert_eq!(
+            core.queue_frontend_update(intent, "second update"),
+            Err(FrontendQueueError::Duplicate)
+        );
+        assert!(core.frontend_updates.pending(worker, intent).is_none());
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        assert!(core.frontend_updates.pending(broker, intent).is_some());
+        core.control_out.bytes = 0;
+        core.service_frontend_polls();
+        let frame = core.pop_control_frame().unwrap();
+        let reply = decode_inference_event(&frame[ENVELOPE_LEN..]).unwrap();
+        let update = kore_hostlink::decode_frontend_update(reply.payload).unwrap();
+        assert_eq!(
+            (update.intent_id, update.revision, update.text),
+            (intent, revision, "Revoke input.")
+        );
+        assert!(core.frontend_updates.pending(broker, intent).is_none());
+        let result = FrontendUpdateResult {
+            intent_id: intent,
+            revision,
+            outcome: FrontendUpdateOutcome::Applied,
+            text: "Input revoked.",
+        };
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let len = result.encode(&mut inner).unwrap();
+        let payload =
+            frontend_request(InferenceRequestKind::FrontendUpdateResult, 1, &inner[..len]);
+        // The worker cannot submit testimony on behalf of the owning broker.
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                worker.route,
+                worker.generation.get(),
+                0,
+                RequestId([110; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert!(core.pop_frontend_update_result().is_none());
+        core.control_out.clear();
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                broker.route,
+                broker.generation.get(),
+                1,
+                RequestId([111; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert!(
+            core.pop_frontend_update_result().is_none(),
+            "backpressure retains result/receipt custody"
+        );
+        assert!(core.frontend_results.is_empty() && core.frontend_completions.is_empty());
+        assert_eq!(core.frontend_intents.len(), 2);
+        core.control_out.bytes = 0;
+        core.service_frontend_polls();
+        let frame = core.pop_control_frame().unwrap();
+        assert!(
+            decode_inference_event(&frame[ENVELOPE_LEN..])
+                .unwrap()
+                .payload
+                .is_empty()
+        );
+        let actual = core.pop_frontend_update_result().unwrap();
+        assert_eq!(
+            (
+                actual.intent_id,
+                actual.revision,
+                actual.outcome,
+                actual.text.as_str()
+            ),
+            (
+                intent,
+                revision,
+                FrontendUpdateOutcome::Applied,
+                "Input revoked."
+            )
+        );
+        assert!(core.pop_frontend_update_result().is_none());
+        let next = core
+            .queue_frontend_update(intent, "Grant input again.")
+            .unwrap();
+        assert!(next > revision);
+        assert!(!core.frontend_updates.accepts(broker, result));
+        assert!(core.frontend_results.is_empty() && core.frontend_completions.is_empty());
+    }
+
+    #[test]
+    fn frontend_updates_wait_for_existing_planning_and_hold_new_claims_until_receipt() {
+        use kore_hostlink::{FrontendUpdateOutcome, FrontendUpdateResult};
+        let (mut core, intent, broker, _) = frontend_race_fixture();
+        let second = core.queue_frontend_intent("already claimed").unwrap();
+        core.frontend_intents[1].state = FrontendIntentState::BrokerClaimed;
+        core.frontend_intents[1].broker = Some(broker);
+        let third = core.queue_frontend_intent("wait for update").unwrap();
+        let revision = core.queue_frontend_update(intent, "Revoke input.").unwrap();
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        let frame = core.pop_control_frame().unwrap();
+        assert_eq!(
+            kore_hostlink::FrontendControl::decode(
+                decode_inference_event(&frame[ENVELOPE_LEN..])
+                    .unwrap()
+                    .payload
+            ),
+            Some(kore_hostlink::FrontendControl::Active)
+        );
+        assert!(core.frontend_updates.pending(broker, intent).is_some());
+        let other = SequenceIdentity {
+            route: RouteId([74; 16]),
+            generation: TaskGeneration::new(3).unwrap(),
+            role: BackendRole::Agent,
+        };
+        install_frontend_route(
+            &mut core,
+            LinkEpoch([71; 16]),
+            other.route,
+            other.generation,
+            RouteRole::Agent,
+            BackendRole::Agent,
+        );
+        core.frontend_intents[1].state = FrontendIntentState::AgentClaimed(other);
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert!(core.control_out.frames.is_empty());
+        assert_eq!(core.frontend_intents[2].state, FrontendIntentState::Queued);
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        let frame = core.pop_control_frame().unwrap();
+        assert!(
+            kore_hostlink::decode_frontend_update(
+                decode_inference_event(&frame[ENVELOPE_LEN..])
+                    .unwrap()
+                    .payload
+            )
+            .is_some()
+        );
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let len = FrontendUpdateResult {
+            intent_id: intent,
+            revision,
+            outcome: FrontendUpdateOutcome::Applied,
+            text: "done",
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload =
+            frontend_request(InferenceRequestKind::FrontendUpdateResult, 1, &inner[..len]);
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                broker.route,
+                broker.generation.get(),
+                3,
+                RequestId([119; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        core.service_frontend_polls();
+        assert_eq!(core.frontend_intents[2].state, FrontendIntentState::Queued);
+        core.control_out.bytes = 0;
+        core.service_frontend_polls();
+        assert_eq!(
+            core.frontend_intents
+                .iter()
+                .find(|row| row.intent_id == third)
+                .unwrap()
+                .state,
+            FrontendIntentState::BrokerClaimed
+        );
+        assert_eq!(
+            core.frontend_intents
+                .iter()
+                .find(|row| row.intent_id == second)
+                .unwrap()
+                .state,
+            FrontendIntentState::AgentClaimed(other)
+        );
+        assert_eq!(
+            core.pop_frontend_update_result().unwrap().outcome,
+            FrontendUpdateOutcome::Applied
+        );
+        assert!(core.frontend_results.is_empty() && core.frontend_completions.is_empty());
+    }
+
+    #[test]
+    fn authority_update_runtime_bridge_waits_for_exact_receipt_and_preserves_other_results() {
+        use crate::{AuthorityUpdateRequest, EventKind, kore_runtime::LiveUpdateBridge};
+        use kore_hostlink::{FrontendUpdateOutcome, FrontendUpdateResult};
+        let (mut core, intent, broker, _) = frontend_race_fixture();
+        let mut bridge = LiveUpdateBridge::new(intent);
+        let request = std::cell::RefCell::new(Some(AuthorityUpdateRequest {
+            api_version: 1,
+            prompt_id: "prompt".into(),
+            update_id: "update".into(),
+            text: "Revoke input.".into(),
+        }));
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut emit = |kind, public, value| events.borrow_mut().push((kind, public, value));
+        bridge.submit(&mut core, &|| request.borrow_mut().take(), &mut emit);
+        assert!(bridge.pending());
+        bridge.submit(
+            &mut core,
+            &|| panic!("must not drain another API request"),
+            &mut emit,
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        let frame = core.pop_control_frame().unwrap();
+        let reply = decode_inference_event(&frame[ENVELOPE_LEN..]).unwrap();
+        let update = kore_hostlink::decode_frontend_update(reply.payload).unwrap();
+        assert_eq!(update.text, "Revoke input.");
+        let revision = update.revision;
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let len = FrontendUpdateResult {
+            intent_id: intent,
+            revision,
+            outcome: FrontendUpdateOutcome::Applied,
+            text: "Input revoked.",
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload =
+            frontend_request(InferenceRequestKind::FrontendUpdateResult, 1, &inner[..len]);
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                broker.route,
+                broker.generation.get(),
+                1,
+                RequestId([121; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        bridge.receive(&mut core, &mut emit);
+        assert!(bridge.pending() && events.borrow().is_empty());
+        core.control_out.bytes = 0;
+        core.service_frontend_polls();
+        // Another intent's terminal result must remain in its own custody.
+        let other = FrontendIntentId([122; 16]);
+        let other_revision = core
+            .frontend_updates
+            .queue(other, broker, "other".into())
+            .unwrap();
+        core.frontend_updates.cancel_undelivered(other);
+        bridge.receive(&mut core, &mut emit);
+        bridge.receive(&mut core, &mut emit);
+        assert!(!bridge.pending());
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, EventKind::AuthorityUpdate);
+        assert!(events[0].1);
+        assert_eq!(events[0].2["update_id"], "update");
+        assert_eq!(events[0].2["revision"], revision);
+        assert_eq!(events[0].2["status"], "applied");
+        assert!(core.frontend_results.is_empty() && core.frontend_completions.is_empty());
+        assert_eq!(
+            core.pop_frontend_update_result_for(other, other_revision)
+                .unwrap()
+                .outcome,
+            FrontendUpdateOutcome::Cancelled
+        );
+    }
+
+    fn frontend_race_fixture() -> (
+        LinkCore<crate::backend::DeterministicBackend>,
+        FrontendIntentId,
+        SequenceIdentity,
+        SequenceIdentity,
+    ) {
+        let epoch = LinkEpoch([71; 16]);
+        let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
+        core.epoch = Some(epoch);
+        for (route, role, backend_role) in [
+            (RouteId([72; 16]), RouteRole::Broker, BackendRole::Broker),
+            (RouteId([73; 16]), RouteRole::Agent, BackendRole::Agent),
+        ] {
+            install_frontend_route(
+                &mut core,
+                epoch,
+                route,
+                TaskGeneration::new(3).unwrap(),
+                role,
+                backend_role,
+            );
+        }
+        let broker = core.routes[0].identity;
+        let worker = core.routes[1].identity;
+        core.backend.open(broker).unwrap();
+        let intent_id = core.queue_frontend_intent("hello").unwrap();
+        core.frontend_intents[0].state = FrontendIntentState::AgentClaimed(worker);
+        core.frontend_intents[0].broker = Some(broker);
+        (core, intent_id, broker, worker)
+    }
+
+    fn submit_frontend_race_result(
+        core: &mut LinkCore<crate::backend::DeterministicBackend>,
+        intent_id: FrontendIntentId,
+        identity: SequenceIdentity,
+        sequence: u64,
+        request: RequestId,
+    ) {
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let (kind, text) = if identity.role == BackendRole::Broker {
+            (FrontendResultKind::Failed, "Agent deadline exceeded.")
+        } else {
+            (
+                FrontendResultKind::Completed,
+                "Finished before the deadline.",
+            )
+        };
+        let length = kore_hostlink::FrontendResult {
+            intent_id,
+            kind,
+            text,
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendResult, 1, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                identity.route,
+                identity.generation.get(),
+                sequence,
+                request,
+                payload.len(),
+            ),
+            &payload,
+        );
+    }
+
+    #[test]
+    fn frontend_deadline_race_shares_publication_without_replacing_the_answer() {
+        for publish_before_deadline in [false, true] {
+            let (mut core, intent, broker, worker) = frontend_race_fixture();
+            let worker_request = RequestId([74; 16]);
+            let broker_request = RequestId([75; 16]);
+            submit_frontend_race_result(&mut core, intent, worker, 0, worker_request);
+            assert_eq!(
+                core.pop_frontend_result().unwrap().kind,
+                FrontendResultKind::Completed
+            );
+            assert!(core.control_out.frames.is_empty());
+            if publish_before_deadline {
+                assert!(core.acknowledge_frontend_result(intent));
+            }
+            submit_frontend_race_result(&mut core, intent, broker, 0, broker_request);
+            assert!(
+                core.frontend_results.is_empty(),
+                "a deadline cannot replace the answer"
+            );
+            if !publish_before_deadline {
+                assert!(
+                    core.control_out.frames.is_empty(),
+                    "both requests wait for publication"
+                );
+                assert_eq!(core.frontend_receipts.len(), 2);
+                core.control_out.bytes = QUEUE_BYTES_MAX;
+                assert!(!core.acknowledge_frontend_result(intent));
+                assert_eq!(core.frontend_receipts.len(), 2);
+                core.control_out.bytes = 0;
+                assert!(core.acknowledge_frontend_result(intent));
+            }
+            assert!(core.frontend_receipts.is_empty());
+            let receipts: Vec<_> = core
+                .control_out
+                .frames
+                .iter()
+                .map(|frame| {
+                    let envelope = EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN]).unwrap();
+                    assert_eq!(envelope.kind.get(), INFER_REPLY);
+                    let event = decode_inference_event(&frame[ENVELOPE_LEN..]).unwrap();
+                    assert!(event.terminal && event.payload.is_empty());
+                    assert_eq!(event.kind, InferenceEventKind::TurnFinished);
+                    (envelope.route_id, envelope.request_id)
+                })
+                .collect();
+            assert_eq!(
+                receipts,
+                vec![
+                    (worker.route, worker_request),
+                    (broker.route, broker_request)
+                ]
+            );
+            assert!(!core.acknowledge_frontend_result(intent));
+            // Even a fresh request from the real broker cannot join twice.
+            submit_frontend_race_result(&mut core, intent, broker, 1, RequestId([76; 16]));
+            assert!(core.frontend_results.is_empty() && core.frontend_receipts.is_empty());
+        }
+    }
+
+    #[test]
+    fn frontend_deadline_winner_rejects_a_late_worker_answer() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, broker, 0, RequestId([74; 16]));
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([75; 16]));
+        assert_eq!(core.frontend_results.len(), 1);
+        assert_eq!(
+            core.pop_frontend_result().unwrap().kind,
+            FrontendResultKind::Failed
+        );
+        assert_eq!(core.frontend_receipts.len(), 1);
+        assert!(core.acknowledge_frontend_result(intent));
+        assert!(core.frontend_receipts.is_empty());
+    }
+
+    #[test]
+    fn frontend_deadline_join_rejects_other_brokers_and_replacement_generations() {
+        for replacement in [false, true] {
+            let (mut core, intent, broker, worker) = frontend_race_fixture();
+            submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+            let intruder = SequenceIdentity {
+                route: if replacement {
+                    broker.route
+                } else {
+                    RouteId([79; 16])
+                },
+                generation: TaskGeneration::new(4).unwrap(),
+                role: BackendRole::Broker,
+            };
+            if replacement {
+                core.routes.remove(0);
+            }
+            let epoch = core.epoch.unwrap();
+            install_frontend_route(
+                &mut core,
+                epoch,
+                intruder.route,
+                intruder.generation,
+                RouteRole::Broker,
+                BackendRole::Broker,
+            );
+            submit_frontend_race_result(&mut core, intent, intruder, 0, RequestId([75; 16]));
+            assert!(!core.frontend_completions[0].broker_joined);
+            assert_eq!(core.frontend_receipts.len(), 1);
+            assert_eq!(core.frontend_results.len(), 1);
+            assert_eq!(
+                EnvelopeV1::read_from_bytes(
+                    &core.control_out.frames.back().unwrap()[..ENVELOPE_LEN]
+                )
+                .unwrap()
+                .kind
+                .get(),
+                REFUSED
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_contract_requires_the_new_authenticated_poll_and_ends_with_its_route() {
+        let (mut core, _, broker, _) = frontend_race_fixture();
+        assert!(core.supervisor_contract.is_none());
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert!(
+            core.supervisor_contract.is_none(),
+            "legacy init is not the supervisor contract"
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::SupervisorNextV1,
+            FrontendIntentId::ZERO,
+        );
+        assert_eq!(core.supervisor_contract, Some(broker));
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                core.epoch.unwrap(),
+                broker.route,
+                broker.generation.get(),
+                2,
+                RequestId::ZERO,
+                0,
+            ),
+            &[],
+        );
+        assert!(core.supervisor_contract.is_none());
+    }
+
+    #[test]
+    fn supervisor_close_fences_claims_polls_and_published_results_without_replay() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        let result = core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        let mut bytes = [0; INFERENCE_PART_MAX];
+        let len = FrontendPoll {
+            phase: FrontendPollPhase::BrokerNext,
+            intent_id: FrontendIntentId::ZERO,
+        }
+        .encode(&mut bytes)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &bytes[..len]);
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                0,
+                RequestId([75; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert!(
+            core.frontend_polls
+                .iter()
+                .any(|poll| poll.identity == broker)
+        );
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                1,
+                RequestId::ZERO,
+                0,
+            ),
+            &[],
+        );
+        assert!(core.frontend_interrupted(intent));
+        assert!(!core.frontend_ready(intent));
+        assert!(
+            !core
+                .frontend_polls
+                .iter()
+                .any(|poll| poll.identity == broker)
+        );
+        assert!(core.frontend_completions[0].published);
+        assert_eq!(result.intent_id, intent);
+        install_frontend_route(
+            &mut core,
+            epoch,
+            RouteId([91; 16]),
+            TaskGeneration::new(broker.generation.get() + 1).unwrap(),
+            RouteRole::Broker,
+            BackendRole::Broker,
+        );
+        core.service_frontend_polls();
+        assert!(core.frontend_results.is_empty());
+        assert!(core.frontend_interrupted(intent));
+    }
+
+    #[test]
+    fn frontend_completion_survives_concurrent_poll_until_exact_worker_route_closes() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let length = FrontendPoll {
+            phase: FrontendPollPhase::BrokerNext,
+            intent_id: FrontendIntentId::ZERO,
+        }
+        .encode(&mut inner)
+        .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &inner[..length]);
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                0,
+                RequestId([75; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert_eq!(
+            core.frontend_completions.len(),
+            1,
+            "a concurrent poll is not worker retirement"
+        );
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                worker.route,
+                worker.generation.get(),
+                1,
+                RequestId([76; 16]),
+                0,
+            ),
+            &[],
+        );
+        assert!(!core.routes.iter().any(|route| route.identity == worker));
+        // A replacement generation does not keep its predecessor's completion
+        // alive, and can never receive the predecessor's delayed receipt.
+        install_frontend_route(
+            &mut core,
+            epoch,
+            worker.route,
+            TaskGeneration::new(4).unwrap(),
+            RouteRole::Agent,
+            BackendRole::Agent,
+        );
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                1,
+                RequestId([77; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+        assert_eq!(core.frontend_completions.len(), 1);
+        assert!(!core.frontend_ready(intent));
+        assert!(!core.finish_frontend_intent(intent));
+        assert!(!core.acknowledge_frontend_result(intent));
+    }
+
+    #[test]
+    fn frontend_worker_route_close_preserves_the_brokers_unpublished_receipt() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        submit_frontend_race_result(&mut core, intent, broker, 0, RequestId([75; 16]));
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                worker.route,
+                worker.generation.get(),
+                1,
+                RequestId([76; 16]),
+                0,
+            ),
+            &[],
+        );
+        assert_eq!(core.frontend_receipts.len(), 1);
+        assert_eq!(core.frontend_receipts[0].identity, broker);
+        assert!(!core.frontend_completions[0].published);
+        core.control_out.clear();
+        install_frontend_route(
+            &mut core,
+            epoch,
+            worker.route,
+            TaskGeneration::new(4).unwrap(),
+            RouteRole::Agent,
+            BackendRole::Agent,
+        );
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        assert_eq!(core.control_out.frames.len(), 1);
+        let reply =
+            EnvelopeV1::read_from_bytes(&core.control_out.frames[0][..ENVELOPE_LEN]).unwrap();
+        assert_eq!(reply.route_id, broker.route);
+        assert_eq!(reply.kind.get(), INFER_REPLY);
+        core.disconnect();
+        assert!(core.frontend_receipts.is_empty());
+        assert!(core.frontend_interrupted(intent));
+        assert!(!core.frontend_ready(intent));
+        assert!(!core.acknowledge_frontend_result(intent));
+    }
+
+    #[test]
+    fn frontend_disconnect_never_replays_claimed_work_on_a_new_epoch() {
+        for broker_claimed in [true, false] {
+            let (mut core, first, broker, _) = frontend_race_fixture();
+            if broker_claimed {
+                core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+            }
+            // The second iteration exercises the fixture's AgentClaimed state.
+            let queued = core.queue_frontend_intent("not delivered yet").unwrap();
+            core.disconnect();
+            core.disconnect(); // repeated reset cannot erase the uncertainty
+            assert!(core.frontend_interrupted(first));
+            assert!(!core.frontend_interrupted(queued));
+            assert!(core.frontend_results.is_empty());
+            assert!(!core.frontend_ready(first));
+            let epoch = LinkEpoch([81; 16]);
+            core.epoch = Some(epoch);
+            // Reuse the same route/generation to prove a fresh epoch alone
+            // cannot turn the old claim into a new delivery.
+            install_frontend_route(
+                &mut core,
+                epoch,
+                broker.route,
+                broker.generation,
+                RouteRole::Broker,
+                BackendRole::Broker,
+            );
+            core.backend.open(broker).unwrap();
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                0,
+                FrontendPollPhase::BrokerNext,
+                FrontendIntentId::ZERO,
+            );
+            assert!(core.frontend_interrupted(first));
+            let next = core
+                .frontend_intents
+                .iter()
+                .find(|intent| intent.intent_id == queued)
+                .unwrap();
+            assert_eq!(next.state, FrontendIntentState::BrokerClaimed);
+            assert_eq!(
+                core.frontend_intents
+                    .iter()
+                    .filter(|intent| intent.state == FrontendIntentState::BrokerClaimed)
+                    .count(),
+                1
+            );
+            assert!(core.cancel_frontend_intent(first));
+            assert!(!core.frontend_interrupted(first));
+            assert!(
+                core.frontend_intents
+                    .iter()
+                    .any(|intent| intent.intent_id == queued)
+            );
+        }
+    }
+
+    #[test]
+    fn frontend_disconnect_preserves_a_result_without_inventing_cleanup() {
+        let (mut core, intent, _, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        core.disconnect();
+        let result = core.pop_frontend_result().unwrap();
+        assert_eq!(result.intent_id, intent);
+        assert_eq!(result.kind, FrontendResultKind::Completed);
+        assert!(core.frontend_interrupted(intent));
+        assert!(!core.frontend_ready(intent));
+        assert!(!core.finish_frontend_intent(intent));
+        assert!(!core.acknowledge_frontend_result(intent));
+        assert!(core.control_out.frames.is_empty());
+        core.cancel_frontend_intent(intent);
+        assert!(core.frontend_completions.is_empty());
+        assert!(!core.frontend_interrupted(intent));
+    }
+
+    #[test]
+    fn frontend_disconnect_does_not_erase_already_confirmed_readiness() {
+        let (mut core, intent, broker, _) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+        submit_frontend_race_result(&mut core, intent, broker, 0, RequestId([74; 16]));
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            intent,
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(core.frontend_ready(intent));
+        core.disconnect();
+        assert!(!core.frontend_interrupted(intent));
+        assert!(core.frontend_ready(intent));
+        assert!(core.finish_frontend_intent(intent));
+        assert!(core.frontend_completions.is_empty());
+    }
+
+    #[test]
+    fn frontend_refusal_without_worker_retires_and_reuses_bounded_capacity() {
+        let (mut core, mut intent, broker, _) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+        for cycle in 0..(FRONTEND_RESULTS_MAX as u64 * 3) {
+            submit_frontend_race_result(
+                &mut core,
+                intent,
+                broker,
+                cycle * 3,
+                RequestId([(100 + cycle * 3) as u8; 16]),
+            );
+            assert_eq!(
+                core.pop_frontend_result().unwrap().kind,
+                FrontendResultKind::Failed
+            );
+            assert!(!core.frontend_ready(intent));
+            assert!(core.acknowledge_frontend_result(intent));
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                cycle * 3 + 1,
+                FrontendPollPhase::BrokerRetired,
+                intent,
+            );
+            assert!(core.frontend_completions[0].retired);
+            assert!(
+                !core.frontend_ready(intent),
+                "retirement alone is not broker readiness"
+            );
+            let next = core.queue_frontend_intent("next prompt").unwrap();
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                cycle * 3 + 2,
+                FrontendPollPhase::BrokerReadyNext,
+                intent,
+            );
+            assert!(core.frontend_ready(intent));
+            assert!(!core.frontend_ready(next));
+            assert!(core.finish_frontend_intent(intent));
+            assert!(!core.finish_frontend_intent(intent));
+            assert!(core.frontend_completions.is_empty() && core.frontend_receipts.is_empty());
+            assert!(core.frontend_polls.is_empty());
+            assert_eq!(
+                core.frontend_intents[0].state,
+                FrontendIntentState::BrokerClaimed
+            );
+            core.control_out.clear();
+            intent = next;
+        }
+    }
+
+    fn submit_frontend_lifecycle(
+        core: &mut LinkCore<crate::backend::DeterministicBackend>,
+        identity: SequenceIdentity,
+        sequence: u64,
+        phase: FrontendPollPhase,
+        intent_id: FrontendIntentId,
+    ) {
+        let mut inner = [0; INFERENCE_PART_MAX];
+        let length = FrontendPoll { phase, intent_id }
+            .encode(&mut inner)
+            .unwrap();
+        let payload = frontend_request(InferenceRequestKind::FrontendPoll, 1, &inner[..length]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                core.epoch.unwrap(),
+                identity.route,
+                identity.generation.get(),
+                sequence,
+                RequestId([(100 + sequence) as u8; 16]),
+                payload.len(),
+            ),
+            &payload,
+        );
+    }
+
+    #[test]
+    fn frontend_concurrent_lanes_serialize_plans_and_overlap_worker_execution() {
+        let (mut core, first, broker, worker) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::Queued;
+        core.frontend_intents[0].broker = None;
+        let second = core.queue_frontend_intent("second worker").unwrap();
+        for sequence in 0..2 {
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                sequence,
+                FrontendPollPhase::BrokerNext,
+                FrontendIntentId::ZERO,
+            );
+        }
+        assert_eq!(
+            core.frontend_intents[0].state,
+            FrontendIntentState::BrokerClaimed
+        );
+        assert_eq!(core.frontend_intents[1].state, FrontendIntentState::Queued);
+        assert_eq!(core.frontend_polls.len(), 1);
+        // No planning request has arrived yet: idle backend alone must not
+        // admit both claims into the same turn-one broker sequence.
+        assert!(core.backend.broker_prompt_ready(broker));
+        core.backend.open(worker).unwrap();
+        core.backend
+            .submit(worker, RequestId([87; 16]), b"running worker", 0)
+            .unwrap();
+        submit_frontend_lifecycle(&mut core, worker, 0, FrontendPollPhase::AgentClaim, first);
+        core.service_frontend_polls();
+        assert_eq!(
+            core.frontend_intents[0].state,
+            FrontendIntentState::AgentClaimed(worker)
+        );
+        assert_eq!(core.frontend_intents[1].intent_id, second);
+        assert_eq!(
+            core.frontend_intents[1].state,
+            FrontendIntentState::BrokerClaimed
+        );
+        assert!(core.frontend_polls.is_empty());
+        assert_eq!(
+            core.backend.metrics().pending,
+            1,
+            "worker remains active during next plan"
+        );
+    }
+
+    #[test]
+    fn frontend_broker_claim_waits_for_backend_ownership_to_clear() {
+        let (mut core, _, broker, _) = frontend_race_fixture();
+        let next = core
+            .queue_frontend_intent("waiting for broker cleanup")
+            .unwrap();
+        let request = RequestId([88; 16]);
+        core.backend
+            .submit(broker, request, b"pending plan", 0)
+            .unwrap();
+        assert!(!core.backend.broker_prompt_ready(broker));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert_eq!(core.frontend_intents[1].state, FrontendIntentState::Queued);
+        assert_eq!(core.frontend_polls.len(), 1);
+        core.backend.cancel(broker, request, 1).unwrap();
+        assert!(core.backend.broker_prompt_ready(broker));
+        core.service_frontend_polls();
+        assert_eq!(core.frontend_intents[1].intent_id, next);
+        assert_eq!(
+            core.frontend_intents[1].state,
+            FrontendIntentState::BrokerClaimed
+        );
+        assert!(core.frontend_polls.is_empty());
+        core.backend.close(broker).unwrap();
+        assert!(!core.backend.broker_prompt_ready(broker));
+    }
+
+    #[test]
+    fn frontend_lane_readiness_is_not_delayed_by_another_lanes_plan() {
+        let (mut core, first, broker, _) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+        submit_frontend_race_result(&mut core, first, broker, 0, RequestId([89; 16]));
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(first));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            first,
+        );
+        let second = core.queue_frontend_intent("another lane's plan").unwrap();
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert_eq!(core.frontend_intents[0].intent_id, second);
+        assert_eq!(
+            core.frontend_intents[0].state,
+            FrontendIntentState::BrokerClaimed
+        );
+        core.backend
+            .submit(broker, RequestId([90; 16]), b"planning", 0)
+            .unwrap();
+        let third = core.queue_frontend_intent("next work").unwrap();
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            3,
+            FrontendPollPhase::BrokerReadyNext,
+            first,
+        );
+        assert!(core.frontend_ready(first));
+        assert!(core.finish_frontend_intent(first));
+        assert_eq!(core.frontend_polls.len(), 1, "only the new claim waits");
+        assert_eq!(core.frontend_intents[1].intent_id, third);
+        assert_eq!(core.frontend_intents[1].state, FrontendIntentState::Queued);
+        assert_eq!(core.backend.metrics().pending, 1);
+    }
+
+    #[test]
+    fn frontend_concurrent_lane_readiness_only_completes_its_named_intent() {
+        let (mut core, first, broker, _) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+        let second = core.queue_frontend_intent("second lane").unwrap();
+        core.frontend_intents[1].state = FrontendIntentState::BrokerClaimed;
+        core.frontend_intents[1].broker = Some(broker);
+        for (sequence, intent) in [(0, first), (1, second)] {
+            submit_frontend_race_result(
+                &mut core,
+                intent,
+                broker,
+                sequence,
+                RequestId([(70 + sequence) as u8; 16]),
+            );
+            assert_eq!(core.pop_frontend_result().unwrap().intent_id, intent);
+            assert!(core.acknowledge_frontend_result(intent));
+        }
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerRetired,
+            first,
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            3,
+            FrontendPollPhase::BrokerRetired,
+            second,
+        );
+        assert!(
+            core.frontend_completions
+                .iter()
+                .all(|completion| completion.retired)
+        );
+        // A fresh lane's unrelated poll cannot acknowledge either old lane.
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            4,
+            FrontendPollPhase::BrokerNext,
+            FrontendIntentId::ZERO,
+        );
+        assert!(!core.frontend_ready(first) && !core.frontend_ready(second));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            5,
+            FrontendPollPhase::BrokerReadyNext,
+            first,
+        );
+        assert!(core.frontend_ready(first));
+        assert!(!core.frontend_ready(second));
+        assert!(core.finish_frontend_intent(first));
+        assert!(!core.finish_frontend_intent(second));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            6,
+            FrontendPollPhase::BrokerReadyNext,
+            second,
+        );
+        assert!(core.finish_frontend_intent(second));
+        assert!(core.frontend_completions.is_empty());
+    }
+
+    #[test]
+    fn frontend_lane_readiness_refuses_unretired_foreign_and_repeated_claims() {
+        let (mut core, intent, broker, _) = frontend_race_fixture();
+        core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+        submit_frontend_race_result(&mut core, intent, broker, 0, RequestId([79; 16]));
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(!core.frontend_ready(intent));
+        assert!(core.frontend_polls.is_empty());
+        // The refused request did not consume receive order or a request row.
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            intent,
+        );
+        assert!(core.frontend_completions[0].retired);
+        let epoch = core.epoch.unwrap();
+        install_frontend_route(
+            &mut core,
+            epoch,
+            RouteId([80; 16]),
+            TaskGeneration::new(3).unwrap(),
+            RouteRole::Broker,
+            BackendRole::Broker,
+        );
+        let foreign = core.routes.last().unwrap().identity;
+        submit_frontend_lifecycle(
+            &mut core,
+            foreign,
+            0,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(!core.frontend_ready(intent));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(core.frontend_ready(intent));
+        let pending = core.frontend_polls.len();
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            3,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert_eq!(core.frontend_polls.len(), pending);
+        assert!(core.finish_frontend_intent(intent));
+    }
+
+    #[test]
+    fn frontend_retirement_requires_publication_exact_broker_and_closed_worker() {
+        for case in 0..4 {
+            let (mut core, intent, broker, worker) = frontend_race_fixture();
+            submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+            let reporter = if case == 2 { worker } else { broker };
+            if case != 0 {
+                core.acknowledge_frontend_result(intent);
+            }
+            if case != 1 {
+                let epoch = core.epoch.unwrap();
+                core.receive(
+                    SocketPlane::Control,
+                    envelope(
+                        ROUTE_CLOSE,
+                        epoch,
+                        worker.route,
+                        worker.generation.get(),
+                        1,
+                        RequestId([76; 16]),
+                        0,
+                    ),
+                    &[],
+                );
+            }
+            if case == 3 {
+                core.frontend_completions[0].broker = Some(SequenceIdentity {
+                    generation: TaskGeneration::new(2).unwrap(),
+                    ..broker
+                });
+            }
+            core.control_out.clear();
+            submit_frontend_lifecycle(
+                &mut core,
+                reporter,
+                if case == 2 { 2 } else { 0 },
+                FrontendPollPhase::BrokerRetired,
+                intent,
+            );
+            assert!(!core.frontend_completions[0].retired);
+            assert!(!core.frontend_ready(intent));
+            assert_eq!(core.control_out.frames.len(), 1);
+            assert_eq!(
+                EnvelopeV1::read_from_bytes(&core.control_out.frames[0][..ENVELOPE_LEN])
+                    .unwrap()
+                    .kind
+                    .get(),
+                REFUSED
+            );
+        }
+    }
+
+    #[test]
+    fn frontend_retirement_backpressure_waits_before_broker_readiness() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        core.pop_frontend_result().unwrap();
+        assert!(core.acknowledge_frontend_result(intent));
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                worker.route,
+                worker.generation.get(),
+                1,
+                RequestId([76; 16]),
+                0,
+            ),
+            &[],
+        );
+        core.control_out.clear();
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerRetired,
+            intent,
+        );
+        assert_eq!(core.frontend_polls.len(), 1);
+        assert!(!core.frontend_completions[0].retired);
+        assert!(!core.frontend_ready(intent));
+        core.control_out.bytes = 0;
+        core.poll_backend();
+        assert!(core.frontend_completions[0].retired);
+        assert!(core.frontend_polls.is_empty());
+        assert_eq!(core.control_out.frames.len(), 1);
+        assert!(!core.frontend_ready(intent));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(core.frontend_ready(intent));
+        assert!(core.finish_frontend_intent(intent));
+    }
+
+    #[test]
+    fn frontend_cancellation_orders_against_results_without_replacing_a_settled_answer() {
+        for cancel_first in [true, false] {
+            let (mut core, intent, _, worker) = frontend_race_fixture();
+            if cancel_first {
+                assert_eq!(
+                    core.request_frontend_cancellation(intent),
+                    FrontendCancelOutcome::Requested
+                );
+                assert_eq!(
+                    core.request_frontend_cancellation(intent),
+                    FrontendCancelOutcome::Requested
+                );
+            }
+            submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+            assert_eq!(
+                core.request_frontend_cancellation(intent),
+                FrontendCancelOutcome::AlreadySettled
+            );
+            let result = core.pop_frontend_result().unwrap();
+            assert_eq!(
+                result.kind,
+                if cancel_first {
+                    FrontendResultKind::Cancelled
+                } else {
+                    FrontendResultKind::Completed
+                }
+            );
+            assert_eq!(
+                result.text,
+                if cancel_first {
+                    "Prompt cancelled."
+                } else {
+                    "Finished before the deadline."
+                }
+            );
+            assert!(
+                core.control_out.frames.is_empty(),
+                "cancellation does not waive publication"
+            );
+            assert_eq!(core.frontend_receipts.len(), 1);
+            assert!(core.acknowledge_frontend_result(intent));
+            assert!(
+                !core.frontend_ready(intent),
+                "publication does not waive native retirement"
+            );
+        }
+    }
+
+    #[test]
+    fn frontend_queued_cancellation_removes_only_the_unclaimed_intent() {
+        let (mut core, active, broker, _) = frontend_race_fixture();
+        let cancelled = core.queue_frontend_intent("cancel before claim").unwrap();
+        let other = core.queue_frontend_intent("keep queued").unwrap();
+        assert_eq!(
+            core.request_frontend_cancellation(cancelled),
+            FrontendCancelOutcome::QueuedRemoved
+        );
+        assert_eq!(
+            core.request_frontend_cancellation(cancelled),
+            FrontendCancelOutcome::Unknown
+        );
+        assert_eq!(
+            core.frontend_control(broker, active),
+            Some(kore_hostlink::FrontendControl::Active)
+        );
+        assert_eq!(core.frontend_intents.len(), 2);
+        assert_eq!(core.frontend_intents[1].intent_id, other);
+        assert!(core.frontend_results.is_empty() && core.frontend_completions.is_empty());
+        assert_eq!(core.routes.len(), 2);
+    }
+
+    #[test]
+    fn frontend_control_is_exact_broker_owned_and_rechecks_backpressured_cancellation() {
+        use kore_hostlink::FrontendControl;
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_lifecycle(
+            &mut core,
+            worker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        assert_eq!(
+            EnvelopeV1::read_from_bytes(&core.control_out.frames.back().unwrap()[..ENVELOPE_LEN])
+                .unwrap()
+                .kind
+                .get(),
+            REFUSED
+        );
+        assert_eq!(
+            core.frontend_control(
+                SequenceIdentity {
+                    generation: TaskGeneration::new(4).unwrap(),
+                    ..broker
+                },
+                intent
+            ),
+            None
+        );
+        assert_eq!(
+            core.frontend_control(broker, FrontendIntentId::from_sequence(999).unwrap()),
+            None
+        );
+        let (mut core, intent, broker, _) = frontend_race_fixture();
+        core.control_out.clear();
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        assert_eq!(core.frontend_polls.len(), 1);
+        assert_eq!(
+            core.request_frontend_cancellation(intent),
+            FrontendCancelOutcome::Requested
+        );
+        core.control_out.bytes = 0;
+        core.poll_backend();
+        assert!(core.frontend_polls.is_empty());
+        let reply = decode_inference_event(&core.control_out.frames[0][ENVELOPE_LEN..]).unwrap();
+        assert_eq!(
+            FrontendControl::decode(reply.payload),
+            Some(FrontendControl::CancelRequested)
+        );
+    }
+
+    #[test]
+    fn frontend_cancelled_worker_closure_leaves_other_inference_alive() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        let epoch = core.epoch.unwrap();
+        let sibling = SequenceIdentity {
+            route: RouteId([79; 16]),
+            ..worker
+        };
+        install_frontend_route(
+            &mut core,
+            epoch,
+            sibling.route,
+            sibling.generation,
+            RouteRole::Agent,
+            BackendRole::Agent,
+        );
+        // Exercise the daemon's supported raw inference admission and actual
+        // backend sequence owners; no cancelled intent sweeps shared requests.
+        for identity in [worker, sibling] {
+            core.backend.open(identity).unwrap();
+            core.receive(
+                SocketPlane::Control,
+                envelope(
+                    INFER_REQUEST,
+                    epoch,
+                    identity.route,
+                    identity.generation.get(),
+                    0,
+                    RequestId([90; 16]),
+                    4,
+                ),
+                b"work",
+            );
+        }
+        assert_eq!(core.backend_metrics().pending, 2);
+        assert_eq!(
+            core.request_frontend_cancellation(intent),
+            FrontendCancelOutcome::Requested
+        );
+        assert_eq!(
+            core.backend_metrics().pending,
+            2,
+            "the broker owns cancellation of its requests"
+        );
+        submit_frontend_race_result(&mut core, intent, broker, 0, RequestId([74; 16]));
+        assert_eq!(
+            core.pop_frontend_result().unwrap().kind,
+            FrontendResultKind::Cancelled
+        );
+        assert!(core.acknowledge_frontend_result(intent));
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                worker.route,
+                worker.generation.get(),
+                1,
+                RequestId([76; 16]),
+                0,
+            ),
+            &[],
+        );
+        assert_eq!(core.backend_metrics().pending, 1);
+        assert!(core.routes.iter().any(|route| route.identity == sibling));
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            intent,
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            2,
+            FrontendPollPhase::BrokerReadyNext,
+            intent,
+        );
+        assert!(core.finish_frontend_intent(intent));
+        assert_eq!(core.backend_metrics().pending, 1);
+    }
+
+    #[test]
+    fn frontend_planning_cancel_after_terminal_does_not_replay_or_disconnect() {
+        let (mut core, _, broker, _) = frontend_race_fixture();
+        let epoch = core.epoch.unwrap();
+        let request = RequestId([91; 16]);
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                INFER_REQUEST,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                0,
+                request,
+                4,
+            ),
+            b"plan",
+        );
+        core.advance();
+        assert_eq!(core.backend_metrics().pending, 0);
+        assert!(core.routes[0].completed_requests.contains(&request));
+        let before = core.control_out.frames.len();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                CANCEL,
+                epoch,
+                broker.route,
+                broker.generation.get(),
+                1,
+                request,
+                0,
+            ),
+            &[],
+        );
+        assert_eq!(
+            core.control_out.frames.len(),
+            before,
+            "keep the original terminal reply"
+        );
+        assert!(!core.reconnect_required());
+        assert_eq!(core.epoch(), Some(epoch));
+        // The history belongs to the full route generation, not a bare ID.
+        core.routes.remove(0);
+        let next = TaskGeneration::new(4).unwrap();
+        install_frontend_route(
+            &mut core,
+            epoch,
+            broker.route,
+            next,
+            RouteRole::Broker,
+            BackendRole::Broker,
+        );
+        core.receive(
+            SocketPlane::Control,
+            envelope(CANCEL, epoch, broker.route, next.get(), 0, request, 0),
+            &[],
+        );
+        assert_eq!(
+            EnvelopeV1::read_from_bytes(&core.control_out.frames.back().unwrap()[..ENVELOPE_LEN])
+                .unwrap()
+                .kind
+                .get(),
+            REFUSED
+        );
+    }
+
+    #[test]
+    fn frontend_broker_cancelled_result_requires_a_host_cancellation() {
+        for cancel in [false, true] {
+            let (mut core, intent, broker, _) = frontend_race_fixture();
+            core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+            if cancel {
+                core.request_frontend_cancellation(intent);
+            }
+            let mut inner = [0; INFERENCE_PART_MAX];
+            let len = kore_hostlink::FrontendResult {
+                intent_id: intent,
+                kind: FrontendResultKind::Cancelled,
+                text: "Prompt cancelled.",
+            }
+            .encode(&mut inner)
+            .unwrap();
+            let payload = frontend_request(InferenceRequestKind::FrontendResult, 1, &inner[..len]);
+            core.receive(
+                SocketPlane::Control,
+                envelope(
+                    INFER_REQUEST,
+                    core.epoch.unwrap(),
+                    broker.route,
+                    broker.generation.get(),
+                    0,
+                    RequestId([74; 16]),
+                    payload.len(),
+                ),
+                &payload,
+            );
+            assert_eq!(core.frontend_results.len(), usize::from(cancel));
+            if cancel {
+                assert_eq!(
+                    core.pop_frontend_result().unwrap().kind,
+                    FrontendResultKind::Cancelled
+                );
+                assert!(core.acknowledge_frontend_result(intent));
+                submit_frontend_lifecycle(
+                    &mut core,
+                    broker,
+                    1,
+                    FrontendPollPhase::BrokerRetired,
+                    intent,
+                );
+                submit_frontend_lifecycle(
+                    &mut core,
+                    broker,
+                    2,
+                    FrontendPollPhase::BrokerReadyNext,
+                    intent,
+                );
+                assert!(core.finish_frontend_intent(intent));
+            }
+        }
+    }
+
+    #[test]
+    fn frontend_retirement_cannot_overtake_a_backpressured_control_reply() {
+        let (mut core, intent, broker, worker) = frontend_race_fixture();
+        submit_frontend_race_result(&mut core, intent, worker, 0, RequestId([74; 16]));
+        core.pop_frontend_result().unwrap();
+        core.acknowledge_frontend_result(intent);
+        let receipt_len = core.control_out.frames[0].len();
+        let epoch = core.epoch.unwrap();
+        core.receive(
+            SocketPlane::Control,
+            envelope(
+                ROUTE_CLOSE,
+                epoch,
+                worker.route,
+                worker.generation.get(),
+                1,
+                RequestId([76; 16]),
+                0,
+            ),
+            &[],
+        );
+        core.control_out.clear();
+        core.control_out.bytes = QUEUE_BYTES_MAX - receipt_len;
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            0,
+            FrontendPollPhase::BrokerControl,
+            intent,
+        );
+        submit_frontend_lifecycle(
+            &mut core,
+            broker,
+            1,
+            FrontendPollPhase::BrokerRetired,
+            intent,
+        );
+        assert_eq!(core.frontend_polls.len(), 2);
+        assert!(!core.frontend_completions[0].retired);
+        assert!(core.control_out.frames.is_empty());
+        core.control_out.bytes = 0;
+        core.poll_backend();
+        assert!(core.frontend_polls.is_empty());
+        assert!(core.frontend_completions[0].retired);
+        assert_eq!(core.control_out.frames.len(), 2);
+        assert_eq!(core.control_out.frames[0].len(), receipt_len + 1);
+        assert_eq!(core.control_out.frames[1].len(), receipt_len);
+    }
+
+    #[test]
+    fn frontend_inference_failure_is_terminal_for_one_request_and_recovers() {
+        for (failure, code) in [
+            (BackendFailure::TimedOut, RefusalCode::TimedOut),
+            (
+                BackendFailure::HostDisconnected,
+                RefusalCode::HostDisconnected,
+            ),
+            (
+                BackendFailure::BackendRestarted,
+                RefusalCode::HostDisconnected,
+            ),
+            (
+                BackendFailure::MalformedResponse,
+                RefusalCode::InvalidEncoding,
+            ),
+            (BackendFailure::ModelFailed, RefusalCode::ModelFailed),
+            (BackendFailure::OutputLimit, RefusalCode::TooLarge),
+            (BackendFailure::ContextLimit, RefusalCode::BudgetExceeded),
+        ] {
+            let (mut core, intent, broker, worker) = frontend_race_fixture();
+            core.frontend_intents[0].state = FrontendIntentState::BrokerClaimed;
+            let epoch = core.epoch.unwrap();
+            let request = RequestId([92; 16]);
+            for identity in [broker, worker] {
+                if identity == worker {
+                    core.backend.open(identity).unwrap();
+                }
+                core.receive(
+                    SocketPlane::Control,
+                    envelope(
+                        INFER_REQUEST,
+                        epoch,
+                        identity.route,
+                        identity.generation.get(),
+                        0,
+                        request,
+                        4,
+                    ),
+                    b"work",
+                );
+            }
+            assert_eq!(core.backend_metrics().pending, 2);
+            assert!(!core.frontend_requires_progress());
+            // Replace this one real pending backend completion with a fault.
+            core.backend.cancel(broker, request, 0).unwrap();
+            core.control_out.clear();
+            core.finish(BackendEvent::Failed {
+                sequence: broker,
+                request,
+                submitted_tick: 0,
+                turn: 1,
+                failure,
+            });
+            assert_eq!(core.epoch(), Some(epoch));
+            assert!(!core.reconnect_required());
+            assert!(
+                core.frontend_requires_progress(),
+                "another inference cannot keep the failed guest asleep"
+            );
+            assert_eq!(core.backend_metrics().pending, 1);
+            let frame = &core.control_out.frames[0];
+            assert_eq!(
+                EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN])
+                    .unwrap()
+                    .kind
+                    .get(),
+                INFER_REPLY
+            );
+            let event = decode_inference_event(&frame[ENVELOPE_LEN..]).unwrap();
+            assert_eq!(event.kind, InferenceEventKind::TurnFailed);
+            assert_eq!(event.turn, 1);
+            assert_eq!(event.part, 0);
+            assert_eq!(
+                kore_hostlink::decode_inference_failure(event.payload)
+                    .unwrap()
+                    .code,
+                code
+            );
+            assert!(
+                core.frontend_results.is_empty(),
+                "the guest still owns its terminal frontend result"
+            );
+            submit_frontend_race_result(&mut core, intent, broker, 1, RequestId([74; 16]));
+            assert_eq!(
+                core.pop_frontend_result().unwrap().kind,
+                FrontendResultKind::Failed
+            );
+            core.acknowledge_frontend_result(intent);
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                2,
+                FrontendPollPhase::BrokerRetired,
+                intent,
+            );
+            submit_frontend_lifecycle(
+                &mut core,
+                broker,
+                3,
+                FrontendPollPhase::BrokerReadyNext,
+                intent,
+            );
+            assert!(core.finish_frontend_intent(intent));
+            assert!(!core.frontend_requires_progress());
+            let next = core.queue_frontend_intent("try again").unwrap();
+            assert_eq!(core.frontend_intents[0].intent_id, next);
+            assert_eq!(
+                core.frontend_intents[0].state,
+                FrontendIntentState::BrokerClaimed
+            );
+            assert_eq!(core.backend_metrics().pending, 1);
+        }
+    }
+
+    #[test]
     fn consecutive_frontend_intents_use_fresh_agent_generations() {
         let epoch = LinkEpoch([51; 16]);
         let broker_route = RouteId([52; 16]);
@@ -2964,6 +5648,13 @@ mod tests {
         let agent_generation = TaskGeneration::new(3).unwrap();
         let mut core = LinkCore::new(crate::backend::DeterministicBackend::new(1), ());
         core.epoch = Some(epoch);
+        core.backend
+            .open(SequenceIdentity {
+                route: broker_route,
+                generation: broker_generation,
+                role: BackendRole::Broker,
+            })
+            .unwrap();
         install_frontend_route(
             &mut core,
             epoch,
@@ -3045,6 +5736,7 @@ mod tests {
         .encode(&mut inner)
         .unwrap();
         let payload = frontend_request(InferenceRequestKind::FrontendResult, 2, &inner[..length]);
+        core.control_out.clear();
         core.receive(
             SocketPlane::Control,
             envelope(
@@ -3059,6 +5751,11 @@ mod tests {
             &payload,
         );
         assert!(core.frontend_intents.is_empty());
+        assert!(
+            core.control_out.frames.is_empty(),
+            "receipt must wait for publication"
+        );
+        assert_eq!(core.frontend_receipts.len(), 1);
         assert_eq!(
             core.pop_frontend_result(),
             Some(FrontendResultOwned {
@@ -3066,6 +5763,24 @@ mod tests {
                 kind: FrontendResultKind::Completed,
                 text: "ordinary X content".into(),
             })
+        );
+        assert!(
+            core.control_out.frames.is_empty(),
+            "taking the result is not publication"
+        );
+        core.control_out.bytes = QUEUE_BYTES_MAX;
+        assert!(!core.acknowledge_frontend_result(intent_id));
+        assert_eq!(
+            core.frontend_receipts.len(),
+            1,
+            "backpressure retains the receipt"
+        );
+        core.control_out.bytes = 0;
+        assert!(core.acknowledge_frontend_result(intent_id));
+        assert!(!core.control_out.frames.is_empty());
+        assert!(
+            !core.acknowledge_frontend_result(intent_id),
+            "only one receipt"
         );
 
         // Kore tears the prompt-scoped runner down after returning its
@@ -3142,7 +5857,7 @@ mod tests {
         let length = kore_hostlink::FrontendResult {
             intent_id: next_intent_id,
             kind: FrontendResultKind::Completed,
-            text: "hello".into(),
+            text: "hello",
         }
         .encode(&mut inner)
         .unwrap();
@@ -3169,6 +5884,7 @@ mod tests {
                 text: "hello".into(),
             })
         );
+        assert!(core.acknowledge_frontend_result(next_intent_id));
     }
 
     #[test]
@@ -3233,6 +5949,7 @@ mod tests {
                 role: BackendRole::Broker,
             },
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
         let report = kore_hostlink::AuthorityReportView {
             state: kore_hostlink::AuthorityState::Installed,
@@ -3358,6 +6075,7 @@ mod tests {
                 role: BackendRole::Workspace,
             },
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
         core.outbound_bulk.push(OutboundBulk {
             route: route_id,
@@ -3413,6 +6131,7 @@ mod tests {
                 role: BackendRole::Workspace,
             },
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
         let reference = BulkRefV1 {
             bulk_id,
@@ -3448,8 +6167,6 @@ mod tests {
 
         let epoch = LinkEpoch([31; 16]);
         let route_id = RouteId([32; 16]);
-        let request = RequestId([33; 16]);
-        let bulk_id = BulkId([34; 16]);
         let generation = TaskGeneration::new(1).unwrap();
         let identity = SequenceIdentity {
             route: route_id,
@@ -3473,44 +6190,46 @@ mod tests {
             state,
             identity,
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
 
-        let mut offers = Vec::new();
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [1; 16],
-            kind: kore_hostlink::BrokerOfferKind::Object,
-            permitted_ops: 1,
-            max_uses: 0,
-            label: "workspace/X",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [2; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "ls",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [3; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "find",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [4; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "stat",
-        });
-        offers.push(kore_hostlink::BrokerOffer {
-            reference: [5; 16],
-            kind: kore_hostlink::BrokerOfferKind::Executable,
-            permitted_ops: 4,
-            max_uses: 2,
-            label: "cat",
-        });
+        let mut offers = vec![
+            kore_hostlink::BrokerOffer {
+                reference: [1; 16],
+                kind: kore_hostlink::BrokerOfferKind::Object,
+                permitted_ops: 1,
+                max_uses: 0,
+                label: "workspace/X",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [2; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "ls",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [3; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "find",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [4; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "stat",
+            },
+            kore_hostlink::BrokerOffer {
+                reference: [5; 16],
+                kind: kore_hostlink::BrokerOfferKind::Executable,
+                permitted_ops: 4,
+                max_uses: 2,
+                label: "cat",
+            },
+        ];
         for reference in 6..=15 {
             offers.push(kore_hostlink::BrokerOffer {
                 reference: [reference; 16],
@@ -3545,47 +6264,59 @@ mod tests {
         .unwrap();
         assert!(kir1_len > FOUNDED_CLIENT_BUFFER);
 
-        let frames = outbound_bulk_payloads(
-            bulk_id,
-            kore_hostlink::INFERENCE_REQUEST_CONTENT,
-            &kir1[..kir1_len],
-        )
-        .unwrap();
-        for (sequence, (kind, payload)) in frames.into_iter().enumerate() {
-            core.receive(
-                SocketPlane::Bulk,
-                envelope(
-                    kind,
-                    epoch,
-                    route_id,
-                    generation.get(),
-                    sequence as u64,
-                    request,
-                    payload.len(),
-                ),
-                &payload,
-            );
-        }
+        // More requests than the retained diagnostic capacity must still
+        // reach the typed backend and retire on this same broker route.
+        for round in 0..COMPLETED_BULK_MAX + 4 {
+            let request = RequestId([33 + round as u8; 16]);
+            let bulk_id = BulkId([34 + round as u8; 16]);
+            let frames = outbound_bulk_payloads(
+                bulk_id,
+                kore_hostlink::INFERENCE_REQUEST_CONTENT,
+                &kir1[..kir1_len],
+            )
+            .unwrap();
+            for (sequence, (kind, payload)) in frames.into_iter().enumerate() {
+                core.receive(
+                    SocketPlane::Bulk,
+                    envelope(
+                        kind,
+                        epoch,
+                        route_id,
+                        generation.get(),
+                        (round * 3 + sequence) as u64,
+                        request,
+                        payload.len(),
+                    ),
+                    &payload,
+                );
+            }
 
-        assert!(core.routes[0].state.has_request(request));
-        assert_eq!(core.routes[0].stream_parts, vec![(request, 0)]);
-        core.advance();
-        assert!(!core.routes[0].state.has_request(request));
-        assert!(core.routes[0].stream_parts.is_empty());
-        let kinds: Vec<u16> = core
-            .control_out
-            .frames
-            .iter()
-            .map(|frame| {
-                EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN])
-                    .unwrap()
-                    .kind
-                    .get()
-            })
-            .collect();
+            assert!(core.routes[0].state.has_request(request));
+            assert_eq!(core.routes[0].stream_parts, vec![(request, 0)]);
+            core.advance();
+            assert!(!core.routes[0].state.has_request(request));
+            assert!(core.routes[0].stream_parts.is_empty());
+            let kinds: Vec<u16> = core
+                .control_out
+                .frames
+                .iter()
+                .map(|frame| {
+                    EnvelopeV1::read_from_bytes(&frame[..ENVELOPE_LEN])
+                        .unwrap()
+                        .kind
+                        .get()
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![BULK_ACCEPTED, BULK_ACCEPTED, BULK_READY, INFER_REPLY]
+            );
+            while core.pop_control_frame().is_some() {}
+        }
+        assert_eq!(core.completed_bulk.len(), COMPLETED_BULK_MAX);
         assert_eq!(
-            kinds,
-            vec![BULK_ACCEPTED, BULK_ACCEPTED, BULK_READY, INFER_REPLY]
+            core.completed_bulk.front().unwrap().request,
+            RequestId([37; 16])
         );
     }
 
@@ -3621,6 +6352,7 @@ mod tests {
             state,
             identity,
             stream_parts: Vec::new(),
+            completed_requests: VecDeque::new(),
         });
 
         let bytes = b"x";

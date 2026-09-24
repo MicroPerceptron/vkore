@@ -1,6 +1,8 @@
+mod authority_updates;
 mod fonts;
 mod logo;
 mod model_timing;
+mod picker;
 mod render_backend;
 mod splash;
 mod theme;
@@ -89,6 +91,7 @@ enum Message {
     PromptAction(iced_core::text::editor::Action),
     SelectText(String, iced_core::text::editor::Action),
     SendPrompt,
+    SendPermissionUpdate,
     CancelPrompt,
     ToggleWorking(String),
     ToggleWorkOutput(String),
@@ -134,6 +137,7 @@ enum RequestKind {
     StartSession,
     StopSession,
     SendPrompt,
+    PermissionUpdate(u64),
     CancelPrompt,
     RequestApproval,
     DecideApproval,
@@ -1022,6 +1026,7 @@ fn work_rows(events: &[&Value]) -> Vec<WorkRow> {
                         }
                     })
                 }
+                "authority_update" => authority_updates::work_row(event),
                 "error" => Some(WorkRow {
                     speaker: if event["payload"]["stage"] == "agent_failure" {
                         "Agent failed".into()
@@ -1382,6 +1387,7 @@ struct Request {
 enum UserEvent {
     Response(RequestKind, Result<ApiResponse, String>),
     Poll(Result<Vec<Value>, String>),
+    PickDirectory(RequestKind),
 }
 
 #[derive(Debug)]
@@ -1412,6 +1418,13 @@ impl Network {
         let request_proxy = proxy.clone();
         thread::spawn(move || {
             while let Ok(request) = receiver.recv() {
+                if matches!(
+                    request.kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    let _ = request_proxy.send_event(UserEvent::PickDirectory(request.kind));
+                    continue;
+                }
                 let result = http(server, request.method, &request.path, request.body.as_ref());
                 let _ = request_proxy.send_event(UserEvent::Response(request.kind, result));
             }
@@ -1502,6 +1515,7 @@ impl Network {
 }
 
 struct CachedProjectChat {
+    permission_update: Option<authority_updates::Submission>,
     session: String,
     prompt_id: Option<String>,
     draft: String,
@@ -1524,6 +1538,8 @@ struct Model {
     session: Option<String>,
     prompt_id: Option<String>,
     submitted_prompt: Option<String>,
+    permission_update: Option<authority_updates::Submission>,
+    next_permission_update: u64,
     prompt: text_editor::Content<AxRenderer<System>>,
     events: Vec<Value>,
     selectable_text: BTreeMap<String, text_editor::Content<AxRenderer<System>>>,
@@ -1594,6 +1610,8 @@ impl Model {
             session: None,
             prompt_id: None,
             submitted_prompt: None,
+            permission_update: None,
+            next_permission_update: 0,
             prompt: text_editor::Content::new(),
             events: Vec::new(),
             selectable_text: BTreeMap::new(),
@@ -1640,6 +1658,7 @@ impl Model {
         self.project_chats.insert(
             id,
             CachedProjectChat {
+                permission_update: self.permission_update.clone(),
                 session,
                 prompt_id: self.prompt_id.clone(),
                 draft: self.prompt.text(),
@@ -1797,7 +1816,9 @@ impl Model {
                 self.submitted_prompt = None;
                 self.prompt_id = None;
                 let project_id = self.projects[index]["id"].as_str().unwrap_or_default();
+                self.permission_update = None;
                 if let Some(chat) = self.project_chats.get(project_id) {
+                    self.permission_update = chat.permission_update.clone();
                     self.session = Some(chat.session.clone());
                     self.prompt_id = chat.prompt_id.clone();
                     self.prompt = text_editor::Content::with_text(&chat.draft);
@@ -1990,6 +2011,7 @@ impl Model {
                 }
             }
             Message::SendPrompt => self.send_prompt(),
+            Message::SendPermissionUpdate => self.send_permission_update(),
             Message::CancelPrompt => {
                 if let (Some(session), Some(prompt_id)) = (&self.session, &self.prompt_id) {
                     self.network.request(Request {
@@ -2207,6 +2229,9 @@ impl Model {
     fn response(&mut self, kind: RequestKind, result: Result<ApiResponse, String>) {
         let result = result.and_then(ApiResponse::json);
         match (kind, result) {
+            (RequestKind::PermissionUpdate(token), result) => {
+                self.permission_update_response(token, result)
+            }
             (RequestKind::Runtime, Ok(value)) => {
                 self.runtime_status = value;
             }
@@ -2351,8 +2376,9 @@ impl Model {
                 self.prompt_id = None;
                 self.expanded_work.clear();
                 self.expanded_outputs.clear();
-                self.selectable_text.clear();
-                self.assistant_blocks.clear();
+                // Keep the completed transcript readable after closing. Its
+                // selectable text and topology must remain in sync with events.
+                self.events_changed();
                 self.status = "Chat closed.".into();
                 for grant in self.approvals["grants"]
                     .as_array()
@@ -2466,6 +2492,7 @@ impl Model {
                     {
                         continue;
                     }
+                    self.permission_update_event(&event);
                     if event["kind"] == "prompt_terminal"
                         && event["prompt_id"].as_str() == self.prompt_id.as_deref()
                     {
@@ -2974,8 +3001,9 @@ impl Model {
             Some("model_starting") => "Loading AI model…",
             Some("model_ready" | "preparing") => "Preparing assistant…",
             Some("vm_booting") => "Starting Kore…",
-            Some("hostlink_connected" | "bootstrap_ready") => "Preparing resident broker…",
-            Some("broker_ready") => "Assistant ready",
+            Some("hostlink_connected") => "Connected to Kore…",
+            Some("supervisor_starting" | "bootstrap_ready") => "Starting assistant…",
+            Some("supervisor_ready" | "broker_ready") => "Assistant ready",
             Some("unavailable") => "Assistant connection unavailable",
             Some("failed") => self.runtime_status["message"]
                 .as_str()
@@ -3481,8 +3509,33 @@ impl Model {
             .font(fonts::body())
             .line_height(iced_core::text::LineHeight::Relative(1.55))
             .style(widgets::composer_editor);
+        let update_button: UiElement<'_> = if self.prompt_id.is_some() {
+            button(widgets::control(self.permission_update_label()))
+                .height(theme::CONTROL_SM)
+                .padding([0, 12])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    self.can_update_permissions()
+                        .then_some(Message::SendPermissionUpdate),
+                )
+                .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
+        let update_status: UiElement<'_> = if let Some(message) = self.permission_update_message() {
+            container(widgets::body(
+                message,
+                theme::SIZE_SM,
+                theme::TEXT_SECONDARY,
+            ))
+            .padding([4, 16])
+            .into()
+        } else {
+            space::Space::new().width(0).height(0).into()
+        };
         let composer = container(column![
             prompt,
+            update_status,
             container(
                 row![
                     space::horizontal(),
@@ -3493,6 +3546,7 @@ impl Model {
                             Some(theme::BORDER),
                             theme::RADIUS_SM
                         )),
+                    update_button,
                     send,
                 ]
                 .spacing(theme::SPACE_2)
@@ -4062,6 +4116,8 @@ impl Model {
 
 struct App {
     model: Model,
+    proxy: EventLoopProxy<UserEvent>,
+    picker: Option<picker::Picker>,
     context: SoftContext<OwnedDisplayHandle>,
     surface: Option<SoftSurface<OwnedDisplayHandle, Rc<Window>>>,
     renderer: AxRenderer<System>,
@@ -4305,7 +4361,28 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Response(kind, result) => self.model.response(kind, result),
+            UserEvent::Response(kind, result) => {
+                if matches!(
+                    kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    self.picker.take();
+                }
+                self.model.response(kind, result);
+            }
+            UserEvent::PickDirectory(kind) => {
+                let proxy = self.proxy.clone();
+                match picker::Picker::open(move |result| {
+                    let result = result.map(|path| ApiResponse {
+                        content_type: "application/json".into(),
+                        body: serde_json::to_vec(&json!({"path":path})).unwrap(),
+                    });
+                    let _ = proxy.send_event(UserEvent::Response(kind, result));
+                }) {
+                    Ok(picker) => self.picker = Some(picker),
+                    Err(error) => self.model.response(kind, Err(error)),
+                }
+            }
             UserEvent::Poll(result) => self.model.poll_result(result),
         }
         self.redraw = true;
@@ -4329,7 +4406,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match &event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.picker.take();
+                event_loop.exit();
+            }
             WindowEvent::HoveredFile(path) if self.model.workspace_selection_open => {
                 self.model.workspace_drop_hovered = path.is_dir() && !self.model.busy;
                 self.redraw = true;
@@ -4436,6 +4516,10 @@ fn http(
     stream
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    parse_http_response(&bytes)
+}
+
+fn parse_http_response(bytes: &[u8]) -> Result<ApiResponse, String> {
     let split = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -4455,10 +4539,8 @@ fn http(
         })
         .map(|(_, value)| value.trim().to_owned())
         .unwrap_or_default();
-    let response = ApiResponse {
-        content_type,
-        body: decode_http_body(&headers, &bytes[split + 4..])?,
-    };
+    let body = decode_http_body(&headers, &bytes[split + 4..])?;
+    let response = ApiResponse { content_type, body };
     if (200..300).contains(&status) {
         Ok(response)
     } else {
@@ -4471,47 +4553,60 @@ fn http(
 }
 
 fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>, String> {
-    if !headers.lines().any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-        })
-    }) {
-        return Ok(body.to_vec());
+    let transfer_encodings: Vec<_> = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(',').map(str::trim))
+        .collect();
+    match transfer_encodings.as_slice() {
+        [] => Ok(body.to_vec()),
+        [encoding] if encoding.eq_ignore_ascii_case("chunked") => decode_chunked_body(body),
+        _ => Err("unsupported HTTP transfer encoding".into()),
     }
-    let bytes = body;
-    let mut decoded = Vec::new();
-    let mut cursor = 0usize;
-    loop {
-        let line_end = bytes[cursor..]
+}
+
+/// HTTP framing can split an SSE record or even a UTF-8 character. Reassemble
+/// bytes before either JSON or SSE parsing, including for HTTP error responses.
+fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>, String> {
+    fn line<'a>(body: &mut &'a [u8]) -> Result<&'a [u8], String> {
+        let end = body
             .windows(2)
             .position(|pair| pair == b"\r\n")
-            .map(|offset| cursor + offset)
-            .ok_or("malformed chunked HTTP response")?;
-        let size_text = std::str::from_utf8(&bytes[cursor..line_end])
-            .map_err(|_| "non-UTF-8 HTTP chunk size")?
-            .split(';')
+            .ok_or("truncated HTTP chunk line")?;
+        let result = &body[..end];
+        *body = &body[end + 2..];
+        Ok(result)
+    }
+
+    let mut decoded = Vec::new();
+    loop {
+        let size_line = line(&mut body)?;
+        let size_text = size_line
+            .split(|byte| *byte == b';')
             .next()
-            .unwrap_or("");
-        let size =
-            usize::from_str_radix(size_text.trim(), 16).map_err(|_| "invalid HTTP chunk size")?;
-        cursor = line_end + 2;
-        if size == 0 {
-            break;
+            .unwrap_or_default();
+        if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_hexdigit) {
+            return Err("invalid HTTP chunk size".into());
         }
-        let end = cursor
-            .checked_add(size)
-            .filter(|end| end.saturating_add(2) <= bytes.len())
-            .ok_or("truncated chunked HTTP response")?;
-        decoded.extend_from_slice(&bytes[cursor..end]);
-        if &bytes[end..end + 2] != b"\r\n" {
+        let size = usize::from_str_radix(
+            std::str::from_utf8(size_text).map_err(|_| "invalid HTTP chunk size")?,
+            16,
+        )
+        .map_err(|_| "invalid HTTP chunk size")?;
+        if size == 0 {
+            // Consume optional trailers and require their terminating blank line.
+            while !line(&mut body)?.is_empty() {}
+            return Ok(decoded);
+        }
+        let end = size.checked_add(2).ok_or("invalid HTTP chunk size")?;
+        let chunk = body.get(..end).ok_or("truncated HTTP chunk data")?;
+        if &chunk[size..] != b"\r\n" {
             return Err("malformed HTTP chunk terminator".into());
         }
-        cursor = end + 2;
+        decoded.extend_from_slice(&chunk[..size]);
+        body = &body[end..];
     }
-    Ok(decoded)
 }
 
 fn parse_sse(response: ApiResponse) -> Result<Vec<Value>, String> {
@@ -4582,6 +4677,8 @@ fn main() {
         .expect("create software presentation context");
     let mut app = App {
         model: Model::with_launch_project(network, options.project),
+        proxy: event_loop.create_proxy(),
+        picker: None,
         context,
         surface: None,
         renderer: native_renderer(),
@@ -4681,6 +4778,212 @@ mod tests {
             }),
         );
         assert!(model.prompt.text().is_empty());
+    }
+
+    fn permission_fixture() -> (Model, mpsc::Receiver<Request>) {
+        let mut model = populated_fixture_model();
+        let (requests, receiver) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        model.network = Network {
+            sender: requests,
+            session: sessions,
+        };
+        model.session = Some("permission-session".into());
+        model.prompt_id = Some("permission-prompt".into());
+        model.events.clear();
+        model.prompt = text_editor::Content::with_text("Revoke input.");
+        (model, receiver)
+    }
+
+    fn permission_reply(request: &Request, status: &str) -> ApiResponse {
+        ApiResponse {
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&json!({
+                "request": request.body, "status": status, "revision": 7,
+                "message": if status == "applied" { "Input revoked." } else { "Update queued." }
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn permission_event(request: &Request, status: &str) -> Value {
+        json!({"kind": "authority_update", "session_id": "permission-session",
+        "prompt_id": "permission-prompt", "public": true, "payload": {
+            "update_id": request.body.as_ref().unwrap()["update_id"], "status": status,
+            "revision": 7, "message": "Input revoked."
+        }})
+    }
+
+    #[test]
+    fn permission_update_delivery_state_survives_background_chat_navigation() {
+        let (mut model, requests) = permission_fixture();
+        model.projects = vec![json!({"id":"a"}), json!({"id":"b"})];
+        model.selected = Some(0);
+        model.project_chats.insert(
+            "b".into(),
+            CachedProjectChat {
+                session: "chat-b".into(),
+                prompt_id: None,
+                draft: "B draft".into(),
+                events: vec![],
+                permission_update: None,
+            },
+        );
+        model.send_permission_update();
+        let first = requests.try_recv().unwrap();
+        model.update(Message::SelectProject(1));
+        model.response(first.kind, Err("reply lost after navigation".into()));
+        assert_eq!(model.prompt.text(), "B draft");
+        assert!(model.permission_update_message().is_none());
+        model.update(Message::SelectProject(0));
+        assert_eq!(model.permission_update_label(), "Retry update");
+        model.send_permission_update();
+        let retry = requests.try_recv().unwrap();
+        assert_eq!(retry.body, first.body);
+        model.update(Message::SelectProject(1));
+        model.response(retry.kind, Ok(permission_reply(&retry, "queued")));
+        assert_eq!(model.prompt.text(), "B draft");
+        model.update(Message::SelectProject(0));
+        assert!(model.prompt.text().is_empty());
+        model.poll_result(Ok(vec![permission_event(&retry, "applied")]));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+    }
+
+    #[test]
+    fn permission_update_retries_exact_request_and_preserves_new_draft() {
+        let (mut model, requests) = permission_fixture();
+        model.update(Message::SendPermissionUpdate);
+        let first = requests.try_recv().unwrap();
+        assert!(matches!(first.kind, RequestKind::PermissionUpdate(_)));
+        assert_eq!(
+            first.path,
+            "/api/v1/sessions/permission-session/prompts/permission-prompt/updates"
+        );
+        assert_eq!(first.body.as_ref().unwrap()["text"], "Revoke input.");
+        model.update(Message::SendPermissionUpdate);
+        assert!(requests.try_recv().is_err());
+        model.response(first.kind, Err("response lost".into()));
+        assert_eq!(model.prompt.text(), "Revoke input.");
+        assert_eq!(model.permission_update_label(), "Retry update");
+        model.prompt = text_editor::Content::with_text("My next chat draft");
+        model.update(Message::SendPermissionUpdate);
+        let retry = requests.try_recv().unwrap();
+        assert_eq!(
+            (retry.kind, &retry.path, &retry.body),
+            (first.kind, &first.path, &first.body)
+        );
+        model.response(retry.kind, Ok(permission_reply(&retry, "queued")));
+        assert_eq!(model.prompt.text(), "My next chat draft");
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.can_update_permissions());
+        let mut foreign = permission_event(&retry, "applied");
+        foreign["session_id"] = json!("another-session");
+        model.permission_update_event(&foreign);
+        assert!(!model.can_update_permissions());
+        model.poll_result(Ok(vec![permission_event(&retry, "applied")]));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.prompt_id.as_deref(), Some("permission-prompt"));
+        assert!(!model.events.iter().any(|event| matches!(
+            event["kind"].as_str(),
+            Some("assistant" | "error" | "prompt_terminal")
+        )));
+        let rows = work_rows(&model.events.iter().collect::<Vec<_>>());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].context.as_deref(), Some("Update applied"));
+    }
+
+    #[test]
+    fn permission_update_ignores_stale_replies_and_clears_only_acknowledged_unchanged_drafts() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let first = requests.try_recv().unwrap();
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert!(model.prompt.text().is_empty());
+        model.permission_update_event(&permission_event(&first, "applied"));
+        model.response(first.kind, Ok(permission_reply(&first, "queued")));
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        model.send_permission_update();
+        let next = requests.try_recv().unwrap();
+        assert_ne!(first.kind, next.kind);
+        assert_ne!(
+            first.body.as_ref().unwrap()["update_id"],
+            next.body.as_ref().unwrap()["update_id"]
+        );
+        model.response(first.kind, Ok(permission_reply(&first, "applied")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.session = Some("new-session".into());
+        model.prompt_id = Some("new-prompt".into());
+        model.response(next.kind, Ok(permission_reply(&next, "queued")));
+        assert_eq!(model.prompt.text(), "Grant input.");
+        assert!(model.permission_update_message().is_none());
+    }
+
+    #[test]
+    fn permission_update_requires_active_prompt_and_validates_bound_and_testimony() {
+        let (mut model, requests) = permission_fixture();
+        model.prompt_id = None;
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt_id = Some("permission-prompt".into());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(129));
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        model.prompt = text_editor::Content::with_text(&"x".repeat(128));
+        model.send_permission_update();
+        let request = requests.try_recv().unwrap();
+        let mut malformed = permission_event(&request, "applied");
+        malformed["payload"]["revision"] = json!(0);
+        model.permission_update_event(&malformed);
+        assert!(authority_updates::work_row(&malformed).is_none());
+        assert_eq!(
+            model.permission_update_message(),
+            Some("Submitting permission update…")
+        );
+        model.permission_update_event(&permission_event(&request, "failed"));
+        assert!(model.can_update_permissions());
+        model.events.push(json!({"kind":"assistant", "session_id":"permission-session", "prompt_id":"permission-prompt", "public":true}));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        let rows = work_rows(&[
+            &permission_event(&request, "refused"),
+            &permission_event(&request, "failed"),
+            &permission_event(&request, "cancelled"),
+        ]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.context.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Update refused", "Update unconfirmed", "Update cancelled"]
+        );
+    }
+
+    #[test]
+    fn permission_update_tracks_external_pending_and_hides_old_prompt_status() {
+        let (mut model, requests) = permission_fixture();
+        model.send_permission_update();
+        let own = requests.try_recv().unwrap();
+        model.response(own.kind, Ok(permission_reply(&own, "applied")));
+        model.prompt = text_editor::Content::with_text("Grant input.");
+        let mut other = permission_event(&own, "queued");
+        other["payload"]["update_id"] = json!("another-client");
+        model.poll_result(Ok(vec![other.clone()]));
+        assert!(!model.can_update_permissions());
+        model.send_permission_update();
+        assert!(requests.try_recv().is_err());
+        other["payload"]["status"] = json!("cancelled");
+        model.poll_result(Ok(vec![other]));
+        assert!(model.can_update_permissions());
+        assert_eq!(model.permission_update_message(), Some("Input revoked."));
+        model.prompt_id = Some("a-new-prompt".into());
+        assert!(model.permission_update_message().is_none());
+        assert!(model.can_update_permissions());
     }
 
     fn populated_fixture_model() -> Model {
@@ -5175,6 +5478,22 @@ mod tests {
     #[ignore = "manual reproducible UI capture and timing probe"]
     fn capture_and_benchmark_ui() {
         let mut model = populated_fixture_model();
+        if let Ok(state) = std::env::var("VKORE_UI_PERMISSION_UPDATE") {
+            let (mut active, requests) = permission_fixture();
+            active.events.push(json!({"kind":"user_prompt", "session_id":"permission-session",
+                "prompt_id":"permission-prompt", "payload":{"text":"Inspect the project input files."}}));
+            active.send_permission_update();
+            let request = requests.try_recv().unwrap();
+            if state == "uncertain" {
+                active.response(request.kind, Err("capture: response lost".into()));
+            } else {
+                active.response(request.kind, Ok(permission_reply(&request, "queued")));
+                active.poll_result(Ok(vec![permission_event(&request, &state)]));
+            }
+            active.expanded_work.insert("permission-prompt".into());
+            active.events_changed();
+            model = active;
+        }
         if let Ok(path) = std::env::var("VKORE_UI_TRACE") {
             model.events = std::fs::read_to_string(path)
                 .unwrap()
@@ -6569,6 +6888,7 @@ mod tests {
         model.project_chats.insert(
             "b".into(),
             CachedProjectChat {
+                permission_update: None,
                 session: "chat-b".into(),
                 prompt_id: None,
                 draft: "unsent B".into(),
@@ -6626,6 +6946,7 @@ mod tests {
         model.project_chats.insert(
             "b".into(),
             CachedProjectChat {
+                permission_update: None,
                 session: "chat-b".into(),
                 prompt_id: None,
                 draft: "hello B".into(),
@@ -6693,6 +7014,38 @@ mod tests {
     }
 
     #[test]
+    fn close_chat_keeps_completed_transcript_renderable() {
+        let (requests, _) = mpsc::channel();
+        let (sessions, _) = mpsc::channel();
+        let mut model = Model::new(Network {
+            sender: requests,
+            session: sessions,
+        });
+        model.auto_open_pending = false;
+        model.projects = vec![json!({"id":"a", "name":"A"})];
+        model.selected = Some(0);
+        model.session = Some("chat-a".into());
+        model.events = vec![
+            json!({"kind":"user_prompt","prompt_id":"p","public":true,"payload":{"text":"6 plus 7"}}),
+            json!({"kind":"assistant","prompt_id":"p","public":true,"payload":{"text":"13"}}),
+            json!({"kind":"prompt_terminal","prompt_id":"p","public":true,"payload":{"status":"completed"}}),
+        ];
+        model.events_changed();
+        model.response(
+            RequestKind::StopSession,
+            Ok(ApiResponse {
+                content_type: "application/json".into(),
+                body: b"{}".to_vec(),
+            }),
+        );
+        assert!(model.session.is_none());
+        assert_eq!(model.events.len(), 3);
+        // Building the actual closed-chat view used to panic when it looked
+        // up the retained user/assistant events in an emptied text cache.
+        let _ = model.view(Size::new(1182.0, 768.0));
+    }
+
+    #[test]
     fn close_chat_revokes_only_that_projects_approvals() {
         let (requests, receiver) = mpsc::channel();
         let (sessions, _) = mpsc::channel();
@@ -6742,6 +7095,64 @@ mod tests {
             }),
         );
         assert_eq!(model.project().unwrap()["id"], "a");
+    }
+
+    #[test]
+    fn native_transport_decodes_chunked_events_before_parsing_json() {
+        let answer = json!({"sequence": 1, "kind": "assistant", "payload": {
+            "text": format!("{}heron 🐦", "x".repeat(10_000))
+        }});
+        let terminal = json!({"sequence": 2, "kind": "prompt_terminal",
+            "payload": {"status": "completed"}});
+        let body = format!("data: {answer}\n\ndata: {terminal}\n\n").into_bytes();
+        // Split both a large JSON record and the UTF-8 bytes of the bird.
+        let bird = body.windows(4).position(|b| b == "🐦".as_bytes()).unwrap();
+        let boundaries = [0, 8192, bird + 1, body.len()];
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\ntRaNsFeR-EnCoDiNg: ChUnKeD\r\n\r\n".to_vec();
+        for bounds in boundaries.windows(2) {
+            let chunk = &body[bounds[0]..bounds[1]];
+            write!(response, "{:x};test=extension\r\n", chunk.len()).unwrap();
+            response.extend_from_slice(chunk);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\nX-Test: trailer\r\n\r\n");
+        let events = parse_sse(parse_http_response(&response).unwrap()).unwrap();
+        assert_eq!(events, vec![answer, terminal]);
+    }
+
+    #[test]
+    fn native_transport_preserves_plain_bodies_and_decodes_chunked_errors() {
+        let response = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}",
+        ).unwrap();
+        assert_eq!(response.json().unwrap(), json!({"ok": true}));
+        let error = parse_http_response(
+            b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"error\":\"busy\"}\r\n0\r\n\r\n",
+        ).unwrap_err();
+        assert_eq!(error, "HTTP 409: busy");
+    }
+
+    #[test]
+    fn native_transport_rejects_incomplete_or_invalid_chunk_framing() {
+        for body in [
+            "",
+            "xyz\r\n",
+            "+1\r\na\r\n0\r\n\r\n",
+            "ffffffffffffffffffffffffffffffff\r\n",
+            "5\r\nhi",
+            "1\r\naXX0\r\n\r\n",
+            "1\r\na\r\n",
+            "0\r\n",
+            "0\r\nX-Test: missing-final-blank-line\r\n",
+        ] {
+            assert!(decode_chunked_body(body.as_bytes()).is_err(), "{body:?}");
+        }
+        assert!(
+            parse_http_response(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ fn run() -> Result<(), String> {
     let mut state = PathBuf::from(".vkore-state");
     let mut qemu = None;
     let mut qemu_args = Vec::new();
+    let mut headless_park = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -25,8 +26,9 @@ fn run() -> Result<(), String> {
             "--llama-server" | "--llama-model" | "--llama-port" | "--llama-arg" => return Err("configure the application llama.cpp profile in settings.json; the production harness requires real Kore via --qemu".into()),
             "--qemu" => qemu = Some(PathBuf::from(args.next().ok_or("missing --qemu")?)),
             "--require-real" => {}, // Compatibility: real execution is now unconditional.
+            "--headless-park" => headless_park = true,
             "--qemu-arg" => qemu_args.push(args.next().ok_or("missing --qemu-arg")?.into()),
-            _ => return Err("usage: vkore-harnessd --qemu PATH [--listen 127.0.0.1:8787] [--state PATH] [--qemu-arg ARG]...".into()),
+            _ => return Err("usage: vkore-harnessd --qemu PATH [--listen 127.0.0.1:8787] [--state PATH] [--headless-park] [--qemu-arg ARG]...".into()),
         }
     }
     let qemu_executable = qemu.ok_or("--qemu is required; simulated guests are forbidden")?;
@@ -35,6 +37,7 @@ fn run() -> Result<(), String> {
         qemu_arguments: qemu_args,
         project_root: state.join("projects"),
         require_real: true,
+        headless_park,
     })?;
     run_server(
         listen,

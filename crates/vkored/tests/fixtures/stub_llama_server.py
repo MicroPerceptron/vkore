@@ -11,7 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("-np", type=int, default=3)
 parser.add_argument("--port", type=int, required=True)
+parser.add_argument("--test-control-dir")
 args, _ = parser.parse_known_args()
+if args.test_control_dir and os.path.exists(os.path.join(args.test_control_dir, "fail-start")):
+    os._exit(74)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -29,6 +32,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/test/crash" and args.test_control_dir:
+            os._exit(75)
         if self.path == "/health":
             self.send_json({"status": "ok"})
         elif self.path == "/slots":

@@ -156,11 +156,17 @@ if test -n "${VKORE_EXPECTED_KORE_DIFF_SHA256:-}"; then
 fi
 
 kore_boot_features=${VKORE_KORE_BOOT_FEATURES:-boot-vkore-headless}
+kore_supervisor=${VKORE_KORE_AGENT_SUPERVISOR:-1}
+test "$kore_supervisor" = 1 || {
+    echo "vKore requires an explicitly enabled guest supervisor; ordinary Kore boot does not start one." >&2
+    exit 2
+}
 
 make_value() {
     local name=$1
     "$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
+        KORE_AGENT_SUPERVISOR="$kore_supervisor" KORE_AGENT_SUPERVISOR_PROJECT=1 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         --eval '.PHONY: _print_vkore_runtime' \
         --eval "_print_vkore_runtime: ; \$(info \$($name))" \
@@ -212,6 +218,8 @@ inference = settings.get("default_inference") or project.get("inference") or {}
 problems = []
 if inference.get("backend") != "llama_cpp":
     problems.append("inference.backend must be llama_cpp (deterministic is forbidden)")
+if project.get("archived", False):
+    problems.append("the selected project is archived")
 kore_image = inference.get("kore_image")
 if not kore_image or os.path.realpath(kore_image) != os.path.realpath(verified_iso):
     problems.append(f"inference.kore_image must be the verified image {verified_iso}")
@@ -286,6 +294,11 @@ if test "$check_only" = 1; then
 fi
 
 build_flags=()
+cargo_config=()
+if test -n "${VKORE_CARGO_CONFIG:-}"; then
+    test -f "$VKORE_CARGO_CONFIG" || { echo "Missing local Cargo configuration: $VKORE_CARGO_CONFIG" >&2; exit 2; }
+    cargo_config=(--config "$VKORE_CARGO_CONFIG")
+fi
 profile_dir=debug
 if test "$release" = 1; then
     build_flags+=(--release)
@@ -293,7 +306,7 @@ if test "$release" = 1; then
 fi
 
 if test "$no_build" != 1; then
-    cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
+    cargo ${cargo_config[@]+"${cargo_config[@]}"} build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" \
         -p vkored --bin vkore-harnessd --bin vkore
 fi
 harness="$vkore_root/target/$profile_dir/vkore-harnessd"
@@ -356,6 +369,7 @@ if ! curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     resource_arguments=("CPUS=$application_cpus" "MEM=$application_memory")
     qemu_arguments=$("$make_command" -C "$kore_root" --no-print-directory -s \
         PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 BOOT_FEATURES="$kore_boot_features" \
+        KORE_AGENT_SUPERVISOR="$kore_supervisor" KORE_AGENT_SUPERVISOR_PROJECT=1 \
         MODE=release CARGO_FLAGS=--release OUT_DIR=release \
         "${resource_arguments[@]}" \
         NVME_IMG="$nvme" USB_STICK_IMG="$usb" DEBUGCON_LOG="$debug_log" \
@@ -483,7 +497,7 @@ if test -n "${WSL_DISTRO_NAME:-}" && command -v cargo.exe >/dev/null 2>&1; then
     ui="$windows_target/$profile_dir/vkore-ui.exe"
 else
     if test "$no_build" != 1; then
-        cargo build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
+        cargo ${cargo_config[@]+"${cargo_config[@]}"} build --manifest-path "$vkore_root/Cargo.toml" "${build_flags[@]}" -p vkore-ui
     fi
     ui="$vkore_root/target/$profile_dir/vkore-ui"
 fi

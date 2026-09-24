@@ -59,6 +59,10 @@ pub struct WorkspaceBackend<B = DeterministicBackend> {
     events: VecDeque<BackendEvent>,
     grant: Option<StandingGrant>,
     blobs: Vec<StagedBlob>,
+    // Native fault gate: delay only the real committed write's reply. No
+    // fabricated result or tool execution; production builds have no hook.
+    #[cfg(test)]
+    transaction_reply_gate: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl WorkspaceBackend<DeterministicBackend> {
@@ -124,6 +128,8 @@ impl<B> WorkspaceBackend<B> {
             events: VecDeque::with_capacity(EVENTS_MAX),
             grant,
             blobs: Vec::with_capacity(BLOBS_MAX),
+            #[cfg(test)]
+            transaction_reply_gate: None,
         })
     }
 
@@ -157,6 +163,15 @@ impl<B> WorkspaceBackend<B> {
         self.pending_delta = None;
         self.blobs.clear();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_next_transaction_reply(
+        &mut self,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        self.transaction_reply_gate = Some(gate.clone());
+        gate
     }
 
     pub(crate) fn task_catalog(&self) -> Vec<(String, bool)> {
@@ -470,6 +485,10 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
         self.pending_delta = None;
         self.events.clear();
         self.blobs.clear();
+        #[cfg(test)]
+        {
+            self.transaction_reply_gate = None;
+        }
     }
 
     fn open(&mut self, identity: SequenceIdentity) -> Result<(), BackendError> {
@@ -737,6 +756,20 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
     }
 
     fn poll(&mut self, tick: u64) -> Option<BackendEvent> {
+        #[cfg(test)]
+        if let Some(gate) = self.transaction_reply_gate.as_ref()
+            && let Some(BackendEvent::Completed { payload, .. }) = self.events.front()
+            && let Ok(result) = TransactionResultV1::read_from_bytes(payload)
+            && result.magic == TRANSACTION_RESULT_MAGIC
+            && result.status.get() == WorkspaceStatus::Ok as u16
+        {
+            use std::sync::atomic::Ordering;
+            if gate.load(Ordering::SeqCst) != 2 {
+                gate.store(1, Ordering::SeqCst);
+                return self.inference.poll(tick);
+            }
+            self.transaction_reply_gate = None;
+        }
         self.events
             .pop_front()
             .or_else(|| self.inference.poll(tick))
@@ -760,6 +793,10 @@ impl<B: InferenceBackend> InferenceBackend for WorkspaceBackend<B> {
 
     fn take_observation(&mut self) -> Option<crate::backend::InferenceObservation> {
         self.inference.take_observation()
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        self.inference.broker_prompt_ready(identity)
     }
 }
 
@@ -927,6 +964,7 @@ mod tests {
         };
         let mut encoded = [0u8; kore_workspace_sync::MAX_WRITE_TRANSACTION_BYTES];
         let len = encode_write_transaction(&transaction, &mut encoded).unwrap();
+        let reply_gate = backend.gate_next_transaction_reply();
         for request in [RequestId([5; 16]), RequestId([6; 16])] {
             backend
                 .submit_bulk(
@@ -938,6 +976,16 @@ mod tests {
                     3,
                 )
                 .unwrap();
+            if request == RequestId([5; 16]) {
+                use std::sync::atomic::Ordering;
+                assert!(backend.poll(3).is_none());
+                assert_eq!(reply_gate.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    std::fs::read(root.path().join("file")).unwrap(),
+                    replacement
+                );
+                reply_gate.store(2, Ordering::SeqCst);
+            }
             let BackendEvent::Completed { payload, .. } = backend.poll(3).unwrap() else {
                 panic!("transaction must complete inline");
             };

@@ -1,10 +1,11 @@
-# Issue #24 shared-assistant artifact, stacked on PR #39 / Kore #933.
-# Userland source: 5173ebce12f6b6631792e8967142b87fcf4c6789.
-# Download kore-x86-vkore-headless-release.iso from vkore-issue24-20260914.
-# Rebuilding requires revalidation and a new digest; do not bypass these checks.
-VKORE_EXPECTED_KORE_COMMIT := 3fca0fe1f8578d59c16c465089967ecb268b7f79
-VKORE_EXPECTED_KORE_DIFF_SHA256 := e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-VKORE_EXPECTED_ISO_SHA256 := 6ae17033d2fca456567c35626618fcf18d60106e401e60276863b4a2df570aa0
-VKORE_KORE_ISO_RELATIVE := target/kore-x86-vkore-headless-release.iso
-VKORE_KORE_BOOT_FEATURES := boot-vkore-headless
-VKORE_EXPECTED_KORE_SOURCE_COMMIT := 5173ebce12f6b6631792e8967142b87fcf4c6789
+# Reviewed provenance for the real Kore developer stack.
+#
+# Updating either value is a security-sensitive compatibility change. Build the
+# ISO from the reviewed commit, verify the resulting image, and commit both
+# updates together. The developer launcher never checks out this revision or
+# changes a Kore worktree automatically.
+VKORE_EXPECTED_KORE_COMMIT := 6d01d91e74b70c19cde1bbfe36d203064827b6a0
+# Source identity stays fixed when the generated payloads are committed.
+VKORE_EXPECTED_KORE_SOURCE_COMMIT := c1a0fd568bcac9b94bd9e53759bc632c4085d195
+VKORE_EXPECTED_ISO_SHA256 := 843bcf183326cb0b22feea80ba6d090b23ab781a13b70890dd34f464d3e3517f
+VKORE_KORE_ISO_RELATIVE := target/kore-x86-release.iso

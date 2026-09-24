@@ -23,6 +23,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod updates;
+pub use updates::{AuthorityUpdateRequest, AuthorityUpdateState, AuthorityUpdateStatus};
+
 pub const HARNESS_API_VERSION: u16 = 1;
 const EVENTS_MAX: usize = 512;
 const SESSIONS_MAX: usize = 64;
@@ -99,6 +102,7 @@ pub enum EventKind {
     Error,
     PromptTerminal,
     ConversationClosed,
+    AuthorityUpdate,
 }
 
 pub(crate) fn emit_inference_observation(
@@ -183,9 +187,12 @@ struct SessionData {
     events: VecDeque<HarnessEvent>,
     idempotency: BTreeMap<String, (String, String)>,
     cancellations: BTreeSet<String>,
+    updates: BTreeMap<String, AuthorityUpdateState>,
+    published_prompt: Option<String>,
 }
 
 struct Shared {
+    authority_updates_supported: bool,
     shutting_down: bool,
     runtime_status: Value,
     sessions: BTreeMap<String, SessionData>,
@@ -319,6 +326,20 @@ enum Command {
 }
 
 pub trait TaskRuntime: Send + 'static {
+    fn supports_authority_updates(&self) -> bool {
+        false
+    }
+    fn run_prompt_with_updates(
+        &mut self,
+        session: &SessionState,
+        prompt: &PromptRequest,
+        emit: &mut dyn FnMut(EventKind, bool, Value),
+        cancelled: &dyn Fn() -> bool,
+        response_published: &dyn Fn() -> bool,
+        _updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+    ) -> PromptStatus {
+        self.run_prompt(session, prompt, emit, cancelled, response_published)
+    }
     fn prepare(
         &mut self,
         _status: &mut dyn FnMut(Value),
@@ -357,6 +378,7 @@ pub struct HarnessHandle {
 impl HarnessService {
     pub fn start(runtime: impl TaskRuntime, transcript_root: impl Into<PathBuf>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
+            authority_updates_supported: runtime.supports_authority_updates(),
             shutting_down: false,
             runtime_status: json!({"phase":"preparing"}),
             sessions: BTreeMap::new(),
@@ -518,6 +540,11 @@ fn worker_loop(
                 let response_published = std::cell::Cell::new(false);
                 let mut emit = |kind, public, payload| {
                     if let Ok(mut shared) = shared_emit.lock() {
+                        if kind == EventKind::AuthorityUpdate {
+                            let _ =
+                                shared.finish_authority_update(&session_id, &prompt_id, payload);
+                            return;
+                        }
                         let response =
                             public && matches!(kind, EventKind::Assistant | EventKind::Error);
                         // Cleanup diagnostics remain visible in Working, but
@@ -528,6 +555,13 @@ fn worker_loop(
                             .is_ok();
                         if response && public {
                             response_published.set(published);
+                            if published {
+                                shared
+                                    .sessions
+                                    .get_mut(&session_id)
+                                    .unwrap()
+                                    .published_prompt = Some(prompt_id.clone());
+                            }
                         }
                     }
                 };
@@ -546,12 +580,25 @@ fn worker_loop(
                         })
                         .unwrap_or(true)
                 };
-                let status = runtime.run_prompt(&session, &prompt, &mut emit, &cancelled, &|| {
-                    response_published.get()
-                });
+                let update_shared = Arc::clone(&shared);
+                let updates = || {
+                    update_shared
+                        .lock()
+                        .ok()?
+                        .take_authority_update(&session.session_id, &prompt.prompt_id)
+                };
+                let status = runtime.run_prompt_with_updates(
+                    &session,
+                    &prompt,
+                    &mut emit,
+                    &cancelled,
+                    &|| response_published.get(),
+                    &updates,
+                );
                 maintain(&mut runtime, &shared);
                 let backend_incarnation = runtime.backend_incarnation();
                 if let Ok(mut shared) = shared.lock() {
+                    shared.finish_pending_updates(&session.session_id, &prompt.prompt_id);
                     if let Some(data) = shared.sessions.get_mut(&session.session_id) {
                         data.state.prompts.insert(prompt.prompt_id.clone(), status);
                         data.state.backend_incarnation = backend_incarnation;
@@ -682,6 +729,8 @@ impl HarnessHandle {
                 events: VecDeque::with_capacity(EVENTS_MAX),
                 idempotency: BTreeMap::new(),
                 cancellations: BTreeSet::new(),
+                updates: BTreeMap::new(),
+                published_prompt: None,
             },
         );
         shared.emit(
@@ -2183,10 +2232,10 @@ fn route_http(
             .unwrap()
         }
         ("POST", ["api", "v1", "picker"]) => {
-            let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-            let kind = value["kind"].as_str().unwrap_or("directory");
-            let path = native_picker(kind == "directory")?;
-            json!({"path":path})
+            // A headless service must never own a desktop modal dialog.
+            return Err(HarnessError::Http(
+                "Use the desktop application's local folder picker".into(),
+            ));
         }
         ("POST", ["api", "v1", "artifacts", "inspect"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;
@@ -2227,6 +2276,38 @@ fn route_http(
             handle.cancel_prompt(session, request)?;
             json!({"cancelled":true})
         }
+        (
+            "POST",
+            [
+                "api",
+                "v1",
+                "sessions",
+                session,
+                "prompts",
+                prompt_id,
+                "updates",
+            ],
+        ) => {
+            let request: AuthorityUpdateRequest =
+                serde_json::from_slice(body).map_err(http_json)?;
+            if request.prompt_id != *prompt_id {
+                return Err(HarnessError::InvalidIdentity);
+            }
+            serde_json::to_value(handle.submit_authority_update(session, request)?).unwrap()
+        }
+        (
+            "GET",
+            [
+                "api",
+                "v1",
+                "sessions",
+                session,
+                "prompts",
+                prompt_id,
+                "updates",
+                update_id,
+            ],
+        ) => serde_json::to_value(handle.authority_update(session, prompt_id, update_id)?).unwrap(),
         ("GET", ["api", "v1", "sessions", session]) => {
             serde_json::to_value(handle.state(session)?).unwrap()
         }
@@ -2365,61 +2446,6 @@ fn inspect_artifact(path: &Path) -> Result<Value, HarnessError> {
         "license": "read from verified package manifest when installed",
         "context_tokens": "configured by project; verify against GGUF metadata"
     }))
-}
-
-#[cfg(target_os = "windows")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.SelectedPath)}"
-    } else {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}"
-    };
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Err(HarnessError::Io(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "linux")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let mut command = std::process::Command::new("zenity");
-    command.arg("--file-selection");
-    if directory {
-        command.arg("--directory");
-    }
-    let output = command
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "macos")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "POSIX path of (choose folder)"
-    } else {
-        "POSIX path of (choose file)"
-    };
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
 }
 
 fn encode_sse(events: &[HarnessEvent]) -> Vec<u8> {

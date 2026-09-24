@@ -9,11 +9,6 @@ approvals, add-ons, packages, transcripts, and diagnostics. Kore remains the
 authority-bearing guest. A host path, model response, tool name, or UI event is
 never authority by itself.
 
-![The native vKore chat harness showing a scoped workspace read and validated assistant response](artifacts/readme/chat-harness.png)
-
-_The native Iced + Axiom harness. The expandable Working timeline keeps broker,
-agent, and tool activity separate from validated assistant output._
-
 ## What is here
 
 - **Native project UI.** Create projects with optional focus folders, configure
@@ -136,7 +131,9 @@ project settings, real inference, VM lifecycle, and diagnostics.
 The harness never downloads or guesses a model. Supply the llama-server binary,
 GGUF model and pinned Kore image through the setup helper in the Linux guide.
 Application Settings owns the active inference profile. Changing models
-explicitly restarts the one shared runtime; switching projects does not. Legacy
+explicitly restarts the shared runtime. Chats in the same workspace reuse it;
+the current pinned guest requires a restart when task workspace attachments change
+(see [stacked validation](docs/stacked-ui-validation.md)). Legacy
 project profiles remain model catalog inputs. Project settings retain focus
 folders, writeback policies, prompt budgets and retention preferences.
 

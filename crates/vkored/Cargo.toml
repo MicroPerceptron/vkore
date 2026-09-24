@@ -10,7 +10,7 @@ description = "Host control-plane daemon for Kore guests."
 cap-std = "=4.0.2"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 roxmltree = "=0.20.0"
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
 httparse = { version = "=1.10.1", default-features = false, features = ["std"] }
 kore-hostlink.workspace = true
 kore-hostlink-shmem.workspace = true

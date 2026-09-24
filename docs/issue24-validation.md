@@ -1,5 +1,11 @@
 # Shared application assistant validation
 
+> Historical PR #41 guest instructions/results. PR #43 now uses a different
+> current-Kore image and compatibility path. Use [the current UI handoff](ui-handoff.md)
+> and [stacked validation](stacked-ui-validation.md) for its exact pin and limits.
+> The older release image and unchanged-process claims below do not apply to #43.
+
+
 Issue #24 is stacked on vKore #39 and Kore #933. Neither parent PR is merged by
 this change. The architecture and explicit bounds are recorded in
 [ADR 24](adr/0024-shared-assistant.md); use [Linux setup](linux-setup.md) for the

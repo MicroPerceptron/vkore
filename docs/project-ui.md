@@ -159,17 +159,20 @@ provider is connected.
 
 Set `VKORE_UI_PROFILE=1` to print per-frame display-list, glyph-atlas, structure,
 scratch, and presentation-byte counters. The reproducible before/after capture
-and release-mode timing method is recorded in
-`artifacts/ui-upgrade/README.md`.
+and release-mode timing method is recorded in the
+[historical capture notes](https://github.com/MicroPerceptron/vkore/blob/68155f07dd5d80c5c751f9b6b2adb263b53f7042/artifacts/ui-upgrade/README.md).
 
 ## Real Kore VM
 
-One application-owned VM, AI server and coordinating broker serve every project
-and chat. Preparation starts when the harness opens, using application settings
-and an empty read-only bootstrap root. Required headless guest readiness is a
-parked broker call after service and executable-store initialization. Old
-single-prompt guest images are incompatible and fail visibly; prompt submission
-never silently boots a replacement VM.
+One application-owned runtime serves every project and chat. Preparation starts
+when the harness opens, using application settings and an empty read-only
+bootstrap root. Readiness requires an authenticated parked broker call after
+service initialization. With the current pinned guest, the first workspace
+attachment and subsequent attachment changes retire the exact guest before
+replacing its root and booting a replacement. Unchanged workspace prompts and
+new chats reuse their processes. The selected model remains application-wide;
+its server may restart during HostLink retirement. See
+[stacked native validation](stacked-ui-validation.md) for the compatibility limit.
 
 The sidebar switches between project chats while preserving drafts and
 chat identity. **New chat** starts a fresh conversation for the selected
@@ -197,6 +200,32 @@ and 16 KiB each, with a 30-minute idle expiry. The application schedules at most
 archiving scoped work leaves the shared processes alive. Shared failure retires
 all affected generations and requires explicit Retry. See
 [ADR 24](adr/0024-shared-assistant.md) and [validation](issue24-validation.md).
+
+Structured generation uses llama.cpp's `/apply-template` endpoint with the
+configured model's template, then `/completion` with both a visible JSON schema
+and constrained decoding. All results still pass the strict wire decoder.
+After tools, the model must author a response rather than emit a bare completion.
+One bounded live correction may follow a rejected candidate; there is no canned
+answer or deterministic inference fallback.
+The worker is instructed to follow requested step order and ground external
+claims in observed tool results; validation does not prove semantic task
+completion. A live test must inspect the actual calls and effects as well as
+the final answer. VM pause/resume follows pending backend requests, not the
+number of diagnostic prompt events (a correction emits another prompt for the
+same request).
+
+The current Kore task-intent wire format limits each prompt to 128 UTF-8 bytes.
+Oversized prompts are rejected explicitly, never shortened silently. The
+terminal client keeps the session open after a rejection or a failed turn so
+the user can continue; batch runs still exit nonzero if any turn failed.
+
+For single-prompt guests such as the locally built PR909 image, vKore retires
+the real VM after confirmed reclamation and boots another real VM for the next
+prompt. The logical chat remains the same. The host retains up to 16 completed
+user/assistant exchanges (16 KiB total), scoped by project and session; it
+replays those conversation facts into fresh broker and worker requests. It
+does not retain old grants, rejected outputs, or private reasoning. Closing the
+session clears this in-memory context; it is not restored across harness restarts.
 
 Structured generation uses llama.cpp's `/apply-template` endpoint with the
 configured model's template, then `/completion` with both a visible JSON schema

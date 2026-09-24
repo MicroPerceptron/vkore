@@ -1111,6 +1111,275 @@ fn supervised_stub_streams_three_isolated_sequences_with_fair_progress() {
 }
 
 #[test]
+fn idle_server_death_retries_failed_startup_on_host_time_and_recovers() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let controls = tempfile::tempdir().unwrap();
+    let mut config = stub_config();
+    config.executable_args.push("--test-control-dir".into());
+    config
+        .executable_args
+        .push(controls.path().as_os_str().to_owned());
+    let port = config.port;
+    let mut backend = LlamaServerBackend::start(config).unwrap();
+    let broker = identity(1, BackendRole::Broker);
+    backend.open(broker).unwrap();
+    assert!(backend.broker_prompt_ready(broker));
+    assert_eq!(backend.metrics().pending, 0);
+
+    let failure = controls.path().join("fail-start");
+    std::fs::write(&failure, []).unwrap();
+    let mut control = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    control
+        .write_all(b"GET /test/crash HTTP/1.0\r\n\r\n")
+        .unwrap();
+    drop(control);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while backend.metrics().restarts == 0 && Instant::now() < deadline {
+        assert!(backend.poll(0).is_none());
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(backend.metrics().restarts, 1);
+    assert!(!backend.broker_prompt_ready(broker));
+    // Frequent polls while the VM clock is frozen do not spawn a replacement
+    // per poll, or invent failures for requests which never existed.
+    for _ in 0..100 {
+        assert!(backend.poll(0).is_none());
+    }
+    assert_eq!(backend.metrics().restarts, 1);
+    assert_eq!(backend.metrics().failed, 0);
+    std::fs::remove_file(failure).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !backend.broker_prompt_ready(broker) && Instant::now() < deadline {
+        assert!(backend.poll(0).is_none());
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(backend.broker_prompt_ready(broker));
+    assert_eq!(backend.metrics().restarts, 2);
+    let request = RequestId(id(18));
+    backend
+        .submit(broker, request, &broker_planning_request(1), 0)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut completed = false;
+    while Instant::now() < deadline {
+        match backend.poll(0) {
+            Some(BackendEvent::Completed {
+                sequence,
+                request: reply,
+                payload,
+                ..
+            }) => {
+                assert_eq!(sequence, broker);
+                assert_eq!(reply, request);
+                assert_eq!(
+                    decode_broker_reply(&payload).unwrap().action,
+                    BrokerActionKind::CreateAgent
+                );
+                completed = true;
+                break;
+            }
+            Some(other) => panic!("unexpected recovery event: {other:?}"),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    assert!(completed);
+    assert_eq!(backend.metrics().sequences_open, 1);
+}
+
+#[test]
+fn broker_recovers_after_server_failure_only_at_a_fresh_structured_prompt() {
+    for broker_was_active in [false, true] {
+        let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+        let identities = open_three(&mut backend);
+        let broker = identities[0];
+        let old_broker = RequestId(id(24));
+        if broker_was_active {
+            backend
+                .submit(
+                    broker,
+                    old_broker,
+                    &inference_request(
+                        BackendRole::Broker,
+                        1,
+                        "SLOW_SERVER old broker context",
+                        32,
+                    ),
+                    0,
+                )
+                .unwrap();
+        }
+        let failed_peer = RequestId(id(25));
+        backend
+            .submit(
+                identities[1],
+                failed_peer,
+                &inference_request(BackendRole::Agent, 1, "MALFORMED_SERVER", 32),
+                0,
+            )
+            .unwrap();
+        let expected_failures = if broker_was_active { 2 } else { 1 };
+        let mut failed = Vec::new();
+        let mut tick = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            tick += 1;
+            if let Some(event) = backend.poll(tick) {
+                assert!(
+                    !failed.contains(&event.request()),
+                    "late output/duplicate failure escaped: {event:?}"
+                );
+                match event {
+                    BackendEvent::Failed {
+                        request, failure, ..
+                    } => {
+                        assert_eq!(failure, hostlinkd::BackendFailure::MalformedResponse);
+                        failed.push(request);
+                    }
+                    BackendEvent::Chunk { request, .. }
+                        if request == old_broker && failed.is_empty() => {}
+                    other => panic!("unexpected pre-recovery event: {other:?}"),
+                }
+            }
+            if !failed.is_empty() && !backend.broker_prompt_ready(broker) {
+                // A caller bypassing frontend admission still cannot reset a
+                // poisoned slot while failed workers or terminal events remain.
+                assert_eq!(
+                    backend.submit(broker, RequestId(id(26)), &broker_planning_request(1), tick),
+                    Err(BackendError::BackendUnavailable)
+                );
+            }
+            if failed.len() == expected_failures && backend.broker_prompt_ready(broker) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(failed.len(), expected_failures);
+        assert!(backend.broker_prompt_ready(broker));
+        assert_eq!(backend.metrics().pending, 0);
+        assert!(backend.metrics().restarts >= 1);
+        assert_eq!(
+            backend.submit(
+                broker,
+                RequestId(id(27)),
+                &inference_request(BackendRole::Broker, 2, "old raw continuation", 32),
+                tick
+            ),
+            Err(BackendError::BackendUnavailable)
+        );
+        if broker_was_active {
+            assert!(
+                backend
+                    .submit(broker, old_broker, &broker_planning_request(1), tick)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            backend.submit(
+                identities[1],
+                RequestId(id(28)),
+                &inference_request(BackendRole::Agent, 2, "old worker continuation", 32),
+                tick
+            ),
+            Err(BackendError::BackendUnavailable)
+        );
+        let fresh = RequestId(id(29));
+        backend
+            .submit(broker, fresh, &broker_planning_request(1), tick)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut completed = false;
+        while Instant::now() < deadline {
+            tick += 1;
+            match backend.poll(tick) {
+                Some(BackendEvent::Completed {
+                    sequence,
+                    request,
+                    payload,
+                    ..
+                }) => {
+                    assert_eq!(sequence, broker, "the held broker route remains resident");
+                    assert_eq!(request, fresh);
+                    assert_eq!(
+                        decode_broker_reply(&payload).unwrap().action,
+                        BrokerActionKind::CreateAgent
+                    );
+                    completed = true;
+                    break;
+                }
+                Some(other) => panic!("stale output or failed recovery: {other:?}"),
+                None => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(completed);
+        assert_eq!(backend.metrics().sequences_open, 3);
+    }
+}
+
+#[test]
+fn broker_prompt_readiness_waits_for_cancelled_model_worker_cleanup() {
+    let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
+    let identities = open_three(&mut backend);
+    let broker = identities[0];
+    assert!(backend.broker_prompt_ready(broker));
+    assert!(!backend.broker_prompt_ready(identities[1]));
+    assert!(!backend.broker_prompt_ready(SequenceIdentity {
+        generation: TaskGeneration::new(8).unwrap(),
+        ..broker
+    }));
+    let queued = RequestId(id(22));
+    backend
+        .submit(
+            broker,
+            queued,
+            &inference_request(BackendRole::Broker, 1, "queued cancellation", 32),
+            0,
+        )
+        .unwrap();
+    assert!(!backend.broker_prompt_ready(broker));
+    backend.cancel(broker, queued, 1).unwrap();
+    assert!(backend.broker_prompt_ready(broker));
+
+    let active = RequestId(id(23));
+    backend
+        .submit(
+            broker,
+            active,
+            &inference_request(
+                BackendRole::Broker,
+                2,
+                "SLOW_SERVER active cancellation",
+                32,
+            ),
+            2,
+        )
+        .unwrap();
+    assert!(backend.poll(3).is_none()); // dispatch, retaining the actual HTTP worker
+    assert!(matches!(
+        backend.cancel(broker, active, 4).unwrap(),
+        BackendEvent::Cancelled { .. }
+    ));
+    assert!(
+        !backend.broker_prompt_ready(broker),
+        "receipt does not release the worker owner"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tick = 4;
+    while !backend.broker_prompt_ready(broker) && Instant::now() < deadline {
+        tick += 1;
+        assert!(
+            backend.poll(tick).is_none(),
+            "cancelled output must remain retired"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(backend.broker_prompt_ready(broker));
+    backend.close(broker).unwrap();
+    assert!(!backend.broker_prompt_ready(broker));
+}
+
+#[test]
 fn cancellation_does_not_block_another_sequence_and_old_worker_output_is_retired() {
     let mut backend = LlamaServerBackend::start(stub_config()).unwrap();
     let identities = open_three(&mut backend);

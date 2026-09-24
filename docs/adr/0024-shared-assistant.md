@@ -1,6 +1,14 @@
 # ADR 24: One application assistant with scoped task filesystems
 
-Status: implemented on the issue #24 branches, stacked on vKore #39 and Kore #933.
+Status: original issue #24 design and validation on vKore #41 / Kore #933.
+
+Current-Kore compatibility (PR #43): the pinned guest retains its imported root
+and write grant across prompts. Host-only attachment replacement is therefore
+insufficient. PR #43 reuses unchanged focus-folder attachments, but confirms
+termination of the old guest before replacing a task attachment and booting its
+successor. HostLink retirement can also restart the model server. The persistent
+cross-workspace process identity described below remains a property of the older
+#41 guest, not this current-Kore integration. See [live validation](../stacked-ui-validation.md).
 
 ## Ownership and startup
 
@@ -107,6 +115,13 @@ and regular-file identity are rechecked when attached and on each range read;
 changed or replaced source data fails closed instead of serving stale text.
 Office text is exposed through a read-only virtual `.txt` alias. Same-named
 files from different locations receive different identity-derived aliases.
+
+When discovery finds a file inside the explicitly selected focus folder, keep
+that folder attachment and its existing access policy. Its filenames remain
+stable across create/read/write prompts. Virtual projects and external-only
+matches still use sparse read-only aliases. A mixed result containing a focus
+match gives the selected folder precedence; combining focus and external
+namespaces is not implemented.
 
 The deterministic authority layer validates catalog selectors and source
 identity again before deriving grants. Exact file grants are preferred for

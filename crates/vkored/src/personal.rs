@@ -21,6 +21,27 @@ pub(crate) struct SearchResult {
     pub bounded: bool,
 }
 
+impl SearchResult {
+    /// A matching file in the explicitly selected project is already offered
+    /// by that root. Keep its stable path and the project's access policy;
+    /// replacing it with a personal-search alias breaks subsequent reads and
+    /// silently removes authorized writeback. External-only results still use
+    /// the sparse read-only attachment.
+    pub(crate) fn prefer_focus_root(&mut self, root: &Path) -> Result<bool, String> {
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let matched = self.files.iter().any(|file| {
+            file.backing_path
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(&root))
+        });
+        if matched {
+            self.files.clear();
+            self.identities.clear();
+        }
+        Ok(matched)
+    }
+}
+
 struct Candidate {
     score: usize,
     modified: u64,
@@ -309,6 +330,33 @@ fn text_content(extension: &str, bytes: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn matching_project_files_keep_the_focus_root_instead_of_search_aliases() {
+        let parent = tempfile::tempdir().unwrap();
+        let focus = parent.path().join("project");
+        let sibling = parent.path().join("project-other");
+        std::fs::create_dir(&focus).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(focus.join("test.txt"), "hello").unwrap();
+        std::fs::write(sibling.join("external.txt"), "outside").unwrap();
+        let roots = [focus.clone(), sibling.clone()];
+        let mut local = search("Read test.txt and reply with its exact contents.", &roots).unwrap();
+        assert_eq!(local.files.len(), 1);
+        assert!(local.prefer_focus_root(&focus).unwrap());
+        assert!(local.files.is_empty());
+        assert!(local.identities.is_empty());
+        let mut external = search("Read external.txt", &roots).unwrap();
+        assert!(!external.prefer_focus_root(&focus).unwrap());
+        assert_eq!(external.files.len(), 1);
+        assert_eq!(external.identities[0].1, sibling.join("external.txt"));
+        let mut mixed = search("Read test.txt and external.txt", &roots).unwrap();
+        assert!(mixed.prefer_focus_root(&focus).unwrap());
+        assert!(
+            mixed.files.is_empty(),
+            "explicit project match keeps the selected root"
+        );
+    }
 
     #[test]
     fn file_extensions_and_generic_request_words_do_not_select_unrelated_files() {

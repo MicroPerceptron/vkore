@@ -293,6 +293,10 @@ pub trait InferenceBackend {
         true
     }
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics>;
+    /// Whether this exact, open broker sequence can begin a fresh prompt.
+    /// Terminal delivery alone is insufficient: cancelled model work may still
+    /// own the sequence. Unknown/non-broker sequences must return false.
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool;
     /// Pop one bounded, non-authoritative observation produced by the real
     /// backend path. Implementations that do not expose model internals keep
     /// the default empty stream.
@@ -365,6 +369,10 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {
         (**self).take_observation()
+    }
+
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool {
+        (**self).broker_prompt_ready(sequence)
     }
 }
 
@@ -1513,6 +1521,14 @@ impl InferenceBackend for DeterministicBackend {
             .get(identity)
             .ok()
             .map(|entry| entry.state.metrics)
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self
+                .registry
+                .get(identity)
+                .is_ok_and(|entry| entry.state.pending.is_empty())
     }
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {

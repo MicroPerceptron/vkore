@@ -1,5 +1,11 @@
 # Run the shared-assistant development stack on Linux
 
+> Historical PR #41 guest instructions/results. PR #43 now uses a different
+> current-Kore image and compatibility path. Use [the current UI handoff](ui-handoff.md)
+> and [stacked validation](stacked-ui-validation.md) for its exact pin and limits.
+> The older release image and unchanged-process claims below do not apply to #43.
+
+
 Open the **vKore repository** in your editor and terminal. Run the native app
 from a Linux desktop session (X11 or Wayland). The guest is an x86-64 Kore ISO
 running under QEMU TCG, including when the host is ARM64. This implements issue #24 on top of PR #39; see

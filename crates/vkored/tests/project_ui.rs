@@ -79,6 +79,7 @@ fn real_only_runtime_refuses_deterministic_projects_before_starting_a_backend() 
         qemu_arguments: Vec::new(),
         project_root: projects,
         require_real: false, // Legacy flag cannot re-enable a test backend.
+        headless_park: false,
     })
     .unwrap();
     let session = SessionState {
@@ -499,6 +500,35 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     let policy = transact(&server, address, "GET", "/api/v1/approvals", "", &[]);
     let payload: Value = serde_json::from_str(policy.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert!(payload["grants"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn headless_http_picker_is_rejected_without_blocking_followup_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = HarnessService::start(
+        BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
+        temp.path().join("transcripts"),
+    );
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        service.handle(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
+    let address = server.local_addr();
+    let response = transact(
+        &server,
+        address,
+        "POST",
+        "/api/v1/picker",
+        r#"{"kind":"directory"}"#,
+        &[("X-vKore-Client", "harness-ui-v1")],
+    );
+    assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(response.contains("local folder picker"));
+    let health = transact(&server, address, "GET", "/api/v1/health", "", &[]);
+    assert!(health.starts_with("HTTP/1.1 200"));
+    assert!(health.contains(r#""ok":true"#));
 }
 
 fn transact(

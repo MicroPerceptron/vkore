@@ -876,3 +876,39 @@ No merge, issue closure, or default artifact-lock promotion.
 
 The init/focus correction and execution ledger are committed as Kore `f3e2b45df`;
 generated diagnostic payloads remain separate, captured build products.
+
+
+### Projection timeout investigation — 2026-09-23
+
+The installer incorrectly completed a seed with failure 96 after one expired
+filesystem observation while the original projection request remained owned.
+Init's outer retry can only resume a still-outstanding exec call, so it cannot
+recover that completed negative verdict. The regression reproduces this exact
+boundary on the old source. Bounded continuation of the original Open/Create/
+Link now follows the existing write-owner policy: 250 ms slices, at most eight
+continuations, unchanged terminal refusals and retained cleanup ownership.
+
+Six new regressions and all 182 exec tests pass. Full host validation passes
+6,423 Rust tests with 34 ignored; build-tool suites and all three architecture
+checks pass. Native RISC-V exec checking and ARM/x86 payload builds pass.
+Fresh disabled production, separate kernel boottest, full 20-round returning-
+main/lifecycle/status and a second fresh-disk production boot pass. Every
+production/interactive boot reports 35/35 apps, 3/3 libraries, 2/2 data, package
+present and app failure 0. Tests run serially under QEMU TCG; G7 remains
+explicitly not exercisable on this topology.
+
+Hardware CI 35898242114 predates this projection patch and fails nine of its
+18 hardware scenarios. AMD window and SMP logs report 27/35 and 33/35 app
+seeds with code 96; returning-main reaches repeated launches but fails later
+exit-value assertions. Neither that run nor the local repeat is relabeled green.
+
+See [the investigation report](https://github.com/MicroPerceptron/kore/blob/c6dd5fe714183c71475e5fa4372dfde9a7747c1d/res/agent-supervisor/projection-timeout-investigation.md) for exact
+hashes, source paths, red/green proof and native timings. Successful Link waits
+for a durable metadata/root publication with two flushes; the captured timeout
+does not identify which storage/scheduling/notification wait was late. Hardware
+validation of the patch, final source/SDK/artifact convergence and native Mac UI
+acceptance remain open. No merge or default-lock promotion.
+
+Published Kore source: `c6dd5fe714183c71475e5fa4372dfde9a7747c1d`. The diagnostic images were built at
+`f3e2b45df` plus the recorded patch; the earlier enabled candidate and default
+locks remain unchanged. vKore runtime source remains `e389274`.

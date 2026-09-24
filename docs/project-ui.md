@@ -159,8 +159,8 @@ provider is connected.
 
 Set `VKORE_UI_PROFILE=1` to print per-frame display-list, glyph-atlas, structure,
 scratch, and presentation-byte counters. The reproducible before/after capture
-and release-mode timing method is recorded in
-`artifacts/ui-upgrade/README.md`.
+and release-mode timing method is recorded in the
+[historical capture notes](https://github.com/MicroPerceptron/vkore/blob/68155f07dd5d80c5c751f9b6b2adb263b53f7042/artifacts/ui-upgrade/README.md).
 
 ## Real Kore VM
 

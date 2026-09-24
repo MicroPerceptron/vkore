@@ -2,6 +2,7 @@ mod authority_updates;
 mod fonts;
 mod logo;
 mod model_timing;
+mod picker;
 mod render_backend;
 mod splash;
 mod theme;
@@ -1386,6 +1387,7 @@ struct Request {
 enum UserEvent {
     Response(RequestKind, Result<ApiResponse, String>),
     Poll(Result<Vec<Value>, String>),
+    PickDirectory(RequestKind),
 }
 
 #[derive(Debug)]
@@ -1416,6 +1418,13 @@ impl Network {
         let request_proxy = proxy.clone();
         thread::spawn(move || {
             while let Ok(request) = receiver.recv() {
+                if matches!(
+                    request.kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    let _ = request_proxy.send_event(UserEvent::PickDirectory(request.kind));
+                    continue;
+                }
                 let result = http(server, request.method, &request.path, request.body.as_ref());
                 let _ = request_proxy.send_event(UserEvent::Response(request.kind, result));
             }
@@ -4107,6 +4116,8 @@ impl Model {
 
 struct App {
     model: Model,
+    proxy: EventLoopProxy<UserEvent>,
+    picker: Option<picker::Picker>,
     context: SoftContext<OwnedDisplayHandle>,
     surface: Option<SoftSurface<OwnedDisplayHandle, Rc<Window>>>,
     renderer: AxRenderer<System>,
@@ -4350,7 +4361,28 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Response(kind, result) => self.model.response(kind, result),
+            UserEvent::Response(kind, result) => {
+                if matches!(
+                    kind,
+                    RequestKind::PickWorkspace | RequestKind::PickSearchLocation
+                ) {
+                    self.picker.take();
+                }
+                self.model.response(kind, result);
+            }
+            UserEvent::PickDirectory(kind) => {
+                let proxy = self.proxy.clone();
+                match picker::Picker::open(move |result| {
+                    let result = result.map(|path| ApiResponse {
+                        content_type: "application/json".into(),
+                        body: serde_json::to_vec(&json!({"path":path})).unwrap(),
+                    });
+                    let _ = proxy.send_event(UserEvent::Response(kind, result));
+                }) {
+                    Ok(picker) => self.picker = Some(picker),
+                    Err(error) => self.model.response(kind, Err(error)),
+                }
+            }
             UserEvent::Poll(result) => self.model.poll_result(result),
         }
         self.redraw = true;
@@ -4374,7 +4406,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match &event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.picker.take();
+                event_loop.exit();
+            }
             WindowEvent::HoveredFile(path) if self.model.workspace_selection_open => {
                 self.model.workspace_drop_hovered = path.is_dir() && !self.model.busy;
                 self.redraw = true;
@@ -4642,6 +4677,8 @@ fn main() {
         .expect("create software presentation context");
     let mut app = App {
         model: Model::with_launch_project(network, options.project),
+        proxy: event_loop.create_proxy(),
+        picker: None,
         context,
         surface: None,
         renderer: native_renderer(),

@@ -14,9 +14,50 @@ passes with repaired pointer delivery. A full desktop/fault diagnostic rerun
 also passes functionally, with its earlier timeout retained. New capacity checks
 exposed accumulating pinned filesystem views. A kernel-validated cleanup fix
 passes the final full fault gate with unchanged view counts through generation 7.
-The corrected kernel boot, returning-main and two-terminal gates pass. The extended desktop repeat passes; its earlier intermittent Files-activation failure remains unexplained. Hardware CI and native UI acceptance remain unresolved. The default real-stack lock has not been promoted.
+The corrected kernel boot, returning-main and two-terminal gates pass. The extended desktop repeat passes; its earlier intermittent Files-activation failure remains unexplained. Hardware CI remains unresolved. Native Mac regression checks pass with the host/UI fixes recorded below. The default real-stack lock has not been promoted.
 
 ## Current coordinated candidate
+
+The unaccepted x86 candidate now includes the projection timeout fix at Kore
+`c6dd5fe714183c71475e5fa4372dfde9a7747c1d` (both source and artifact base).
+SDK `688d5bfb40db47a63d5e0f45593898b42d6f9d61` and host native owner
+`60e659644acf6e5e730b6b566a68765f8016563c` are unchanged. ISO SHA-256:
+`fef674e7906dfb84d36d16ba8a0c3d0f62e1ac37c3605d93c15b910b6237b367`;
+BLAKE3: `afb93f8a0dfe4c4035a163e4ebd59f910f60bba657caa0fe6db3f8130bfac38e`.
+The generated payload diff from the clean tracked baseline has SHA-256
+`aeae492476f717afa805b0d49d07da6f2808b9c8bf68af0a1ee03848508eeda2`.
+
+The enabled build passes. `make artifacts` from the clean committed baseline
+reproduces the ISO byte-for-byte, and launcher `make dev-check` passes with the
+candidate lock and dedicated real-model state. The first working-tree diff also
+contained older ARM diagnostic artifacts; the clean rebuild removed those
+dependencies from the candidate record without changing any x86 image bytes.
+Both original and clean payload records are preserved under Kore's
+`target/agent-supervisor-evidence/projection-enabled-c6dd/`.
+
+`projection-enabled-files-01` passes in 608.43 s (607.90 s native test) against
+this exact image using the real model and guest. Boot reports 35/35 apps,
+3/3 libraries, 2/2 data, package present and library failure 0. All four prompts
+run in the same VM: create and write succeed, the independent host file is
+exactly five bytes `hello`, guest read returns `hello\n`, missing-file handling
+accurately reports absence, and arithmetic returns exactly `42`. The model
+still wraps readback in prose; the valid missing-file refusal still receives
+Failed status. Neither behavior is relabeled fixed by this patch.
+
+This does not assert that the timeout continuation fired
+during boot. Earlier recovery/authority/desktop results below belong to their
+recorded images; they are not reruns on this candidate. Native Mac computer-use
+checks now pass the four core prompts, Retry, layout and project draft isolation,
+and initially exposed cancellation-confirmation and blocking folder-picker failures.
+The fixes now pass native cancellation followed by exact `42` in the same
+VM, and picker selection/cancellation with responsive HTTP during inference.
+See [the original native UI report](native-ui-acceptance-20260924.md) and
+[the fixes and final regression evidence](native-ui-fixes-20260924.md).
+Hardware CI remains unresolved. These checks
+do not rerun the full fault matrix or close the separate filesystem-inventory
+UI limitation. No default-lock promotion.
+
+## Prior coordinated candidate (before the projection fix)
 
 Native owner `60e659644acf6e5e730b6b566a68765f8016563c` is mechanically exported by SDK
 `688d5bfb40db47a63d5e0f45593898b42d6f9d61`. All required local SDK checks, actual-Kore composition and

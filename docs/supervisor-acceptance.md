@@ -3,29 +3,23 @@
 Candidate identities and observed checks are recorded in
 [the candidate evidence](supervisor-candidate-validation.md).
 
-Status: real fresh-worker arithmetic and receipt retirement pass. Recovery
-passes three idle restarts, idle disconnect, disconnect during inference and
-termination after response publication before receipt in one live VM.
-Disabled production/kernel boot, real file prompts, two-terminal isolation,
-absent-project refusal and committed-write recovery also pass on their recorded
-images. Live file revocation and existing-name collision also pass. The recycled
-ordinary desktop passes with the repaired pointer driver. A diagnostic full desktop/fault sequence now passes; an earlier final-recovery
-timeout remains unexplained. Fresh capacity snapshots subsequently exposed pinned
-filesystem views accumulating across restarts. The kernel-validated canary fix
-passes the coordinated full native fault sequence through generations 1–7 with
-unchanged FS occupancy at all thirteen desktop probes. Candidate artifacts
-reproduce exactly and preflight passes at their pinned artifact base. The
-corrected kernel boot, returning-main and two-terminal gates pass. Extended
-desktop repeat passes all cycles, editor persistence and five windows. Its
-earlier intermittent Files-activation failure remains unexplained. Hardware CI has seven failing scenarios; computer-use acceptance remains
-blocked by the locked Mac. The first refreshed file-revocation attempt was
-refused because the broker proposed creating a new agent. The corrected planning
-instruction and single-grant request pass native revocation, five denied reads
-and a same-VM follow-up prompt. The resealed interrupted-write repetition also
-passes both faults and a fresh post-recovery tool operation without replay. The candidate lock now selects the latest driver-only Kore commit; its refreshed
-image contains exactly the same payload files. Clean reproduction and preflight
-pass at the refreshed revision. Host unit tests do not
-certify these gates.
+Status: the current unaccepted candidate includes Kore's projection timeout
+fix at `c6dd5fe714183c71475e5fa4372dfde9a7747c1d`. The enabled x86 image
+reproduces byte-for-byte from the committed baseline, launcher preflight passes,
+and `projection-enabled-files-01` passes the real-model create/read/missing-file/
+arithmetic sequence with independent host-byte verification. Its boot installs
+all 35 applications, 3 libraries and 2 data packages. SDK and host native pins
+are unchanged. The exact source, image, clean payload diff and gate evidence are
+in the candidate ledger linked above.
+
+Previous containment, recovery, authority and desktop results remain tied to
+their recorded images. They have not all been rerun on this image. Native Mac
+computer-use checks now pass core prompts, Retry, resizing and project draft
+isolation, but expose cancellation-confirmation and blocking folder-picker
+failures; see [the UI report](native-ui-acceptance-20260924.md). UI acceptance
+and hardware CI acceptance remain open. The default
+artifact lock is not promoted. Readback still adds prose, and a correct missing-
+file refusal still receives Failed status; neither is a projection regression.
 Use the coordinated plan in Kore
 [`res/agent-supervisor/implementation-plan.md`](https://github.com/MicroPerceptron/kore/issues/1053).
 
@@ -239,4 +233,7 @@ screenshots, host-byte proofs and failures. Fixture renders do not establish
 live Mac focus, input delivery, project selection or real guest UI behavior.
 See the locked-Mac checkpoint in [the evidence ledger](supervisor-candidate-validation.md)
 for passing headless UI/render checks, init/focus validation, and the locally
-reproduced provisioning timeout. Final live UI acceptance remains open.
+reproduced provisioning timeout. After unlock, the four core prompts and the
+cancellation/folder-picker regressions were exercised in the native Mac UI;
+see [the local fixes report](native-ui-fixes-20260924.md). The locked checkpoint
+remains historical evidence, not the latest UI result.

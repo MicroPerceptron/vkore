@@ -2832,6 +2832,19 @@ impl<B: InferenceBackend, S: BenchmarkSink> LinkCore<B, S> {
         }
     }
     pub fn disconnect(&mut self) {
+        // The bounded transcript can wrap during a long inference turn. Keep
+        // the immediate failure boundary visible even if a consumer's cursor
+        // has reached the buffer's capacity.
+        if std::env::var_os("VKORE_HOSTLINK_TRACE").is_some() {
+            eprintln!("hostlink: disconnect metrics={:?}", self.metrics);
+            for entry in self
+                .transcript
+                .iter()
+                .skip(self.transcript.len().saturating_sub(12))
+            {
+                eprintln!("hostlink: disconnect context: {entry}");
+            }
+        }
         self.metrics.disconnects += 1;
         self.sink
             .observe(BenchmarkEvent::Disconnected { tick: self.tick });

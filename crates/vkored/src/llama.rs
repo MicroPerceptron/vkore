@@ -543,7 +543,12 @@ impl LlamaServerBackend {
 
     fn fail_all(&mut self, failure: BackendFailure) {
         for entry in &mut self.registry.entries {
-            entry.state.poisoned = true;
+            // Preopened agents that have never accepted work have no server
+            // context to lose. Keep them usable after a shared server restart;
+            // used sequences must still fail closed rather than replay work.
+            entry.state.poisoned |= !entry.state.seen.is_empty()
+                || entry.state.accepted_turn != 0
+                || entry.state.pending() != 0;
             while let Some(queued) = entry.state.queue.pop_front() {
                 if self.terminal.len() < TERMINAL_EVENTS_MAX {
                     self.terminal.push_back(BackendEvent::Failed {
@@ -1876,7 +1881,9 @@ fn slots_ready(port: u16, expected: usize, timeout: Duration) -> bool {
         return false;
     }
     let cancelled = AtomicBool::new(false);
-    let Ok((200, mut body)) = HttpBody::read_headers(stream, &cancelled, timeout) else {
+    let Ok((200, mut body)) =
+        HttpBody::read_headers_until(stream, &cancelled, timeout, Some(Instant::now() + timeout))
+    else {
         return false;
     };
     let mut bytes = Vec::with_capacity(4096);
@@ -1910,7 +1917,9 @@ fn erase_slot(port: u16, slot: u16, timeout: Duration) -> bool {
         return false;
     }
     let cancelled = AtomicBool::new(false);
-    let Ok((200, mut body)) = HttpBody::read_headers(stream, &cancelled, timeout) else {
+    let Ok((200, mut body)) =
+        HttpBody::read_headers_until(stream, &cancelled, timeout, Some(Instant::now() + timeout))
+    else {
         return false;
     };
     let mut bytes = Vec::with_capacity(128);
@@ -3391,13 +3400,23 @@ struct HttpBody {
     buffered: Vec<u8>,
     at: usize,
     mode: BodyMode,
+    deadline: Option<Instant>,
 }
 
 impl HttpBody {
     fn read_headers(
+        stream: TcpStream,
+        cancel: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<(u16, Self), WorkerFailure> {
+        Self::read_headers_until(stream, cancel, timeout, None)
+    }
+
+    fn read_headers_until(
         mut stream: TcpStream,
         cancel: &AtomicBool,
         timeout: Duration,
+        deadline: Option<Instant>,
     ) -> Result<(u16, Self), WorkerFailure> {
         let mut bytes = Vec::with_capacity(4096);
         let header_end = loop {
@@ -3408,7 +3427,7 @@ impl HttpBody {
                 return Err(WorkerFailure::Backend(BackendFailure::MalformedResponse));
             }
             let mut input = [0; 4096];
-            match read_cancel(&mut stream, &mut input, cancel, timeout)? {
+            match read_cancel(&mut stream, &mut input, cancel, timeout, deadline)? {
                 0 => return Err(WorkerFailure::Backend(BackendFailure::HostDisconnected)),
                 n => bytes.extend_from_slice(&input[..n]),
             }
@@ -3457,6 +3476,7 @@ impl HttpBody {
                 buffered: bytes[header_end..].to_vec(),
                 at: 0,
                 mode,
+                deadline,
             },
         ))
     }
@@ -3482,7 +3502,8 @@ impl HttpBody {
                     return Ok(Some(bytes));
                 }
                 let mut bytes = vec![0; 8192];
-                let read = read_cancel(&mut self.stream, &mut bytes, cancel, timeout)?;
+                let read =
+                    read_cancel(&mut self.stream, &mut bytes, cancel, timeout, self.deadline)?;
                 if read == 0 {
                     return Ok(None);
                 }
@@ -3569,7 +3590,7 @@ impl HttpBody {
             return Err(WorkerFailure::Backend(BackendFailure::MalformedResponse));
         }
         let mut bytes = [0; 8192];
-        let read = read_cancel(&mut self.stream, &mut bytes, cancel, timeout)?;
+        let read = read_cancel(&mut self.stream, &mut bytes, cancel, timeout, self.deadline)?;
         if read == 0 {
             return Err(WorkerFailure::Backend(BackendFailure::HostDisconnected));
         }
@@ -3583,22 +3604,33 @@ fn read_cancel(
     bytes: &mut [u8],
     cancel: &AtomicBool,
     timeout: Duration,
+    deadline: Option<Instant>,
 ) -> Result<usize, WorkerFailure> {
     loop {
         if cancel.load(Ordering::Acquire) {
             let _ = stream.shutdown(std::net::Shutdown::Both);
             return Err(WorkerFailure::Cancelled);
         }
+        // Streaming inference polls cancellation across idle reads. Management
+        // requests instead carry one absolute deadline through headers and body;
+        // a socket timeout or a partial response must never renew that budget.
+        let wait = if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(WorkerFailure::Backend(BackendFailure::TimedOut));
+            }
+            timeout.min(remaining)
+        } else {
+            timeout
+        };
+        let _ = stream.set_read_timeout(Some(wait));
         match stream.read(bytes) {
             Ok(read) => return Ok(read),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                let _ = stream.set_read_timeout(Some(timeout));
-            }
+                ) => {}
             Err(_) => return Err(WorkerFailure::Backend(BackendFailure::HostDisconnected)),
         }
     }
@@ -3654,6 +3686,147 @@ mod tests {
             },
             offers,
             offer_count: 4,
+        }
+    }
+
+    #[test]
+    fn restart_preserves_unused_agents_but_fails_used_sequences_closed() {
+        use super::*;
+        use kore_hostlink::{RouteId, TaskGeneration};
+
+        let limits = BackendLimits::default();
+        let mut backend = LlamaServerBackend {
+            config: LlamaServerConfig {
+                executable: "unused-test-server".into(),
+                executable_args: Vec::new(),
+                model: "unused-test-model".into(),
+                port: 0,
+                total_context_tokens: 4096,
+                threads: 1,
+                startup_timeout: Duration::from_secs(1),
+                io_timeout: Duration::from_millis(10),
+                limits,
+                trace: false,
+            },
+            registry: SequenceRegistry::new(limits).unwrap(),
+            child: None,
+            restart_not_before: None,
+            slot_cache: tempfile::tempdir().unwrap(),
+            metrics: BackendMetrics::default(),
+            incarnation: 1,
+            next_stamp: 1,
+            poll_cursor: 0,
+            dispatch_cursor: 0,
+            terminal: VecDeque::new(),
+            observations: VecDeque::new(),
+            conversation_context: Vec::new(),
+        };
+        let identities = [1, 2, 3, 4].map(|id| SequenceIdentity {
+            route: RouteId([id; 16]),
+            generation: TaskGeneration::new(1).unwrap(),
+            role: BackendRole::Agent,
+        });
+        for identity in identities {
+            backend
+                .registry
+                .open(identity, |_| LlamaSequence::new(limits))
+                .unwrap();
+        }
+        // One pristine agent, one completed agent, one already invalidated
+        // agent, and one queued request share the same model process.
+        let completed = &mut backend.registry.get_mut(identities[1]).unwrap().state;
+        completed.seen.push(RequestId([7; 16]));
+        completed.accepted_turn = 1;
+        backend
+            .registry
+            .get_mut(identities[2])
+            .unwrap()
+            .state
+            .poisoned = true;
+        let queued = &mut backend.registry.get_mut(identities[3]).unwrap().state;
+        queued.seen.push(RequestId([8; 16]));
+        queued.queue.push_back(QueuedRequest {
+            request: RequestId([8; 16]),
+            input: "hello".into(),
+            submitted: 1,
+            deadline: 100,
+            stamp: 1,
+            reserved_bytes: 5,
+            reserved_tokens: 2,
+            turn: 1,
+            max_output_tokens: 16,
+            agent_protocol: None,
+            broker_protocol: None,
+        });
+        queued.reserved_bytes = 5;
+        queued.reserved_tokens = 2;
+
+        backend.fail_all(BackendFailure::BackendRestarted);
+
+        assert!(!backend.registry.get(identities[0]).unwrap().state.poisoned);
+        for identity in &identities[1..] {
+            assert!(backend.registry.get(*identity).unwrap().state.poisoned);
+        }
+        let queued = &backend.registry.get(identities[3]).unwrap().state;
+        assert_eq!(queued.pending(), 0);
+        assert_eq!((queued.reserved_bytes, queued.reserved_tokens), (0, 0));
+        assert_eq!(backend.terminal.len(), 1);
+        assert!(
+            matches!(backend.terminal.front(), Some(BackendEvent::Failed {
+            sequence, request, failure: BackendFailure::BackendRestarted, ..
+        }) if *sequence == identities[3] && *request == RequestId([8; 16]))
+        );
+        backend.fail_all(BackendFailure::BackendRestarted);
+        assert!(!backend.registry.get(identities[0]).unwrap().state.poisoned);
+        assert_eq!(
+            backend.terminal.len(),
+            1,
+            "never duplicate a terminal result"
+        );
+    }
+
+    #[test]
+    fn management_http_deadline_covers_idle_headers_and_partial_body() {
+        use std::{
+            io::Write,
+            net::{TcpListener, TcpStream},
+            sync::{atomic::AtomicBool, mpsc},
+            time::{Duration, Instant},
+        };
+        for partial in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            if partial {
+                peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{")
+                    .unwrap();
+            }
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let cancelled = AtomicBool::new(false);
+                let deadline = Instant::now() + Duration::from_millis(80);
+                let result = super::HttpBody::read_headers_until(
+                    stream,
+                    &cancelled,
+                    Duration::from_millis(10),
+                    Some(deadline),
+                )
+                .and_then(|(_, mut body)| {
+                    while body.next(&cancelled, Duration::from_millis(10))?.is_some() {}
+                    Ok(())
+                });
+                tx.send(matches!(
+                    result,
+                    Err(super::WorkerFailure::Backend(
+                        crate::BackendFailure::TimedOut
+                    ))
+                ))
+                .unwrap();
+            });
+            let result = rx.recv_timeout(Duration::from_secs(1));
+            drop(peer); // also releases a broken implementation's reader
+            worker.join().unwrap();
+            assert_eq!(result.unwrap(), true, "partial body: {partial}");
         }
     }
 

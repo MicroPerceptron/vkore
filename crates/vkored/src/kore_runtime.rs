@@ -898,8 +898,10 @@ impl KoreVmRuntime {
                 "guest": "kore",
             }),
         );
-        let mut deadline = Instant::now()
-            + Duration::from_secs(u64::from(runtime.config.resources.prompt_seconds.max(1)));
+        let mut deadline = PromptDeadline::new(
+            Instant::now(),
+            Duration::from_secs(u64::from(runtime.config.resources.prompt_seconds.max(1))),
+        );
         let started = Instant::now();
         let mut next_progress = started;
         let tick_interval = hostlink_tick_interval();
@@ -931,7 +933,7 @@ impl KoreVmRuntime {
                     }
                     crate::daemon::FrontendCancelOutcome::Requested => {
                         cancellation_pending = true;
-                        deadline = Instant::now() + Duration::from_secs(10);
+                        deadline.cancelling(Instant::now());
                         // A paused guest cannot poll its control decision or
                         // cancel its own exact inference request. Keep it awake
                         // through publication and native retirement.
@@ -958,11 +960,11 @@ impl KoreVmRuntime {
                     }
                 }
             }
-            if Instant::now() >= deadline {
+            if deadline.expired(Instant::now()) {
                 emit(
                     EventKind::Error,
                     true,
-                    json!({"message": if cancellation_pending { "Kore cancellation was not confirmed" } else { "Kore prompt timed out" }, "stage": "agent_failure"}),
+                    json!({"message": if pending_terminal.is_some() { "Kore cleanup was not confirmed" } else if cancellation_pending { "Kore cancellation was not confirmed" } else { "Kore prompt timed out" }, "stage": "agent_failure"}),
                 );
                 runtime.daemon.cancel_frontend_intent(intent_id);
                 runtime.recover_supervisor(emit);
@@ -972,12 +974,34 @@ impl KoreVmRuntime {
                 authority_updates.submit(runtime.daemon.core_mut(), updates, emit);
             }
             let tick_started = Instant::now();
+            let restarts_before = runtime.daemon.core().backend_metrics().restarts;
             let tick_result = if runtime.vm_suspended {
                 runtime.daemon.tick_frozen()
             } else {
                 runtime.daemon.tick()
             };
-            loop_timing.record_tick(tick_started.elapsed());
+            let tick_elapsed = tick_started.elapsed();
+            loop_timing.record_tick(tick_elapsed);
+            // Restarting the local model server is synchronous and has its own
+            // startup bound. During that wait the host cannot service guest
+            // receipts, so it must not count as a guest cancellation/reap timeout.
+            // Credit at most one observed restart; repeated failures stay bounded.
+            if (cancellation_pending || pending_terminal.is_some())
+                && runtime.daemon.core().backend_metrics().restarts > restarts_before
+                && deadline.backend_restart(tick_elapsed)
+            {
+                if let Some(published_at) = response_at.as_mut() {
+                    *published_at += tick_elapsed;
+                }
+                emit(
+                    EventKind::Validation,
+                    false,
+                    json!({
+                        "stage": "cancellation_backend_restart_wait",
+                        "elapsed_ms": tick_elapsed.as_millis(),
+                    }),
+                );
+            }
             if let Err(error) = tick_result {
                 emit(
                     EventKind::Error,
@@ -1085,6 +1109,10 @@ impl KoreVmRuntime {
                         PromptStatus::Failed
                     }
                 };
+                // A backend tick can block while stopping/restarting inference.
+                // Once the guest result arrives, allow its receipt and retirement
+                // to settle under their own bounded deadline.
+                deadline.settling(Instant::now());
                 pending_terminal = Some(status);
             }
             if pending_terminal.is_some() && response_published() {
@@ -1637,6 +1665,39 @@ fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
     format!("{}…", &value[..boundary])
 }
 
+/// Response and guest retirement are distinct protocol phases. A response
+/// accepted during a slow backend tick must not inherit an expired request timer.
+struct PromptDeadline {
+    expires: Instant,
+    restart_credited: bool,
+}
+
+impl PromptDeadline {
+    fn new(now: Instant, budget: Duration) -> Self {
+        Self {
+            expires: now + budget,
+            restart_credited: false,
+        }
+    }
+    fn cancelling(&mut self, now: Instant) {
+        self.expires = now + Duration::from_secs(10);
+    }
+    fn settling(&mut self, now: Instant) {
+        self.expires = now + Duration::from_secs(5);
+    }
+    fn backend_restart(&mut self, elapsed: Duration) -> bool {
+        if self.restart_credited {
+            return false;
+        }
+        self.restart_credited = true;
+        self.expires += elapsed;
+        true
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.expires
+    }
+}
+
 fn unconfirmed_cleanup_timed_out(
     pending: Option<PromptStatus>,
     published: bool,
@@ -1991,6 +2052,31 @@ mod tests {
     use super::{qemu_serial_log, read_tail, without_qemu_resource_arguments};
     use crate::PromptStatus;
     use std::ffi::OsString;
+
+    #[test]
+    fn cancelled_result_after_slow_tick_has_bounded_retirement_time() {
+        let start = std::time::Instant::now();
+        let mut deadline = super::PromptDeadline::new(start, std::time::Duration::from_secs(600));
+        deadline.cancelling(start);
+        let result_at = start + std::time::Duration::from_secs(17);
+        assert!(deadline.expired(result_at));
+        deadline.settling(result_at);
+        assert!(!deadline.expired(result_at + std::time::Duration::from_secs(4)));
+        assert!(deadline.expired(result_at + std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn backend_restart_does_not_consume_guest_retirement_budget_or_extend_it_twice() {
+        let start = std::time::Instant::now();
+        let mut deadline = super::PromptDeadline::new(start, std::time::Duration::from_secs(600));
+        deadline.cancelling(start);
+        deadline.settling(start + std::time::Duration::from_millis(250));
+        assert!(deadline.backend_restart(std::time::Duration::from_secs(32)));
+        assert!(!deadline.expired(start + std::time::Duration::from_secs(36)));
+        assert!(deadline.expired(start + std::time::Duration::from_secs(38)));
+        assert!(!deadline.backend_restart(std::time::Duration::from_secs(32)));
+        assert!(deadline.expired(start + std::time::Duration::from_secs(38)));
+    }
 
     #[test]
     fn cleanup_timeout_never_precedes_response_publication() {

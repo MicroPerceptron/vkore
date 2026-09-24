@@ -502,6 +502,35 @@ fn ui_api_discovers_native_shell_persists_project_and_blocks_cross_origin_mutati
     assert!(payload["grants"].as_array().unwrap().is_empty());
 }
 
+#[test]
+fn headless_http_picker_is_rejected_without_blocking_followup_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = HarnessService::start(
+        BackendHarness::new(DeterministicBackend::new(1), DeterministicGuest::new()),
+        temp.path().join("transcripts"),
+    );
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        service.handle(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
+    let address = server.local_addr();
+    let response = transact(
+        &server,
+        address,
+        "POST",
+        "/api/v1/picker",
+        r#"{"kind":"directory"}"#,
+        &[("X-vKore-Client", "harness-ui-v1")],
+    );
+    assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(response.contains("local folder picker"));
+    let health = transact(&server, address, "GET", "/api/v1/health", "", &[]);
+    assert!(health.starts_with("HTTP/1.1 200"));
+    assert!(health.contains(r#""ok":true"#));
+}
+
 fn transact(
     server: &HarnessHttpServer,
     address: SocketAddr,

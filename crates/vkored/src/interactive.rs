@@ -2232,10 +2232,10 @@ fn route_http(
             .unwrap()
         }
         ("POST", ["api", "v1", "picker"]) => {
-            let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-            let kind = value["kind"].as_str().unwrap_or("directory");
-            let path = native_picker(kind == "directory")?;
-            json!({"path":path})
+            // A headless service must never own a desktop modal dialog.
+            return Err(HarnessError::Http(
+                "Use the desktop application's local folder picker".into(),
+            ));
         }
         ("POST", ["api", "v1", "artifacts", "inspect"]) => {
             let value: Value = serde_json::from_slice(body).map_err(http_json)?;
@@ -2446,61 +2446,6 @@ fn inspect_artifact(path: &Path) -> Result<Value, HarnessError> {
         "license": "read from verified package manifest when installed",
         "context_tokens": "configured by project; verify against GGUF metadata"
     }))
-}
-
-#[cfg(target_os = "windows")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.SelectedPath)}"
-    } else {
-        "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}"
-    };
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Err(HarnessError::Io(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "linux")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let mut command = std::process::Command::new("zenity");
-    command.arg("--file-selection");
-    if directory {
-        command.arg("--directory");
-    }
-    let output = command
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
-}
-
-#[cfg(target_os = "macos")]
-fn native_picker(directory: bool) -> Result<Option<PathBuf>, HarnessError> {
-    let script = if directory {
-        "POSIX path of (choose folder)"
-    } else {
-        "POSIX path of (choose file)"
-    };
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!value.is_empty()).then(|| PathBuf::from(value)))
 }
 
 fn encode_sse(events: &[HarnessEvent]) -> Vec<u8> {

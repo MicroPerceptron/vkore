@@ -9,7 +9,7 @@ configuration and transcripts are stored below the directory given to
 
 The normal developer entry point is `make dev-real` from WSL or `.\dev.cmd`
 from PowerShell. It builds release vKore binaries and fails closed unless the
-selected project uses llama.cpp with existing runtime/model files and the exact
+application uses llama.cpp with existing runtime/model files and the exact
 reviewed Kore image. `make dev-check` performs the same preflight without
 starting anything; `make dev-fast` reuses already-built release vKore binaries;
 and `make dev-debug PROMPT="hello"` runs a terminal prompt with retained logs.
@@ -27,8 +27,8 @@ session API to own and clean up the real harness, QEMU, and llama.cpp process
 group; a separate `setsid` utility is not required. `VKORE_MAKE` selects GNU
 Make for the Kore recipes (`gmake` is preferred when installed).
 
-The selected project must be active and explicitly name an executable
-llama-server, a GGUF model, and the pinned Kore ISO. vKore starts llama-server
+Application settings must name an executable llama-server, a GGUF model, and
+the pinned headless Kore ISO. A selected project is optional for native launch. vKore starts llama-server
 itself. `--require-real` is also passed to the daemon, which refuses simulated
 guests and deterministic project inference. On Apple Silicon, the x86 Kore
 guest executes through QEMU TCG; model inference can use llama.cpp's Metal
@@ -94,11 +94,11 @@ make dev-real
 ```
 
 The launcher starts the native UI together with the real harness.
-The named persisted project opens directly and its sandbox starts without the
-project modal. If the daemon has exactly one active project, `--project` may be
+The application runtime starts preparing before any project is selected.
+A named persisted project opens directly without the project modal. If the daemon has exactly one active project, `--project` may be
 omitted and that project opens automatically. There is no login, token, or
-browser-session step. Choose **New project**, then click **Select or drop a
-folder here** to open the operating system's folder picker. A folder can also
+browser-session step. Choose **New project**, then **Create without a folder**
+for a virtual task project, or click **Select or drop a folder here** to open the operating system's folder picker. A folder can also
 be dropped directly on that target when the windowing system provides a
 directory path. There is no in-app filesystem explorer or configuration wizard:
 vKore derives the display name
@@ -126,14 +126,14 @@ defaults migrate to an unconfigured live model; users must configure real
 artifacts before starting. Existing live model settings are preserved.
 Deterministic protocol fixtures remain available to automated tests only.
 
-Backend-specific llama.cpp arguments belong in the project's inference
+Backend-specific llama.cpp arguments belong in the application's active inference
 configuration (`extra_args`), not in a separate simulated-guest launcher mode.
 
 The UI records the Kore image, llama.cpp runtime, and model paths, and refuses
 missing files during preflight. It never downloads a selected model implicitly.
 Verified import, signature/hash checks, compatibility selection, activation,
-and rollback are provided by `vkore-packages`; the current harness process must
-still be restarted to change its active backend.
+and rollback are provided by `vkore-packages`. Selecting a different active
+model explicitly restarts the shared runtime with visible preparation status.
 
 ## Native rendering lifecycle
 
@@ -159,38 +159,65 @@ provider is connected.
 
 Set `VKORE_UI_PROFILE=1` to print per-frame display-list, glyph-atlas, structure,
 scratch, and presentation-byte counters. The reproducible before/after capture
-and release-mode timing method is recorded in
-`artifacts/ui-upgrade/README.md`.
+and release-mode timing method is recorded in the
+[historical capture notes](https://github.com/MicroPerceptron/vkore/blob/68155f07dd5d80c5c751f9b6b2adb263b53f7042/artifacts/ui-upgrade/README.md).
 
 ## Real Kore VM
 
-The configured project directory is the host filesystem boundary. New projects
-default to automatic writeback. Settings → Workspace → Apply file changes
-automatically changes this per project, effective after closing and reopening
-the project. Turning it off currently blocks host writes; a complete interactive
-review/apply workflow is not implemented. Existing saved project preferences
-are preserved.
+One application-owned runtime serves every project and chat. Preparation starts
+when the harness opens, using application settings and an empty read-only
+bootstrap root. Readiness requires an authenticated parked broker call after
+service initialization. With the current pinned guest, the first workspace
+attachment and subsequent attachment changes retire the exact guest before
+replacing its root and booting a replacement. Unchanged workspace prompts and
+new chats reuse their processes. The selected model remains application-wide;
+its server may restart during HostLink retirement. See
+[stacked native validation](stacked-ui-validation.md) for the compatibility limit.
 
-In the local Kore project-authority implementation, the live broker selects
-executables, not a separate filesystem object/view offer. Kore bundles the
-selected commands' minimum filesystem rights into a revocable grant of the
-imported project root: read for `cat`/`ls`, read + namespace mutation for `touch`,
-and read + write for `write`. This does not grant access to other host paths or
-administrative sharing rights. Task-private Kore homes remain outside the
-imported project. The explicit object/view offers used by boot witnesses are
-test-only and are not enabled for frontend prompts.
+The sidebar switches between project chats while preserving drafts and
+chat identity. **New chat** starts a fresh conversation for the selected
+project; **Close chat** retires it without stopping the assistant. Active work
+continues when changing projects; returning replays the result in its original chat.
 
-Start `vkore-harnessd` with `--qemu PATH` and the repeated base QEMU arguments
-needed by the selected Kore image. In this mode the project supplies the Kore
-image, workspace, backend, llama.cpp runtime, model, and resource limits. vKore
-adds loopback HostLink devices and starts one supervised VM for the open
-project. The trusted broker, its revocation face, HostLink epoch, and inference
-backend remain resident between prompts when the guest supports the resident
-frontend idle protocol. Every prompt gets a fresh agent task,
-route generation, model context, budget, mappings, and capability grants. Kore
-revokes and reclaims that prompt authority before admitting the next intent, so
-conversation continuity does not silently preserve an earlier prompt's file or
-tool access.
+Projects are optional organizational contexts. A focus folder offers task
+resources; Settings → Document access authorizes independent read-only host
+discovery. Selecting a tool no longer implicitly grants the project root. The
+broker chooses explicit file/directory offers, and Kore validates identities
+and rights before deriving revocable grants. The filesystem tab shows only
+effective task grants, with the broker omitted. Office documents use a read-only
+text projection linked to their original backing file.
+
+Focus projects default to automatic writeback. Settings → Workspace → Apply
+file changes automatically changes this per project after reopening. Turning it
+off blocks host writes; an interactive review/apply workflow is not implemented.
+Virtual projects and personal discovery files are read-only. Existing settings
+migrate explicitly; opening a focus folder does not authorize global search.
+
+Every prompt gets a fresh worker, route generation, private filesystem view and
+capability transaction. At most 32 isolated chat contexts retain 16 exchanges
+and 16 KiB each, with a 30-minute idle expiry. The application schedules at most
+32 pending prompts fairly across projects. Closing, cleaning, cancelling or
+archiving scoped work leaves the shared processes alive. Shared failure retires
+all affected generations and requires explicit Retry. See
+[ADR 24](adr/0024-shared-assistant.md) and [validation](issue24-validation.md).
+
+Structured generation uses llama.cpp's `/apply-template` endpoint with the
+configured model's template, then `/completion` with both a visible JSON schema
+and constrained decoding. All results still pass the strict wire decoder.
+After tools, the model must author a response rather than emit a bare completion.
+One bounded live correction may follow a rejected candidate; there is no canned
+answer or deterministic inference fallback.
+The worker is instructed to follow requested step order and ground external
+claims in observed tool results; validation does not prove semantic task
+completion. A live test must inspect the actual calls and effects as well as
+the final answer. VM pause/resume follows pending backend requests, not the
+number of diagnostic prompt events (a correction emits another prompt for the
+same request).
+
+The current Kore task-intent wire format limits each prompt to 128 UTF-8 bytes.
+Oversized prompts are rejected explicitly, never shortened silently. The
+terminal client keeps the session open after a rejection or a failed turn so
+the user can continue; batch runs still exit nonzero if any turn failed.
 
 For single-prompt guests such as the locally built PR909 image, vKore retires
 the real VM after confirmed reclamation and boots another real VM for the next
@@ -336,3 +363,17 @@ Run `scripts/kore-interactive-gate.sh` from Linux or WSL with `KORE_ROOT` set to
 the matching Kore checkout. It creates a project and prompt through the same API
 used by the UI, then requires a real capability-scoped guest tool result to
 return before it passes.
+
+### Model speed
+
+Expand a chat turn's **Worked for…** / **Working…** disclosure to see **Model speed**.
+Each completed broker or worker call reports input processing (prefill) and output
+generation separately: tokens/second, token count, measured seconds, and reused
+input tokens. These are llama.cpp server measurements, not whole-chat throughput;
+queueing, VM startup, authority and delivery remain part of the overall elapsed
+chat time. Measurements appear when a model call completes. Missing measurements
+show as unavailable; partial streaming rates are not presented as final rates.
+Older transcripts are supported when their retained SSE record contains final
+server timings. New compact `ModelTiming` observations preserve those metrics
+independently of the bounded verbose capture. Duplicate records for one call do
+not duplicate its displayed measurements.

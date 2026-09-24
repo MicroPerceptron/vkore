@@ -22,6 +22,26 @@ def model_timings(payload):
     return latest
 
 
+def tool_identity(payload):
+    """Tool results arrive on a later inference request; match the call's route."""
+    try:
+        body = json.loads(payload.get('payload', ''))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    call_id = body.get('call_id')
+    route = payload.get('route')
+    generation = payload.get('generation')
+    role = payload.get('role')
+    if (type(call_id) is not int or call_id <= 0
+            or not isinstance(route, str) or not route
+            or not isinstance(role, str) or not role
+            or type(generation) is not int or generation <= 0):
+        return None
+    return role, route, generation, call_id
+
+
 def analyze(events):
     events = sorted(events, key=lambda e: e['sequence'])
     timed = [e for e in events if 'runtime_elapsed_ms' in e['payload']]
@@ -62,15 +82,15 @@ def analyze(events):
     add('Worker final answer validated', obs('Agent', 'AssistantMessage'))
     add('Public response emitted', first(lambda e: e['kind'] == 'assistant' and e['public']))
     add('Failure reported', first(lambda e: e['kind'] == 'error' and e['public']))
-    add('Worker teardown observed', first(lambda e: e['kind'] == 'capability' and e['payload'].get('state') == 'Teardown' and e['payload'].get('label') == 'agent/frontend'))
-    add('Guest retirement begins', stage('guest_retired_after_reclaim'))
+    add('Response publication confirmed', stage('kore_response_published'))
+    add('Native retirement and broker readiness confirmed', stage('kore_frontend_ready'))
     add('Failed guest shutdown begins', stage('failed_guest_shutdown'))
     add('Runtime finished', stage('runtime_prompt_finished'))
     add('Timing summary recorded', stage('runtime_timing_summary'))
     milestones.sort()
     phases = [{'from': a[2], 'to': b[2], 'start_ms': a[0], 'end_ms': b[0], 'duration_ms': b[0]-a[0]}
               for a, b in zip(milestones, milestones[1:])]
-    attempts, pending, tools, pending_tools = [], {}, [], []
+    attempts, pending, tools, pending_tools = [], {}, [], {}
     for e in timed:
         p = e['payload']
         key = (p.get('role'), p.get('route'), p.get('generation'), p.get('request'), p.get('turn'))
@@ -93,11 +113,18 @@ def analyze(events):
             pending[key]['server_timings'] = model_timings(p.get('payload', ''))
             pending[key]['server_capture_truncated'] = 'capture truncated' in p.get('detail', '')
         if e['kind'] == 'tool_call':
-            pending_tools.append((time(e), p.get('payload', '')))
-        elif e['kind'] == 'tool_result' and pending_tools:
-            start, call = pending_tools.pop(0)
-            tools.append({'start_ms': start, 'end_ms': time(e), 'duration_ms': time(e)-start,
-                          'call': call[:200]})
+            identity = tool_identity(p)
+            if identity is not None:
+                # Duplicate calls make the duration ambiguous; do not pick one.
+                pending_tools[identity] = (time(e), p.get('payload', '')) if identity not in pending_tools else None
+        elif e['kind'] == 'tool_result':
+            identity = tool_identity(p)
+            matched = pending_tools.pop(identity, None)
+            if matched is not None:
+                start, call = matched
+                tools.append({'start_ms': start, 'end_ms': time(e), 'duration_ms': time(e)-start,
+                              'role': identity[0], 'route': identity[1], 'generation': identity[2],
+                              'call_id': identity[3], 'call': call[:200]})
     for attempt in attempts:
         if attempt['end_ms'] is not None:
             attempt['wall_ms'] = attempt['end_ms'] - attempt['start_ms']

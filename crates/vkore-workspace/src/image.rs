@@ -10,11 +10,13 @@ use std::{
     path::Path,
 };
 
-use kore_block::{
-    BlockBuffer, BlockChannel, BlockError, BlockGeometry, CompletionMode, DeviceCommand,
-    DeviceCompletion, DirectBlockDevice,
+use kore_driver::block::{
+    BlockBuffer, BlockChannel, BlockError, BlockGeometry, BlockIoHints, CompletionMode,
+    DeviceCommand, DeviceCompletion, DirectBlockDevice,
 };
-use kore_svc_fs::{BlockProvider, SessionId, WorkspaceStore, block_on, persistence::PersistentFs};
+use kore_svc_dagfs::{
+    BlockProvider, SessionId, block_on, persistence::PersistentFs, workspace::WorkspaceStore,
+};
 use kore_workspace_sync::{Policy, SnapshotId, import_from};
 
 use crate::{Artifact, Error, secure_output_options};
@@ -61,6 +63,7 @@ impl FileBlockDevice {
             flush: true,
             discard: false,
             read_only: false,
+            io_hints: BlockIoHints::NONE,
         }
         .validate()
         .map_err(|_| Error::Image("invalid block geometry"))?;
@@ -244,7 +247,7 @@ pub fn seed_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kore_svc_fs::{Name, Rights};
+    use kore_svc_dagfs::{Name, Rights};
 
     #[test]
     fn raw_image_recovers_snapshot_and_fresh_broker_authority() {

@@ -10,7 +10,10 @@ VKORE_STATE ?= $(HOME)/.local/state/vkore-issue27-test
 VKORE_PROJECT ?= qwen9b-issue27
 VKORE_LISTEN ?= 127.0.0.1:8787
 VKORE_MAKE ?= $(shell command -v gmake 2>/dev/null || command -v make)
-VKORE_XORRISO ?= xorriso
+VKORE_XORRISO ?= python3 '$(CURDIR)/scripts/reproducible-iso.py'
+VKORE_KORE_BOOT_FEATURES ?= boot
+VKORE_KORE_AGENT_SUPERVISOR ?= 1
+VKORE_EXPECTED_KORE_SOURCE_COMMIT ?= $(VKORE_EXPECTED_KORE_COMMIT)
 PROMPT ?= hello
 TIMEOUT_SECONDS ?= 900
 
@@ -22,6 +25,9 @@ export VKORE_MAKE
 export VKORE_EXPECTED_KORE_COMMIT
 export VKORE_EXPECTED_ISO_SHA256
 export VKORE_EXPECTED_KORE_DIFF_SHA256
+export VKORE_CARGO_CONFIG
+export VKORE_KORE_BOOT_FEATURES
+export VKORE_KORE_AGENT_SUPERVISOR
 
 .DEFAULT_GOAL := help
 
@@ -64,11 +70,14 @@ artifacts:
 	  echo 'Create or select a separate Kore worktree at that commit; this target will not change it.' >&2; \
 	  exit 2; \
 	}
-	$(VKORE_MAKE) -C "$(KORE_ROOT)" iso-boot-x86 \
+	$(VKORE_MAKE) -C "$(KORE_ROOT)" prepare-boot-gate-x86 \
 	  PROFILE=intel ACCEL=tcg PAGING_PROFILE=4k48 \
+	  BOOT_FEATURES="$(VKORE_KORE_BOOT_FEATURES)" \
+	  KORE_AGENT_SUPERVISOR="$(VKORE_KORE_AGENT_SUPERVISOR)" KORE_AGENT_SUPERVISOR_PROJECT=1 \
+	  KORE_GIT_HEAD="$(VKORE_EXPECTED_KORE_SOURCE_COMMIT)" KORE_BUILD_STAMP="$(VKORE_EXPECTED_KORE_SOURCE_COMMIT)" \
 	  MODE=release CARGO_FLAGS=--release OUT_DIR=release XORRISO="$(VKORE_XORRISO)"
 	@printf '%s  %s\n' "$(VKORE_EXPECTED_ISO_SHA256)" \
 	  "$(KORE_ROOT)/$(VKORE_KORE_ISO_RELATIVE)" | sha256sum -c -
 
 test:
-	cargo test --workspace
+	cargo $(if $(VKORE_CARGO_CONFIG),--config "$(VKORE_CARGO_CONFIG)") test --workspace

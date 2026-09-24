@@ -12,7 +12,7 @@ name = "kore_hostlink_ab"
 path = "src/lib.rs"
 
 [dependencies]
-blake3 = "=1.8.6"
+blake3 = "=1.8.7"
 hostlinkd = { package = "vkored", path = "../vkored" }
 kore-hostlink.workspace = true
 kore-hostlink-shmem.workspace = true

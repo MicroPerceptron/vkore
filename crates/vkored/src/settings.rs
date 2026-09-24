@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SETTINGS_SCHEMA_VERSION: u16 = 1;
+pub const SETTINGS_SCHEMA_VERSION: u16 = 2;
 const ACTIVITY_LIMIT: usize = 50;
 const ACTIVITY_FILE_LIMIT: usize = 200;
 const ACTIVITY_BYTES_PER_FILE: u64 = 1_048_576;
@@ -25,11 +25,34 @@ pub enum BodyFont {
     JetbrainsMono,
 }
 
+/// Process resources belong to the application. Project prompt budgets remain scoped.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationResources {
+    pub memory_mib: u32,
+    pub virtual_cpus: u16,
+}
+impl Default for ApplicationResources {
+    fn default() -> Self {
+        Self {
+            memory_mib: 2048,
+            virtual_cpus: 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub schema_version: u16,
     pub default_inference: InferenceConfig,
+    #[serde(default)]
+    pub runtime: ApplicationResources,
+    #[serde(default)]
+    pub legacy_runtime_migrated: bool,
+    /// Explicit read-only discovery roots. They are never rendered as a file tree.
+    #[serde(default)]
+    pub authorized_locations: Vec<PathBuf>,
     #[serde(default)]
     pub body_font: BodyFont,
     #[serde(default = "default_true")]
@@ -43,6 +66,9 @@ impl Default for AppSettings {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             default_inference: unconfigured_live_inference(),
+            runtime: ApplicationResources::default(),
+            legacy_runtime_migrated: false,
+            authorized_locations: Vec::new(),
             body_font: BodyFont::DesignDefault,
             show_working: true,
             working_expanded_default: false,
@@ -138,6 +164,46 @@ impl SettingsStore {
         Ok(store)
     }
 
+    /// Adopt an unambiguous legacy process profile once. Project folders stay
+    /// optional focus resources and do not own an inference process thereafter.
+    pub fn migrate_runtime(&self, projects: &ProjectStore) -> Result<(), SettingsError> {
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| SettingsError::Io("settings lock poisoned".into()))?;
+        if settings.legacy_runtime_migrated {
+            return Ok(());
+        }
+        let legacy: Vec<_> = projects
+            .list()
+            .into_iter()
+            .filter(|p| !p.archived)
+            .collect();
+        if let Some(first) = legacy.first() {
+            if settings.default_inference.model.is_none()
+                && first.inference.backend == RuntimeBackend::LlamaCpp
+                && legacy
+                    .iter()
+                    .all(|project| project.inference == first.inference)
+            {
+                settings.default_inference = first.inference.clone();
+            }
+            if legacy.iter().all(|project| {
+                project.resources.memory_mib == first.resources.memory_mib
+                    && project.resources.virtual_cpus == first.resources.virtual_cpus
+            }) {
+                settings.runtime = ApplicationResources {
+                    memory_mib: first.resources.memory_mib.clamp(512, 65536),
+                    virtual_cpus: first.resources.virtual_cpus.clamp(1, 64),
+                };
+            }
+        }
+        settings.legacy_runtime_migrated = true;
+        drop(settings);
+        self.persist()?;
+        Ok(())
+    }
+
     pub fn get(&self) -> Result<AppSettings, SettingsError> {
         self.settings
             .lock()
@@ -153,6 +219,10 @@ impl SettingsStore {
             "schema_version": settings.schema_version,
             "default_model_id": selected,
             "default_inference": settings.default_inference,
+            "runtime": settings.runtime,
+            "runtime_owner": "application",
+            "legacy_runtime_migrated": settings.legacy_runtime_migrated,
+            "authorized_locations": settings.authorized_locations,
             "body_font": settings.body_font,
             "show_working": settings.show_working,
             "working_expanded_default": settings.working_expanded_default,
@@ -195,6 +265,36 @@ impl SettingsStore {
             .and_then(Value::as_bool)
         {
             next.working_expanded_default = expanded;
+        }
+        if let Some(locations) = patch.get("authorized_locations") {
+            let values = locations
+                .as_array()
+                .filter(|values| values.len() <= 16)
+                .ok_or_else(|| {
+                    SettingsError::Io("Choose at most 16 authorized directories".into())
+                })?;
+            let mut roots = Vec::new();
+            for value in values {
+                let path = value
+                    .as_str()
+                    .map(Path::new)
+                    .filter(|path| path.is_absolute())
+                    .ok_or_else(|| {
+                        SettingsError::Io(
+                            "Search locations must be absolute directory paths".into(),
+                        )
+                    })?;
+                let resolved = path.canonicalize().map_err(io_error)?;
+                if !resolved.is_dir() {
+                    return Err(SettingsError::Io(
+                        "Search location is not a directory".into(),
+                    ));
+                }
+                if !roots.contains(&resolved) {
+                    roots.push(resolved);
+                }
+            }
+            next.authorized_locations = roots;
         }
         next.schema_version = SETTINGS_SCHEMA_VERSION;
         self.persist_value(&next)?;
@@ -476,7 +576,11 @@ fn unconfigured_live_inference() -> InferenceConfig {
     }
 }
 
-fn migrate(value: Value) -> (AppSettings, bool) {
+fn migrate(mut value: Value) -> (AppSettings, bool) {
+    let legacy = value["schema_version"].as_u64() == Some(1);
+    if legacy {
+        value["schema_version"] = json!(SETTINGS_SCHEMA_VERSION);
+    }
     if value["schema_version"].as_u64() == Some(u64::from(SETTINGS_SCHEMA_VERSION))
         && let Ok(mut settings) = serde_json::from_value::<AppSettings>(value.clone())
     {
@@ -484,7 +588,7 @@ fn migrate(value: Value) -> (AppSettings, bool) {
             settings.default_inference = unconfigured_live_inference();
             return (settings, true);
         }
-        return (settings, false);
+        return (settings, legacy);
     }
     let mut settings = AppSettings::default();
     if let Ok(inference) =
@@ -585,6 +689,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             workspace: crate::project::WorkspaceConfig {
+                virtual_only: false,
                 root: workspace.into(),
                 state: state.into(),
                 access: crate::project::WorkspaceAccess::ReviewChanges,
@@ -611,6 +716,40 @@ mod tests {
             },
             archived: false,
         }
+    }
+
+    #[test]
+    fn runtime_migration_is_explicit_once_and_does_not_authorize_focus_folders() {
+        let temporary = tempfile::tempdir().unwrap();
+        let projects = temporary.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        let mut inference = unconfigured_live_inference();
+        inference.model = Some(temporary.path().join("model.gguf"));
+        let mut legacy = project_config(
+            "legacy",
+            &temporary.path().join("focus"),
+            &temporary.path().join("journal"),
+            inference.clone(),
+        );
+        legacy.resources.virtual_cpus = 4;
+        legacy.resources.memory_mib = 4096;
+        fs::write(
+            projects.join("legacy.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let projects = ProjectStore::open(projects).unwrap();
+        let settings = SettingsStore::open(temporary.path().join("settings.json")).unwrap();
+        settings.migrate_runtime(&projects).unwrap();
+        let actual = settings.get().unwrap();
+        assert!(actual.legacy_runtime_migrated);
+        assert_eq!(actual.default_inference, inference);
+        assert_eq!(actual.runtime.virtual_cpus, 4);
+        assert_eq!(actual.runtime.memory_mib, 4096);
+        assert!(actual.authorized_locations.is_empty());
+        let reopened = SettingsStore::open(temporary.path().join("settings.json")).unwrap();
+        reopened.migrate_runtime(&projects).unwrap();
+        assert_eq!(actual, reopened.get().unwrap());
     }
 
     #[test]

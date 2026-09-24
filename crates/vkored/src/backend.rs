@@ -201,6 +201,7 @@ pub struct SequenceMetrics {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendMetrics {
+    pub process_id: Option<u32>,
     pub incarnation: u64,
     pub restarts: u64,
     pub stale_events: u64,
@@ -288,7 +289,14 @@ pub trait InferenceBackend {
     ) -> Result<BackendEvent, BackendError>;
     fn poll(&mut self, tick: u64) -> Option<BackendEvent>;
     fn metrics(&self) -> BackendMetrics;
+    fn healthy(&mut self) -> bool {
+        true
+    }
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics>;
+    /// Whether this exact, open broker sequence can begin a fresh prompt.
+    /// Terminal delivery alone is insufficient: cancelled model work may still
+    /// own the sequence. Unknown/non-broker sequences must return false.
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool;
     /// Pop one bounded, non-authoritative observation produced by the real
     /// backend path. Implementations that do not expose model internals keep
     /// the default empty stream.
@@ -351,6 +359,9 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
     fn metrics(&self) -> BackendMetrics {
         (**self).metrics()
     }
+    fn healthy(&mut self) -> bool {
+        (**self).healthy()
+    }
 
     fn sequence_metrics(&self, sequence: SequenceIdentity) -> Option<SequenceMetrics> {
         (**self).sequence_metrics(sequence)
@@ -358,6 +369,10 @@ impl<T: InferenceBackend + ?Sized> InferenceBackend for Box<T> {
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {
         (**self).take_observation()
+    }
+
+    fn broker_prompt_ready(&self, sequence: SequenceIdentity) -> bool {
+        (**self).broker_prompt_ready(sequence)
     }
 }
 
@@ -387,6 +402,8 @@ pub enum ObservationKind {
     ModelOutputChunk,
     RawModelCompletion,
     ReturnedModelFields,
+    /// Compact final server timings, retained independently of verbose SSE capture.
+    ModelTiming,
     Validation,
     AssistantMessage,
     ToolCall,
@@ -1504,6 +1521,14 @@ impl InferenceBackend for DeterministicBackend {
             .get(identity)
             .ok()
             .map(|entry| entry.state.metrics)
+    }
+
+    fn broker_prompt_ready(&self, identity: SequenceIdentity) -> bool {
+        identity.role == BackendRole::Broker
+            && self
+                .registry
+                .get(identity)
+                .is_ok_and(|entry| entry.state.pending.is_empty())
     }
 
     fn take_observation(&mut self) -> Option<InferenceObservation> {

@@ -16,7 +16,20 @@ python3 scripts/report-timings.py /absolute/path/to/events.jsonl \
 Keep the accompanying `harness.log` beside the events: the reporter extracts
 model-server loading and restart durations from its existing startup telemetry.
 
-## September 14 measurement
+In the current-Kore integration, response publication and native retirement plus
+broker readiness are separate observed milestones. The reporter uses the current
+runtime transitions and does not infer readiness from old aggregate capability
+telemetry. Tool durations match role, route, generation and call ID; missing or
+ambiguous identities are left unmeasured. Startup and terminal errors retain their
+original status and visibility when timing fields are attached.
+
+## Historical September 14 measurement
+
+These measurements came from the previous guest stack before the current-Kore
+port. They are retained as historical evidence, not measurements or acceptance
+of the new integration. The port now observes per-intent response publication
+and native retirement/broker readiness through their actual runtime transitions;
+the older teardown counters and guest-idle fallback below are superseded.
 
 Host: Apple M1, 16 GiB RAM. Qwen3.5-9B-Q4_K_M, llama.cpp Metal enabled,
 99 requested GPU layers, 32K context, three slots, six host threads. Kore is
@@ -105,6 +118,6 @@ performance comparison.
 - Builds and launcher preflight precede prompt admission and are excluded from
   these response-latency numbers; the launcher retains their timestamped logs.
 
-Verification: Rust runtime/CLI/harness tests, incremental serial-marker regression,
+Historical verification: Rust runtime/CLI/harness tests, incremental serial-marker regression,
 and Python report/session tests passed. The real batch correctly exited nonzero
 because two of its three prompts failed; no successful answer was synthesized.

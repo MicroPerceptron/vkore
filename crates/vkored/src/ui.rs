@@ -67,6 +67,7 @@ impl LiveUi {
             ObservationKind::ModelOutputChunk => "model_output_chunk",
             ObservationKind::RawModelCompletion => "raw_model_completion",
             ObservationKind::ReturnedModelFields => "returned_model_fields",
+            ObservationKind::ModelTiming => "model_timing",
             ObservationKind::Validation => "validation",
             ObservationKind::AssistantMessage => "assistant_message",
             ObservationKind::ToolCall => "tool_call",
@@ -235,7 +236,9 @@ mod tests {
             }
         });
         let mut client = TcpStream::connect(address).unwrap();
-        client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         client
             .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
@@ -245,7 +248,9 @@ mod tests {
         assert!(response.contains("workspace/docs-architecture.md"));
         assert!(response.contains("authority_state"));
         let mut discovery = TcpStream::connect(address).unwrap();
-        discovery.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        discovery
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         discovery
             .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();

@@ -113,6 +113,169 @@ fn response_is_published_before_reclaim_and_cleanup_cannot_reply_twice() {
 }
 
 #[test]
+fn authority_update_http_reaches_running_runtime_without_publishing_the_prompt_answer() {
+    use hostlinkd::{AuthorityUpdateRequest, AuthorityUpdateStatus};
+    struct UpdateRuntime {
+        started: mpsc::Sender<()>,
+        received: mpsc::Sender<AuthorityUpdateRequest>,
+        release: mpsc::Receiver<()>,
+    }
+    impl TaskRuntime for UpdateRuntime {
+        fn supports_authority_updates(&self) -> bool {
+            true
+        }
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            panic!("must use live controls")
+        }
+        fn run_prompt_with_updates(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            emit: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            response_published: &dyn Fn() -> bool,
+            updates: &dyn Fn() -> Option<AuthorityUpdateRequest>,
+        ) -> PromptStatus {
+            self.started.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let request = loop {
+                if let Some(request) = updates() {
+                    break request;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            };
+            self.received.send(request.clone()).unwrap();
+            if self.release.recv_timeout(Duration::from_secs(5)).is_err() {
+                return PromptStatus::Failed;
+            }
+            assert!(!response_published());
+            emit(
+                EventKind::AuthorityUpdate,
+                true,
+                serde_json::json!({
+                    "update_id": request.update_id, "status": "applied", "revision": 7,
+                    "message": "Input revoked."
+                }),
+            );
+            assert!(
+                !response_published(),
+                "an update result is not the prompt answer"
+            );
+            emit(
+                EventKind::Assistant,
+                true,
+                serde_json::json!({"text": "Finished."}),
+            );
+            assert!(response_published());
+            PromptStatus::Completed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    // This exercises HTTP, the harness worker and its runtime callback. The
+    // fixture does not claim native capability execution or real VM acceptance.
+    let temp = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (received_tx, received_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let service = HarnessService::start(
+        UpdateRuntime {
+            started: started_tx,
+            received: received_tx,
+            release: release_rx,
+        },
+        temp.path(),
+    );
+    let handle = service.handle();
+    create(&handle, "updates");
+    handle
+        .submit_prompt("updates", prompt("p1", "work"))
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let server = HarnessHttpServer::bind_with_state(
+        "127.0.0.1:0".parse().unwrap(),
+        handle.clone(),
+        temp.path().join("projects"),
+    )
+    .unwrap();
+    let address = server.local_addr();
+    let request = AuthorityUpdateRequest {
+        api_version: 1,
+        prompt_id: "p1".into(),
+        update_id: "u1".into(),
+        text: "Revoke input.".into(),
+    };
+    let body = serde_json::to_string(&request).unwrap();
+    let client = thread::spawn(move || {
+        http(
+            address,
+            "POST",
+            "/api/v1/sessions/updates/prompts/p1/updates",
+            &body,
+        )
+    });
+    server.poll(Duration::from_secs(2)).unwrap();
+    let response = client.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(
+        received_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        request
+    );
+    assert_eq!(
+        handle
+            .submit_authority_update("updates", request.clone())
+            .unwrap()
+            .status,
+        AuthorityUpdateStatus::Dispatched
+    );
+    release_tx.send(()).unwrap();
+    let events = wait_terminal(&handle, "updates", "p1");
+    let result = handle.authority_update("updates", "p1", "u1").unwrap();
+    assert_eq!(result.status, AuthorityUpdateStatus::Applied);
+    assert_eq!(result.revision, Some(7));
+    assert_eq!(
+        handle.submit_authority_update("updates", request).unwrap(),
+        result
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == EventKind::AuthorityUpdate)
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.public
+                && matches!(event.kind, EventKind::Assistant | EventKind::Error))
+            .count(),
+        1
+    );
+    let client = thread::spawn(move || {
+        http(
+            address,
+            "GET",
+            "/api/v1/sessions/updates/prompts/p1/updates/u1",
+            "",
+        )
+    });
+    server.poll(Duration::from_secs(2)).unwrap();
+    let response = client.join().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.contains("\"status\":\"applied\""),
+        "{response}"
+    );
+}
+
+#[test]
 fn prompt_runs_broker_agent_guest_tool_and_assistant_loop() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = BackendHarness::new(DeterministicBackend::new(2), DeterministicGuest::new());
@@ -648,4 +811,241 @@ fn find_python() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+#[test]
+fn preparation_is_async_and_queued_projects_keep_their_scope_and_fair_turns() {
+    use std::sync::{Arc, Mutex};
+    struct Prepared {
+        release: mpsc::Receiver<()>,
+        entered: mpsc::Sender<()>,
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl TaskRuntime for Prepared {
+        fn prepare(
+            &mut self,
+            status: &mut dyn FnMut(Value),
+            _: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.entered.send(()).unwrap();
+            self.release.recv().unwrap();
+            status(serde_json::json!({"phase":"broker_ready"}));
+            Ok(())
+        }
+        fn run_prompt(
+            &mut self,
+            session: &SessionState,
+            prompt: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((session.project_id.clone(), prompt.prompt_id.clone()));
+            PromptStatus::Completed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (release, wait) = mpsc::channel();
+    let (entered, entered_wait) = mpsc::channel();
+    let service = HarnessService::start(
+        Prepared {
+            release: wait,
+            entered,
+            seen: seen.clone(),
+        },
+        temp.path(),
+    );
+    entered_wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    let handle = service.handle();
+    for name in ["alpha", "beta", "closed"] {
+        handle
+            .create_session(CreateSession {
+                api_version: 1,
+                project_id: name.into(),
+                session_id: name.into(),
+            })
+            .unwrap();
+    }
+    for (name, id) in [
+        ("alpha", "a1"),
+        ("alpha", "a2"),
+        ("beta", "b1"),
+        ("closed", "c1"),
+    ] {
+        handle.submit_prompt(name, prompt(id, "hello")).unwrap();
+    }
+    handle.close_session("closed").unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+    release.send(()).unwrap();
+    wait_terminal(&handle, "alpha", "a2");
+    wait_terminal(&handle, "closed", "c1");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("alpha".into(), "a1".into()),
+            ("beta".into(), "b1".into()),
+            ("alpha".into(), "a2".into())
+        ]
+    );
+    assert_eq!(
+        handle.state("closed").unwrap().prompts["c1"],
+        PromptStatus::Cancelled
+    );
+    service.shutdown();
+}
+
+#[test]
+fn shared_failure_invalidates_other_queued_generations_before_running_them() {
+    struct FailsOnce {
+        incarnation: u64,
+        failed: bool,
+    }
+    impl TaskRuntime for FailsOnce {
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            prompt: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            assert_ne!(prompt.prompt_id, "stale");
+            self.failed = true;
+            PromptStatus::Failed
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+        fn runtime_status(&mut self) -> Option<Value> {
+            if self.failed && self.incarnation == 1 {
+                self.incarnation = 2;
+            }
+            None
+        }
+        fn backend_incarnation(&self) -> u64 {
+            self.incarnation
+        }
+    }
+    // A preparation barrier makes both submissions definitely precede failure.
+    struct Barrier {
+        inner: FailsOnce,
+        release: mpsc::Receiver<()>,
+    }
+    impl TaskRuntime for Barrier {
+        fn prepare(
+            &mut self,
+            _: &mut dyn FnMut(Value),
+            _: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.release.recv().unwrap();
+            Ok(())
+        }
+        fn run_prompt(
+            &mut self,
+            s: &SessionState,
+            p: &PromptRequest,
+            e: &mut dyn FnMut(EventKind, bool, Value),
+            c: &dyn Fn() -> bool,
+            r: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            self.inner.run_prompt(s, p, e, c, r)
+        }
+        fn close(&mut self, s: &SessionState, e: &mut dyn FnMut(EventKind, bool, Value)) {
+            self.inner.close(s, e);
+        }
+        fn runtime_status(&mut self) -> Option<Value> {
+            self.inner.runtime_status()
+        }
+        fn backend_incarnation(&self) -> u64 {
+            self.inner.incarnation
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (send, release) = mpsc::channel();
+    let service = HarnessService::start(
+        Barrier {
+            inner: FailsOnce {
+                incarnation: 1,
+                failed: false,
+            },
+            release,
+        },
+        temp.path(),
+    );
+    let handle = service.handle();
+    let old = create(&handle, "first");
+    create(&handle, "second");
+    handle
+        .submit_prompt("first", prompt("failure", "hello"))
+        .unwrap();
+    handle
+        .submit_prompt("second", prompt("stale", "hello"))
+        .unwrap();
+    send.send(()).unwrap();
+    wait_terminal(&handle, "second", "stale");
+    assert_eq!(
+        handle.state("second").unwrap().prompts["stale"],
+        PromptStatus::Cancelled
+    );
+    assert_ne!(handle.state("first").unwrap().generation, old.generation);
+    assert_eq!(handle.state("second").unwrap().backend_incarnation, 2);
+    service.shutdown();
+}
+
+#[test]
+fn app_shutdown_cancels_preparation_and_terminalizes_queued_work() {
+    struct Starting(mpsc::Sender<()>);
+    impl TaskRuntime for Starting {
+        fn prepare(
+            &mut self,
+            _: &mut dyn FnMut(Value),
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            self.0.send(()).unwrap();
+            while !cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err("startup cancelled".into())
+        }
+        fn run_prompt(
+            &mut self,
+            _: &SessionState,
+            _: &PromptRequest,
+            _: &mut dyn FnMut(EventKind, bool, Value),
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+        ) -> PromptStatus {
+            panic!("shutdown must not run queued work");
+        }
+        fn close(&mut self, _: &SessionState, _: &mut dyn FnMut(EventKind, bool, Value)) {}
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (entered, wait) = mpsc::channel();
+    let service = HarnessService::start(Starting(entered), temp.path());
+    let handle = service.handle();
+    wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    create(&handle, "queued");
+    for index in 0..32 {
+        handle
+            .submit_prompt("queued", prompt(&format!("p{index}"), "hello"))
+            .unwrap();
+    }
+    handle.close_session("queued").unwrap();
+    service.shutdown();
+    assert_eq!(
+        handle.state("queued").unwrap().prompts["p0"],
+        PromptStatus::Cancelled
+    );
+    assert_eq!(
+        handle
+            .events("queued", 0)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == EventKind::PromptTerminal)
+            .count(),
+        32
+    );
 }

@@ -31,3 +31,6 @@ Makefile.local
 #.idea/
 .design-ref/
 .claude/launch.json
+
+# Local screenshots and generated review artifacts
+/artifacts/

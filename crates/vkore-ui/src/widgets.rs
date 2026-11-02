@@ -18,36 +18,24 @@
 
 use crate::{fonts, theme};
 use iced_core::{Background, Border, Color, Length, Theme, alignment};
-use iced_widget::{button, scrollable, text, text_editor};
-
-/// A wizard step's position relative to the one being edited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
-    /// The step being edited.
-    Current,
-    /// A step already passed.
-    Complete,
-    /// A step not yet reached.
-    Upcoming,
-}
+use iced_widget::{button, scrollable, text, text_input};
 
 /// The controls the design defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
-    /// Black fill, magenta border. Send, Next, Save project, Allow once.
+    /// Black fill, magenta border. Open, Create, Start in a window.
     Primary,
-    /// Hairline border, secondary text. Browse, Back, New project, preflight.
+    /// Hairline border, secondary text. Refresh, Save, Import, Start headless.
     Secondary,
-    /// Hairline border, error text. Cancel a running prompt, Deny.
+    /// Hairline border, error text. Remove, Stop.
     Danger,
-    /// Bare until hover. Wizard cancel, sidebar footer navigation.
+    /// Bare until hover. Close, a breadcrumb.
     Ghost,
-    /// A selectable option: view tabs, workspace access, backends, add-ons.
+    /// A selectable option: the navigation rail, a volume's places.
     Choice(bool),
-    /// A project row. Selected carries a magenta border; unselected has none.
+    /// A list row: an entry, a machine. Selected carries a magenta border;
+    /// unselected has none.
     Row(bool),
-    /// A wizard step marker.
-    Step(Step),
 }
 
 /// Resolved colours for one control state, before the disabled dimming.
@@ -118,37 +106,6 @@ impl Button {
                 },
                 edge: (selected || hovered).then_some(theme::MAGENTA),
             },
-            Self::Step(Step::Current) => Face {
-                fill: None,
-                text: theme::TEXT,
-                edge: Some(theme::MAGENTA),
-            },
-            Self::Step(Step::Complete) => Face {
-                fill: None,
-                text: theme::TEXT_SECONDARY,
-                edge: Some(theme::MAGENTA_DARKER),
-            },
-            Self::Step(Step::Upcoming) => Face {
-                fill: None,
-                text: if hovered {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_MUTED
-                },
-                edge: Some(if hovered {
-                    theme::MAGENTA
-                } else {
-                    theme::BORDER
-                }),
-            },
-        }
-    }
-
-    /// The radius this control carries.
-    const fn radius(self) -> f32 {
-        match self {
-            Self::Step(_) => theme::RADIUS_SM,
-            _ => theme::RADIUS_MD,
         }
     }
 }
@@ -175,7 +132,7 @@ pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::
                     .edge
                     .map_or(Color::TRANSPARENT, |edge| dim(theme::rgb(edge))),
                 width: face.edge.map_or(0.0, |_| 1.0),
-                radius: kind.radius().into(),
+                radius: theme::RADIUS_MD.into(),
             },
             shadow: theme::no_shadow(),
             ..Default::default()
@@ -183,10 +140,10 @@ pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
-/// The prompt composer and every wizard field share one editor treatment.
-pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
-    let focused = matches!(status, text_editor::Status::Focused { .. });
-    text_editor::Style {
+/// Every text field's treatment.
+pub fn field(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
         // A field sits on the page black, not on a panel: it is a well cut
         // into the surface rather than a card resting on it.
         background: Background::Color(theme::rgb(theme::BACKGROUND)),
@@ -218,28 +175,6 @@ pub fn hidden_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable
     style
 }
 
-/// The composer is a transparent editor inside its own bordered panel.
-pub fn composer_editor(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: theme::rgb(theme::TEXT_MUTED),
-        value: theme::rgb(theme::TEXT),
-        selection: theme::rgba(theme::MAGENTA, 0.28),
-    }
-}
-
-/// Read-only conversation text, which carries no chrome of its own.
-pub fn selectable(color: u32) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + Copy {
-    move |_theme, _status| text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: theme::rgb(color),
-        value: theme::rgb(color),
-        selection: theme::rgba(theme::MAGENTA, 0.28),
-    }
-}
-
 /// An uppercase mono label: metadata, navigation, and section markers.
 pub fn label<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.as_ref().to_uppercase())
@@ -254,20 +189,8 @@ pub fn label<'a>(content: impl AsRef<str>, color: u32) -> text::Text<'a, Theme, 
 /// Filling the button's computed inner height gives the paragraph a shape to
 /// center against. This keeps every control size on the same rule and avoids
 /// font- or button-specific padding offsets.
-pub fn control<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.into())
-        .font(fonts::MONO_LABEL)
-        .size(theme::SIZE_MONO)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .height(Length::Fill)
-        .align_y(alignment::Vertical::Center)
-}
-
-/// An explicitly uppercase component-button label, used by view tabs and
-/// inspector controls. It follows the same shape-derived vertical centering
-/// as [`control`].
-pub fn control_upper<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.as_ref().to_uppercase())
+pub fn control<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content)
         .font(fonts::MONO_LABEL)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
@@ -277,8 +200,8 @@ pub fn control_upper<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crat
 
 /// A navigation item, which the system sets slightly tighter than a label and
 /// centers inside its control's computed height.
-pub fn nav<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.into())
+pub fn nav<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content)
         .font(fonts::MONO_NAV)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
@@ -286,22 +209,39 @@ pub fn nav<'a>(content: impl Into<String>) -> text::Text<'a, Theme, crate::AxUi>
         .align_y(alignment::Vertical::Center)
 }
 
-/// Machine-shaped text: paths, agent and tool names, JSON, log bodies.
-pub fn mono<'a>(content: impl Into<String>, color: u32) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.into())
+/// Machine-shaped text the binary wrote: labels, sizes, hashes. Text from
+/// outside it goes through [`data`].
+pub fn mono<'a>(
+    content: impl text::IntoFragment<'a>,
+    color: u32,
+) -> text::Text<'a, Theme, crate::AxUi> {
+    text(content)
         .font(fonts::MONO)
         .size(theme::SIZE_MONO)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
         .color(theme::rgb(color))
 }
 
-/// Prose: prompts, answers, field values, project names.
+/// Text from outside the binary -- a name a guest wrote, its logs, a host
+/// path, an error quoting one -- set as [`mono`] through [`fonts::shown`], so
+/// it can neither break the frame nor pass for something it is not.
+pub fn data<'a>(
+    content: impl Into<std::borrow::Cow<'a, str>>,
+    color: u32,
+) -> text::Text<'a, Theme, crate::AxUi> {
+    mono(
+        fonts::shown(fonts::MONO, content, fonts::Breaks::Escape),
+        color,
+    )
+}
+
+/// Prose the binary wrote.
 pub fn body<'a>(
-    content: impl Into<String>,
+    content: impl text::IntoFragment<'a>,
     size: f32,
     color: u32,
 ) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.into())
+    text(content)
         .font(fonts::BODY)
         .size(size)
         .line_height(iced_core::text::LineHeight::Relative(1.35))
@@ -337,9 +277,6 @@ mod tests {
             Button::Choice(false),
             Button::Row(true),
             Button::Row(false),
-            Button::Step(Step::Current),
-            Button::Step(Step::Complete),
-            Button::Step(Step::Upcoming),
         ] {
             for status in [
                 button::Status::Active,
@@ -460,13 +397,19 @@ mod tests {
     }
 
     #[test]
-    fn a_focused_editor_takes_the_accent_border() {
-        let resting = editor(&Theme::Dark, text_editor::Status::Active);
-        let focused = editor(
+    fn a_focused_field_takes_the_accent_border_and_selects_without_a_fill() {
+        let resting = field(&Theme::Dark, text_input::Status::Active);
+        let focused = field(
             &Theme::Dark,
-            text_editor::Status::Focused { is_hovered: false },
+            text_input::Status::Focused { is_hovered: false },
         );
         assert_eq!(resting.border.color, theme::rgb(theme::BORDER));
         assert_eq!(focused.border.color, theme::rgb(theme::MAGENTA));
+        assert_eq!(
+            resting.background,
+            Background::Color(theme::rgb(theme::BACKGROUND))
+        );
+        // Magenta is never a fill: a selection is a tint, not a block.
+        assert!(focused.selection.a < 0.5);
     }
 }

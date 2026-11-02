@@ -18,16 +18,12 @@ use iced_core::{Background, Border, Color, Shadow};
 pub const BACKGROUND: u32 = 0x0A0A0C;
 /// Panel and card fill.
 pub const PANEL: u32 = 0x131316;
-/// Topology directory node fill.
-pub const PANEL_DIR: u32 = 0x17171B;
-/// Topology file node fill.
+/// The well a log sits in, a step darker than the page.
 pub const PANEL_FILE: u32 = 0x0C0C0F;
 /// Hovered ghost row fill.
 pub const HOVER: u32 = 0x1B1B20;
 /// Hairline border.
 pub const BORDER: u32 = 0x2A2A30;
-/// Dim border, and the colour of disabled or struck-through text.
-pub const BORDER_DIM: u32 = 0x3A3A42;
 /// Primary off-white text.
 pub const TEXT: u32 = 0xF2F0EC;
 /// Secondary text.
@@ -36,10 +32,6 @@ pub const TEXT_SECONDARY: u32 = 0xB9B9BE;
 pub const TEXT_MUTED: u32 = 0x8B8B90;
 /// The single accent.
 pub const MAGENTA: u32 = 0xCE15C4;
-/// First dark accent step, used for completed wizard steps.
-pub const MAGENTA_DARK: u32 = 0xA410A0;
-/// Second dark accent step.
-pub const MAGENTA_DARKER: u32 = 0x7A0C77;
 /// Success.
 pub const SUCCESS: u32 = 0x3FCB6E;
 /// Warning, and the colour of external paths.
@@ -47,14 +39,10 @@ pub const WARNING: u32 = 0xE8A23D;
 /// Error.
 pub const ERROR: u32 = 0xE8433D;
 
-/// Radius for small controls and log rows.
-pub const RADIUS_SM: f32 = 3.0;
 /// Radius for buttons and fields.
 pub const RADIUS_MD: f32 = 4.0;
 /// Radius for panels and cards.
 pub const RADIUS_LG: f32 = 6.0;
-/// Radius for glass surfaces. Nothing in the system exceeds this.
-pub const RADIUS_GLASS: f32 = 8.0;
 
 /// Spacing scale. The unit is 8px; 4 is the one permitted half step.
 pub const SPACE_1: f32 = 4.0;
@@ -64,17 +52,14 @@ pub const SPACE_2: f32 = 8.0;
 pub const SPACE_4: f32 = 16.0;
 /// Six spacing units.
 pub const SPACE_6: f32 = 24.0;
-/// Eight spacing units.
-pub const SPACE_8: f32 = 32.0;
 
-/// Small control height. The system's controls are 32 / 40 / 52.
+/// Control height. The system's controls are 32 / 40 / 52; these pages
+/// use the small one.
 pub const CONTROL_SM: f32 = 32.0;
-/// Medium control height.
-pub const CONTROL_MD: f32 = 40.0;
 
 /// Type scale. Caps are used only above 22px.
 pub const SIZE_MONO: f32 = 12.0;
-/// Body small, and the topology node name size.
+/// Body small, and every field and list row.
 pub const SIZE_SM: f32 = 14.0;
 /// Body.
 pub const SIZE_MD: f32 = 16.0;
@@ -83,18 +68,10 @@ pub const SIZE_DISPLAY: f32 = 22.0;
 
 /// Display face. Archivo 600, uppercase.
 pub const DISPLAY_FAMILY: &str = "Archivo";
-/// Display weight.
-pub const DISPLAY_WEIGHT: u16 = 600;
 /// Body face. Space Grotesk 400.
 pub const BODY_FAMILY: &str = "Space Grotesk";
-/// Body weight.
-pub const BODY_WEIGHT: u16 = 400;
 /// Mono face, used for labels, metadata, navigation, paths, and logs.
 pub const MONO_FAMILY: &str = "JetBrains Mono";
-/// Mono body weight, used for logs, JSON, and paths.
-pub const MONO_WEIGHT: u16 = 400;
-/// Mono label weight, used for uppercase labels and navigation.
-pub const MONO_LABEL_WEIGHT: u16 = 500;
 
 /// Tracking on uppercase mono labels and metadata.
 pub const TRACK_LABEL: f32 = 0.06;
@@ -129,33 +106,6 @@ pub fn rgba(hex: u32, alpha: f32) -> Color {
         a: alpha,
         ..rgb(hex)
     }
-}
-
-/// The scrim behind a modal.
-pub fn scrim() -> Color {
-    rgba(BACKGROUND, 0.66)
-}
-
-/// The glass surface a dialog sits on.
-///
-/// The system's translucent fill over its Axiom backdrop filter.
-pub fn glass() -> Color {
-    rgba(BACKGROUND, 0.86)
-}
-
-/// The border around a glass surface.
-pub fn glass_border() -> Color {
-    rgba(TEXT, 0.18)
-}
-
-/// The fill behind a selected topology node.
-pub fn selected_fill() -> Color {
-    rgba(MAGENTA, 0.07)
-}
-
-/// The border around a capability chip the agent holds.
-pub fn chip_border() -> Color {
-    rgba(MAGENTA, 0.42)
 }
 
 /// A one-pixel border in `hex`, at `radius`.

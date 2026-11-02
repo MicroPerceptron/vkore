@@ -1,0 +1,27 @@
+[package]
+name = "vkore-volume"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A Kore machine's DagFS volume from the host: browse, preview and transfer through Kore's own engine."
+
+# Kore's volume engine reaches the host only through libkore's `kore-host`
+# (the exported `kore-vol` procedure over the filesystem row's own code).
+# The image device takes POSIX record locks, so this crate is Unix-hosted.
+[target.'cfg(unix)'.dependencies]
+kore-host.workspace = true
+blake3 = { workspace = true, features = ["std"] }
+cap-std = "4.0.3"
+# The `*_nofollow` directory opens cap-std leaves to its extension crate.
+cap-fs-ext = "4.0.3"
+png = "0.18.1"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+png = "0.18.1"
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

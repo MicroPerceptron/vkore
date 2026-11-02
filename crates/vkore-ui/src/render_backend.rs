@@ -385,46 +385,24 @@ struct OpenTypeGlyphSource {
 impl OpenTypeGlyphSource {
     fn new() -> Result<Self, RenderError> {
         // This font system is the backend's own; it rasterizes coverage for
-        // identities the frontend already resolved. Load the same faces so a
-        // resource recorded above the boundary can be resolved below it.
-        let registered = axui_iced::registered_fonts();
-        let sources = core::iter::once(fontdb::Source::Binary(Arc::new(axui_fonts::DM_SANS)))
-            .chain(
-                registered
-                    .iter()
-                    .map(|face| fontdb::Source::Binary(Arc::new(face.bytes))),
-            );
-        let mut fonts = FontSystem::new_with_fonts(sources);
-        fonts
-            .db_mut()
-            .set_sans_serif_family(axui_fonts::DM_SANS_FAMILY);
-        let default = fonts
-            .db()
-            .query(&fontdb::Query {
-                families: &[fontdb::Family::Name(axui_fonts::DM_SANS_FAMILY)],
-                weight: fontdb::Weight::NORMAL,
-                stretch: fontdb::Stretch::Normal,
-                style: fontdb::Style::Normal,
-            })
-            .ok_or(RenderError::ResourceSetup)?;
-        let mut faces = vec![(axui_iced::DEFAULT_FONT_RESOURCE, default)];
-        for face in &registered {
-            // The frontend registry holds Cosmic Text ids from the shared font
-            // system, so match on the face bytes this store actually loaded.
-            let local = fonts
-                .db()
-                .faces()
-                .find(|candidate| match fonts.db().face_source(candidate.id) {
-                    Some((fontdb::Source::Binary(loaded), _)) => {
-                        let loaded: &[u8] = loaded.as_ref().as_ref();
-                        loaded.len() == face.bytes.len() && loaded == face.bytes
-                    }
-                    _ => false,
-                })
-                .map(|candidate| candidate.id)
-                .ok_or(RenderError::ResourceSetup)?;
-            faces.push((face.resource, local));
+        // identities the frontend already resolved, and never shapes. It
+        // holds exactly the faces a frame may name, each keyed by the id its
+        // load returned: no host face is scanned, and none can stand in for
+        // ours under a shared family name.
+        let mut database = fontdb::Database::new();
+        let mut load = |bytes: &'static [u8]| {
+            database
+                .load_font_source(fontdb::Source::Binary(Arc::new(bytes)))
+                .first()
+                .copied()
+                .ok_or(RenderError::ResourceSetup)
+        };
+        let mut faces = vec![(axui_iced::DEFAULT_FONT_RESOURCE, load(axui_fonts::DM_SANS)?)];
+        for face in axui_iced::registered_fonts() {
+            faces.push((face.resource, load(face.bytes)?));
         }
+        // The locale steers fallback, which rasterizing never consults.
+        let fonts = FontSystem::new_with_locale_and_db(String::from("en-US"), database);
         Ok(Self {
             fonts,
             faces,

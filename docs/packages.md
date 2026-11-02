@@ -1,5 +1,10 @@
 # Package installation, updates, and recovery
 
+> **Status.** This service is retained from vKore's first architecture, whose
+> guest path was HostLink. HostLink is retired until a host-guest channel lands
+> on Kore's main line (see [MIGRATION.md](../MIGRATION.md)); until then the
+> host side is exercised by its own tests, and nothing here reaches a guest.
+
 vKore manages the host artifacts needed by a project without taking ownership
 of workspaces, conversations, policies, credentials, or user model libraries.
 Those data classes are never stored under the managed object directory and are

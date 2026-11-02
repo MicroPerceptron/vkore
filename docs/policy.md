@@ -1,5 +1,10 @@
 # User approvals and standing policy
 
+> **Status.** This service is retained from vKore's first architecture, whose
+> guest path was HostLink. HostLink is retired until a host-guest channel lands
+> on Kore's main line (see [MIGRATION.md](../MIGRATION.md)); until then the
+> host side is exercised by its own tests, and nothing here reaches a guest.
+
 vKore records authenticated user decisions and converts them into bounded
 authority ceilings. It does not mint Kore capabilities. The resident Kore
 broker independently verifies its live holdings, the target generation, uses,

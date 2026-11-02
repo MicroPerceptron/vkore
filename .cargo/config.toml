@@ -1,5 +1,4 @@
 [net]
-# Kore is currently a private repository. Use the user's authenticated Git
-# client for the pinned shared-contract dependencies.
+# The desktop's renderer, Axiom, is not public yet: Cargo fetches it with the
+# user's authenticated Git client. Every other dependency is public.
 git-fetch-with-cli = true
-

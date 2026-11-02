@@ -13,6 +13,7 @@ volume layer runs.
 | Kore source | `ab6e7b157659cc4158ca30bb70a14bb64b0c6820` | Kore main `e5e0b96a` (v0.40.0) plus four `tools/kore-vol` commits: the procedure as a library, and a mount that releases every handle it opens |
 | DagFS on disk | format version 5 | `kore_host::volume::FORMAT_VERSION`; a volume another version wrote is refused, never rewritten |
 | Kore ISO | v0.40.0, SHA-256 `029ddd7e1e1cc1819c7e3ecf7ec22ffc3f0f6e01105972cd4d968313465aab23` | `make iso-sealed-boot-x86 BOOT_FEATURES=boot PAGING_PROFILE=4k48 MODE=release` at Kore `1b6cb322`; `ab6e7b15` changes only a host tool the ISO does not carry |
+| Kore ISO, graceful stop | SHA-256 `7493248a3f1832ad8a52eca16a918b028a83ef88b1b0efe73e4f09ed96e1cb1a` | the same build at Kore `547af2184dab3772b7434041d413b950a69072a4`, which accesses the ACPI PM1 registers at their width: the power button stops it gracefully |
 | QEMU | 8.2.2, TCG | the oldest QEMU vKore has booted Kore on; newer ones add capabilities vKore probes for |
 
 The Kore `v0.40.0` tag points at an older tree (Cargo version 0.30.0); the
@@ -50,10 +51,18 @@ Kore's own lines:
 Any other `: FAIL` row is a warning: a witness failed, the boot did not.
 
 **Input and power.** QMP: `send-key` (PrintScreen is `print`), `screendump`,
-`system_powerdown`, `quit`. Kore v0.40.0 does not act on the ACPI power button
-under q35, so a stop ends QEMU after its grace period. Every QMP command carries
-an id, so a reply that comes late (a busy TCG guest can hold QEMU's main loop for
-seconds) is dropped instead of being taken for the next one.
+`system_powerdown`, `quit`. A stop presses the ACPI fixed power button: Kore's
+SCI handler latches it and its run loop powers off through the same path
+`pwctl shutdown` takes (services asked to quiesce, the runtime torn down, then
+ACPI S5). Before Kore `547af218`, Kore accessed the PM1 status and enable
+registers a byte at a time; QEMU's ICH9 model decodes them only as words at
+offsets 0 and 2, so the button (bit 8) is never armed, and stopping such a Kore
+ends QEMU after the grace period. `547af218` accesses them at their width, as
+ACPICA does. Graceful reboot and
+suspend have no host trigger: they are `pwctl reboot` and `pwctl suspend`
+inside the guest. Every QMP command carries an id, so a reply that comes late
+(a busy TCG guest can hold QEMU's main loop for seconds) is dropped instead of
+being taken for the next one.
 
 **The volume.** A blank disk is formatted by the machine at its first boot, with
 terminal homes at `work/face-N`. Kore's capture app saves into

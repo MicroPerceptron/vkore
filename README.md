@@ -69,9 +69,13 @@ target/release/vkore-ui --open @demo
 ```
 
 `--display window` (the default) gives the guest QEMU's own window, so you can
-use Kore and press PrintScreen yourself. Kore v0.40.0 does not yet act on the
-power button under QEMU's q35 machine, so a stop ends QEMU after `--grace`
-seconds (10 by default); the volume keeps its last committed state. Machines,
+use Kore and press PrintScreen yourself. A stop presses the machine's ACPI
+power button, and Kore powers itself off the way `pwctl shutdown` does: its
+services asked to quiesce, its runtime torn down, then ACPI S5, in well under a
+second. Kore up to v0.40.0 reads and writes the power-management registers a
+byte at a time, which QEMU's chipset does not decode, so it never hears the
+button; there a stop ends QEMU after `--grace` seconds (10 by default) and the
+volume keeps its last committed state. Kore `547af218` fixes that. Machines,
 their disks and run transcripts live under `$XDG_STATE_HOME/vkore` (or `--state`).
 
 ## The desktop
@@ -154,6 +158,9 @@ Kore v0.40.0 ISO:
 - The desktop under Xvfb: browsing that disk, previewing the capture and its
   record, saving it out byte-identical, and starting, following and stopping
   the machine.
+- With an ISO built from Kore `547af218`, a stop is graceful: Kore hears the
+  power button and powers off through its own shutdown path, 0.4 s after the
+  press.
 - `cargo test --workspace`, including Kore's volume engine end to end on real
   images, and the opt-in host test that boots the ISO through `vkore-vm`.
 

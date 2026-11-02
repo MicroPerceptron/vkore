@@ -52,9 +52,9 @@ the SHA-256 it last booted, its resources, and the project it stages.
 - **Start in a window** gives the guest QEMU's own window, where you use Kore
   directly and press PrintScreen to capture. **Start headless** runs it without
   one.
-- **Stop** presses the power button and ends QEMU if the guest has not powered
-  off within 10 s (Kore v0.40.0 does not yet act on the button under QEMU, so
-  expect the warning). The volume keeps its last committed state.
+- **Stop** presses the power button, and Kore shuts itself down. A Kore from
+  before `547af218` does not hear the button under QEMU, so after 10 s vKore ends
+  QEMU and says so. Either way the volume keeps its last committed state.
 
 The pane under the controls follows the boot as it happens and keeps the last
 run's record after the machine stops. Starting a machine whose disk the

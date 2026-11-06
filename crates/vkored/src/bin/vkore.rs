@@ -177,6 +177,9 @@ struct RunArgs {
     #[arg(long, default_value_t = 10)]
     grace: u64,
     /// Press PrintScreen in the guest when it reaches --until
+    ///
+    /// Kore writes the capture after the press, and a stop does not wait for
+    /// it: with --stop-after, leave it the time (under TCG, several seconds).
     #[arg(long)]
     screenshot: bool,
     /// Write the guest's screen as PPM to this path when it reaches --until

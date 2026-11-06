@@ -10,8 +10,9 @@ Kore's public API. There is no second implementation of anything Kore owns.
 
 It comes as a desktop app (`vkore-ui`) and a command line (`vkore`).
 
-**Status: alpha.** Verified against Kore v0.40.0 (a production x86 ISO) under
-QEMU 8.2 with TCG on Linux; see [what is and is not verified](#what-is-verified).
+**Status: alpha.** Verified against production x86 ISOs of Kore v0.40.0 and of
+Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
+[what is and is not verified](#what-is-verified).
 
 ## What it does today
 
@@ -53,10 +54,14 @@ target/release/vkore machine create demo --iso /path/to/kore-x86-release.iso
 ```
 
 ```sh
-target/release/vkore machine run demo --display headless --screenshot --stop-after 5
+target/release/vkore machine run demo --display headless --screenshot --stop-after 15
 ```
 
-Copy the captures out, with their record:
+Kore writes a capture a few seconds after the press (under TCG, up to ten), and
+a stop does not wait for one still being written: hence the 15 s.
+
+Copy the captures out, with their record (the folder is created if it does not
+exist):
 
 ```sh
 target/release/vkore volume @demo shots --get ~/Pictures/kore
@@ -75,8 +80,9 @@ services asked to quiesce, its runtime torn down, then ACPI S5, in well under a
 second. Kore up to v0.40.0 reads and writes the power-management registers a
 byte at a time, which QEMU's chipset does not decode, so it never hears the
 button; there a stop ends QEMU after `--grace` seconds (10 by default) and the
-volume keeps its last committed state. Kore `547af218` fixes that. Machines,
-their disks and run transcripts live under `$XDG_STATE_HOME/vkore` (or `--state`).
+volume keeps its last committed state. Kore's main fixes that at `7074bda2`.
+Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
+(or `--state`).
 
 ## The desktop
 
@@ -148,25 +154,32 @@ against, are in [docs/compatibility.md](docs/compatibility.md).
 
 ## What is verified
 
-On Linux x86_64 in a container (QEMU 8.2.2, TCG, no KVM) against a production
-Kore v0.40.0 ISO:
+On Linux x86_64 in a container (QEMU 8.2.2, TCG, no KVM), with the engine
+libkore exports from Kore's main at `7074bda2`:
 
-- `vkore machine run` boots it to ready (19/19 services, `first-shell: ready`,
-  44/44 apps seeded, homes present), presses PrintScreen, and stops it;
-  `vkore volume @demo shots --get` copies out a PNG that shows Kore's lock
-  screen with its capture record.
-- The desktop under Xvfb: browsing that disk, previewing the capture and its
-  record, saving it out byte-identical, and starting, following and stopping
-  the machine.
-- With an ISO built from Kore `547af218`, a stop is graceful: Kore hears the
-  power button and powers off through its own shutdown path, 0.4 s after the
-  press.
+- A production ISO built from Kore's main at `7074bda2`: `vkore machine run`
+  boots it to ready (19/19 services, `first-shell: ready`, 45/45 apps seeded,
+  homes present), presses PrintScreen, and stops it gracefully: Kore hears the
+  power button and powers off through its own shutdown path, 0.35 s after the
+  press. `vkore volume @NAME shots --get` copies out the capture, stamped with
+  the build that took it and byte-identical to the volume's copy.
+- A production Kore v0.40.0 ISO: the same run to ready (44/44 apps), and its
+  capture copied out; a stop ends QEMU after the grace period.
+- A disk v0.40.0 formatted and wrote, booted by the `7074bda2` ISO: ready, with
+  the captures of both builds read back side by side.
+- A GPT disk on a loop device with Kore's user and system partitions: an
+  install through the partition node, exports byte-identical through both the
+  partition and the whole-disk node, and nothing outside the user partition
+  changed.
+- The desktop under Xvfb: browsing a machine's disk, previewing a capture and
+  its record, saving it out byte-identical, and starting, following and
+  stopping the machine.
 - `cargo test --workspace`, including Kore's volume engine end to end on real
-  images, and the opt-in host test that boots the ISO through `vkore-vm`.
+  images, and the opt-in host test that boots each ISO through `vkore-vm`.
 
-Not verified yet: KVM or HVF acceleration, physical hardware, macOS (`vkore-vm`
-supports HVF; nothing here has run it), block devices (`vkore-volume` opens
-them; only image files have been exercised through vKore), and AMD hosts.
+Not verified yet: KVM or HVF acceleration, physical hardware (a physical disk
+included), macOS (`vkore-vm` supports HVF; nothing here has run it), and AMD
+hosts.
 
 ## Workspace
 

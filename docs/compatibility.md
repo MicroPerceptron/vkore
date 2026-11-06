@@ -9,11 +9,11 @@ volume layer runs.
 
 | | Revision | What it is |
 | --- | --- | --- |
-| libkore | `83d8347082302fbc604381b15ce1125509ff4c2b` | `kore-host`, the host facade, over the exported `kore-vol` closure (26 packages) |
-| Kore source | `ab6e7b157659cc4158ca30bb70a14bb64b0c6820` | Kore main `e5e0b96a` (v0.40.0) plus four `tools/kore-vol` commits: the procedure as a library, and a mount that releases every handle it opens |
+| libkore | `3aac3b5ce4870421581ffa9b8abc0837c63d2c41` | `kore-host`, the host facade, over the exported `kore-vol` closure (26 packages) |
+| Kore source | `7074bda28c416ffe34562857ee43cbc883482782` | Kore main with MicroPerceptron/kore#1475: the volume procedure as a library whose mount releases every handle it opens, and the ACPI PM1 registers accessed at their width |
 | DagFS on disk | format version 5 | `kore_host::volume::FORMAT_VERSION`; a volume another version wrote is refused, never rewritten |
-| Kore ISO | v0.40.0, SHA-256 `029ddd7e1e1cc1819c7e3ecf7ec22ffc3f0f6e01105972cd4d968313465aab23` | `make iso-sealed-boot-x86 BOOT_FEATURES=boot PAGING_PROFILE=4k48 MODE=release` at Kore `1b6cb322`; `ab6e7b15` changes only a host tool the ISO does not carry |
-| Kore ISO, graceful stop | SHA-256 `7493248a3f1832ad8a52eca16a918b028a83ef88b1b0efe73e4f09ed96e1cb1a` | the same build at Kore `547af2184dab3772b7434041d413b950a69072a4`, which accesses the ACPI PM1 registers at their width: the power button stops it gracefully |
+| Kore ISO, main | SHA-256 `b085e919144afc01e302405d379d399f80f0fc84fd323cff68c5a91daca5b838` | `make iso-sealed-boot-x86 BOOT_FEATURES=boot PAGING_PROFILE=4k48 MODE=release` at Kore `7074bda2`: the power button stops it gracefully |
+| Kore ISO, v0.40.0 | SHA-256 `029ddd7e1e1cc1819c7e3ecf7ec22ffc3f0f6e01105972cd4d968313465aab23` | the same build at Kore `1b6cb322`: v0.40.0 (`e5e0b96a`) plus host-tool commits from MicroPerceptron/kore#1475 that the ISO does not carry. A stop ends QEMU after the grace period |
 | QEMU | 8.2.2, TCG | the oldest QEMU vKore has booted Kore on; newer ones add capabilities vKore probes for |
 
 The Kore `v0.40.0` tag points at an older tree (Cargo version 0.30.0); the
@@ -54,25 +54,26 @@ Any other `: FAIL` row is a warning: a witness failed, the boot did not.
 `system_powerdown`, `quit`. A stop presses the ACPI fixed power button: Kore's
 SCI handler latches it and its run loop powers off through the same path
 `pwctl shutdown` takes (services asked to quiesce, the runtime torn down, then
-ACPI S5). Before Kore `547af218`, Kore accessed the PM1 status and enable
+ACPI S5). Before Kore `7074bda2`, Kore accessed the PM1 status and enable
 registers a byte at a time; QEMU's ICH9 model decodes them only as words at
 offsets 0 and 2, so the button (bit 8) is never armed, and stopping such a Kore
-ends QEMU after the grace period. `547af218` accesses them at their width, as
-ACPICA does. Graceful reboot and
-suspend have no host trigger: they are `pwctl reboot` and `pwctl suspend`
-inside the guest. Every QMP command carries an id, so a reply that comes late
-(a busy TCG guest can hold QEMU's main loop for seconds) is dropped instead of
-being taken for the next one.
+ends QEMU after the grace period. `7074bda2` accesses them at their width, as
+ACPICA does. Graceful reboot and suspend have no host trigger: they are
+`pwctl reboot` and `pwctl suspend` inside the guest. Every QMP command carries
+an id, so a reply that comes late (a busy TCG guest can hold QEMU's main loop
+for seconds) is dropped instead of being taken for the next one.
 
 **The volume.** A blank disk is formatted by the machine at its first boot, with
 terminal homes at `work/face-N`. Kore's capture app saves into
 `pictures/screenshots` only if the folder exists, so vKore creates it in
 terminal 0's home before each boot (`screenshots_folder` in the machine's
-configuration turns that off). A capture's record is in `tEXt` chunks ahead of
-its image data: `Software`, `Creation Time`, and `kore:kernel-build`,
-`kore:uptime-ms`, `kore:screen`, `kore:mode`, `kore:app`, `kore:rect`,
-`kore:density-percent`, plus any other `kore:` keys Kore adds (v0.40.0 also
-writes `kore:cursor` and `kore:freeze-us`).
+configuration turns that off). Kore writes a capture a few seconds after the
+press (seven to ten under TCG here), and its shutdown does not wait for one
+still being written: a stop sooner than that loses it. A capture's record is
+in `tEXt` chunks ahead of its image data: `Software`, `Creation Time`, and
+`kore:kernel-build`, `kore:uptime-ms`, `kore:screen`, `kore:mode`, `kore:app`,
+`kore:rect`, `kore:density-percent`, plus any other `kore:` keys Kore adds
+(v0.40.0 also writes `kore:cursor` and `kore:freeze-us`).
 
 **The engine's bounds.** One open volume per disk per process (Kore's image lock
 is a per-process POSIX record lock); 512 objects, 128 entries a directory, 32
@@ -88,7 +89,7 @@ levels, names of at most 32 bytes; 32 handles per engine session.
    -D warnings` and `cargo test --workspace`.
 4. Build an ISO from the matching Kore revision and run the boot test
    (`VKORE_TEST_QEMU`, `VKORE_TEST_ISO`; see the README), then a screenshot round
-   trip: `vkore machine run NAME --screenshot --stop-after 5` and
+   trip: `vkore machine run NAME --screenshot --stop-after 15` and
    `vkore volume @NAME shots --get DIR`.
 5. Record the new identities here. A table row no run has verified is not
    written.

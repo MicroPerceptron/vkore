@@ -26,7 +26,7 @@ rust-version = "1.97"
 # Kore revision whose DagFS format vKore reads and writes (docs/compatibility.md).
 [workspace.dependencies]
 blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
-kore-host = { git = "https://github.com/MicroPerceptron/libkore", rev = "83d8347082302fbc604381b15ce1125509ff4c2b" }
+kore-host = { git = "https://github.com/MicroPerceptron/libkore", rev = "3aac3b5ce4870421581ffa9b8abc0837c63d2c41" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -131,7 +131,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -904,7 +904,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1702,7 +1702,7 @@ dependencies = [
 [[package]]
 name = "kore-abi"
 version = "0.1.4"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "bitflags 2.13.1",
  "zerocopy",
@@ -1711,12 +1711,12 @@ dependencies = [
 [[package]]
 name = "kore-collections"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 
 [[package]]
 name = "kore-dagfs"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "heapless",
  "kore-abi",
@@ -1730,7 +1730,7 @@ dependencies = [
 [[package]]
 name = "kore-driver"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -1748,7 +1748,7 @@ dependencies = [
 [[package]]
 name = "kore-hint"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "raw-cpuid",
 ]
@@ -1756,7 +1756,7 @@ dependencies = [
 [[package]]
 name = "kore-host"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "kore-vol",
 ]
@@ -1764,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "kore-nvme"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1773,7 +1773,7 @@ dependencies = [
 [[package]]
 name = "kore-ring"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "kore-abi",
  "zerocopy",
@@ -1782,7 +1782,7 @@ dependencies = [
 [[package]]
 name = "kore-rt"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "heapless",
  "kore-abi",
@@ -1797,7 +1797,7 @@ dependencies = [
 [[package]]
 name = "kore-rt-macros"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1808,12 +1808,12 @@ dependencies = [
 [[package]]
 name = "kore-scrub"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 
 [[package]]
 name = "kore-svc-block"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "kore-abi",
  "kore-driver",
@@ -1826,7 +1826,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-dagfs"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "blake3",
  "crc",
@@ -1846,7 +1846,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-device"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "heapless",
  "kore-abi",
@@ -1856,7 +1856,7 @@ dependencies = [
 [[package]]
 name = "kore-svc-extract"
 version = "0.0.1"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "blake3",
  "heapless",
@@ -1866,7 +1866,7 @@ dependencies = [
 [[package]]
 name = "kore-vol"
 version = "0.0.0"
-source = "git+https://github.com/MicroPerceptron/libkore?rev=83d8347082302fbc604381b15ce1125509ff4c2b#83d8347082302fbc604381b15ce1125509ff4c2b"
+source = "git+https://github.com/MicroPerceptron/libkore?rev=3aac3b5ce4870421581ffa9b8abc0837c63d2c41#3aac3b5ce4870421581ffa9b8abc0837c63d2c41"
 dependencies = [
  "blake3",
  "kore-driver",
@@ -2494,7 +2494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2819,7 +2819,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3228,7 +3228,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3882,7 +3882,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

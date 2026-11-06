@@ -153,10 +153,10 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                 reply(
                     match browser.export(&path, &destination, ExportOptions::default()) {
                         Ok(exported) => Reply::Done(format!(
-                            "saved {} ({} files, {} bytes)",
+                            "saved {} ({}, {})",
                             exported.destination.display(),
-                            exported.files,
-                            exported.bytes
+                            widgets::count(exported.files, "file", "files"),
+                            widgets::count(exported.bytes, "byte", "bytes")
                         )),
                         Err(error) => Reply::Failed(error.to_string()),
                     },
@@ -185,8 +185,10 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                 let outcome = disk.install(&source, &destination, false);
                 reply(match &outcome {
                     Ok(installed) => Reply::Done(format!(
-                        "installed {} files ({} bytes) at {destination}, generation {}",
-                        installed.files, installed.bytes, installed.generation
+                        "installed {} ({}) at {destination}, generation {}",
+                        widgets::count(installed.files, "file", "files"),
+                        widgets::count(installed.bytes, "byte", "bytes"),
+                        installed.generation
                     )),
                     Err(error) => Reply::Failed(error.to_string()),
                 });
@@ -695,7 +697,11 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     .spacing(2)
     .align_y(alignment::Vertical::Center);
     for (depth, name) in state.path.iter().enumerate() {
-        crumbs = crumbs.push(widgets::mono("/", theme::TEXT_MUTED));
+        // The root's own crumb is `/`: a separator before its first
+        // component would read `/ / work`.
+        if depth > 0 || matches!(state.place, Place::Home(_)) {
+            crumbs = crumbs.push(widgets::mono("/", theme::TEXT_MUTED));
+        }
         crumbs = crumbs.push(
             button(widgets::data(name.as_str(), theme::TEXT))
                 .padding([4, 6])

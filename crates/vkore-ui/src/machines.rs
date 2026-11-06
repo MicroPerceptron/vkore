@@ -345,9 +345,10 @@ fn describe(event: &Event) -> String {
             preflight.vendor,
             preflight.accel
         ),
-        Event::Staged { files, skipped, .. } => {
-            format!("staged the project ({files} files, {skipped} left out)")
-        }
+        Event::Staged { files, skipped, .. } => format!(
+            "staged the project ({}, {skipped} left out)",
+            widgets::count(*files, "file", "files")
+        ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
         Event::Qemu { name, .. } => format!("qemu: {name}"),
         Event::Stopping => "stopping".into(),

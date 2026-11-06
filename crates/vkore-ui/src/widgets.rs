@@ -19,6 +19,7 @@
 use crate::{fonts, theme};
 use iced_core::{Background, Border, Color, Length, Theme, alignment};
 use iced_widget::{button, scrollable, text, text_input};
+use std::fmt;
 
 /// The controls the design defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +98,9 @@ impl Button {
                     theme::BORDER
                 }),
             },
+            // Hover only tints a row: in a list longer than the pane, the
+            // selection can scroll out of view, and a hovered row with its
+            // border would pass for it.
             Self::Row(selected) => Face {
                 fill: hovered.then_some(theme::HOVER),
                 text: if selected {
@@ -104,7 +108,7 @@ impl Button {
                 } else {
                     theme::TEXT_SECONDARY
                 },
-                edge: (selected || hovered).then_some(theme::MAGENTA),
+                edge: selected.then_some(theme::MAGENTA),
             },
         }
     }
@@ -248,6 +252,12 @@ pub fn body<'a>(
         .color(theme::rgb(color))
 }
 
+/// `n` and its noun in agreement: "1 file", "2 files".
+pub fn count<N: fmt::Display + PartialEq + From<u8>>(n: N, one: &str, many: &str) -> String {
+    let noun = if n == N::from(1) { one } else { many };
+    format!("{n} {noun}")
+}
+
 /// A display heading. The system sets these uppercase.
 pub fn display<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxUi> {
     text(content.as_ref().to_uppercase())
@@ -330,6 +340,26 @@ mod tests {
         let selected = styled(Button::Choice(true), button::Status::Active);
         assert_eq!(selected.border.color, theme::rgb(theme::MAGENTA));
         assert_eq!(selected.text_color, theme::rgb(theme::TEXT));
+    }
+
+    #[test]
+    fn a_hovered_row_never_passes_for_the_selected_one() {
+        let selected = styled(Button::Row(true), button::Status::Active);
+        let hovered = styled(Button::Row(false), button::Status::Hovered);
+        assert_eq!(selected.border.color, theme::rgb(theme::MAGENTA));
+        assert_eq!(hovered.border.width, 0.0);
+        assert_eq!(
+            hovered.background,
+            Some(Background::Color(theme::rgb(theme::HOVER)))
+        );
+        assert_ne!(hovered.text_color, selected.text_color);
+    }
+
+    #[test]
+    fn a_count_agrees_with_its_noun() {
+        assert_eq!(count(0usize, "file", "files"), "0 files");
+        assert_eq!(count(1usize, "file", "files"), "1 file");
+        assert_eq!(count(2u64, "byte", "bytes"), "2 bytes");
     }
 
     #[test]

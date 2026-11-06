@@ -367,12 +367,12 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
             print_changes(&changes);
             let applied = run::apply(&store, &name, &changes).map_err(|error| error.to_string())?;
             println!(
-                "applied: {} written ({} bytes), {} deleted, {} directories created, {} removed",
-                applied.written,
-                applied.bytes,
-                applied.deleted,
-                applied.directories_created,
-                applied.directories_removed
+                "applied: {} written ({}), {} deleted, {} created, {} removed",
+                count(applied.written, "file", "files"),
+                count(applied.bytes, "byte", "bytes"),
+                count(applied.deleted, "file", "files"),
+                count(applied.directories_created, "directory", "directories"),
+                count(applied.directories_removed, "directory", "directories")
             );
             for kept in applied.directories_kept {
                 println!("kept {kept}/: it still holds host files");
@@ -494,7 +494,9 @@ fn print_event(event: &Event, json: bool, started: Instant) {
             skipped,
             generation,
         } => format!(
-            "staged the project: {files} files, {directories} directories ({skipped} left out), volume generation {generation}"
+            "staged the project: {}, {} ({skipped} left out), volume generation {generation}",
+            count(*files, "file", "files"),
+            count(*directories, "directory", "directories")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
         Event::Stage { stage, .. } => format!("boot: {}", describe(*stage)),
@@ -742,11 +744,11 @@ fn volume(state: Option<PathBuf>, arguments: VolumeArgs) -> Result<ExitCode, Fai
                 .export(&path(Some(&text))?, &destination, ExportOptions { replace })
                 .map_err(|error| error.to_string())?;
             println!(
-                "{}: {} files, {} directories, {} bytes",
+                "{}: {}, {}, {}",
                 exported.destination.display(),
-                exported.files,
-                exported.directories,
-                exported.bytes
+                count(exported.files, "file", "files"),
+                count(exported.directories, "directory", "directories"),
+                count(exported.bytes, "byte", "bytes")
             );
         }
         VolumeCommand::Put {
@@ -758,8 +760,11 @@ fn volume(state: Option<PathBuf>, arguments: VolumeArgs) -> Result<ExitCode, Fai
                 .install(&source, &path(Some(&text))?, replace)
                 .map_err(|error| error.to_string())?;
             println!(
-                "{text}: {} files, {} directories, {} bytes in terminal {face}'s home (generation {}); every file read back identical",
-                installed.files, installed.directories, installed.bytes, installed.generation
+                "{text}: {}, {}, {} in terminal {face}'s home (generation {}); every file read back identical",
+                count(installed.files, "file", "files"),
+                count(installed.directories, "directory", "directories"),
+                count(installed.bytes, "byte", "bytes"),
+                installed.generation
             );
         }
         VolumeCommand::Rm { path: text } => {
@@ -775,6 +780,12 @@ fn volume(state: Option<PathBuf>, arguments: VolumeArgs) -> Result<ExitCode, Fai
         VolumeCommand::Shots { get, json } => shots(&disk, face, get, json)?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `n` and its noun in agreement: "1 file", "2 files".
+fn count<N: std::fmt::Display + PartialEq + From<u8>>(n: N, one: &str, many: &str) -> String {
+    let noun = if n == N::from(1) { one } else { many };
+    format!("{n} {noun}")
 }
 
 /// Kore's screen captures in terminal `face`'s home, newest first by name
@@ -859,8 +870,8 @@ fn shots(disk: &Disk, face: u8, get: Option<PathBuf>, json: bool) -> Result<(), 
         );
     } else if let Some(destination) = &get {
         println!(
-            "copied {} screenshot(s) to {}",
-            shots.len(),
+            "copied {} to {}",
+            count(shots.len(), "screenshot", "screenshots"),
             destination.display()
         );
     }

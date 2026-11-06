@@ -174,12 +174,14 @@ libkore exports from Kore's main at `7074bda2`:
 - The desktop under Xvfb: browsing a machine's disk, previewing a capture and
   its record, saving it out byte-identical, and starting, following and
   stopping the machine.
+- A physical machine with Kore and Ubuntu on one NVMe disk, booted into
+  Ubuntu: the desktop opened Kore's user volume through the disk's node,
+  previewed a 2880×1800 capture's record and saved it out.
 - `cargo test --workspace`, including Kore's volume engine end to end on real
   images, and the opt-in host test that boots each ISO through `vkore-vm`.
 
-Not verified yet: KVM or HVF acceleration, physical hardware (a physical disk
-included), macOS (`vkore-vm` supports HVF; nothing here has run it), and AMD
-hosts.
+Not verified yet: KVM or HVF acceleration, writing to a physical disk, macOS
+(`vkore-vm` supports HVF; nothing here has run it), and AMD hosts.
 
 ## Workspace
 

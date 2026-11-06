@@ -782,19 +782,30 @@ fn shots(disk: &Disk, face: u8, get: Option<PathBuf>, json: bool) -> Result<(), 
         VolPath::parse(face, vkore_volume::SCREENSHOTS).map_err(|error| error.to_string())?;
     let entries = match browser.list(&folder) {
         Ok(Listing::Directory { entries }) => entries,
-        Ok(_) | Err(_) => {
-            println!(
-                "no screenshots in terminal {face}'s home ({})",
-                vkore_volume::SCREENSHOTS
-            );
-            return Ok(());
+        // A home its machine has not created yet, or one without the folder,
+        // holds no captures.
+        Ok(Listing::EmptyHome) => Vec::new(),
+        Err(error) if error.is_not_found() => Vec::new(),
+        Ok(Listing::File { .. }) => {
+            return Err(format!(
+                "{folder}: a file where Kore keeps its captures' folder"
+            ));
         }
+        Err(error) => return Err(error.to_string()),
     };
     let mut shots = entries
         .into_iter()
         .filter(|entry| entry.kind == EntryKind::File && entry.name.ends_with(".png"))
         .collect::<Vec<_>>();
     shots.sort_by(|a, b| b.name.cmp(&a.name));
+    if shots.is_empty() && !json {
+        // Nothing to copy, so a destination is not created either.
+        println!(
+            "no screenshots in terminal {face}'s home ({})",
+            vkore_volume::SCREENSHOTS
+        );
+        return Ok(());
+    }
     let mut rows = Vec::new();
     for shot in &shots {
         let path = folder.join(&shot.name).map_err(|error| error.to_string())?;

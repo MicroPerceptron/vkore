@@ -44,7 +44,8 @@ disk. `vkore machine run` takes `--display window|headless|vnc=SOCKET`,
 `--until kernel|shell|ready`, `--timeout`, `--screenshot` (press PrintScreen at
 `--until`), `--screendump PATH`, `--stop-after SECONDS`, `--grace SECONDS` and
 `--json` (events as JSON lines). `vkore volume DISK shots` lists Kore's
-captures newest first with their record; `--get DIR` copies them out.
+captures newest first with their record; `--get DIR` copies them out, creating
+`DIR` if it does not exist (`get` does the same for its destination).
 
 A volume command refuses a disk a running machine holds; stop the machine
 first.

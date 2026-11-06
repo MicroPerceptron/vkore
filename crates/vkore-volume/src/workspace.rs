@@ -447,7 +447,7 @@ pub fn collect(disk: &Disk, manifest: &Manifest, scratch: &Path) -> Result<Chang
     let walked = match browser.walk(&root) {
         Ok(walked) => walked,
         // The machine removed the project's directory itself.
-        Err(Error::Volume(kore_host::volume::VolError::NotFound(_))) => Vec::new(),
+        Err(error) if error.is_not_found() => Vec::new(),
         Err(error) => return Err(error),
     };
     let mut files = BTreeSet::new();

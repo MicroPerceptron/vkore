@@ -201,6 +201,52 @@ fn an_export_writes_inside_its_destination_and_never_over_what_is_there_unasked(
 }
 
 #[test]
+fn an_export_creates_its_destination_only_for_something_to_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let disk = formatted(dir.path());
+    let source = dir.path().join("src");
+    tree(&source, &[("shot.png", b"\x89PNG not really")]);
+    disk.install(&source, &home("pictures"), false).unwrap();
+    let browser = Browser::open(&disk).unwrap();
+
+    // A path that names nothing leaves the host as it was.
+    assert!(
+        browser
+            .export(
+                &home("pictures/none.png"),
+                &dir.path().join("missing/below"),
+                ExportOptions::default(),
+            )
+            .is_err()
+    );
+    assert!(!dir.path().join("missing").exists());
+
+    // A destination that does not exist yet is created, parents and all.
+    let out = dir.path().join("kore/screenshots");
+    let file = browser
+        .export(&home("pictures/shot.png"), &out, ExportOptions::default())
+        .unwrap();
+    assert_eq!((file.files, file.bytes), (1, 15));
+    assert_eq!(
+        fs::read(out.join("shot.png")).unwrap(),
+        b"\x89PNG not really"
+    );
+
+    // A destination that is a file is refused, and left as it was.
+    let occupied = dir.path().join("occupied");
+    fs::write(&occupied, b"kept").unwrap();
+    assert!(matches!(
+        browser.export(
+            &home("pictures/shot.png"),
+            &occupied,
+            ExportOptions::default()
+        ),
+        Err(Error::Host { .. })
+    ));
+    assert_eq!(fs::read(&occupied).unwrap(), b"kept");
+}
+
+#[test]
 fn a_project_round_trips_through_a_terminal_s_home() {
     let dir = tempfile::tempdir().unwrap();
     let disk = Disk::create_image(dir.path().join("disk.raw"), 64 * MIB).unwrap();

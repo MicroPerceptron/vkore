@@ -49,6 +49,11 @@ impl Error {
     pub fn is_blank(&self) -> bool {
         matches!(self, Self::Volume(VolError::Blank))
     }
+
+    /// Whether the engine found nothing at the path asked for.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Volume(VolError::NotFound(_)))
+    }
 }
 
 impl fmt::Display for Error {

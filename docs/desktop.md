@@ -30,8 +30,8 @@ makes.
 - **Open** copies the file to a private directory (`$XDG_RUNTIME_DIR`, mode
   0700) and hands it to the host's viewer (`xdg-open`, or `open` on macOS).
 - **Save** copies the selected file, or the directory you are in, into the host
-  folder in the field (your Downloads folder by default). It never replaces a
-  file there.
+  folder in the field (your Downloads folder by default), creating the folder
+  if it does not exist. It never replaces a file there.
 - **Import** installs a host file or directory into the directory you are in,
   inside a terminal's home. It is one publication: the volume has all of it
   or none of it.

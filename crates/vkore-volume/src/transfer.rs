@@ -107,6 +107,11 @@ impl Browser {
     /// into the host directory `destination` under its own name (a home
     /// exports as `face-N`, the root as `volume`), and answer what was
     /// written.
+    ///
+    /// `destination` is the host path its caller named. When it does not
+    /// exist yet it is created with any missing parents, as `mkdir -p`
+    /// would, but only once `source` has been found: a path that names
+    /// nothing leaves the host as it was.
     pub fn export(
         &self,
         source: &VolPath,
@@ -119,13 +124,15 @@ impl Browser {
             (None, crate::Place::Root) => "volume".to_owned(),
         };
         check_name(&name)?;
+        let listing = self.list(source)?;
+        std::fs::create_dir_all(destination).map_err(|error| Error::host(destination, error))?;
         let into = Dir::open_ambient_dir(destination, ambient_authority())
             .map_err(|error| Error::host(destination, error))?;
         let mut exported = Exported {
             destination: destination.join(&name),
             ..Exported::default()
         };
-        match self.list(source)? {
+        match listing {
             Listing::File { len } => {
                 exported.bytes =
                     self.export_file(source, len, &into, &name, destination, options)?;

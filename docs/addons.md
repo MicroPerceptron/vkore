@@ -1,5 +1,10 @@
 # vKore add-ons
 
+> **Status.** This service is retained from vKore's first architecture, whose
+> guest path was HostLink. HostLink is retired until a host-guest channel lands
+> on Kore's main line (see [MIGRATION.md](../MIGRATION.md)); until then the
+> host side is exercised by its own tests, and nothing here reaches a guest.
+
 An add-on is a separately packaged collection of typed tools. Installing or
 registering one makes it visible to the vKore product; it does not grant an AI
 agent permission to invoke it.

@@ -1,230 +1,248 @@
 # vKore
 
-vKore is the open-source host control plane for running
-[Kore](https://github.com/MicroPerceptron/kore) as a local, project-oriented
-agent system.
+vKore is the open-source host side of [Kore](https://github.com/MicroPerceptron/kore),
+Micro Perceptron's capability-backed kernel for on-device AI. It boots a Kore
+ISO under QEMU on the same machine topology Kore's own production gate boots,
+follows the boot by what Kore itself reports, and reads and writes Kore's
+DagFS volumes from the host through Kore's own filesystem engine, the one the
+kernel mounts, reached through [libkore](https://github.com/MicroPerceptron/libkore),
+Kore's public API. There is no second implementation of anything Kore owns.
 
-It owns the desktop experience and the host-side runtime: projects, VM and
-llama.cpp supervision, HostLink transport, capability-rooted workspace access,
-approvals, add-ons, packages, transcripts, and diagnostics. Kore remains the
-authority-bearing guest. A host path, model response, tool name, or UI event is
-never authority by itself.
+It comes as a desktop app (`vkore-ui`) and a command line (`vkore`).
 
-## What is here
+**Status: alpha.** Verified against production x86 ISOs of Kore v0.40.0 and of
+Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
+[what is and is not verified](#what-is-verified).
 
-- **Native project UI.** Create and persist projects, select a workspace and
-  access mode, configure inference and resource ceilings, chat with an agent,
-  inspect the agent/filesystem topology, review approvals, and open the
-  append-only transcript.
-- **Interactive runtime.** `vkore-harnessd` exposes the same loopback-only,
-  versioned API to the desktop UI, the headless client, integration tests, and
-  other local clients.
-- **Kore guest bridge.** A supervised QEMU guest receives prompt-scoped intent
-  through HostLink. vKore waits for guest-side agent teardown before completing
-  a prompt and retires its inference state when the route closes.
-- **Local inference.** One caller-supplied llama.cpp server can continuously
-  batch bounded broker and worker slots. A deterministic backend exercises the
-  protocol without downloading a model or starting a VM.
-- **Scoped workspaces.** Host directories are opened as capabilities, imported
-  into Kore, and optionally written back through exact, bounded change sets.
-- **Product security services.** The workspace contains authenticated approval
-  and revocation policy, capability-scoped host/guest/split add-ons, signed
-  content-addressed package management, rollback, and audit records.
+## What it does today
 
-The repository is under active development. The deterministic backend is a
-security and UI test oracle; it is not a substitute for a booted Kore guest.
+- **Machines.** `vkore machine create` records a machine for an ISO;
+  `vkore machine run` probes the host's QEMU, firmware and acceleration, checks
+  the ISO (SHA-256, the paging mode its bootloader asks for), boots it, and
+  reports the boot's stages from Kore's own console markers: kernel, shell,
+  ready, degraded, failed. It stops the machine with the power button, and ends
+  QEMU after a grace period if the guest does not power off.
+- **Volumes.** A machine's disk, any raw Kore disk image, or a disk's block
+  device (Linux) can be listed, previewed, copied out, and written into, from
+  the host, while no machine runs on it. Writes go through Kore's
+  all-or-nothing publication: a volume is either as it was or carries the whole
+  change, never part of one.
+- **Screenshots.** Kore's PrintScreen saves a PNG stamped with the build, the
+  time and the screen it captured into `pictures/screenshots` in terminal 0's
+  home. vKore makes sure that folder exists before each boot, and lists, previews
+  and exports the captures with their record.
+- **Projects.** A host directory can be staged into a terminal's home at every
+  boot; after the machine stops, `vkore machine changes` shows what the guest
+  changed and `vkore machine apply` writes it back, within explicit file and
+  byte bounds.
 
-## Runtime shape
+## Quick start (Linux)
+
+You need a Kore x86_64 ISO, `qemu-system-x86_64` (8.2 or newer) with OVMF
+(`ovmf` on Debian and Ubuntu), and the Rust toolchain pinned in
+[rust-toolchain.toml](rust-toolchain.toml); `rustup` installs it on first build.
+
+```sh
+cargo build --release -p vkored -p vkore-ui
+```
+
+Create a machine and boot it until Kore reports ready, then save a screenshot
+and stop:
+
+```sh
+target/release/vkore machine create demo --iso /path/to/kore-x86-release.iso
+```
+
+```sh
+target/release/vkore machine run demo --display headless --screenshot --stop-after 15
+```
+
+Kore writes a capture a few seconds after the press (under TCG, up to ten), and
+a stop does not wait for one still being written: hence the 15 s.
+
+Copy the captures out, with their record (the folder is created if it does not
+exist):
+
+```sh
+target/release/vkore volume @demo shots --get ~/Pictures/kore
+```
+
+Or open the desktop on that machine's disk:
+
+```sh
+target/release/vkore-ui --open @demo
+```
+
+`--display window` (the default) gives the guest QEMU's own window, so you can
+use Kore and press PrintScreen yourself. A stop presses the machine's ACPI
+power button, and Kore powers itself off the way `pwctl shutdown` does: its
+services asked to quiesce, its runtime torn down, then ACPI S5, in well under a
+second. Kore up to v0.40.0 reads and writes the power-management registers a
+byte at a time, which QEMU's chipset does not decode, so it never hears the
+button; there a stop ends QEMU after `--grace` seconds (10 by default) and the
+volume keeps its last committed state. Kore's main fixes that at `7074bda2`.
+Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
+(or `--state`).
+
+## The desktop
+
+`vkore-ui` has two pages.
+
+- **Volumes** opens a machine's disk (`@name`), an image, or a block device and
+  lands in terminal 0's screenshots. Terminal homes and the volume root are one
+  click away; a screenshot shows its size and Kore's capture record (build,
+  time, mode, screen, region, uptime); text shows its first 32 KiB. **Open**
+  hands a file to the host's own viewer, **Save** copies it out (never over an
+  existing file), **Import** installs a host file or folder into the open
+  directory, and **Remove** asks twice.
+- **Machines** creates machines from an ISO, starts them in a window or
+  headless, follows their boot, and stops them. Starting a machine whose disk
+  the Volumes page holds closes the browser first and reopens it when the
+  machine stops, so what you captured is what you see next.
+
+The desktop draws with [Iced](https://iced.rs) over Axiom, Micro Perceptron's
+software renderer; there is no browser, daemon or login. Every string that
+comes from outside the binary (a file name a guest wrote, a log, a host path)
+is set so that it cannot break the frame or pass for something it is not:
+characters the bundled faces cannot draw, controls, direction overrides and
+invisible characters show as `\u{…}` escapes. A file a guest named `gnp.exe`
+behind a right-to-left override shows as `\u{202e}gnp.exe`, not `exe.png`.
+
+See [docs/desktop.md](docs/desktop.md).
+
+## How it fits together
 
 ```text
-native vkore-ui / headless `vkore chat`
-                    |
-          loopback harness API
-                    |
-             vkore-harnessd
-              /     |      \
-     QEMU + Kore  llama.cpp  host services
-          |                     |
-       HostLink          workspace / policy /
-                         add-ons / packages
+   vkore-ui (desktop)        vkore (CLI)
+            \                  /
+             vkored: machines, their state, boot sessions, transcripts
+            /                  \
+   vkore-vm                     vkore-volume
+   QEMU: probe, gate topology,  DagFS from the host: browse, preview,
+   firmware, ISO, QMP,          export, install, project staging
+   readiness from Kore's            |
+   own console markers          kore-host (libkore)
+            |                       |
+     qemu-system-x86_64         kore-vol + kore-svc-dagfs: Kore's own
+            |                   volume procedure and filesystem engine
+       Kore guest  ─── disk ───┘
 ```
 
-## Key crates
+What vKore relies on from Kore, and the exact revisions it was verified
+against, are in [docs/compatibility.md](docs/compatibility.md).
 
-- `vkore-addon-sdk`: capability-scoped host, guest, and split tool contracts and runtime.
-- `vkore-git-addon`: exact-repository Git status, diff, history, staging, and commit tools.
-- `vkore-gmail-addon`: Gmail search, read, draft, send, and trash tools using vKore's
-  credential-brokered HTTPS boundary.
-- `vkore-reference-addon`: reference out-of-process host tool and Kore guest tool manifest.
-- `vkore-policy`: authenticated approvals, standing policies, revocation, and audit history.
-- `vkore-packages`: signed, content-addressed artifacts, updates, compatibility, and rollback.
-- `vkored` interactive binaries: loopback harness server and headless `vkore chat` client.
+## Integrity and security
 
-The native UI is rendered directly with Iced and Axiom. It does not embed a
-browser or require a login, token, or browser session. Only validated public
-assistant text appears as chat output; model fragments, validation envelopes,
-and raw protocol records remain in the audit transcript.
+- **Kore's engine, or nothing.** vKore never parses or writes DagFS bytes
+  itself. Locating, recovering, publishing and verifying a volume is Kore's
+  procedure, exported unmodified through libkore (`native/` there is a
+  byte-exact export with provenance).
+- **One owner per disk.** A volume is offline: vKore refuses a disk a running
+  machine holds (Kore's image lock), and within one process a disk has one
+  opener at a time.
+- **Exports stay where they are sent.** Copies out are created inside the
+  destination with no symlink followed, written to a partial file, synced, and
+  only then published under their name, never over an existing file unless
+  asked.
+- **Bounded by construction.** Previews read at most a file's head (a PNG's
+  record precedes its pixels, so none are decoded), the PNG decoder's
+  allocations are capped, project staging and write-back carry file and byte
+  limits, and QMP lines are bounded.
+- **Probe, don't guess.** QEMU's devices and properties, firmware descriptors,
+  acceleration and the ISO's paging mode are read from the host and the medium.
+  What Kore or QEMU cannot take is refused before a machine starts, in words.
 
-## Try the harness locally
+## What is verified
 
-The deterministic runtime is the shortest contributor path. It needs no Kore
-image, QEMU installation, llama.cpp binary, or model.
+On Linux x86_64 in a container (QEMU 8.2.2, TCG, no KVM), with the engine
+libkore exports from Kore's main at `7074bda2`:
 
-Start the harness:
+- A production ISO built from Kore's main at `7074bda2`: `vkore machine run`
+  boots it to ready (19/19 services, `first-shell: ready`, 45/45 apps seeded,
+  homes present), presses PrintScreen, and stops it gracefully: Kore hears the
+  power button and powers off through its own shutdown path, 0.35 s after the
+  press. `vkore volume @NAME shots --get` copies out the capture, stamped with
+  the build that took it and byte-identical to the volume's copy.
+- A production Kore v0.40.0 ISO: the same run to ready (44/44 apps), and its
+  capture copied out; a stop ends QEMU after the grace period.
+- A disk v0.40.0 formatted and wrote, booted by the `7074bda2` ISO: ready, with
+  the captures of both builds read back side by side.
+- A GPT disk on a loop device with Kore's user and system partitions: an
+  install through the partition node, exports byte-identical through both the
+  partition and the whole-disk node, and nothing outside the user partition
+  changed.
+- The desktop under Xvfb: browsing a machine's disk, previewing a capture and
+  its record, saving it out byte-identical, and starting, following and
+  stopping the machine.
+- A physical machine with Kore and Ubuntu on one NVMe disk, booted into
+  Ubuntu: the desktop opened Kore's user volume through the disk's node,
+  previewed a 2880×1800 capture's record and saved it out.
+- `cargo test --workspace`, including Kore's volume engine end to end on real
+  images, and the opt-in host test that boots each ISO through `vkore-vm`.
 
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state C:\path\outside\your\workspace\vkore-state
-```
+Not verified yet: KVM or HVF acceleration, writing to a physical disk, macOS
+(`vkore-vm` supports HVF; nothing here has run it), and AMD hosts.
 
-In another terminal, start the native client:
+## Workspace
 
-```powershell
-cargo run --release -p vkore-ui -- --server 127.0.0.1:8787
-```
-
-Keep the state directory outside any workspace you plan to open. Create a
-project in the setup wizard and choose a narrow workspace directory. For an
-existing project, open it directly with `--project PROJECT_ID`.
-
-You can also use the terminal client against the same harness:
-
-```powershell
-cargo run -p vkored --bin vkore -- chat `
-  --server 127.0.0.1:8787 `
-  --project PROJECT_ID
-```
-
-## Run the full Windows + WSL stack
-
-The paved development workflow runs the native Windows UI while the harness,
-QEMU, Kore, and llama.cpp stay in WSL:
-
-```powershell
-.\vkore-axiom.cmd --check
-.\vkore-axiom.cmd
-```
-
-From WSL, use `./vkore-axiom`. The launcher expects the matching Kore checkout
-and prebuilt ISO, verifies their pinned commit and SHA-256, builds vKore, starts
-or reuses the loopback harness, and opens the requested persisted project. It
-never rebuilds Kore or silently substitutes an image. Override the conventional
-paths and project with `--kore-root`, `--state`, and `--project`.
-
-For a terminal-only end-to-end run with timestamped evidence:
-
-```powershell
-.\vkore-axiom.cmd --debug --prompt "hello" --timeout-seconds 300
-```
-
-Debug runs retain the launcher and harness logs, raw API events, process
-samples, project and launch manifests, and QEMU serial/debug output below
-`~/.local/state/vkore-chat/diagnostics`. Processes started by the launcher are
-stopped when the run finishes.
-
-See [the project UI guide](docs/project-ui.md) for launcher prerequisites,
-project settings, real inference, VM lifecycle, and diagnostics.
-
-## Bring your own llama.cpp runtime
-
-The harness never downloads or guesses a model. Supply both artifacts:
-
-```powershell
-cargo run -p vkored --bin vkore-harnessd -- `
-  --state C:\path\to\vkore-state `
-  --llama-server C:\path\to\llama-server.exe `
-  --llama-model C:\path\to\model.gguf
-```
-
-Repeated `--llama-arg` values pass backend-specific options. Project
-configuration records the selected Kore image, runtime, model, context/output
-limits, threads, slots, VM resources, workspace mode, add-ons, approvals, and
-retention preferences.
-
-## Security boundary
-
-vKore deliberately separates convenient host configuration from authority:
-
-- Project paths and enabled add-ons are ceilings, not live agent grants.
-- Every prompt is bound to its project, session, generation, prompt ID,
-  idempotency key, and exact text.
-- The server refuses non-loopback binds. Browser-originated mutations also
-  require the exact local origin and native-client header.
-- A real Kore session creates generation-bound agent routes and capability
-  grants, then revokes them before the next prompt is admitted.
-- Workspace scans are bounded, do not follow symlinks, and warn about broad or
-  credential-bearing roots. Writeback requires explicit byte and file limits.
-- Add-on installation does not grant invocation authority. Tool calls are
-  checked against the exact package, generation, prompt, arguments, resource
-  scope, mediation, expiration, call budget, replay state, and revocation state.
-- llama.cpp receives model inputs and bounded sequence state, never guest
-  capabilities, host descriptors, or ambient tool execution.
-
-The division of responsibility is intentional: Kore owns capability lineage,
-guest routes, agent founding, budgets, executable/filesystem grants, and guest
-security gates; vKore owns host lifecycle, selected resource adapters, product
-UX, supervision, and auditability.
-
-## Workspace layout
-
-| Package | Responsibility |
+| Package | What it owns |
 | --- | --- |
-| `vkored` | HostLink endpoint, bounded inference registry, daemon, interactive harness, transcripts, and CLI |
-| `vkore-ui` | Native Iced + Axiom project, chat, approval, agent, and filesystem UI |
-| `vkore-vm` | QEMU process lifecycle, QMP pause/resume, and exact HostLink device topology |
-| `vkore-workspace` | Root-confined snapshots, live ranges, image import, diff, and bounded writeback |
-| `vkore-addon-sdk` | Typed host, guest, and split tool manifests plus capability validation/runtime |
-| `vkore-reference-addon` | Reference out-of-process host tool and Kore guest-tool descriptor |
-| `vkore-policy` | Authenticated approvals, standing policy, revocation, and tamper-evident audit state |
-| `vkore-packages` | Signed artifact install, compatibility checks, activation, offline bundles, and rollback |
-| `vkore-hostlink-ab` | Reproducible serial-versus-ivshmem HostLink measurement runner |
-| `iced-renderer-compat` | Internal type bridge that keeps the native client off unused renderer backends |
+| `vkored` | Machines and their state, boot sessions and transcripts, the `vkore` CLI |
+| `vkore-vm` | QEMU: host probing, Kore's gate topology, firmware, ISO inspection, QMP, readiness |
+| `vkore-volume` | DagFS volumes from the host over `kore-host`: browse, preview, export, install, project staging |
+| `vkore-ui` | The desktop: Volumes and Machines, Iced over Axiom |
+| `vkore-policy` | Authenticated approvals, standing policy, revocation, tamper-evident audit |
+| `vkore-packages` | Signed, content-addressed artifacts, compatibility checks, rollback |
+| `vkore-addon-sdk` | Capability-scoped host, guest and split tool contracts |
+| `vkore-git-addon`, `vkore-gmail-addon`, `vkore-reference-addon` | Add-ons over the SDK |
+| `iced-renderer-compat` | Keeps the desktop off renderer backends it does not use |
 
-Shared HostLink, workspace, block, and guest-filesystem contracts remain
-Kore-owned dependencies. This workspace pins them to the exact Kore revision in
-[Cargo.toml](Cargo.toml) instead of maintaining duplicate wire definitions.
+The policy, package and add-on services are retained from vKore's first
+architecture. Their guest path was HostLink, a host-guest channel that never
+landed on Kore's main line and has been retired here; they return to the
+guest when a channel does. See [MIGRATION.md](MIGRATION.md).
 
 ## Build and test
 
-The repository pins `nightly-2026-07-13` in
-[rust-toolchain.toml](rust-toolchain.toml). Kore is currently private, so Cargo
-uses the authenticated Git CLI to fetch the pinned shared-contract crates.
-
-```powershell
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+```sh
 cargo fmt --all -- --check
 ```
 
-The real llama.cpp smoke test is opt-in and uses caller-owned artifacts:
-
 ```sh
-KORE_LLAMA_SERVER=/path/to/llama-server \
-KORE_LLAMA_MODEL=/path/to/model.gguf \
-cargo test -p vkored --test llama_backend \
-  real_llama_server_runs_generic_broker_and_agents_on_one_continuously_batched_model \
-  -- --ignored --exact --nocapture
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Two cross-repository gates are available under `scripts/`:
+```sh
+cargo test --workspace
+```
 
-- `kore-interactive-gate.sh` creates a project through the harness API, boots
-  Kore, submits a prompt, and requires the capability-scoped guest tool result
-  and teardown events to return through HostLink.
-- `kore-qemu-gate.sh` preserves the earlier deterministic PR #722 isolation and
-  stale-generation witness against its original pinned Kore revision.
+The boot test is opt-in and uses your own QEMU and ISO:
 
-Use a dedicated matching Kore worktree for either gate. The interactive path is
-the current end-to-end product gate.
+```sh
+VKORE_TEST_QEMU=$(command -v qemu-system-x86_64) VKORE_TEST_ISO=/path/to/kore-x86-release.iso \
+  cargo test -p vkore-vm --test host -- --nocapture
+```
+
+The desktop depends on Axiom, which is not public yet; Cargo fetches it with
+your Git credentials (see [.cargo/config.toml](.cargo/config.toml)). Every
+other crate builds from public sources.
+
+## How we work
+
+vKore follows the doctrine Kore and libkore follow: precedent is evidence, not
+authority; take proven work as a dependency rather than re-earning it; one
+narrow goal at a time, accepted only on a real Kore boot; and quality (correct,
+secure, efficient, fast) is the product, not a pass after it. The working
+rules are in [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
-- [Project and native harness UI](docs/project-ui.md)
-- [Interactive harness API](docs/harness-api.md)
+- [The desktop](docs/desktop.md)
+- [Compatibility: Kore, libkore, QEMU and the guest contract](docs/compatibility.md)
+- [Migration: from HostLink to libkore](MIGRATION.md)
 - [Approval and standing-policy model](docs/policy.md)
 - [Add-on SDK and execution domains](docs/addons.md)
-- [Package installation, updates, and rollback](docs/packages.md)
-- [Extraction inventory and compatibility contract](MIGRATION.md)
+- [Package installation, updates and rollback](docs/packages.md)
 
 vKore is licensed under the [Mozilla Public License 2.0](LICENSE). See
-[NOTICE.md](NOTICE.md) for attribution and repository-boundary notes.
+[NOTICE.md](NOTICE.md) for attribution.

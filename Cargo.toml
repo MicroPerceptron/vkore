@@ -7,11 +7,10 @@ members = [
     "crates/vkore-policy",
     "crates/vkore-packages",
     "crates/vkored",
-    "crates/vkore-hostlink-ab",
     "crates/iced-renderer-compat",
     "crates/vkore-ui",
     "crates/vkore-vm",
-    "crates/vkore-workspace",
+    "crates/vkore-volume",
 ]
 resolver = "3"
 
@@ -21,16 +20,13 @@ license = "MPL-2.0"
 repository = "https://github.com/MicroPerceptron/vkore"
 rust-version = "1.97"
 
-# PR #722 is the integration source for the initial extraction. These shared
-# crates remain Kore-owned wire/guest contracts; vKore consumes one exact
-# revision instead of copying protocol definitions into the host repository.
+# Kore reaches vKore only through libkore, Kore's public API: `kore-host` is
+# the exported filesystem row's own engine (the `kore-vol` procedure), never a
+# second copy of it. The pinned revision's `native/provenance.json` names the
+# Kore revision whose DagFS format vKore reads and writes (docs/compatibility.md).
 [workspace.dependencies]
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
-kore-block = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-hostlink = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-hostlink-shmem = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-svc-fs = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
-kore-workspace-sync = { git = "https://github.com/MicroPerceptron/kore.git", rev = "cccf76da11fa397242c587817ec975dce529f40e" }
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
+kore-host = { git = "https://github.com/MicroPerceptron/libkore", rev = "3aac3b5ce4870421581ffa9b8abc0837c63d2c41" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

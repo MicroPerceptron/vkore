@@ -1,40 +1,33 @@
 [package]
 name = "vkored"
-version = "0.0.0"
-edition = "2024"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
-license = "MPL-2.0"
-description = "Host control-plane daemon for Kore guests."
+description = "vKore's runtime: Kore machines and their volumes on a Linux or macOS host, and the `vkore` command."
 
 [dependencies]
-blake3 = { version = "=1.8.6", default-features = false, features = ["pure"] }
-httparse = { version = "=1.10.1", default-features = false, features = ["std"] }
-kore-hostlink.workspace = true
-kore-hostlink-shmem.workspace = true
-kore-workspace-sync.workspace = true
-memmap2 = "=0.9.11"
+serde.workspace = true
+serde_json.workspace = true
 vkore-vm = { path = "../vkore-vm" }
-workspacectl = { package = "vkore-workspace", path = "../vkore-workspace" }
-vkore-addon-sdk = { path = "../vkore-addon-sdk" }
-vkore-policy = { path = "../vkore-policy" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+vkore-volume = { path = "../vkore-volume" }
+clap = { version = "4.6.7", features = ["derive"] }
+# Ctrl-C asks the guest to stop rather than killing QEMU under it.
+ctrlc = "3.5.2"
+
+[dev-dependencies]
 tempfile = "3.23.0"
-tiny_http = "0.12"
-zerocopy = { version = "0.8", default-features = false }
 
 [lib]
-name = "hostlinkd"
-path = "src/lib.rs"
-
-[[bin]]
 name = "vkored"
-path = "src/main.rs"
-
-[[bin]]
-name = "vkore-harnessd"
-path = "src/bin/harnessd.rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "vkore"
 path = "src/bin/vkore.rs"
+
+[lints]
+workspace = true

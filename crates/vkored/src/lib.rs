@@ -1,49 +1,22 @@
-//! Bounded host endpoint and conformance harness for HostLink v1.
+//! vKore's runtime: Kore machines on a Linux or macOS host, their volumes,
+//! and the projects staged into them.
+//!
+//! - [`config`] keeps each machine's configuration under vKore's state
+//!   directory, written whole by one rename.
+//! - [`run`] boots a machine: preflight (firmware, QEMU's capabilities, the
+//!   ISO's paging mode and digest, the disk), stages its project into a
+//!   terminal's home, follows the boot to readiness, stops it, and collects
+//!   and applies what the machine changed under the project's bounds.
+//!
+//! The ISO is always the caller's: vKore never builds or fetches Kore, and
+//! records the SHA-256 of every image it boots.
 
-pub mod approval;
-pub mod backend;
-pub mod bulk;
-pub mod daemon;
-pub mod harness;
-#[cfg(unix)]
-pub mod hybrid;
-pub mod interactive;
-pub mod ivshmem;
-pub mod kore_runtime;
-pub mod llama;
-pub mod project;
-pub mod protocol;
-pub mod ui;
-pub mod workspace;
+#![cfg(unix)]
 
-pub use vkore_vm as qemu;
+pub mod config;
+pub mod run;
+pub mod state;
 
-pub use approval::UiApprovalService;
-pub use backend::{
-    BackendError, BackendEvent, BackendFailure, BackendLimits, BackendMetrics, BackendRole,
-    DeterministicBackend, InferenceBackend, InferenceObservation, ObservationKind, RequestUsage,
-    SequenceIdentity, SequenceMetrics,
-};
-pub use daemon::{
-    AuthorityObservation, BenchmarkEvent, BenchmarkSink, Config, DaemonError, HostLinkDaemon,
-    Metrics, TcpConfig,
-};
-#[cfg(unix)]
-pub use hybrid::{HybridError, HybridHostLink, HybridMetrics};
-pub use interactive::{
-    BackendHarness, CreateSession, DeterministicGuest, EventKind, HarnessEvent, HarnessHandle,
-    HarnessHttpServer, HarnessService, PromptRequest, PromptStatus, SessionState, SessionStatus,
-    TaskRuntime,
-};
-pub use ivshmem::{
-    IVSHMEM_BACKING_BYTES, IvshmemBulkHost, IvshmemError, IvshmemMetrics, frozen_layout,
-};
-pub use kore_runtime::{KoreVmRuntime, KoreVmRuntimeConfig};
-pub use llama::{LlamaServerBackend, LlamaServerConfig, LlamaServerError};
-pub use project::{
-    AddonSelection, ApprovalProfile, InferenceConfig, ProjectConfig, ProjectError, ProjectStore,
-    ResourceLimits, RetentionConfig, RuntimeBackend, WorkspaceAccess, WorkspaceConfig,
-    WorkspacePreflight,
-};
-pub use ui::{LiveUi, LiveUiError};
-pub use workspace::{WorkspaceBackend, WorkspaceBackendError};
+pub use config::{MachineConfig, MachineStore, StoreError, WorkspaceConfig, Writeback};
+pub use run::{Event, Preflight, RunError, Session};
+pub use state::State;

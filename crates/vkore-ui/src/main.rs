@@ -365,9 +365,13 @@ impl App {
         if !geometry_errors.is_empty() {
             return Err(format!("unsupported geometry request: {geometry_errors:?}"));
         }
-        // The frame names its coverage masks by identity; hand the bytes over
-        // before it is rendered.
-        self.backend.set_masks(self.renderer.take_images());
+        let image_errors = self.renderer.take_image_errors();
+        if !image_errors.is_empty() {
+            return Err(format!("unsupported image request: {image_errors:?}"));
+        }
+        // The frame names its masks and images by identity; hand their bytes
+        // over before it is rendered.
+        self.backend.set_images(self.renderer.take_images());
         axgfx::frame_requirements(frame.view())
             .map_err(|error| format!("axgfx rejected the display list: {error:?}"))?;
         if !self.backend.begin_frame(&frame) {
@@ -548,8 +552,8 @@ fn main() {
             eprintln!("vkore-ui: no state directory: set $HOME or pass --state");
             std::process::exit(2);
         });
-    // Before any renderer exists: registering the faces also confines shaping
-    // to the faces Axiom can draw.
+    // Before the first frame, so that frame already shapes in our faces. Axiom
+    // keeps shaping to the faces it can draw; registering adds ours to them.
     if let Err(error) = fonts::register() {
         eprintln!("vkore-ui: the bundled faces did not register: {error:?}");
         std::process::exit(2);
@@ -818,14 +822,14 @@ mod tests {
         let extent = Extent2d::new(1280, 800).unwrap();
 
         let mut kernels = NativeBackend::new().unwrap();
-        kernels.set_masks(masks.clone());
+        kernels.set_images(masks.clone());
         assert!(kernels.begin_frame(&frame));
         let mut drawn = vec![0u32; 1280 * 800];
         kernels
             .render_changed(&frame, &mut drawn, extent, 1280)
             .unwrap();
         let mut reference = NativeBackend::reference_for_measurement().unwrap();
-        reference.set_masks(masks);
+        reference.set_images(masks);
         let mut expected = vec![0u32; 1280 * 800];
         reference
             .render_changed(&frame, &mut expected, extent, 1280)

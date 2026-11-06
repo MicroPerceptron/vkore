@@ -50,8 +50,9 @@ four. Missing one is missing the goal.
 - QMP commands carry ids; a late reply is dropped, never taken for the next one.
 - In the desktop, text from outside the binary goes through `widgets::data` (or
   `fonts::shown`): it shapes in one registered face, escapes what that face
-  cannot draw, and shows controls and invisible characters. Shaping is confined
-  to the bundled faces (`fonts::register`), so a host font can never stand in.
+  cannot draw, and shows controls and invisible characters. Axiom confines
+  shaping to the faces it can draw -- its DM Sans and the faces
+  `fonts::register` registers -- so a host font can never stand in.
   The render tests (no text refusals, shared kernels equal to the scalar
   reference) stay green.
 

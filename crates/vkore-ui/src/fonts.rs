@@ -3,13 +3,13 @@
 //! The design uses four faces: Archivo 600 for display, Space Grotesk 400 for
 //! body, and JetBrains Mono at 400 and 500 for machine-shaped strings and
 //! uppercase labels. They are registered once at startup so shaping can select
-//! them and the backend can install their coverage resources, and they are the
-//! only faces shaping may select: see [`register`].
+//! them and the backend can install their coverage resources. Axiom confines
+//! shaping to the faces it can draw -- its bundled DM Sans and these -- so no
+//! host face is ever selected in their place: see [`register`].
 
 use crate::theme;
 use axui_core::ResourceId;
 use iced_core::{Font, font};
-use iced_graphics::text::cosmic_text::fontdb;
 use std::{borrow::Cow, sync::OnceLock};
 
 /// The registered resource identities, in registration order.
@@ -25,25 +25,26 @@ pub struct Faces {
     pub mono_label: ResourceId,
 }
 
-/// Registers every MONOLITH face, confines shaping to the faces Axiom can
-/// draw, and returns their display-list identities.
+/// Registers every MONOLITH face and returns their display-list identities.
 ///
 /// Registration is idempotent, so calling this more than once in a process is
-/// harmless and returns the same identities. Call it before the first renderer
-/// is built: a renderer, or a paragraph, made earlier may already hold a host
-/// face that confinement removes.
+/// harmless and returns the same identities. Axiom keeps its shared font
+/// system to the faces it can draw, so a family name resolves to our bytes
+/// even on a host with its own copy of the family -- JetBrains Mono is one
+/// package away on Ubuntu -- and glyph fallback moves only between Axiom's
+/// faces and ours. Call it before the first frame, so that frame already
+/// shapes in these faces; text shaped earlier shapes again at its next layout.
 pub fn register() -> Result<Faces, axui_iced::TextError> {
-    let faces = Faces {
+    Ok(Faces {
         display: axui_iced::register_font(theme::DISPLAY_BYTES)?,
         body: axui_iced::register_font(theme::BODY_BYTES)?,
         mono: axui_iced::register_font(theme::MONO_BYTES)?,
         mono_label: axui_iced::register_font(theme::MONO_LABEL_BYTES)?,
-    };
-    confine();
-    Ok(faces)
+    })
 }
 
-/// The bytes of every face a frame may name: Axiom's default and ours.
+/// The bytes of every face a frame may name: Axiom's default and ours, in the
+/// order [`coverage`] indexes them.
 const DRAWABLE: [&[u8]; 5] = [
     axui_fonts::DM_SANS,
     theme::DISPLAY_BYTES,
@@ -51,46 +52,6 @@ const DRAWABLE: [&[u8]; 5] = [
     theme::MONO_BYTES,
     theme::MONO_LABEL_BYTES,
 ];
-
-/// Removes every face Axiom cannot draw from the shared font system.
-///
-/// The font system starts out holding every face installed on the host, and
-/// shaping selects by family name, preferring the face loaded first. A host
-/// with its own JetBrains Mono -- one package away on Ubuntu -- answers
-/// "JetBrains Mono" with that copy, which was never registered, and Axiom
-/// refuses the whole frame. Glyph fallback is no safer: a character our faces
-/// lack, in a file name a guest wrote or a log it kept, falls back to whichever
-/// host face covers it, and one name blanks the window. With only drawable
-/// faces left, a family resolves to our bytes, fallback moves between our faces
-/// (JetBrains Mono covers what Space Grotesk lacks), and a character none of
-/// them covers shapes as its face's missing-glyph box. The window then draws
-/// the same on every host.
-fn confine() {
-    let mut system = iced_graphics::text::font_system()
-        .write()
-        .expect("write font system");
-    let database = system.raw().db_mut();
-    let foreign: Vec<fontdb::ID> = database
-        .faces()
-        .filter(|face| !drawable(&face.source))
-        .map(|face| face.id)
-        .collect();
-    for id in foreign {
-        database.remove_face(id);
-    }
-}
-
-/// Whether `source` holds one of the [`DRAWABLE`] faces. Bytes are the only
-/// exact key: a host file may carry the same family, and even the same name.
-fn drawable(source: &fontdb::Source) -> bool {
-    match source {
-        fontdb::Source::Binary(loaded) => {
-            let loaded: &[u8] = loaded.as_ref().as_ref();
-            DRAWABLE.contains(&loaded)
-        }
-        _ => false,
-    }
-}
 
 /// What a string set from data keeps of its line structure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,10 +72,9 @@ pub enum Breaks {
 /// backslash is doubled so an escape cannot be forged. Escapes are ASCII,
 /// which every bundled face covers. So:
 ///
-/// - The paragraph shapes in `font` alone, with no fallback to another face.
-///   Axiom's recorder panics when a run of only invisible glyphs is followed
-///   by a change of face within a line, and the panic poisons the shared font
-///   system for the rest of the process; no data can lead there.
+/// - The paragraph shapes in `font` alone, with no fallback to another face:
+///   a name is set in one typeface, and a character none of our faces covers
+///   shows its code point rather than a missing-glyph box.
 /// - A name shows what it is: a right-to-left override cannot show `gnp.exe`
 ///   as `exe.png`, and a zero-width or look-alike space cannot make two names
 ///   look the same.
@@ -243,6 +203,20 @@ pub const SPLASH: Font = face(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced_graphics::text::cosmic_text::fontdb;
+
+    /// Whether `source` holds one of the [`DRAWABLE`] faces. Bytes are the
+    /// only exact key: a host file may carry the same family, and even the
+    /// same name.
+    fn drawable(source: &fontdb::Source) -> bool {
+        match source {
+            fontdb::Source::Binary(loaded) => {
+                let loaded: &[u8] = loaded.as_ref().as_ref();
+                DRAWABLE.contains(&loaded)
+            }
+            _ => false,
+        }
+    }
 
     #[test]
     fn registration_is_idempotent_and_gives_each_weight_its_own_identity() {
@@ -260,28 +234,44 @@ mod tests {
         }
     }
 
+    /// Axiom's guarantee, which the window relies on: a host face never
+    /// shapes, whatever the host has installed.
     #[test]
     fn only_drawable_faces_remain_for_shaping() {
         register().expect("faces register");
-        let mut system = iced_graphics::text::font_system()
-            .write()
-            .expect("write font system");
-        let database = system.raw().db();
-        assert!(database.faces().all(|face| drawable(&face.source)));
-        // Every MONOLITH family still resolves, to our bytes.
-        for family in [
+        let families = [
             theme::DISPLAY_FAMILY,
             theme::BODY_FAMILY,
             theme::MONO_FAMILY,
-        ] {
-            let face = database
-                .query(&fontdb::Query {
-                    families: &[fontdb::Family::Name(family)],
-                    ..fontdb::Query::default()
-                })
-                .unwrap_or_else(|| panic!("{family} resolves"));
-            let (source, _) = database.face_source(face).expect("a source");
-            assert!(drawable(&source), "{family} resolved to a host face");
+        ];
+        // Read under the shared font system's lock and judged after it is
+        // released: a failed assertion holding it would poison it for every
+        // other test in the process, and bury this failure under theirs.
+        let (foreign, resolved) = {
+            let mut system = iced_graphics::text::font_system()
+                .write()
+                .expect("write font system");
+            let database = system.raw().db();
+            let foreign: Vec<String> = database
+                .faces()
+                .filter(|face| !drawable(&face.source))
+                .map(|face| face.post_script_name.clone())
+                .collect();
+            // Every MONOLITH family still resolves, to our bytes.
+            let resolved = families.map(|family| {
+                database
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(family)],
+                        ..fontdb::Query::default()
+                    })
+                    .and_then(|face| database.face_source(face))
+                    .is_some_and(|(source, _)| drawable(&source))
+            });
+            (foreign, resolved)
+        };
+        assert_eq!(foreign, Vec::<String>::new(), "host faces remain");
+        for (family, ours) in families.into_iter().zip(resolved) {
+            assert!(ours, "{family} did not resolve to our bytes");
         }
     }
 

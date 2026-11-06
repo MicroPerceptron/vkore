@@ -60,7 +60,7 @@ pub(crate) struct NativeBackend {
     glyph_source: OpenTypeGlyphSource,
     resources: ResourceStore<System>,
     installed_fonts: Vec<ResourceRef>,
-    masks: Vec<axui_iced::PublishedImage>,
+    published: Vec<axui_iced::PublishedImage>,
     layer_scratch: LayerScratch<System>,
     accepted: Option<Frame<System>>,
     profile: RetainedProfile,
@@ -110,7 +110,7 @@ impl NativeBackend {
             glyph_source: OpenTypeGlyphSource::new()?,
             resources,
             installed_fonts,
-            masks: Vec::new(),
+            published: Vec::new(),
             layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
                 .map_err(|_| RenderError::ResourceSetup)?,
             accepted: None,
@@ -118,12 +118,14 @@ impl NativeBackend {
         })
     }
 
-    /// Accepts the coverage masks the next frame's geometry refers to.
+    /// Accepts the raster resources the next frame refers to: the coverage
+    /// masks its geometry drew and the RGBA images it drew.
     ///
     /// Each carries an identity of its own and lives exactly as long as the
-    /// frame that names it, so these replace rather than accumulate.
-    pub(crate) fn set_masks(&mut self, masks: Vec<axui_iced::PublishedImage>) {
-        self.masks = masks;
+    /// frame that names it, so these replace rather than accumulate. They are
+    /// read where they lie: an image's pixels are the application's own bytes.
+    pub(crate) fn set_images(&mut self, images: Vec<axui_iced::PublishedImage>) {
+        self.published = images;
     }
 
     /// Returns `false` only for an exact display list already made visible.
@@ -172,11 +174,14 @@ impl NativeBackend {
         {
             return Err(RenderError::UnsupportedField);
         }
-        // Every declared resource must be a face this backend installed. The
-        // first structure profile has no image path, so any image refuses.
+        // Every declared resource must be a face this backend installed or a
+        // mask or image published with the frame.
         if frame.resources().iter().any(|resource| {
             !self.installed_fonts.contains(resource)
-                && !self.masks.iter().any(|mask| mask.descriptor == *resource)
+                && !self
+                    .published
+                    .iter()
+                    .any(|image| image.descriptor == *resource)
         }) {
             return Err(RenderError::UnsupportedResource);
         }
@@ -209,7 +214,7 @@ impl NativeBackend {
                 damage,
                 &FrameResources {
                     installed: &self.resources,
-                    masks: &self.masks,
+                    published: &self.published,
                 },
                 &mut self.glyph_source,
                 &mut self.glyph_atlas,
@@ -313,10 +318,11 @@ fn render_profile(
     }
 }
 
-/// Resolves a frame's resources from the installed faces and its own masks.
+/// Resolves a frame's resources from the installed faces and the masks and
+/// images published with it.
 struct FrameResources<'a> {
     installed: &'a ResourceStore<System>,
-    masks: &'a [axui_iced::PublishedImage],
+    published: &'a [axui_iced::PublishedImage],
 }
 
 impl ResourceProvider for FrameResources<'_> {
@@ -324,12 +330,12 @@ impl ResourceProvider for FrameResources<'_> {
         if let Some(data) = self.installed.get(id, generation) {
             return Some(data);
         }
-        self.masks
+        self.published
             .iter()
-            .find(|mask| mask.descriptor.id == id && mask.descriptor.generation == generation)
-            .map(|mask| ResourceData {
-                descriptor: mask.descriptor,
-                bytes: &mask.coverage,
+            .find(|image| image.descriptor.id == id && image.descriptor.generation == generation)
+            .map(|image| ResourceData {
+                descriptor: image.descriptor,
+                bytes: &image.bytes,
             })
     }
 }
@@ -531,7 +537,7 @@ mod tests {
         let frame = renderer.take_frame().unwrap();
 
         let mut backend = NativeBackend::new().unwrap();
-        backend.set_masks(renderer.take_images());
+        backend.set_images(renderer.take_images());
         let mut pixels = [0xff0a_0a0c_u32; 32 * 32];
         backend
             .render_changed(&frame, &mut pixels, Extent2d::new(32, 32).unwrap(), 32)
@@ -566,6 +572,56 @@ mod tests {
                 .any(|pixel| inked(*pixel) && (pixel >> 16) & 0xff < 0xce),
             "expected partial coverage at the curve's edges"
         );
+    }
+
+    #[test]
+    fn an_rgba_image_rasterizes_through_the_real_backend() {
+        use iced_core::Renderer as _;
+        use iced_core::image::Renderer as _;
+
+        // Opaque red, green, and blue, and a white at half alpha.
+        let texels = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, //
+            0, 0, 255, 255, 255, 255, 255, 128,
+        ];
+        let handle = iced_core::image::Handle::from_rgba(2, 2, texels);
+        let mut renderer =
+            axui_iced::Renderer::new_in(iced_core::renderer::Settings::default(), System);
+        let bounds = iced_core::Rectangle::with_size(iced_core::Size::new(16.0, 16.0));
+        renderer.reset(bounds);
+        renderer.draw_image(
+            iced_core::image::Image::new(handle)
+                .filter_method(iced_core::image::FilterMethod::Nearest),
+            iced_core::Rectangle::new(
+                iced_core::Point::new(4.0, 4.0),
+                iced_core::Size::new(8.0, 8.0),
+            ),
+            bounds,
+        );
+        let frame = renderer.take_frame().unwrap();
+        assert_eq!(renderer.take_image_errors(), []);
+
+        let mut backend = NativeBackend::new().unwrap();
+        backend.set_images(renderer.take_images());
+        let mut pixels = [0u32; 16 * 16];
+        backend
+            .render_changed(&frame, &mut pixels, Extent2d::new(16, 16).unwrap(), 16)
+            .unwrap();
+
+        let at = |x: usize, y: usize| pixels[y * 16 + x] & 0x00ff_ffff;
+        // Each texel fills one 4x4 quarter of the 8x8 destination.
+        assert_eq!(at(5, 5), 0xff_00_00);
+        assert_eq!(at(10, 5), 0x00_ff_00);
+        assert_eq!(at(5, 10), 0x00_00_ff);
+        // Half-white over the background lands halfway between them.
+        let half = at(10, 10);
+        for shift in [16, 8, 0] {
+            let channel = (half >> shift) & 0xff;
+            assert!((0x80..=0x88).contains(&channel), "{half:06x}");
+        }
+        // Outside the image, the background is untouched.
+        assert_eq!(at(2, 2), 0x08_0a_0d);
+        assert_eq!(at(13, 13), 0x08_0a_0d);
     }
 
     #[test]

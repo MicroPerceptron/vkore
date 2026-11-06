@@ -93,7 +93,8 @@ draws the same on every host whatever fonts the host has installed.
 
 ## Limits
 
-- Images are previewed by their record only; the renderer does not draw
-  bitmaps yet. **Open** shows them in the host's viewer.
+- Images are previewed by their record only: the renderer draws RGBA
+  bitmaps, but the desktop does not decode a screenshot yet. **Open** shows
+  them in the host's viewer.
 - The desktop needs Axiom, which is not public yet.
 - Only x86_64 Linux has been run (under Xvfb, with QEMU's TCG).

@@ -11,14 +11,14 @@
 //!   ghost row. It never fades opacity, never scales, and never floods a fill.
 //! - Disabled is 40% opacity, applied to whatever the kind already resolved.
 //!
-//! Section labels are uppercased here. Component-button and navigation labels
+//! Typography and text sizing live in `typography`; its section labels are uppercase. Component-button and navigation labels
 //! preserve the case supplied by the screen, exactly like the published
 //! MONOLITH components, and inherit their colour from the control style so a
 //! disabled control dims its label too.
 
-use crate::{fonts, theme};
-use iced_core::{Background, Border, Color, Length, Theme, alignment};
-use iced_widget::{button, column, container, row, scrollable, text, text_input};
+use crate::theme;
+use iced_core::{Background, Border, Color, Length, Theme};
+use iced_widget::{button, container, scrollable, text_input};
 use std::fmt;
 
 /// The controls the design defines.
@@ -208,94 +208,10 @@ pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style
     style
 }
 
-/// An uppercase mono label: metadata, navigation, and section markers.
-pub fn label<'a>(
-    content: impl AsRef<str>,
-    color: theme::Tone,
-) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.as_ref().to_uppercase())
-        .font(fonts::MONO_LABEL)
-        .size(theme::SIZE_MONO)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .style(theme::text(color))
-}
-
-/// A component-button label. Buttons preserve case and own the text colour.
-///
-/// Filling the button's computed inner height gives the paragraph a shape to
-/// center against. This keeps every control size on the same rule and avoids
-/// font- or button-specific padding offsets.
-pub fn control<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content)
-        .font(fonts::BODY)
-        .size(theme::SIZE_SM)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .height(Length::Fill)
-        .align_y(alignment::Vertical::Center)
-}
-
-/// A navigation item, centered inside its control.
-pub fn nav<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content)
-        .font(fonts::BODY)
-        .size(theme::SIZE_SM)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .height(Length::Fill)
-        .align_y(alignment::Vertical::Center)
-}
-
-/// Machine-shaped text the binary wrote: labels, sizes, hashes. Text from
-/// outside it goes through [`data`].
-pub fn mono<'a>(
-    content: impl text::IntoFragment<'a>,
-    color: theme::Tone,
-) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content)
-        .font(fonts::MONO)
-        .size(theme::SIZE_MONO)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .style(theme::text(color))
-}
-
-/// Text from outside the binary -- a name a guest wrote, its logs, a host
-/// path, an error quoting one -- set as [`mono`] through [`fonts::shown`], so
-/// it can neither break the frame nor pass for something it is not.
-pub fn data<'a>(
-    content: impl Into<std::borrow::Cow<'a, str>>,
-    color: theme::Tone,
-) -> text::Text<'a, Theme, crate::AxUi> {
-    mono(
-        fonts::shown(fonts::MONO, content, fonts::Breaks::Escape),
-        color,
-    )
-}
-
-/// Prose the binary wrote.
-pub fn body<'a>(
-    content: impl text::IntoFragment<'a>,
-    size: f32,
-    color: theme::Tone,
-) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content)
-        .font(fonts::BODY)
-        .size(size)
-        .line_height(iced_core::text::LineHeight::Relative(1.35))
-        .style(theme::text(color))
-}
-
 /// `n` and its noun in agreement: "1 file", "2 files".
 pub fn count<N: fmt::Display + PartialEq + From<u8>>(n: N, one: &str, many: &str) -> String {
     let noun = if n == N::from(1) { one } else { many };
     format!("{n} {noun}")
-}
-
-/// A page heading, with case supplied by the screen.
-pub fn display<'a>(content: impl AsRef<str>) -> text::Text<'a, Theme, crate::AxUi> {
-    text(content.as_ref().to_owned())
-        .font(fonts::DISPLAY)
-        .size(theme::SIZE_DISPLAY)
-        .line_height(iced_core::text::LineHeight::Relative(1.25))
-        .style(theme::text(theme::TEXT))
 }
 
 /// A shared logical-pixel content measure. Extra desktop width becomes equal
@@ -311,56 +227,6 @@ pub fn page_frame<'a>(content: impl Into<crate::UiElement<'a>>) -> crate::UiElem
     .center_x(Length::Fill)
     .height(Length::Fill)
     .padding(theme::SPACE_6)
-    .into()
-}
-
-/// A page title and its one-line purpose.
-pub fn page_header<'a>(title: &'static str, subtitle: &'static str) -> crate::UiElement<'a> {
-    column![
-        display(title),
-        body(subtitle, theme::SIZE_SM, theme::TEXT_MUTED)
-    ]
-    .spacing(6)
-    .into()
-}
-
-pub fn badge<'a>(label: impl text::IntoFragment<'a>, tone: theme::Tone) -> crate::UiElement<'a> {
-    container(
-        row![body("·", 16., tone), body(label, 12., tone)]
-            .spacing(5)
-            .align_y(alignment::Vertical::Center),
-    )
-    .padding([3, 9])
-    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 20.))
-    .into()
-}
-
-pub fn empty_state<'a>(
-    icon: crate::visuals::Icon,
-    title: &'static str,
-    description: &'static str,
-) -> crate::UiElement<'a> {
-    container(
-        column![
-            container(crate::visuals::icon(icon, theme::TEXT_MUTED, 30.))
-                .padding(18)
-                .style(|appearance| theme::panel(
-                    appearance,
-                    theme::PANEL_FILE,
-                    Some(theme::SEPARATOR),
-                    16.
-                )),
-            body(title, 20., theme::TEXT),
-            body(description, theme::SIZE_SM, theme::TEXT_MUTED)
-                .align_x(iced_core::text::Alignment::Center),
-        ]
-        .spacing(14)
-        .align_x(alignment::Horizontal::Center)
-        .width(Length::Fill.max(360)),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .padding(24)
     .into()
 }
 

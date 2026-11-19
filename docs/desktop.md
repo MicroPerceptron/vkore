@@ -27,6 +27,19 @@ of display density.
 
 Open **Settings** in the sidebar, then choose **System**, **Light** or **Dark** under
 **Appearance**. Each choice includes a preview of the workspace.
+
+The **Text** section offers four sizes (90%, 100%, 115% and 130%) and three
+bundled interface-font presets: Space Grotesk, DM Sans and JetBrains Mono.
+Changes apply immediately across pages, with a live sample and **Reset text
+settings**. Preferences are saved separately from color scheme and API settings
+in a bounded, atomically replaced `typography` file. Corrupt settings fall back
+to defaults with a visible message.
+
+Typography is passed explicitly through the views, so windows/tests do not
+share a mutable font preference. Page titles retain Archivo; paths, filenames and
+logs retain JetBrains Mono and the same escaping rules. No host fonts or arbitrary
+font paths can be selected. Text and control heights scale together; the logo
+keeps its brand proportions.
 The choice applies immediately to all pages, fields, status colors and the
 launch splash, and is saved in the state directory for the next launch.
 **System** is the default and follows changes to the host color scheme: native

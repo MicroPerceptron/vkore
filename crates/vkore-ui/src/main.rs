@@ -10,6 +10,8 @@ mod render_backend;
 mod settings;
 mod splash;
 mod theme;
+mod typography;
+use typography::Typography;
 mod visuals;
 mod volumes;
 mod widgets;
@@ -192,13 +194,14 @@ impl Model {
     }
 
     fn view(&self, _viewport: Size) -> UiElement<'_> {
+        let ty = self.settings.typography;
         let page = match self.page {
-            Page::Volumes => volumes::view(&self.volumes, &self.machines.names()),
-            Page::Machines => machines::view(&self.machines),
+            Page::Volumes => volumes::view(&self.volumes, &self.machines.names(), ty),
+            Page::Machines => machines::view(&self.machines, ty),
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
         };
         let base: UiElement<'_> = row![
-            sidebar(self.page, self.machines.running.len(), &self.status),
+            sidebar(self.page, self.machines.running.len(), &self.status, ty),
             page
         ]
         .height(Length::Fill)
@@ -219,7 +222,7 @@ impl Model {
 }
 
 /// The navigation rail: pages and what is running.
-fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
+fn sidebar(current: Page, running: usize, status: &str, ty: Typography) -> UiElement<'_> {
     let brand = row![
         splash::mark(36.0),
         column![
@@ -227,7 +230,7 @@ fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
                 .font(fonts::DISPLAY)
                 .size(23.0)
                 .style(theme::text(theme::TEXT)),
-            widgets::body("Your Kore workspace", 11., theme::TEXT_MUTED),
+            ty.body("Your Kore workspace", 11., theme::TEXT_MUTED),
         ]
         .spacing(2)
     ]
@@ -246,7 +249,7 @@ fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
                     },
                     20.
                 ),
-                widgets::nav(label)
+                ty.nav(label)
             ]
             .spacing(12)
             .align_y(alignment::Vertical::Center),
@@ -260,20 +263,20 @@ fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
     let mut rail = column![
         container(brand).padding([10, 0]),
         iced_widget::space::vertical().height(20),
-        widgets::label("Workspace", theme::TEXT_MUTED),
+        ty.label("Workspace", theme::TEXT_MUTED),
         nav("Machines", Page::Machines, visuals::Icon::Machine),
         nav("Volumes", Page::Volumes, visuals::Icon::Volume),
         iced_widget::space::vertical(),
         nav("Settings", Page::Settings, visuals::Icon::Settings),
         container(
             column![
-                widgets::body(
+                ty.body(
                     concat!("vKore v", env!("CARGO_PKG_VERSION")),
                     12.,
                     theme::TEXT_MUTED
                 ),
-                widgets::body("On this computer", 12., theme::TEXT_SECONDARY),
-                widgets::badge(
+                ty.body("On this computer", 12., theme::TEXT_SECONDARY),
+                ty.badge(
                     if running == 0 {
                         "No machines running".to_owned()
                     } else {
@@ -292,7 +295,7 @@ fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
     ]
     .spacing(6);
     if !status.is_empty() {
-        rail = rail.push(widgets::data(status, theme::ERROR));
+        rail = rail.push(ty.data(status, theme::ERROR));
     }
     container(rail)
         .padding(18)
@@ -957,11 +960,11 @@ mod tests {
             let appearance = choice.iced(system_dark);
             for page in [Page::Volumes, Page::Machines, Page::Settings] {
                 let content = match page {
-                    Page::Volumes => volumes::view(&volumes, &[]),
-                    Page::Machines => machines::view(&machines),
+                    Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
+                    Page::Machines => machines::view(&machines, Typography::default()),
                     Page::Settings => settings::view(choice, system_dark, &settings),
                 };
-                let shell = container(row![sidebar(page, 0, ""), content])
+                let shell = container(row![sidebar(page, 0, "", Typography::default()), content])
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.0));
@@ -1007,32 +1010,93 @@ mod tests {
         state.form_hardware = hardware::Draft::new(Some(host), Default::default());
         state.form_hardware.show_cores = true;
         state.configure_new = true;
-        for expanded in [false, true] {
-            state.form_hardware.show_cores = expanded;
-            for (width, height, scale) in [
-                (900., 560., 1.),
-                (1280., 900., 1.),
-                (2560., 1440., 1.),
-                (1280., 900., 2.),
-            ] {
-                for appearance in [Theme::Light, Theme::Dark] {
-                    let shell =
-                        container(row![sidebar(Page::Machines, 0, ""), machines::view(&state)])
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
-                    let (_, refused) = draw_at_scale(
-                        shell.into(),
-                        Size::new(width, height),
-                        &appearance,
-                        scale,
-                        Some(if expanded {
-                            "hardware"
-                        } else {
-                            "hardware-summary"
-                        }),
-                    );
-                    assert!(refused.is_empty(), "{refused:?}");
+        for ty in [
+            Typography::default(),
+            Typography {
+                text_size: typography::TextSize::ExtraLarge,
+                preset: typography::FontPreset::Mono,
+            },
+        ] {
+            for expanded in [false, true] {
+                state.form_hardware.show_cores = expanded;
+                for (width, height, scale) in [
+                    (900., 560., 1.),
+                    (1280., 900., 1.),
+                    (2560., 1440., 1.),
+                    (1280., 900., 2.),
+                ] {
+                    for appearance in [Theme::Light, Theme::Dark] {
+                        let shell = container(row![
+                            sidebar(Page::Machines, 0, "", ty),
+                            machines::view(&state, ty)
+                        ])
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                        let (_, refused) = draw_at_scale(
+                            shell.into(),
+                            Size::new(width, height),
+                            &appearance,
+                            scale,
+                            Some(match (expanded, ty == Typography::default()) {
+                                (true, true) => "hardware",
+                                (false, true) => "hardware-summary",
+                                (true, false) => "hardware-large",
+                                (false, false) => "hardware-summary-large",
+                            }),
+                        );
+                        assert!(refused.is_empty(), "{refused:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typography_presets_render_all_pages_at_large_text_and_compact_sizes() {
+        use typography::{FontPreset, TextSize};
+        let root = tempfile::tempdir().unwrap();
+        let machines = machines::State::new(root.path().to_owned());
+        let (volumes, _worker) = guest_listing();
+        let mut settings = settings::State::new(root.path().to_owned());
+        for preset in FontPreset::ALL {
+            for size in TextSize::ALL {
+                let ty = Typography {
+                    preset,
+                    text_size: size,
+                };
+                settings.typography = ty;
+                for (width, height) in [(900., 560.), (1280., 900.)] {
+                    for appearance in [Theme::Light, Theme::Dark] {
+                        for page in [Page::Machines, Page::Volumes, Page::Settings] {
+                            let content = match page {
+                                Page::Machines => machines::view(&machines, ty),
+                                Page::Volumes => volumes::view(&volumes, &[], ty),
+                                Page::Settings => {
+                                    settings::view(theme::Appearance::System, None, &settings)
+                                }
+                            };
+                            let shell = container(row![sidebar(page, 0, "", ty), content])
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                            let snapshot = (page == Page::Settings
+                                && preset == FontPreset::Mono
+                                && size == TextSize::ExtraLarge)
+                                .then_some("typography");
+                            let (_, refused) = draw_at_scale(
+                                shell.into(),
+                                Size::new(width, height),
+                                &appearance,
+                                1.,
+                                snapshot,
+                            );
+                            assert!(
+                                refused.is_empty(),
+                                "{preset:?} {size:?} {page:?}: {refused:?}"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1058,18 +1122,21 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes, Page::Settings] {
                     let content = match page {
-                        Page::Machines => machines::view(&machines),
-                        Page::Volumes => volumes::view(&volumes, &[]),
+                        Page::Machines => machines::view(&machines, Typography::default()),
+                        Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                         Page::Settings => settings::view(
                             theme::Appearance::System,
                             Some(appearance == Theme::Dark),
                             &settings,
                         ),
                     };
-                    let shell = container(row![sidebar(page, 0, ""), content])
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                    let shell =
+                        container(row![sidebar(page, 0, "", Typography::default()), content])
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(|appearance| {
+                                theme::panel(appearance, theme::BACKGROUND, None, 0.)
+                            });
                     let snapshot = (page == Page::Settings
                         && matches!(width as u32, 900 | 1280 | 2560)
                         && height != 1200.)
@@ -1104,15 +1171,15 @@ mod tests {
         for appearance in [Theme::Dark, Theme::Light] {
             for page in [Page::Volumes, Page::Machines, Page::Settings] {
                 let content = match page {
-                    Page::Volumes => volumes::view(&volumes, &[]),
-                    Page::Machines => machines::view(&machines),
+                    Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
+                    Page::Machines => machines::view(&machines, Typography::default()),
                     Page::Settings => settings::view(
                         theme::Appearance::System,
                         Some(appearance == Theme::Dark),
                         &settings,
                     ),
                 };
-                let shell = container(row![sidebar(page, 0, ""), content])
+                let shell = container(row![sidebar(page, 0, "", Typography::default()), content])
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
@@ -1132,13 +1199,16 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes] {
                     let content = match page {
-                        Page::Machines => machines::view(&machines),
-                        _ => volumes::view(&volumes, &[]),
+                        Page::Machines => machines::view(&machines, Typography::default()),
+                        _ => volumes::view(&volumes, &[], Typography::default()),
                     };
-                    let shell = container(row![sidebar(page, 0, ""), content])
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                    let shell =
+                        container(row![sidebar(page, 0, "", Typography::default()), content])
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(|appearance| {
+                                theme::panel(appearance, theme::BACKGROUND, None, 0.)
+                            });
                     let (_, refused) = draw_in_theme(shell.into(), size, &appearance);
                     assert!(refused.is_empty(), "{page:?}: {refused:?}");
                 }
@@ -1287,7 +1357,10 @@ mod tests {
     fn the_volume_page_draws_a_guest_written_listing_and_its_capture() {
         let (mut state, _worker) = guest_listing();
         let machines = vec!["demo".to_owned(), GUEST_TEXT.to_owned()];
-        let (runs, refused) = draw(volumes::view(&state, &machines), Size::new(1280.0, 800.0));
+        let (runs, refused) = draw(
+            volumes::view(&state, &machines, Typography::default()),
+            Size::new(1280.0, 800.0),
+        );
         assert_eq!(refused, []);
         assert!(runs > 20, "the page drew only {runs} runs");
 
@@ -1303,7 +1376,10 @@ mod tests {
                 truncated: true,
             }),
         ));
-        let (_, refused) = draw(volumes::view(&state, &machines), Size::new(1280.0, 800.0));
+        let (_, refused) = draw(
+            volumes::view(&state, &machines, Typography::default()),
+            Size::new(1280.0, 800.0),
+        );
         assert_eq!(refused, []);
     }
 
@@ -1317,7 +1393,7 @@ mod tests {
             let mut renderer = native_renderer();
             renderer.reset(iced_core::Rectangle::with_size(size));
             let mut interface = UserInterface::build(
-                volumes::view(&state, &machines),
+                volumes::view(&state, &machines, Typography::default()),
                 size,
                 user_interface::Cache::new(),
                 &mut renderer,
@@ -1420,8 +1496,8 @@ mod tests {
         machines.image_menu_open = true;
         for appearance in [Theme::Dark, Theme::Light] {
             let shell = container(row![
-                sidebar(Page::Machines, 0, ""),
-                machines::view(&machines)
+                sidebar(Page::Machines, 0, "", Typography::default()),
+                machines::view(&machines, Typography::default())
             ])
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1446,8 +1522,8 @@ mod tests {
         machines.status = GUEST_TEXT.into();
         for appearance in [Theme::Dark, Theme::Light] {
             let shell = container(row![
-                sidebar(Page::Machines, 0, ""),
-                machines::view(&machines)
+                sidebar(Page::Machines, 0, "", Typography::default()),
+                machines::view(&machines, Typography::default())
             ])
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1459,7 +1535,7 @@ mod tests {
         }
 
         let (runs, refused) = draw(
-            sidebar(Page::Machines, 1, GUEST_TEXT),
+            sidebar(Page::Machines, 1, GUEST_TEXT, Typography::default()),
             Size::new(220.0, 800.0),
         );
         assert_eq!(refused, []);

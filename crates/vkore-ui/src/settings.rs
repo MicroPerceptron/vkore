@@ -1,4 +1,5 @@
 //! Desktop preferences and controls over the runtime's local API.
+use crate::typography::{FontPreset, TextSize, Typography};
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr},
@@ -19,12 +20,17 @@ pub enum SettingsMessage {
     Port(String),
     SavePort,
     ToggleApi,
+    TextSize(TextSize),
+    Font(FontPreset),
+    ResetTypography,
 }
 
 /// Editing a port never changes a live listener. `api` owns the running
 /// server; `port` is the saved choice for its next start, and `port_input`
 /// is the uncommitted field. The runtime still owns listener policy/lifecycle.
 pub struct State {
+    pub typography: Typography,
+    typography_error: String,
     root: PathBuf,
     port: u16,
     port_input: String,
@@ -41,7 +47,16 @@ impl State {
                 format!("Could not load API port; using {DEFAULT_PORT}: {error}"),
             ),
         };
+        let (typography, typography_error) = match Typography::load(&root) {
+            Ok(value) => (value, String::new()),
+            Err(error) => (
+                Typography::default(),
+                format!("Could not load text preferences: {error}"),
+            ),
+        };
         Self {
+            typography,
+            typography_error,
             root,
             port,
             port_input: port.to_string(),
@@ -52,6 +67,18 @@ impl State {
 
     pub fn update(&mut self, message: SettingsMessage) {
         match message {
+            SettingsMessage::TextSize(size) => {
+                self.typography.text_size = size;
+                self.save_typography();
+            }
+            SettingsMessage::Font(preset) => {
+                self.typography.preset = preset;
+                self.save_typography();
+            }
+            SettingsMessage::ResetTypography => {
+                self.typography = Typography::default();
+                self.save_typography();
+            }
             SettingsMessage::Port(value) => {
                 // Numeric fields stay bounded and within the bundled font.
                 if value.len() <= 5 && value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -85,6 +112,15 @@ impl State {
                 }
             }
         }
+    }
+
+    fn save_typography(&mut self) {
+        self.typography_error = self
+            .typography
+            .save(&self.root)
+            .err()
+            .map(|error| format!("Text changed for this session; could not save: {error}"))
+            .unwrap_or_default();
     }
 
     fn save_port(&mut self) -> bool {
@@ -155,9 +191,10 @@ pub fn view(
     system_dark: Option<bool>,
     state: &State,
 ) -> UiElement<'_> {
+    let ty = state.typography;
     widgets::page_frame(
         column![
-            widgets::page_header(
+            ty.page_header(
                 "Settings",
                 "Personalize your workspace and connect your tools."
             ),
@@ -178,17 +215,18 @@ fn panels(
     state: &State,
     wide: bool,
 ) -> UiElement<'_> {
+    let ty = state.typography;
     let choice = |label, caption, value| {
         let selected = appearance == value;
         button(
             column![
                 crate::visuals::appearance_preview(value),
                 row![
-                    widgets::body(label, 14., theme::TEXT),
+                    ty.body(label, 14., theme::TEXT),
                     iced_widget::space::horizontal(),
-                    widgets::mono(if selected { "Selected" } else { "" }, theme::MAGENTA)
+                    ty.mono(if selected { "Selected" } else { "" }, theme::MAGENTA)
                 ],
-                widgets::body(caption, 12., theme::TEXT_MUTED),
+                ty.body(caption, 12., theme::TEXT_MUTED),
             ]
             .spacing(10),
         )
@@ -201,11 +239,11 @@ fn panels(
         column![
             row![
                 crate::visuals::icon(crate::visuals::Icon::Settings, theme::TEXT_SECONDARY, 22.),
-                widgets::body("Appearance", 18., theme::TEXT)
+                ty.body("Appearance", 18., theme::TEXT)
             ]
             .spacing(10)
             .align_y(alignment::Vertical::Center),
-            widgets::body(
+            ty.body(
                 "Make this workspace feel at home.",
                 theme::SIZE_SM,
                 theme::TEXT_MUTED
@@ -216,7 +254,8 @@ fn panels(
                 choice("Dark", "Keep things subdued", theme::Appearance::Dark)
             ]
             .spacing(12),
-            widgets::body(
+            typography_controls(state),
+            ty.body(
                 if appearance == theme::Appearance::System {
                     match system_dark {
                         Some(true) => "Following your system · Dark",
@@ -261,9 +300,9 @@ fn panels(
     let mut api = column![
         row![
             crate::visuals::icon(crate::visuals::Icon::Terminal, theme::TEXT_SECONDARY, 22.),
-            widgets::body("Local API", 18., theme::TEXT),
+            ty.body("Local API", 18., theme::TEXT),
             iced_widget::space::horizontal(),
-            widgets::badge(
+            ty.badge(
                 if state.api.is_some() {
                     "Running"
                 } else {
@@ -278,37 +317,37 @@ fn panels(
         ]
         .spacing(10)
         .align_y(alignment::Vertical::Center),
-        widgets::body(
+        ty.body(
             "Connect an OpenAI-compatible client on this computer.",
             theme::SIZE_SM,
             theme::TEXT_SECONDARY
         ),
-        widgets::label("Connection", theme::TEXT_MUTED),
-        container(widgets::data(address, theme::TEXT))
+        ty.label("Connection", theme::TEXT_MUTED),
+        container(ty.data(address, theme::TEXT))
             .padding(14)
             .width(Length::Fill)
             .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 6.)),
         row![
-            widgets::body("Port", 14., theme::TEXT_SECONDARY),
+            ty.body("Port", 14., theme::TEXT_SECONDARY),
             text_input("8080", &state.port_input)
                 .on_input(|value| wrap(SettingsMessage::Port(value)))
                 .on_submit(wrap(SettingsMessage::SavePort))
                 .font(fonts::MONO)
-                .size(theme::SIZE_SM)
+                .size(ty.size(theme::SIZE_SM))
                 .padding([7, 10])
                 .width(100)
                 .style(widgets::field),
-            button(widgets::control("Save port"))
-                .height(theme::CONTROL_SM)
+            button(ty.control("Save port"))
+                .height(ty.control_height())
                 .padding([0, 14])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press(wrap(SettingsMessage::SavePort)),
-            button(widgets::control(if state.api.is_some() {
+            button(ty.control(if state.api.is_some() {
                 "Stop API"
             } else {
                 "Start API"
             }))
-            .height(theme::CONTROL_SM)
+            .height(ty.control_height())
             .padding([0, 14])
             .style(widgets::button_style(if state.api.is_some() {
                 widgets::Button::Danger
@@ -318,9 +357,10 @@ fn panels(
             .on_press(wrap(SettingsMessage::ToggleApi)),
         ]
         .spacing(theme::SPACE_2)
-        .align_y(alignment::Vertical::Center),
-        widgets::data(port_status, theme::TEXT_MUTED),
-        widgets::body(
+        .align_y(alignment::Vertical::Center)
+        .wrap(),
+        ty.data(port_status, theme::TEXT_MUTED),
+        ty.body(
             "The server is local to this computer. Guest inference is not connected yet.",
             theme::SIZE_SM,
             theme::TEXT_MUTED
@@ -328,7 +368,7 @@ fn panels(
     ]
     .spacing(theme::SPACE_4);
     if !state.error.is_empty() {
-        api = api.push(widgets::data(state.error.as_str(), theme::ERROR));
+        api = api.push(ty.data(state.error.as_str(), theme::ERROR));
     }
     let api = container(api)
         .id("settings-api")
@@ -344,10 +384,79 @@ fn panels(
     widgets::scroll(content).height(Length::Fill).into()
 }
 
+fn typography_controls(state: &State) -> UiElement<'_> {
+    let ty = state.typography;
+    let mut sizes = row![].spacing(6);
+    for size in TextSize::ALL {
+        sizes = sizes.push(
+            button(ty.body(size.label(), 13., theme::TEXT))
+                .padding([8, 10])
+                .style(widgets::button_style(widgets::Button::Choice(
+                    ty.text_size == size,
+                )))
+                .on_press(wrap(SettingsMessage::TextSize(size))),
+        );
+    }
+    let mut presets = row![].spacing(6);
+    for preset in FontPreset::ALL {
+        presets = presets.push(
+            button(
+                ty.body(preset.label(), 13., theme::TEXT)
+                    .font(Typography { preset, ..ty }.font()),
+            )
+            .padding([8, 10])
+            .style(widgets::button_style(widgets::Button::Choice(
+                ty.preset == preset,
+            )))
+            .on_press(wrap(SettingsMessage::Font(preset))),
+        );
+    }
+    let mut content = column![
+        ty.body("Text", 18., theme::TEXT),
+        ty.label("Size", theme::TEXT_MUTED), sizes.wrap(),
+        ty.label("Interface font", theme::TEXT_MUTED), presets.wrap(),
+        container(column![
+            ty.body("Your workspace, your way.", 16., theme::TEXT),
+            ty.data("Kore / models / inference.log", theme::TEXT_SECONDARY),
+        ].spacing(8)).padding(14).width(Length::Fill)
+            .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, Some(theme::SEPARATOR), 8.)),
+        ty.body("Changes apply immediately and are saved automatically. Page titles keep their display face; paths and logs stay monospace.", 12., theme::TEXT_MUTED),
+        button(ty.body("Reset text settings", 13., theme::TEXT)).padding([7, 10])
+            .style(widgets::button_style(widgets::Button::Secondary))
+            .on_press(wrap(SettingsMessage::ResetTypography)),
+    ].spacing(12);
+    if !state.typography_error.is_empty() {
+        content = content.push(ty.data(state.typography_error.as_str(), theme::ERROR));
+    }
+    container(content)
+        .padding(iced_core::Padding::default().top(12))
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn typography_applies_saves_and_resets_without_changing_api_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = State::new(root.path().to_owned());
+        state.update(SettingsMessage::TextSize(TextSize::ExtraLarge));
+        state.update(SettingsMessage::Font(FontPreset::Sans));
+        assert_eq!(state.typography.text_size, TextSize::ExtraLarge);
+        assert_eq!(Typography::load(root.path()).unwrap(), state.typography);
+        assert_eq!(state.port, DEFAULT_PORT);
+        state.update(SettingsMessage::ResetTypography);
+        assert_eq!(
+            State::new(root.path().to_owned()).typography,
+            Typography::default()
+        );
+        std::fs::remove_dir_all(root.path()).unwrap();
+        state.update(SettingsMessage::Font(FontPreset::Mono));
+        assert_eq!(state.typography.preset, FontPreset::Mono);
+        assert!(state.typography_error.contains("could not save"));
+    }
 
     #[test]
     fn invalid_ports_do_not_replace_saved_preferences_or_start_the_api() {

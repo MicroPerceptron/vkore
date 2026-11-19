@@ -1,0 +1,39 @@
+name: Host device discovery
+on:
+  pull_request:
+    paths:
+      - 'crates/vkore-devices/**'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+      - 'tools/check-devices.py'
+      - '.github/workflows/devices.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install libudev
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - name: Install pinned Rust
+        run: rustup toolchain install nightly-2026-07-13 --profile minimal --component clippy
+      - name: Clippy
+        run: python tools/check-devices.py clippy
+      - name: Tests
+        run: python tools/check-devices.py test
+      - name: Read-only native inventory
+        run: python tools/check-devices.py inventory

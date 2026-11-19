@@ -356,6 +356,7 @@ mod tests {
     use super::*;
     fn host() -> HostResources {
         HostResources {
+            npus: vkore_vm::devices::Inventory::empty(vkore_vm::devices::Platform::Linux),
             cpu_name: "fixture".into(),
             physical_cores: 8,
             logical_cpus: 16,
@@ -552,5 +553,195 @@ mod tests {
         assert!(lease(dir.path()).is_err());
         drop(first);
         assert!(lease(dir.path()).is_ok());
+    }
+}
+
+/// Discovery and guest support are distinct. No route is selectable until its
+/// complete launch/ownership implementation exists, irrespective of PCI identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessStatus {
+    Pending,
+    NeedsSetup,
+    Unavailable,
+    Unknown,
+}
+impl AccessStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "Not connected yet",
+            Self::NeedsSetup => "Needs host setup",
+            Self::Unavailable => "Unavailable",
+            Self::Unknown => "Not verified",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct AccessRoute {
+    pub name: &'static str,
+    pub status: AccessStatus,
+    pub detail: &'static str,
+}
+
+pub fn npu_routes(device: &vkore_vm::devices::Npu) -> [AccessRoute; 3] {
+    use AccessStatus::*;
+    use vkore_vm::devices::{Source, Vendor};
+    let route = |name, status, detail| AccessRoute {
+        name,
+        status,
+        detail,
+    };
+    let direct = match &device.pci {
+        Some(pci) if pci.physical_function.is_some() => route(
+            "Dedicated device",
+            Unavailable,
+            "This is a virtual function; use the SR-IOV route.",
+        ),
+        Some(pci) if pci.iommu_group.is_none() => route(
+            "Dedicated device",
+            NeedsSetup,
+            "No IOMMU group was reported. Host isolation must be available before assignment.",
+        ),
+        Some(_) => route(
+            "Dedicated device",
+            Pending,
+            "PCI device detected. Guest assignment, group isolation and reset support still need validation.",
+        ),
+        None if device.source == Source::CoreMl => route(
+            "Dedicated device",
+            Unavailable,
+            "vKore cannot pass the Apple Neural Engine directly to a guest.",
+        ),
+        None => route(
+            "Dedicated device",
+            Unavailable,
+            "vKore has no direct device-assignment backend on this host.",
+        ),
+    };
+    let sriov = match &device.pci {
+        Some(pci) if pci.physical_function.is_some() => route(
+            "Virtual function · SR-IOV",
+            Pending,
+            "The host reports an existing VF. Guest assignment is not connected yet.",
+        ),
+        Some(pci) if pci.total_vfs.is_some_and(|n| n > 0) => route(
+            "Virtual function · SR-IOV",
+            Pending,
+            "The host reports SR-IOV capacity. VF provisioning and guest compatibility are not verified.",
+        ),
+        Some(pci) if pci.total_vfs == Some(0) => route(
+            "Virtual function · SR-IOV",
+            Unavailable,
+            "The host does not expose SR-IOV capacity for this device.",
+        ),
+        None if device.source == Source::CoreMl => route(
+            "Virtual function · SR-IOV",
+            Unavailable,
+            "Core ML does not expose an SR-IOV virtual function.",
+        ),
+        _ => route(
+            "Virtual function · SR-IOV",
+            Unknown,
+            "This discovery source does not report SR-IOV capabilities.",
+        ),
+    };
+    let shared = match (device.vendor, device.source, device.driver.as_deref()) {
+        (_, Source::LinuxPci, Some("vfio-pci")) => route(
+            "Shared · virtio-accel",
+            NeedsSetup,
+            "The device is bound to VFIO. A host runtime needs its native driver.",
+        ),
+        (_, Source::LinuxPci, None) => route(
+            "Shared · virtio-accel",
+            NeedsSetup,
+            "No host driver is bound. A compatible driver and runtime are required.",
+        ),
+        (Vendor::Apple, Source::CoreMl, _) => route(
+            "Shared · virtio-accel",
+            Pending,
+            "Core ML reports this Neural Engine. The guest connection is not implemented yet; Core ML may also use the CPU.",
+        ),
+        (Vendor::Intel, _, _) => route(
+            "Shared · virtio-accel",
+            Unknown,
+            "OpenVINO is the candidate backend. Its runtime and device access have not been checked.",
+        ),
+        (Vendor::Amd, _, _) => route(
+            "Shared · virtio-accel",
+            Unknown,
+            "The XDNA backend needs a compatible host runtime. Runtime access has not been checked.",
+        ),
+        (Vendor::Qualcomm, _, _) => route(
+            "Shared · virtio-accel",
+            Unknown,
+            "The Hexagon backend needs a compatible QAIRT runtime. Runtime access has not been checked.",
+        ),
+        _ => route(
+            "Shared · virtio-accel",
+            Unknown,
+            "No compatible host backend has been verified for this NPU.",
+        ),
+    };
+    [direct, sriov, shared]
+}
+
+#[cfg(test)]
+mod npu_tests {
+    use super::*;
+    use vkore_vm::devices::{Npu, Pci, Source, Vendor};
+    fn device() -> Npu {
+        Npu {
+            id: "pci:0000:00:0b.0".into(),
+            name: "Intel NPU".into(),
+            vendor: Vendor::Intel,
+            source: Source::LinuxPci,
+            driver: Some("ivpu".into()),
+            core_count: None,
+            pci: Some(Pci {
+                address: "0000:00:0b.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0xb03e,
+                revision: Some(1),
+                iommu_group: Some(12),
+                group_members: vec!["0000:00:0b.0".into()],
+                physical_function: None,
+                total_vfs: Some(0),
+                enabled_vfs: None,
+            }),
+        }
+    }
+    #[test]
+    fn identity_never_implies_sriov_or_runtime_readiness() {
+        let mut npu = device();
+        let routes = npu_routes(&npu);
+        assert_eq!(routes[0].status, AccessStatus::Pending);
+        assert_eq!(routes[1].status, AccessStatus::Unavailable);
+        assert_eq!(routes[2].status, AccessStatus::Unknown);
+        npu.pci.as_mut().unwrap().total_vfs = Some(4);
+        assert_eq!(npu_routes(&npu)[1].status, AccessStatus::Pending);
+        npu.pci.as_mut().unwrap().total_vfs = None;
+        assert_eq!(npu_routes(&npu)[1].status, AccessStatus::Unknown);
+        npu.driver = Some("vfio-pci".into());
+        assert_eq!(npu_routes(&npu)[2].status, AccessStatus::NeedsSetup);
+        npu.pci.as_mut().unwrap().physical_function = Some("0000:00:0a.0".into());
+        assert_eq!(npu_routes(&npu)[0].status, AccessStatus::Unavailable);
+        assert_eq!(npu_routes(&npu)[1].status, AccessStatus::Pending);
+    }
+    #[test]
+    fn native_host_discovery_does_not_grant_guest_access() {
+        let mut npu = device();
+        npu.source = Source::CoreMl;
+        npu.vendor = Vendor::Apple;
+        npu.pci = None;
+        npu.driver = None;
+        let routes = npu_routes(&npu);
+        assert_eq!(routes[0].status, AccessStatus::Unavailable);
+        assert_eq!(routes[1].status, AccessStatus::Unavailable);
+        assert_eq!(routes[2].status, AccessStatus::Pending);
+        npu.source = Source::WindowsDxCore;
+        npu.vendor = Vendor::Qualcomm;
+        let routes = npu_routes(&npu);
+        assert_eq!(routes[0].status, AccessStatus::Unavailable);
+        assert_eq!(routes[1].status, AccessStatus::Unknown);
+        assert_eq!(routes[2].status, AccessStatus::Unknown);
     }
 }

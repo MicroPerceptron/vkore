@@ -30,3 +30,6 @@ pub use media::BootMedium;
 pub use probe::{Accel, AccelChoice, HostCaps, QemuCaps};
 pub use profile::{Display, MachineSpec, Paging, ProfileError, Vendor};
 pub use readiness::{Readiness, Stage};
+
+/// Portable read-only host inventory; independent of QEMU and guest support.
+pub use vkore_devices as devices;

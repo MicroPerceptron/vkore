@@ -3,6 +3,16 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.4.0] - 2026-11-19
+
+### Added
+- Read-only NPU discovery on Linux (Intel/AMD PCI devices), Windows (DXCore NPU adapters), and macOS (Core ML Neural Engine devices).
+- Hardware setup device cards showing host identity and separate dedicated, SR-IOV and virtio-accel route assessments, including unavailable and unverified states.
+- Independent cross-platform discovery tests and native inventory CI on Linux, Windows and macOS.
+
+### Breaking
+- `HostResources` adds an `npus` inventory field. Saved machine configurations and guest protocols are unchanged.
+
 ## [0.3.0] - 2026-11-19
 
 ### Changed

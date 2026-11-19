@@ -640,6 +640,7 @@ pub fn view<'a>(
             .wrap(),
             section(cpu),
             section(memory),
+            section(npu_inventory(&host.npus, ty)),
             section(storage),
         ]
         .spacing(16),
@@ -647,6 +648,111 @@ pub fn view<'a>(
     .padding(iced_core::Padding::default().right(14))
     .width(Length::Fill)
     .into()
+}
+
+pub(crate) fn npu_inventory<'a>(
+    inventory: &'a vkore_vm::devices::Inventory,
+    ty: Typography,
+) -> iced_widget::Column<'a, Message, iced_core::Theme, crate::AxUi> {
+    use vkore_vm::devices::DiscoveryStatus;
+    let mut content = column![
+        row![
+            ty.body("Neural processors", 18., theme::TEXT),
+            space::horizontal(),
+            ty.badge(
+                match inventory.status {
+                    DiscoveryStatus::Complete => format!("{} detected", inventory.devices.len()),
+                    DiscoveryStatus::Partial =>
+                        format!("{} reported · incomplete", inventory.devices.len()),
+                    DiscoveryStatus::Unavailable => "Discovery unavailable".into(),
+                },
+                theme::TEXT_MUTED
+            )
+        ]
+        .align_y(alignment::Vertical::Center),
+        ty.body(
+            "Devices reported by your host. Guest accelerator connections are not available yet.",
+            12.,
+            theme::TEXT_MUTED
+        ),
+    ]
+    .spacing(12);
+    if inventory.devices.is_empty() {
+        content = content.push(ty.body(
+            match inventory.status {
+                DiscoveryStatus::Complete => "No NPUs were reported. Refresh the host after connecting a device or installing its driver.",
+                DiscoveryStatus::Partial => "Discovery was incomplete; an NPU may be present but could not be identified.",
+                DiscoveryStatus::Unavailable => "NPU discovery is unavailable. CPU, memory and storage settings remain usable.",
+            }, 13., theme::TEXT_SECONDARY));
+    }
+    for warning in &inventory.warnings {
+        content = content.push(ty.data(warning, theme::WARNING));
+    }
+    for device in &inventory.devices {
+        let mut card = column![
+            ty.data(&device.name, theme::TEXT).size(ty.size(15.)),
+            ty.data(
+                format!("{} · {}", device.vendor.label(), device.source.label()),
+                theme::TEXT_MUTED
+            ),
+        ]
+        .spacing(8);
+        if let Some(cores) = device.core_count {
+            card = card.push(ty.data(
+                format!("{cores} Neural Engine cores"),
+                theme::TEXT_SECONDARY,
+            ));
+        }
+        if let Some(pci) = &device.pci {
+            card = card.push(ty.data(
+                format!(
+                    "{} · {:04x}:{:04x} · {}",
+                    pci.address,
+                    pci.vendor_id,
+                    pci.device_id,
+                    device.driver.as_deref().unwrap_or("No driver bound")
+                ),
+                theme::TEXT_MUTED,
+            ));
+            if let Some(group) = pci.iommu_group {
+                card = card.push(ty.data(
+                    format!("IOMMU group {group} · {} devices", pci.group_members.len()),
+                    theme::TEXT_MUTED,
+                ));
+            }
+            if pci.total_vfs.is_some_and(|n| n > 0) {
+                card = card.push(ty.data(
+                    format!(
+                        "SR-IOV: {} enabled / {} total VFs",
+                        pci.enabled_vfs.map_or("unknown".into(), |n| n.to_string()),
+                        pci.total_vfs.unwrap()
+                    ),
+                    theme::TEXT_MUTED,
+                ));
+            }
+        }
+        for route in vkored::hardware::npu_routes(device) {
+            card = card.push(
+                column![
+                    row![
+                        ty.body(route.name, 13., theme::TEXT_SECONDARY),
+                        ty.badge(route.status.label(), theme::TEXT_MUTED)
+                    ]
+                    .spacing(8)
+                    .wrap(),
+                    ty.body(route.detail, 12., theme::TEXT_MUTED),
+                ]
+                .spacing(4),
+            );
+        }
+        content = content.push(
+            container(card)
+                .padding(14)
+                .width(Length::Fill)
+                .style(widgets::card),
+        );
+    }
+    content
 }
 
 #[cfg(test)]

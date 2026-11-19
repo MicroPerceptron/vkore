@@ -18,7 +18,7 @@ def main():
     parser.add_argument("command", choices=("clippy", "test"))
     args = parser.parse_args()
     root = pathlib.Path(__file__).resolve().parents[1]
-    members = ["vkore-vm", "vkore-volume", "vkored"]
+    members = ["vkore-devices", "vkore-vm", "vkore-volume", "vkored"]
     source = (root / "Cargo.toml").read_text()
     shared = source[source.index("[workspace.package]"):source.index('[patch.')]
     profiles = source[source.index("[workspace.lints.rust]"):].replace('[profile.dev.package.vkore-ui]\nopt-level = 2\n', "")

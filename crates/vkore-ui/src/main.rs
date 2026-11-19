@@ -3,6 +3,7 @@
 //! software rasterizer; no browser, no daemon, no login.
 
 mod fonts;
+mod hardware;
 mod logo;
 mod machines;
 mod render_backend;
@@ -970,6 +971,53 @@ mod tests {
                 &appearance,
             );
             assert!(refused.is_empty());
+        }
+    }
+
+    #[test]
+    fn hardware_editor_renders_with_hybrid_cores_and_both_appearances() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = machines::State::new(root.path().to_owned());
+        let host = state.host.as_mut().unwrap();
+        host.cpu_name = "Hybrid CPU fixture".into();
+        host.core_summary = "4 performance cores · 4 efficiency cores".into();
+        host.physical_cores = 8;
+        host.logical_cpus = 12;
+        host.cpu_pinning = true;
+        host.memory_pinning = true;
+        host.memlock_bytes = Some(65536);
+        host.cores = (0..8)
+            .map(|id| vkore_vm::hardware::Core {
+                package: 0,
+                id,
+                kind: if id < 4 { "Performance" } else { "Efficiency" }.into(),
+                threads: if id < 4 { vec![id, id + 8] } else { vec![id] },
+                numa_node: Some(0),
+            })
+            .collect();
+        state.form_hardware = hardware::Draft::new(Some(host), Default::default());
+        state.form_hardware.show_cores = true;
+        state.configure_new = true;
+        for (width, height, scale) in [
+            (900., 560., 1.),
+            (1280., 900., 1.),
+            (2560., 1440., 1.),
+            (1280., 900., 2.),
+        ] {
+            for appearance in [Theme::Light, Theme::Dark] {
+                let shell = container(row![sidebar(Page::Machines, 0, ""), machines::view(&state)])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                let (_, refused) = draw_at_scale(
+                    shell.into(),
+                    Size::new(width, height),
+                    &appearance,
+                    scale,
+                    Some("hardware"),
+                );
+                assert!(refused.is_empty(), "{refused:?}");
+            }
         }
     }
 

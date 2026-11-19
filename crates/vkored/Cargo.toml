@@ -15,6 +15,7 @@ vkore-vm = { path = "../vkore-vm" }
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 tempfile = "3.23.0"
 url = "2"
+rustix = { version = "1.1.4", features = ["process", "fs"] }
 # Maintained MIT HTTP stack; HTTP/1 only, no websocket, HTTP/2 or macros.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }

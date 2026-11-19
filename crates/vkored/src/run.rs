@@ -158,6 +158,14 @@ pub fn default_qemu() -> Option<PathBuf> {
 
 /// Establish what `config` will boot on `qemu`, without starting it.
 pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunError> {
+    crate::config::validate(config)?;
+    let host_resources =
+        vkore_vm::hardware::HostResources::probe(config.iso.parent().unwrap_or(Path::new("/")))
+            .map_err(RunError::Host)?;
+    crate::hardware::validate_host(config, &host_resources).map_err(RunError::Host)?;
+    if crate::hardware::needs_authorization(config, &host_resources) {
+        return Err(RunError::Host("memory pinning needs authorization: use Authorize memory in the hardware panel, or turn off memory pinning".into()));
+    }
     let runtime = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .map_err(|error| RunError::Host(format!("QEMU runtime: {error}")))?;
     let host = HostCaps::probe();
@@ -222,6 +230,8 @@ pub struct Session {
     machine: Machine,
     transcript: File,
     reported: Option<Stage>,
+    // Drop after Machine: never release the lease while QEMU is still stopping.
+    _lease: File,
 }
 
 fn unix_ms() -> u128 {
@@ -241,8 +251,10 @@ impl Session {
         display: Display,
         sink: &mut dyn FnMut(&Event),
     ) -> Result<Self, RunError> {
-        let mut config = store.get(name)?;
+        store.get(name)?;
         let paths = store.state().machine(name);
+        let lease = crate::hardware::lease(&paths.dir)?;
+        let mut config = store.get(name)?;
         let checked = preflight(&config, qemu)?;
         let paging = checked.medium.paging.unwrap_or(Paging::FourLevel);
         private_dir(&paths.runs).map_err(|error| RunError::Io(paths.runs.clone(), error))?;
@@ -277,6 +289,15 @@ impl Session {
         // The machine's own media, created once.
         let disk = if paths.disk.exists() {
             Disk::new(&paths.disk)?
+        } else if config.resources.reserve_storage {
+            let host = vkore_vm::hardware::HostResources::probe(store.state().root())
+                .map_err(RunError::Host)?;
+            if config.disk_mib > host.storage_available_mib {
+                return Err(RunError::Host(
+                    "not enough free storage for the machine disk".into(),
+                ));
+            }
+            Disk::create_reserved_image(&paths.disk, config.disk_mib << 20)?
         } else {
             Disk::create_image(&paths.disk, config.disk_mib << 20)?
         };
@@ -329,6 +350,7 @@ impl Session {
             paging,
             cpus: config.cpus,
             memory_mib: config.memory_mib,
+            resources: config.resources.clone(),
             display,
             framebuffer: config.framebuffer,
             serial_log: paths.serial.clone(),
@@ -340,6 +362,7 @@ impl Session {
         record.emit(&Event::Started { pid: machine.id() });
         let Recorder { transcript, .. } = record;
         Ok(Self {
+            _lease: lease,
             config,
             paths,
             machine,

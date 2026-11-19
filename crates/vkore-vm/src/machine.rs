@@ -154,6 +154,18 @@ impl Machine {
                             spec.cpus
                         )));
                     }
+                    let threads: Vec<_> = cpus
+                        .iter()
+                        .map(|cpu| match cpu {
+                            qapi_qmp::CpuInfoFast::x86_64(base)
+                            | qapi_qmp::CpuInfoFast::i386(base) => {
+                                Ok((base.cpu_index, base.thread_id))
+                            }
+                            _ => Err(QmpError::Protocol("QEMU reported a non-x86 CPU".into())),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    crate::hardware::bind_vcpus(machine.child.id(), &threads, &spec.resources)
+                        .map_err(QmpError::Protocol)?;
                     qmp.resume()
                 })();
                 if let Err(error) = ready {

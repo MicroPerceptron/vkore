@@ -90,6 +90,7 @@ pub struct MachineSpec {
     pub paging: Paging,
     pub cpus: u16,
     pub memory_mib: u32,
+    pub resources: crate::hardware::Resources,
     pub display: Display,
     /// The framebuffer mode the compositor founds over.
     pub framebuffer: (u32, u32),
@@ -165,7 +166,7 @@ fn option_path(path: &Path) -> Result<&str, ProfileError> {
 /// The NUMA split Kore's gate topology uses: node 0 takes two thirds of
 /// the CPUs (at least one), node 1 the rest; memory splits evenly; HMAT
 /// latencies and bandwidths as the Makefile states them.
-fn numa(cpus: u16, memory_mib: u32) -> Vec<String> {
+fn numa(cpus: u16, memory_mib: u32, pages: crate::hardware::PageSize) -> Vec<String> {
     let nodes = 2u16;
     let per_node = memory_mib / u32::from(nodes);
     let mut arguments = Vec::new();
@@ -185,7 +186,11 @@ fn numa(cpus: u16, memory_mib: u32) -> Vec<String> {
             "node,nodeid={node},cpus={first}-{last},memdev=ram{node}"
         ));
         arguments.push("-object".into());
-        arguments.push(format!("memory-backend-ram,id=ram{node},size={per_node}M"));
+        arguments.push(if pages == crate::hardware::PageSize::System {
+            format!("memory-backend-ram,id=ram{node},size={per_node}M")
+        } else {
+            format!("memory-backend-memfd,id=ram{node},size={per_node}M,hugetlb=on,hugetlbsize={},prealloc=on", u64::from(pages.mib()) << 20)
+        });
         first = last + 1;
     }
     for source in 0..nodes {
@@ -342,7 +347,25 @@ impl MachineSpec {
             "-smp".into(),
             format!("{0},cores={0},threads=1,sockets=1", self.cpus),
         ];
-        arguments.extend(numa(self.cpus, self.memory_mib));
+        crate::hardware::validate_binding(&self.resources, self.cpus)
+            .map_err(ProfileError::Unsupported)?;
+        let page_mib = self.resources.pages.mib();
+        if page_mib != 0
+            && (!cfg!(target_os = "linux") || !self.memory_mib.is_multiple_of(2 * page_mib))
+        {
+            return Err(ProfileError::Unsupported(
+                "hugepages require Linux and page-aligned memory on both guest nodes".into(),
+            ));
+        }
+        if self.resources.pin_memory {
+            if !cfg!(target_os = "linux") {
+                return Err(ProfileError::Unsupported(
+                    "memory locking is unavailable on this host".into(),
+                ));
+            }
+            arguments.extend(["-overcommit".into(), "mem-lock=on".into()]);
+        }
+        arguments.extend(numa(self.cpus, self.memory_mib, self.resources.pages));
         arguments.extend(
             [
                 "-no-user-config",
@@ -486,6 +509,7 @@ mod tests {
             paging: Paging::FourLevel,
             cpus: 4,
             memory_mib: 4096,
+            resources: Default::default(),
             display: Display::Headless,
             framebuffer: (1280, 800),
             serial_log: "/m/serial.log".into(),
@@ -596,9 +620,9 @@ mod tests {
 
     #[test]
     fn the_numa_split_and_vram_match_the_gate() {
-        let two = joined(&numa(2, 2048));
+        let two = joined(&numa(2, 2048, crate::hardware::PageSize::System));
         assert!(two.contains("cpus=0-0") && two.contains("cpus=1-1") && two.contains("size=1024M"));
-        let eight = joined(&numa(8, 8192));
+        let eight = joined(&numa(8, 8192, crate::hardware::PageSize::System));
         assert!(eight.contains("cpus=0-5") && eight.contains("cpus=6-7"));
         assert_eq!(vgamem_mib(1280, 800), 16);
         assert_eq!(vgamem_mib(1920, 1200), 16);

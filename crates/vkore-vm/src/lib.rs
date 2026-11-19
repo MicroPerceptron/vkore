@@ -15,6 +15,7 @@
 //! No Kore checkout is needed: the ISO is a caller-supplied artifact.
 
 pub mod firmware;
+pub mod hardware;
 pub mod machine;
 pub mod media;
 pub mod probe;

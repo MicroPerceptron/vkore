@@ -16,6 +16,8 @@ pub struct Image {
     pub name: String,
     pub version: String,
     pub profile: Profile,
+    #[serde(default)]
+    pub minimum: crate::hardware::Requirements,
     architecture: String,
     format: String,
     pub(crate) url: String,
@@ -54,6 +56,7 @@ impl Catalog {
         }
         let mut ids = BTreeSet::new();
         for image in &catalog.images {
+            image.minimum.validate()?;
             if !valid_name(&image.id) || !ids.insert(&image.id) {
                 return Err("image IDs must be valid and unique".into());
             }
@@ -147,6 +150,17 @@ mod tests {
         assert!(catalog.get("missing").is_none());
     }
 
+    #[test]
+    fn per_image_minimums_are_validated() {
+        let mut doc = fixture();
+        doc["images"][0]["minimum"] = json!({"cpus":8,"memory_mib":8192,"disk_mib":16384});
+        assert_eq!(parse(&doc).unwrap().images()[0].minimum.cpus, 8);
+        doc["images"][0]["minimum"]["cpus"] = json!(1);
+        assert!(parse(&doc).is_err());
+        doc["images"][0]["minimum"]["cpus"] = json!(8);
+        doc["images"][0]["minimum"]["memory_mib"] = json!(1024);
+        assert!(parse(&doc).is_err());
+    }
     #[test]
     fn catalog_rejects_ambiguous_unbounded_or_untrusted_entries() {
         for (field, value) in [

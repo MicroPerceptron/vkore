@@ -7,13 +7,17 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use iced_core::{Length, alignment};
-use iced_widget::{button, column, container, row, scrollable, space, text_input};
+use iced_widget::{button, column, container, row, space, text_input};
 use iced_winit::winit::event_loop::EventLoopProxy;
 
 use vkore_vm::{Display, Stage};
@@ -31,6 +35,8 @@ pub enum Update {
     Line(String),
     Stage(Stage),
     Finished(Result<String, String>),
+    ImportProgress(vkored::images::Progress),
+    Created(Result<(), String>),
 }
 
 /// A machine the view started.
@@ -95,7 +101,12 @@ pub struct State {
     /// How each machine's last run from this window ended, and its log.
     pub finished: BTreeMap<String, Finished>,
     pub form_name: String,
-    pub form_iso: String,
+    pub official_images: Vec<vkored::catalog::Image>,
+    pub selected_image: Option<String>,
+    pub image_menu_open: bool,
+    pub catalog_error: Option<String>,
+    importing: Option<Arc<AtomicBool>>,
+    import_worker: Option<thread::JoinHandle<()>>,
     pub form_workspace: String,
     pub status: String,
 }
@@ -106,7 +117,9 @@ pub enum MachineMessage {
     Start(String, bool),
     Stop(String),
     FormName(String),
-    FormIso(String),
+    SelectImage(String),
+    ToggleImageMenu,
+    CancelImport,
     FormWorkspace(String),
     Create,
     Refresh,
@@ -121,10 +134,19 @@ impl State {
             running: BTreeMap::new(),
             finished: BTreeMap::new(),
             form_name: String::new(),
-            form_iso: String::new(),
+            official_images: Vec::new(),
+            selected_image: None,
+            image_menu_open: false,
+            catalog_error: None,
+            importing: None,
+            import_worker: None,
             form_workspace: String::new(),
             status: String::new(),
         };
+        match vkored::catalog::official() {
+            Ok(catalog) => state.official_images = catalog.images().to_vec(),
+            Err(error) => state.catalog_error = Some(error),
+        }
         state.refresh();
         state
     }
@@ -164,9 +186,27 @@ impl State {
             MachineMessage::Select(name) => self.selected = Some(name),
             MachineMessage::Refresh => self.refresh(),
             MachineMessage::FormName(value) => self.form_name = value,
-            MachineMessage::FormIso(value) => self.form_iso = value,
+            MachineMessage::SelectImage(id) => {
+                if self.importing.is_none()
+                    && self.official_images.iter().any(|image| image.id == id)
+                {
+                    self.selected_image = Some(id);
+                    self.image_menu_open = false;
+                }
+            }
+            MachineMessage::ToggleImageMenu => {
+                if self.importing.is_none() && !self.official_images.is_empty() {
+                    self.image_menu_open = !self.image_menu_open;
+                }
+            }
             MachineMessage::FormWorkspace(value) => self.form_workspace = value,
-            MachineMessage::Create => self.create(),
+            MachineMessage::Create => self.create(proxy.clone()),
+            MachineMessage::CancelImport => {
+                if let Some(cancel) = &self.importing {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                self.status = "Cancelling image import".into();
+            }
             MachineMessage::Start(name, window) => self.start(name, window, proxy.clone()),
             MachineMessage::Stop(name) => {
                 if let Some(running) = self.running.get(&name) {
@@ -177,13 +217,24 @@ impl State {
         }
     }
 
-    fn create(&mut self) {
+    fn create(&mut self, proxy: EventLoopProxy<UserEvent>) {
+        if self.importing.is_some() {
+            return;
+        }
+        self.image_menu_open = false;
+        let Some(image_id) = self
+            .selected_image
+            .clone()
+            .filter(|id| self.official_images.iter().any(|image| &image.id == id))
+        else {
+            self.status = "Select an available official image first".into();
+            return;
+        };
         let absolute = |text: &str| {
             std::fs::canonicalize(text.trim()).map_err(|error| format!("{}: {error}", text.trim()))
         };
         let created = (|| {
-            let store = self.store()?;
-            let mut config = MachineConfig::new(self.form_name.trim(), absolute(&self.form_iso)?);
+            let mut config = MachineConfig::new(self.form_name.trim(), "/pending.iso");
             if !self.form_workspace.trim().is_empty() {
                 let root = absolute(&self.form_workspace)?;
                 let name = root
@@ -204,15 +255,43 @@ impl State {
                     max_bytes: 64 << 20,
                 });
             }
-            store.create(&config).map_err(|error| error.to_string())?;
-            Ok::<_, String>(config.name)
+            Ok::<_, String>(config)
         })();
         match created {
-            Ok(name) => {
-                self.status = format!("created {name}");
-                self.form_name.clear();
-                self.refresh();
-                self.selected = Some(name);
+            Ok(config) => {
+                let root = self.state_root.clone();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let signal = cancelled.clone();
+                let result = thread::Builder::new()
+                    .name("vkore-image-import".into())
+                    .spawn(move || {
+                        let name = config.name.clone();
+                        let send = |update| {
+                            let _ = proxy.send_event(UserEvent::Machine(name.clone(), update));
+                        };
+                        let outcome = VkoreState::open(root)
+                            .map(MachineStore::new)
+                            .map_err(|e| e.to_string())
+                            .and_then(|store| {
+                                vkored::images::create_official(
+                                    &store,
+                                    config,
+                                    &image_id,
+                                    &signal,
+                                    |progress| send(Update::ImportProgress(progress)),
+                                )
+                                .map(|_| ())
+                            });
+                        send(Update::Created(outcome));
+                    });
+                match result {
+                    Ok(worker) => {
+                        self.import_worker = Some(worker);
+                        self.importing = Some(cancelled);
+                        self.status = "Importing and checking image…".into();
+                    }
+                    Err(error) => self.status = error.to_string(),
+                }
             }
             Err(error) => self.status = error,
         }
@@ -250,6 +329,30 @@ impl State {
 
     pub fn machine_update(&mut self, name: String, update: Update) {
         match update {
+            Update::ImportProgress(progress) => {
+                self.status = format!(
+                    "Downloading image: {} MiB{}",
+                    progress.bytes >> 20,
+                    progress
+                        .total
+                        .map(|n| format!(" / {} MiB", n >> 20))
+                        .unwrap_or_default()
+                );
+            }
+            Update::Created(result) => {
+                self.importing = None;
+                if let Some(worker) = self.import_worker.take() {
+                    let _ = worker.join();
+                }
+                match result {
+                    Ok(()) => {
+                        self.status = format!("Created {name}");
+                        self.selected = Some(name);
+                        self.refresh();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
             Update::Line(line) => {
                 if let Some(running) = self.running.get_mut(&name) {
                     running.push(&line);
@@ -280,8 +383,24 @@ impl State {
 
     /// Ask every running machine to stop (the window is closing).
     pub fn stop_all(&mut self) {
+        if let Some(cancel) = &self.importing {
+            cancel.store(true, Ordering::Relaxed);
+        }
         for running in self.running.values() {
             let _ = running.stop.send(());
+        }
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        // Let the import's temporary file cleanup run before process exit.
+        // Socket waits are bounded by the image client's read timeout.
+        if let Some(cancel) = &self.importing {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(worker) = self.import_worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -381,7 +500,7 @@ fn wrap(message: MachineMessage) -> Message {
     Message::Machine(message)
 }
 
-fn stage_label(stage: Option<Stage>) -> (&'static str, u32) {
+fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
     match stage {
         None | Some(Stage::Firmware) => ("starting", theme::TEXT_MUTED),
         Some(Stage::Kernel) => ("kernel up", theme::TEXT_SECONDARY),
@@ -395,7 +514,16 @@ fn stage_label(stage: Option<Stage>) -> (&'static str, u32) {
 
 /// The machines page.
 pub fn view(state: &State) -> UiElement<'_> {
-    let mut list = column![].spacing(theme::SPACE_1);
+    let mut list = column![widgets::label("Your machines", theme::TEXT_MUTED)].spacing(10);
+    if state.configs.is_empty() {
+        list = list
+            .push(widgets::body("No machines yet", 15., theme::TEXT))
+            .push(widgets::body(
+                "Add an official image below to get started.",
+                13.,
+                theme::TEXT_MUTED,
+            ));
+    }
     for config in &state.configs {
         let selected = state.selected.as_deref() == Some(config.name.as_str());
         let (label, color) = match state.running.get(&config.name) {
@@ -407,82 +535,209 @@ pub fn view(state: &State) -> UiElement<'_> {
                 row![
                     widgets::data(config.name.as_str(), theme::TEXT).size(theme::SIZE_SM),
                     space::horizontal(),
-                    widgets::mono(label, color),
+                    widgets::badge(label, color),
                 ]
                 .align_y(alignment::Vertical::Center),
             )
             .width(Length::Fill)
-            .padding([7, 10])
+            .padding([10, 12])
             .style(widgets::button_style(widgets::Button::Row(selected)))
             .on_press(wrap(MachineMessage::Select(config.name.clone()))),
         );
     }
+    let selected_image = state
+        .official_images
+        .iter()
+        .find(|image| Some(&image.id) == state.selected_image.as_ref());
+    let label = selected_image.map_or_else(
+        || {
+            if state.official_images.is_empty() {
+                "No official images available".to_owned()
+            } else {
+                "Select an official image".to_owned()
+            }
+        },
+        |image| format!("{} ({})", image.name, image.version),
+    );
+    // Compose the dropdown from the same paragraph-backed controls as the
+    // rest of the UI: Axiom's immediate-text path does not honor menu alignment.
+    let mut images = column![
+        button(
+            row![
+                widgets::data(label, theme::TEXT).width(Length::Fill),
+                widgets::mono(
+                    if state.image_menu_open { "^" } else { "v" },
+                    theme::TEXT_MUTED
+                ),
+            ]
+            .spacing(theme::SPACE_1)
+            .align_y(alignment::Vertical::Center)
+        )
+        .width(Length::Fill)
+        .padding([7, 10])
+        .style(widgets::button_style(widgets::Button::Secondary))
+        .on_press_maybe(
+            (!state.official_images.is_empty() && state.importing.is_none())
+                .then(|| wrap(MachineMessage::ToggleImageMenu))
+        )
+    ]
+    .spacing(theme::SPACE_1);
+    if state.image_menu_open && state.importing.is_none() {
+        let mut options = column![].spacing(theme::SPACE_1);
+        for image in &state.official_images {
+            options = options.push(
+                button(widgets::data(
+                    format!("{} ({})", image.name, image.version),
+                    theme::TEXT,
+                ))
+                .width(Length::Fill)
+                .padding([7, 10])
+                .style(widgets::button_style(widgets::Button::Row(
+                    Some(&image.id) == state.selected_image.as_ref(),
+                )))
+                .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
+            );
+        }
+        images = images.push(
+            container(widgets::scroll(options).height(Length::Shrink.max(160)))
+                .padding(4)
+                .style(|appearance| {
+                    theme::panel(
+                        appearance,
+                        theme::PANEL,
+                        Some(theme::BORDER),
+                        theme::RADIUS_MD,
+                    )
+                }),
+        );
+    }
+    let create_action = if state.importing.is_some() {
+        Some(wrap(MachineMessage::CancelImport))
+    } else if selected_image.is_some() && vkored::config::valid_name(state.form_name.trim()) {
+        Some(wrap(MachineMessage::Create))
+    } else {
+        None
+    };
     let form = column![
-        widgets::label("New machine", theme::TEXT_MUTED),
-        text_input("name", &state.form_name)
+        widgets::body("Create a machine", 18., theme::TEXT),
+        widgets::body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
+        widgets::label("Machine name", theme::TEXT_MUTED),
+        text_input("e.g. inference", &state.form_name)
             .on_input(|value| wrap(MachineMessage::FormName(value)))
             .font(fonts::MONO)
             .padding([7, 10])
             .size(theme::SIZE_SM)
             .style(widgets::field),
-        text_input("/path/to/kore-x86-release.iso", &state.form_iso)
-            .on_input(|value| wrap(MachineMessage::FormIso(value)))
-            .font(fonts::MONO)
-            .padding([7, 10])
-            .size(theme::SIZE_SM)
-            .style(widgets::field),
-        text_input("project folder to stage (optional)", &state.form_workspace)
+        widgets::label("Official image", theme::TEXT_MUTED),
+        images,
+        widgets::data(
+            state
+                .catalog_error
+                .as_deref()
+                .unwrap_or(if state.official_images.is_empty() {
+                    "Official downloads have not been published yet."
+                } else {
+                    "The official image is verified before it is added."
+                }),
+            theme::TEXT_MUTED
+        ),
+        widgets::label("Project folder · optional", theme::TEXT_MUTED),
+        text_input("/path/to/project", &state.form_workspace)
             .on_input(|value| wrap(MachineMessage::FormWorkspace(value)))
             .font(fonts::MONO)
             .padding([7, 10])
             .size(theme::SIZE_SM)
             .style(widgets::field),
-        button(widgets::control("Create"))
-            .height(theme::CONTROL_SM)
-            .padding([8, 14])
-            .style(widgets::button_style(widgets::Button::Primary))
-            .on_press(wrap(MachineMessage::Create)),
+        button(widgets::control(if state.importing.is_some() {
+            "Cancel import"
+        } else {
+            "Create machine"
+        }))
+        .height(theme::CONTROL_SM)
+        .padding([8, 14])
+        .style(widgets::button_style(widgets::Button::Primary))
+        .on_press_maybe(create_action),
     ]
-    .spacing(theme::SPACE_2);
-    let left = column![scrollable(list).height(Length::Fill), form]
-        .spacing(theme::SPACE_4)
-        .width(Length::FillPortion(2));
+    .spacing(12);
+    let left = widgets::scroll(
+        column![
+            container(list)
+                .padding(18)
+                .width(Length::Fill)
+                .style(widgets::card),
+            container(form)
+                .padding(18)
+                .width(Length::Fill)
+                .style(widgets::card),
+        ]
+        .spacing(16),
+    )
+    .height(Length::Fill)
+    .width(Length::FillPortion(2).max(360))
+    .id("machine-list");
 
     let detail: UiElement<'_> = match state
         .selected
         .as_ref()
         .and_then(|name| state.configs.iter().find(|config| &config.name == name))
     {
-        None => widgets::body(
-            "Select a machine, or create one from a Kore ISO.",
-            theme::SIZE_SM,
-            theme::TEXT_MUTED,
-        )
-        .into(),
+        None => widgets::empty_state(
+            crate::visuals::Icon::Machine,
+            if state.configs.is_empty() {
+                "A home for your Kore machines"
+            } else {
+                "Choose a machine"
+            },
+            if state.configs.is_empty() {
+                "Official images will appear here when they are released. Your machines, boot status and controls will live in this workspace."
+            } else {
+                "Select a machine to see its resources, manage its power and follow its boot."
+            },
+        ),
         Some(config) => {
             let running = state.running.get(&config.name);
+            let (status, tone) =
+                running.map_or(("Stopped", theme::TEXT_MUTED), |run| stage_label(run.stage));
+            let metric = |label, value: String, unit| {
+                container(
+                    column![
+                        widgets::label(label, theme::TEXT_MUTED),
+                        widgets::data(value, theme::TEXT).size(20.),
+                        widgets::body(unit, 12., theme::TEXT_MUTED)
+                    ]
+                    .spacing(8),
+                )
+                .padding(14)
+                .width(Length::Fill)
+                .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.))
+            };
             let mut pane = column![
-                widgets::data(config.name.as_str(), theme::TEXT).size(theme::SIZE_MD),
+                row![
+                    widgets::data(config.name.as_str(), theme::TEXT).size(23.),
+                    space::horizontal(),
+                    widgets::badge(status, tone)
+                ]
+                .spacing(12)
+                .align_y(alignment::Vertical::Center),
+                widgets::body("Machine overview", 13., theme::TEXT_MUTED),
+                row![
+                    metric("CPUs", config.cpus.to_string(), "cores"),
+                    metric("Memory", config.memory_mib.to_string(), "MiB"),
+                    metric("Disk", config.disk_mib.to_string(), "MiB")
+                ]
+                .spacing(10),
+                widgets::label("Boot image", theme::TEXT_MUTED),
+                widgets::data(config.iso.display().to_string(), theme::TEXT_SECONDARY),
+                widgets::label("SHA-256", theme::TEXT_MUTED),
                 widgets::data(
-                    format!("iso      {}", config.iso.display()),
-                    theme::TEXT_SECONDARY
-                ),
-                widgets::data(
-                    format!(
-                        "sha256   {}",
-                        config.iso_sha256.as_deref().unwrap_or("(not booted yet)")
-                    ),
-                    theme::TEXT_SECONDARY,
-                ),
-                widgets::mono(
-                    format!(
-                        "machine  {} CPUs · {} MiB · {} MiB disk",
-                        config.cpus, config.memory_mib, config.disk_mib
-                    ),
-                    theme::TEXT_SECONDARY,
+                    config
+                        .iso_sha256
+                        .as_deref()
+                        .unwrap_or("Recorded after the first boot"),
+                    theme::TEXT_MUTED
                 ),
             ]
-            .spacing(theme::SPACE_1);
+            .spacing(14);
             if let Some(workspace) = &config.workspace {
                 pane = pane.push(widgets::data(
                     format!(
@@ -527,40 +782,58 @@ pub fn view(state: &State) -> UiElement<'_> {
                 (None, Some(finished)) => finished.log.as_str(),
                 (None, None) => "",
             };
-            pane = pane.push(
-                container(
-                    scrollable(widgets::mono(log, theme::TEXT_SECONDARY))
-                        .height(Length::Fill)
-                        .anchor_bottom()
-                        .style(widgets::hidden_scrollbar),
-                )
-                .padding(theme::SPACE_2)
+            pane = pane.push(widgets::label("Boot activity", theme::TEXT_MUTED));
+            if log.is_empty() {
+                pane = pane.push(
+                    container(
+                        column![
+                            widgets::body("Ready when you are", 16., theme::TEXT),
+                            widgets::body(
+                                "Start this machine to follow its boot activity here.",
+                                13.,
+                                theme::TEXT_MUTED
+                            ),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding(20)
+                    .width(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
+                );
+            } else {
+                pane = pane.push(
+                    container(
+                        widgets::scroll(widgets::mono(log, theme::TEXT_SECONDARY))
+                            .height(220)
+                            .anchor_bottom(),
+                    )
+                    .padding(14)
+                    .width(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
+                );
+            }
+            widgets::scroll(pane.spacing(16))
                 .height(Length::Fill)
-                .width(Length::Fill)
-                .style(|_| theme::panel(theme::PANEL_FILE, Some(theme::BORDER), theme::RADIUS_MD)),
-            );
-            pane.spacing(theme::SPACE_2).height(Length::Fill).into()
+                .into()
         }
     };
-    container(
-        column![
-            widgets::display("Machines"),
-            row![
-                left,
-                container(detail)
-                    .width(Length::FillPortion(5))
-                    .height(Length::Fill)
-                    .padding(theme::SPACE_4)
-                    .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG)),
-            ]
-            .spacing(theme::SPACE_4)
-            .height(Length::Fill),
-            widgets::data(state.status.as_str(), theme::TEXT_MUTED),
+    let mut page = column![
+        widgets::page_header("Machines", "Your Kore guests, ready for work."),
+        row![
+            left,
+            container(detail)
+                .id("machine-detail")
+                .width(Length::FillPortion(3))
+                .height(Length::Fill)
+                .padding(24)
+                .style(widgets::card),
         ]
-        .spacing(theme::SPACE_4),
-    )
-    .padding(theme::SPACE_6)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+        .spacing(theme::SPACE_4)
+        .height(Length::Fill),
+    ]
+    .spacing(theme::SPACE_4);
+    if !state.status.is_empty() {
+        page = page.push(widgets::data(state.status.as_str(), theme::TEXT_MUTED));
+    }
+    widgets::page_frame(page)
 }

@@ -6,8 +6,10 @@ mod fonts;
 mod logo;
 mod machines;
 mod render_backend;
+mod settings;
 mod splash;
 mod theme;
+mod visuals;
 mod volumes;
 mod widgets;
 
@@ -64,26 +66,33 @@ fn native_renderer() -> AxRenderer<System> {
 #[derive(Debug, Clone)]
 pub enum Message {
     Show(Page),
+    Appearance(theme::Appearance),
+    Settings(settings::SettingsMessage),
     Volume(volumes::VolumeMessage),
     Machine(machines::MachineMessage),
 }
 
-/// The two pages.
+/// The desktop pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Volumes,
     Machines,
+    Settings,
 }
 
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    SystemTheme(Option<bool>),
     Volume(volumes::Reply),
     Machine(String, machines::Update),
 }
 
 struct Model {
     page: Page,
+    appearance: theme::Appearance,
+    system_dark: Option<bool>,
+    settings: settings::State,
     volumes: volumes::State,
     machines: machines::State,
     proxy: EventLoopProxy<UserEvent>,
@@ -99,6 +108,14 @@ struct Model {
 impl Model {
     fn update(&mut self, message: Message) {
         match message {
+            Message::Settings(message) => self.settings.update(message),
+            Message::Appearance(appearance) => {
+                self.appearance = appearance;
+                if let Err(error) = appearance.save(&self.machines.state_root) {
+                    self.status =
+                        format!("Appearance changed for this session; could not save: {error}");
+                }
+            }
             Message::Show(page) => {
                 self.page = page;
                 if page == Page::Machines {
@@ -136,6 +153,7 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            UserEvent::SystemTheme(dark) => self.system_dark = dark,
             UserEvent::Volume(reply) => {
                 let closed = matches!(reply, volumes::Reply::Closed);
                 self.volumes.reply(reply);
@@ -176,6 +194,7 @@ impl Model {
         let page = match self.page {
             Page::Volumes => volumes::view(&self.volumes, &self.machines.names()),
             Page::Machines => machines::view(&self.machines),
+            Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
         };
         let base: UiElement<'_> = row![
             sidebar(self.page, self.machines.running.len(), &self.status),
@@ -186,7 +205,7 @@ impl Model {
         let base: UiElement<'_> = container(base)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| theme::panel(theme::BACKGROUND, None, 0.0))
+            .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.0))
             .into();
         if let Some(phase) = self.booted_at.and_then(|at| splash::progress(at.elapsed())) {
             return stack![base, splash::overlay(phase)]
@@ -198,54 +217,105 @@ impl Model {
     }
 }
 
-/// The navigation rail: the two pages, and what is running.
+/// The navigation rail: pages and what is running.
 fn sidebar(current: Page, running: usize, status: &str) -> UiElement<'_> {
     let brand = row![
-        splash::mark(20.0),
-        text("vKore")
-            .font(fonts::DISPLAY)
-            .size(15.0)
-            .color(theme::rgb(theme::TEXT)),
-    ]
-    .spacing(theme::SPACE_2)
-    .align_y(alignment::Vertical::Center);
-    let nav = |label: &'static str, page: Page| {
-        button(widgets::nav(label))
-            .height(34)
-            .padding([0, 10])
-            .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Choice(
-                current == page,
-            )))
-            .on_press(Message::Show(page))
-    };
-    container(
+        splash::mark(36.0),
         column![
-            brand,
-            nav("Volumes", Page::Volumes),
-            nav("Machines", Page::Machines),
-            iced_widget::space::vertical(),
-            widgets::mono(
-                if running == 0 {
-                    "no machine running".to_owned()
-                } else {
-                    format!("{running} machine(s) running")
-                },
-                theme::TEXT_MUTED,
-            ),
-            widgets::data(status, theme::TEXT_MUTED),
+            text("vKore")
+                .font(fonts::DISPLAY)
+                .size(23.0)
+                .style(theme::text(theme::TEXT)),
+            widgets::body("Your Kore workspace", 11., theme::TEXT_MUTED),
         ]
-        .spacing(theme::SPACE_2),
-    )
-    .padding(14)
-    .width(220)
-    .height(Length::Fill)
-    .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), 0.0))
-    .into()
+        .spacing(2)
+    ]
+    .spacing(9)
+    .align_y(alignment::Vertical::Center);
+    let nav = |label: &'static str, page: Page, icon| {
+        let active = current == page;
+        button(
+            row![
+                visuals::icon(
+                    icon,
+                    if active {
+                        theme::MAGENTA
+                    } else {
+                        theme::TEXT_MUTED
+                    },
+                    20.
+                ),
+                widgets::nav(label)
+            ]
+            .spacing(12)
+            .align_y(alignment::Vertical::Center),
+        )
+        .height(44)
+        .padding([0, 12])
+        .width(Length::Fill)
+        .style(widgets::button_style(widgets::Button::Navigation(active)))
+        .on_press(Message::Show(page))
+    };
+    let mut rail = column![
+        container(brand).padding([10, 0]),
+        iced_widget::space::vertical().height(20),
+        widgets::label("Workspace", theme::TEXT_MUTED),
+        nav("Machines", Page::Machines, visuals::Icon::Machine),
+        nav("Volumes", Page::Volumes, visuals::Icon::Volume),
+        iced_widget::space::vertical(),
+        nav("Settings", Page::Settings, visuals::Icon::Settings),
+        container(
+            column![
+                widgets::body("On this computer", 12., theme::TEXT_SECONDARY),
+                widgets::badge(
+                    if running == 0 {
+                        "No machines running".to_owned()
+                    } else {
+                        format!("{running} running")
+                    },
+                    if running == 0 {
+                        theme::TEXT_MUTED
+                    } else {
+                        theme::SUCCESS
+                    }
+                ),
+            ]
+            .spacing(8)
+        )
+        .padding([14, 4]),
+    ]
+    .spacing(6);
+    if !status.is_empty() {
+        rail = rail.push(widgets::data(status, theme::ERROR));
+    }
+    container(rail)
+        .padding(18)
+        .width(224)
+        .height(Length::Fill)
+        .style(|appearance| theme::panel(appearance, theme::PANEL, None, 0.))
+        .into()
+}
+
+#[cfg(target_os = "linux")]
+fn system_dark_value(scheme: mundy::ColorScheme) -> Option<bool> {
+    match scheme {
+        mundy::ColorScheme::Light => Some(false),
+        mundy::ColorScheme::Dark => Some(true),
+        mundy::ColorScheme::NoPreference => None,
+    }
+}
+
+fn window_theme(appearance: theme::Appearance) -> Option<winit::window::Theme> {
+    match appearance {
+        theme::Appearance::System => None,
+        theme::Appearance::Light => Some(winit::window::Theme::Light),
+        theme::Appearance::Dark => Some(winit::window::Theme::Dark),
+    }
 }
 
 struct App {
     model: Model,
+    window_appearance: theme::Appearance,
     context: SoftContext<OwnedDisplayHandle>,
     surface: Option<SoftSurface<OwnedDisplayHandle, Rc<Window>>>,
     renderer: AxRenderer<System>,
@@ -301,6 +371,10 @@ impl App {
     }
 
     fn draw(&mut self, window: &Rc<Window>) -> Result<(), String> {
+        if self.window_appearance != self.model.appearance {
+            window.set_theme(window_theme(self.model.appearance));
+            self.window_appearance = self.model.appearance;
+        }
         let physical = window.inner_size();
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
@@ -336,11 +410,12 @@ impl App {
                 ..
             }
         );
+        let appearance = self.model.appearance.iced(self.model.system_dark);
         interface.draw(
             &mut self.renderer,
-            &Theme::Dark,
+            &appearance,
             &renderer::Style {
-                text_color: theme::rgb(theme::TEXT),
+                text_color: theme::color(&appearance, theme::TEXT),
             },
             self.cursor,
         );
@@ -402,13 +477,17 @@ impl ApplicationHandler<UserEvent> for App {
         if self.surface.is_some() {
             return;
         }
+        if let Some(reported) = event_loop.system_theme() {
+            self.model.system_dark = Some(reported == winit::window::Theme::Dark);
+        }
         let window = Rc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title("vKore")
-                        .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800))
-                        .with_min_inner_size(winit::dpi::PhysicalSize::new(900, 560)),
+                        .with_theme(window_theme(self.model.appearance))
+                        .with_inner_size(winit::dpi::LogicalSize::new(1280, 800))
+                        .with_min_inner_size(winit::dpi::LogicalSize::new(900, 560)),
                 )
                 .expect("create vKore window"),
         );
@@ -444,8 +523,18 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match &event {
+            WindowEvent::ThemeChanged(reported) => {
+                if self.model.appearance == theme::Appearance::System {
+                    self.model.user_event(UserEvent::SystemTheme(Some(
+                        *reported == winit::window::Theme::Dark,
+                    )));
+                    self.redraw = true;
+                    window.request_redraw();
+                }
+            }
             WindowEvent::CloseRequested => {
                 // Machines started here stop with the window.
+                self.model.settings.stop();
                 self.model.machines.stop_all();
                 event_loop.exit();
             }
@@ -459,6 +548,14 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(value) => self.modifiers = value.state(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.redraw = true,
             WindowEvent::RedrawRequested => {
+                // Explicit window themes suppress native notifications. Query
+                // the system again when returning to System before drawing.
+                if self.window_appearance != self.model.appearance
+                    && self.model.appearance == theme::Appearance::System
+                    && let Some(reported) = event_loop.system_theme()
+                {
+                    self.model.system_dark = Some(reported == winit::window::Theme::Dark);
+                }
                 self.redraw_requested = false;
                 if self.redraw
                     && let Err(error) = self.draw(&window)
@@ -511,12 +608,14 @@ fn logical_size(window: &Window) -> Size {
 /// What the command line may ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaunchOptions {
+    appearance: Option<theme::Appearance>,
     state: Option<PathBuf>,
     disk: Option<String>,
 }
 
 fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
     let mut options = LaunchOptions {
+        appearance: None,
         state: None,
         disk: None,
     };
@@ -526,9 +625,17 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
             "--state" => {
                 options.state = Some(args.next().ok_or("--state needs a directory")?.into())
             }
+            "--theme" => {
+                options.appearance = Some(theme::Appearance::parse(
+                    &args.next().ok_or("--theme needs system, light or dark")?,
+                )?)
+            }
             "--open" => options.disk = Some(args.next().ok_or("--open needs a disk")?),
             _ => {
-                return Err("usage: vkore-ui [--state DIR] [--open DISK|@MACHINE]".into());
+                return Err(
+                    "usage: vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]"
+                        .into(),
+                );
             }
         }
     }
@@ -558,15 +665,40 @@ fn main() {
         .build()
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "linux")]
+    let system_dark =
+        mundy::Preferences::once_blocking(mundy::Interest::ColorScheme, Duration::from_millis(200))
+            .and_then(|preferences| system_dark_value(preferences.color_scheme));
+    #[cfg(not(target_os = "linux"))]
+    let system_dark = None; // Read from ActiveEventLoop before the first frame.
+    #[cfg(target_os = "linux")]
+    let _system_theme_subscription = {
+        let theme_proxy = proxy.clone();
+        mundy::Preferences::subscribe(mundy::Interest::ColorScheme, move |preferences| {
+            let _ = theme_proxy.send_event(UserEvent::SystemTheme(system_dark_value(
+                preferences.color_scheme,
+            )));
+        })
+    };
     let context = SoftContext::new(event_loop.owned_display_handle())
         .expect("create software presentation context");
+    let (saved_appearance, appearance_status) = match theme::Appearance::load(&state_root) {
+        Ok(appearance) => (appearance, String::new()),
+        Err(error) => (
+            theme::Appearance::default(),
+            format!("Could not load appearance: {error}"),
+        ),
+    };
     let mut model = Model {
         page: Page::Volumes,
+        appearance: options.appearance.unwrap_or(saved_appearance),
+        system_dark,
         volumes: volumes::State::new(volumes::spawn(proxy.clone())),
-        machines: machines::State::new(state_root),
+        machines: machines::State::new(state_root.clone()),
+        settings: settings::State::new(state_root),
         proxy,
         booted_at: Some(Instant::now()),
-        status: String::new(),
+        status: appearance_status,
         pending_start: None,
         reopen: None,
     };
@@ -574,7 +706,9 @@ fn main() {
         let machines = &model.machines;
         model.volumes.open(&disk, |name| machines.disk_of(name));
     }
+    let window_appearance = model.appearance;
     let mut app = App {
+        window_appearance,
         model,
         context,
         surface: None,
@@ -610,21 +744,353 @@ mod tests {
     /// Lays out and draws `element` the way the shell does, and returns the
     /// frame's glyph run count and its text refusals.
     fn draw(element: UiElement<'_>, size: Size) -> (usize, Vec<axui_iced::TextError>) {
+        draw_in_theme(element, size, &Theme::Dark)
+    }
+
+    fn draw_in_theme(
+        element: UiElement<'_>,
+        size: Size,
+        appearance: &Theme,
+    ) -> (usize, Vec<axui_iced::TextError>) {
+        draw_at_scale(element, size, appearance, 1., Some("preview"))
+    }
+
+    #[derive(Default)]
+    struct LayoutBounds(Vec<(iced_core::widget::Id, iced_core::Rectangle)>);
+    impl iced_core::widget::Operation for LayoutBounds {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_core::widget::Operation)) {
+            operate(self);
+        }
+        fn container(&mut self, id: Option<&iced_core::widget::Id>, bounds: iced_core::Rectangle) {
+            if let Some(id) = id {
+                self.0.push((id.clone(), bounds));
+            }
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&iced_core::widget::Id>,
+            bounds: iced_core::Rectangle,
+            _: iced_core::Rectangle,
+            _: iced_core::Vector,
+            _: &mut dyn iced_core::widget::operation::Scrollable,
+        ) {
+            if let Some(id) = id {
+                self.0.push((id.clone(), bounds));
+            }
+        }
+    }
+    impl LayoutBounds {
+        fn get(&self, name: &'static str) -> Option<iced_core::Rectangle> {
+            self.0
+                .iter()
+                .find(|(id, _)| *id == iced_core::widget::Id::new(name))
+                .map(|(_, bounds)| *bounds)
+        }
+        fn check(&self) {
+            if let (Some(frame), Some(content)) = (self.get("page-frame"), self.get("page-content"))
+            {
+                assert!(
+                    (frame.center_x() - content.center_x()).abs() < 1.,
+                    "page is off-center: {frame:?}, {content:?}"
+                );
+                assert!(content.width <= 1440. && content.x >= frame.x + 23.);
+                assert!(content.x + content.width <= frame.x + frame.width - 23.);
+                if let (Some(list), Some(detail)) =
+                    (self.get("machine-list"), self.get("machine-detail"))
+                {
+                    assert!(
+                        list.width <= 360.,
+                        "creation panel must not stretch on wide screens"
+                    );
+                    assert!(
+                        (detail.x - (list.x + list.width + 16.)).abs() < 1.,
+                        "panes must remain adjacent"
+                    );
+                    assert!(
+                        (detail.x + detail.width - (content.x + content.width)).abs() < 1.,
+                        "detail should use the remaining width"
+                    );
+                }
+                if let (Some(appearance), Some(api)) =
+                    (self.get("settings-appearance"), self.get("settings-api"))
+                {
+                    if content.width >= 1240. {
+                        assert!(
+                            (api.y - appearance.y).abs() < 1.,
+                            "wide cards must share a row"
+                        );
+                        assert!(api.x >= appearance.x + appearance.width + 23.);
+                    } else {
+                        assert!(
+                            (api.x - appearance.x).abs() < 1.,
+                            "stacked cards must align"
+                        );
+                        assert!(api.y >= appearance.y + appearance.height + 23.);
+                    }
+                    for card in [appearance, api] {
+                        assert!(
+                            card.x >= content.x
+                                && card.x + card.width <= content.x + content.width + 1.
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_at_scale(
+        element: UiElement<'_>,
+        size: Size,
+        appearance: &Theme,
+        scale: f32,
+        snapshot: Option<&str>,
+    ) -> (usize, Vec<axui_iced::TextError>) {
         fonts::register().expect("MONOLITH faces register");
         let mut renderer = native_renderer();
+        renderer.hint(Scale {
+            window: scale,
+            application: 1.,
+        });
         renderer.reset(iced_core::Rectangle::with_size(size));
         let mut interface =
             UserInterface::build(element, size, user_interface::Cache::new(), &mut renderer);
+        let _ = interface.update(
+            &iced_core::window::Headless,
+            &shell::Waker::noop(),
+            &[iced_core::Event::Window(
+                iced_core::window::Event::RedrawRequested(Instant::now()),
+            )],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut shell::Bus::new(),
+        );
         interface.draw(
             &mut renderer,
-            &Theme::Dark,
+            appearance,
             &renderer::Style {
-                text_color: theme::rgb(theme::TEXT),
+                text_color: theme::color(appearance, theme::TEXT),
             },
             mouse::Cursor::Unavailable,
         );
+        let mut bounds = LayoutBounds::default();
+        interface.operate(&renderer, &mut bounds);
+        if snapshot != Some("preview") {
+            assert!(bounds.get("page-frame").is_some());
+            assert!(bounds.get("page-content").is_some());
+        }
+        if snapshot == Some("settings") {
+            assert!(bounds.get("settings-appearance").is_some());
+            assert!(bounds.get("settings-api").is_some());
+        }
+        bounds.check();
         let frame = renderer.take_frame().expect("a frame");
+        assert!(renderer.take_geometry_errors().is_empty());
+        // Optional artifact from the actual desktop renderer for visual QA on
+        // hosts where a window server is unavailable. Run one page test at a time.
+        if size.width >= 900.0
+            && let Some(snapshot) = snapshot
+            && let Some(path) = std::env::var_os("VKORE_UI_PREVIEW")
+        {
+            use std::io::Write;
+            let width = (size.width * scale) as u32;
+            let height = (size.height * scale) as u32;
+            let mut pixels = vec![0; (width * height) as usize];
+            let mut backend = NativeBackend::new().expect("native backend");
+            backend.set_masks(renderer.take_images());
+            backend
+                .render_changed(
+                    &frame,
+                    &mut pixels,
+                    Extent2d::new(width, height).unwrap(),
+                    width as usize,
+                )
+                .expect("render preview");
+            let mode = if matches!(appearance, Theme::Light) {
+                "light"
+            } else {
+                "dark"
+            };
+            let suffix = if snapshot == "preview" {
+                format!("{mode}.ppm")
+            } else {
+                format!(
+                    "{snapshot}.{}x{}@{scale}.{mode}.ppm",
+                    size.width, size.height
+                )
+            };
+            let mut output = std::io::BufWriter::new(
+                std::fs::File::create(PathBuf::from(path).with_extension(suffix)).unwrap(),
+            );
+            writeln!(output, "P6\n{width} {height}\n255").unwrap();
+            for pixel in pixels {
+                output
+                    .write_all(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8])
+                    .unwrap();
+            }
+        }
         (frame.glyph_runs().len(), renderer.take_text_errors())
+    }
+
+    #[test]
+    fn all_pages_and_splash_render_in_each_appearance() {
+        let root = tempfile::tempdir().unwrap();
+        let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+        store
+            .create(&vkored::MachineConfig::new("inference", "/images/kore.iso"))
+            .unwrap();
+        let mut machines = machines::State::new(root.path().to_owned());
+        machines.selected = Some("inference".into());
+        let (volumes, _worker) = guest_listing();
+        let settings = settings::State::new(root.path().to_owned());
+        for (choice, system_dark) in [
+            (theme::Appearance::Dark, None),
+            (theme::Appearance::Light, None),
+            (theme::Appearance::System, Some(true)),
+            (theme::Appearance::System, Some(false)),
+        ] {
+            let appearance = choice.iced(system_dark);
+            for page in [Page::Volumes, Page::Machines, Page::Settings] {
+                let content = match page {
+                    Page::Volumes => volumes::view(&volumes, &[]),
+                    Page::Machines => machines::view(&machines),
+                    Page::Settings => settings::view(choice, system_dark, &settings),
+                };
+                let shell = container(row![sidebar(page, 0, ""), content])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.0));
+                let (runs, refused) =
+                    draw_in_theme(shell.into(), Size::new(1280.0, 800.0), &appearance);
+                assert!(runs > 10);
+                assert!(refused.is_empty(), "{choice:?}: {refused:?}");
+            }
+            let (_, refused) = draw_in_theme(
+                splash::overlay(splash::progress(Duration::from_millis(1600)).unwrap()),
+                Size::new(640.0, 480.0),
+                &appearance,
+            );
+            assert!(refused.is_empty());
+        }
+    }
+
+    #[test]
+    fn pages_adapt_across_resolutions_and_display_scales() {
+        let root = tempfile::tempdir().unwrap();
+        let machines = machines::State::new(root.path().to_owned());
+        let (volumes, _worker) = guest_listing();
+        let settings = settings::State::new(root.path().to_owned());
+        for (width, height, scale) in [
+            (900., 560., 1.),
+            (1280., 800., 1.),
+            (1500., 900., 1.),
+            (1536., 900., 1.),
+            (1920., 1080., 1.),
+            (2560., 1440., 1.),
+            (900., 1200., 1.),
+            (900., 560., 2.),
+            (1280., 800., 2.),
+        ] {
+            for appearance in [Theme::Dark, Theme::Light] {
+                for page in [Page::Machines, Page::Volumes, Page::Settings] {
+                    let content = match page {
+                        Page::Machines => machines::view(&machines),
+                        Page::Volumes => volumes::view(&volumes, &[]),
+                        Page::Settings => settings::view(
+                            theme::Appearance::System,
+                            Some(appearance == Theme::Dark),
+                            &settings,
+                        ),
+                    };
+                    let shell = container(row![sidebar(page, 0, ""), content])
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                    let snapshot = (page == Page::Settings
+                        && matches!(width as u32, 900 | 1280 | 2560)
+                        && height != 1200.)
+                        .then_some("settings");
+                    let (_, refused) = draw_at_scale(
+                        shell.into(),
+                        Size::new(width, height),
+                        &appearance,
+                        scale,
+                        snapshot,
+                    );
+                    assert!(
+                        refused.is_empty(),
+                        "{page:?} {width}x{height}@{scale}: {refused:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_pages_draw_without_text_refusals() {
+        let root = tempfile::tempdir().unwrap();
+        let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+        store
+            .create(&vkored::MachineConfig::new("inference", "/images/kore.iso"))
+            .unwrap();
+        let mut machines = machines::State::new(root.path().to_owned());
+        machines.selected = Some("inference".into());
+        let (volumes, _worker) = guest_listing();
+        let settings = settings::State::new(root.path().to_owned());
+        for appearance in [Theme::Dark, Theme::Light] {
+            for page in [Page::Volumes, Page::Machines, Page::Settings] {
+                let content = match page {
+                    Page::Volumes => volumes::view(&volumes, &[]),
+                    Page::Machines => machines::view(&machines),
+                    Page::Settings => settings::view(
+                        theme::Appearance::System,
+                        Some(appearance == Theme::Dark),
+                        &settings,
+                    ),
+                };
+                let shell = container(row![sidebar(page, 0, ""), content])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                let (_, refused) = draw_in_theme(shell.into(), Size::new(900., 560.), &appearance);
+                assert!(refused.is_empty(), "{page:?}: {refused:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_workspace_draws_in_each_appearance() {
+        let root = tempfile::tempdir().unwrap();
+        let machines = machines::State::new(root.path().to_owned());
+        let (sender, _worker) = mpsc::channel();
+        let volumes = volumes::State::new(sender);
+        for size in [Size::new(1280., 800.), Size::new(900., 560.)] {
+            for appearance in [Theme::Dark, Theme::Light] {
+                for page in [Page::Machines, Page::Volumes] {
+                    let content = match page {
+                        Page::Machines => machines::view(&machines),
+                        _ => volumes::view(&volumes, &[]),
+                    };
+                    let shell = container(row![sidebar(page, 0, ""), content])
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                    let (_, refused) = draw_in_theme(shell.into(), size, &appearance);
+                    assert!(refused.is_empty(), "{page:?}: {refused:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn launch_theme_can_override_the_saved_choice() {
+        assert_eq!(
+            parse_launch_options(["--theme".into(), "light".into()])
+                .unwrap()
+                .appearance,
+            Some(theme::Appearance::Light)
+        );
+        assert!(parse_launch_options(["--theme".into(), "unknown".into()]).is_err());
+        assert!(parse_launch_options(["--theme".into()]).is_err());
     }
 
     #[test]
@@ -649,7 +1115,6 @@ mod tests {
             ("body", fonts::BODY),
             ("mono", fonts::MONO),
             ("mono label", fonts::MONO_LABEL),
-            ("mono nav", fonts::MONO_NAV),
             ("splash", fonts::SPLASH),
         ] {
             let samples = [
@@ -779,87 +1244,128 @@ mod tests {
 
     #[test]
     fn the_shared_kernels_draw_the_volume_page_exactly_as_the_reference() {
-        let (state, _worker) = guest_listing();
-        let machines = vec!["demo".to_owned()];
-        let size = Size::new(1280.0, 800.0);
-        fonts::register().expect("MONOLITH faces register");
-        let mut renderer = native_renderer();
-        renderer.reset(iced_core::Rectangle::with_size(size));
-        let mut interface = UserInterface::build(
-            volumes::view(&state, &machines),
-            size,
-            user_interface::Cache::new(),
-            &mut renderer,
-        );
-        // A button resolves its status while events traverse the tree: prime
-        // the frame as the window loop does, or every control draws disabled.
-        let _ = interface.update(
-            &iced_core::window::Headless,
-            &shell::Waker::noop(),
-            &[iced_core::Event::Window(
-                iced_core::window::Event::RedrawRequested(Instant::now()),
-            )],
-            mouse::Cursor::Unavailable,
-            &mut renderer,
-            &mut shell::Bus::new(),
-        );
-        interface.draw(
-            &mut renderer,
-            &Theme::Dark,
-            &renderer::Style {
-                text_color: theme::rgb(theme::TEXT),
-            },
-            mouse::Cursor::Unavailable,
-        );
-        let frame = renderer.take_frame().expect("a frame");
-        assert_eq!(renderer.take_text_errors(), []);
-        let masks = renderer.take_images();
-        axgfx::frame_requirements(frame.view()).expect("axgfx takes the display list");
-        let extent = Extent2d::new(1280, 800).unwrap();
+        for appearance in [Theme::Dark, Theme::Light] {
+            let (state, _worker) = guest_listing();
+            let machines = vec!["demo".to_owned()];
+            let size = Size::new(1280.0, 800.0);
+            fonts::register().expect("MONOLITH faces register");
+            let mut renderer = native_renderer();
+            renderer.reset(iced_core::Rectangle::with_size(size));
+            let mut interface = UserInterface::build(
+                volumes::view(&state, &machines),
+                size,
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            // A button resolves its status while events traverse the tree: prime
+            // the frame as the window loop does, or every control draws disabled.
+            let _ = interface.update(
+                &iced_core::window::Headless,
+                &shell::Waker::noop(),
+                &[iced_core::Event::Window(
+                    iced_core::window::Event::RedrawRequested(Instant::now()),
+                )],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut shell::Bus::new(),
+            );
+            interface.draw(
+                &mut renderer,
+                &appearance,
+                &renderer::Style {
+                    text_color: theme::color(&appearance, theme::TEXT),
+                },
+                mouse::Cursor::Unavailable,
+            );
+            let frame = renderer.take_frame().expect("a frame");
+            assert_eq!(renderer.take_text_errors(), []);
+            let masks = renderer.take_images();
+            axgfx::frame_requirements(frame.view()).expect("axgfx takes the display list");
+            let extent = Extent2d::new(1280, 800).unwrap();
 
-        let mut kernels = NativeBackend::new().unwrap();
-        kernels.set_masks(masks.clone());
-        assert!(kernels.begin_frame(&frame));
-        let mut drawn = vec![0u32; 1280 * 800];
-        kernels
-            .render_changed(&frame, &mut drawn, extent, 1280)
-            .unwrap();
-        let mut reference = NativeBackend::reference_for_measurement().unwrap();
-        reference.set_masks(masks);
-        let mut expected = vec![0u32; 1280 * 800];
-        reference
-            .render_changed(&frame, &mut expected, extent, 1280)
-            .unwrap();
-        let differing = drawn.iter().zip(&expected).filter(|(a, b)| a != b).count();
-        assert_eq!(differing, 0, "{differing} pixels differ from the reference");
-        let page = drawn.iter().filter(|pixel| **pixel != drawn[0]).count();
-        assert!(page > 20_000, "the page drew only {page} pixels");
+            let mut kernels = NativeBackend::new().unwrap();
+            kernels.set_masks(masks.clone());
+            assert!(kernels.begin_frame(&frame));
+            let mut drawn = vec![0u32; 1280 * 800];
+            kernels
+                .render_changed(&frame, &mut drawn, extent, 1280)
+                .unwrap();
+            let mut reference = NativeBackend::reference_for_measurement().unwrap();
+            reference.set_masks(masks);
+            let mut expected = vec![0u32; 1280 * 800];
+            reference
+                .render_changed(&frame, &mut expected, extent, 1280)
+                .unwrap();
+            let differing = drawn.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            assert_eq!(differing, 0, "{differing} pixels differ from the reference");
+            let page = drawn.iter().filter(|pixel| **pixel != drawn[0]).count();
+            assert!(page > 20_000, "the page drew only {page} pixels");
 
-        // A damaged region redraws to the same pixels on both.
-        let damage = axgfx::PixelRect::new(240, 160, 640, 260).unwrap();
-        let damage = axgfx::Damage::Rects(&[damage]);
-        kernels
-            .render_damage_for_measurement(&frame, &mut drawn, extent, 1280, damage)
-            .unwrap();
-        reference
-            .render_damage_for_measurement(&frame, &mut expected, extent, 1280, damage)
-            .unwrap();
-        assert!(
-            drawn == expected,
-            "a damaged redraw drifted from the reference"
-        );
+            // A damaged region redraws to the same pixels on both.
+            let damage = axgfx::PixelRect::new(240, 160, 640, 260).unwrap();
+            let damage = axgfx::Damage::Rects(&[damage]);
+            kernels
+                .render_damage_for_measurement(&frame, &mut drawn, extent, 1280, damage)
+                .unwrap();
+            reference
+                .render_damage_for_measurement(&frame, &mut expected, extent, 1280, damage)
+                .unwrap();
+            assert!(
+                drawn == expected,
+                "a damaged redraw drifted from the reference"
+            );
 
-        // And a frame the backend forgot draws again, whole and the same.
-        kernels.invalidate_for_measurement();
-        assert!(kernels.begin_frame(&frame));
-        drawn.fill(0);
-        kernels
-            .render_changed(&frame, &mut drawn, extent, 1280)
-            .unwrap();
-        assert!(
-            drawn == expected,
-            "a full redraw drifted from the reference"
-        );
+            // And a frame the backend forgot draws again, whole and the same.
+            kernels.invalidate_for_measurement();
+            assert!(kernels.begin_frame(&frame));
+            drawn.fill(0);
+            kernels
+                .render_changed(&frame, &mut drawn, extent, 1280)
+                .unwrap();
+            assert!(
+                drawn == expected,
+                "a full redraw drifted from the reference"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selected_official_image_draws_in_each_appearance() {
+        let root = tempfile::tempdir().unwrap();
+        let mut machines = machines::State::new(root.path().to_owned());
+        // Test-only release metadata; never offered by the bundled catalog.
+        let document = r#"{"schema_version":1,"images":[{
+            "id":"test-inference-1","name":"Kore inference","version":"test-1",
+            "profile":"inference","architecture":"x86_64","format":"iso",
+            "url":"https://example.invalid/test.iso",
+            "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bytes":40960,"kore_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "dagfs_format_version":FORMAT_VERSION
+        }]}"#
+            .replace(
+                "FORMAT_VERSION",
+                &vkore_volume::bounds::FORMAT_VERSION.to_string(),
+            );
+        machines.official_images = vkored::catalog::Catalog::parse(document.as_bytes())
+            .unwrap()
+            .images()
+            .to_vec();
+        machines.selected_image = Some("test-inference-1".into());
+        machines.form_name = "inference".into();
+        machines.image_menu_open = true;
+        for appearance in [Theme::Dark, Theme::Light] {
+            let shell = container(row![
+                sidebar(Page::Machines, 0, ""),
+                machines::view(&machines)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.0));
+            let (runs, refused) =
+                draw_in_theme(shell.into(), Size::new(1280.0, 800.0), &appearance);
+            assert!(refused.is_empty(), "{refused:?}");
+            assert!(runs >= 8, "the creation form drew only {runs} runs");
+        }
     }
 
     #[test]
@@ -873,9 +1379,19 @@ mod tests {
         let mut machines = machines::State::new(root.path().to_owned());
         machines.selected = Some("demo".into());
         machines.status = GUEST_TEXT.into();
-        let (runs, refused) = draw(machines::view(&machines), Size::new(1280.0, 800.0));
-        assert_eq!(refused, []);
-        assert!(runs > 10, "the page drew only {runs} runs");
+        for appearance in [Theme::Dark, Theme::Light] {
+            let shell = container(row![
+                sidebar(Page::Machines, 0, ""),
+                machines::view(&machines)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.0));
+            let (runs, refused) =
+                draw_in_theme(shell.into(), Size::new(1280.0, 800.0), &appearance);
+            assert_eq!(refused, []);
+            assert!(runs > 10, "the page drew only {runs} runs");
+        }
 
         let (runs, refused) = draw(
             sidebar(Page::Machines, 1, GUEST_TEXT),

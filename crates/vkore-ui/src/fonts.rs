@@ -217,7 +217,7 @@ const fn face(family: &'static str, weight: font::Weight, tracking: f32) -> Font
     }
 }
 
-/// Archivo 600. Dialog titles and section heads, uppercase.
+/// Archivo 600. Dialog titles and section heads.
 pub const DISPLAY: Font = face(
     theme::DISPLAY_FAMILY,
     font::Weight::Semibold,
@@ -227,11 +227,8 @@ pub const DISPLAY: Font = face(
 pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
 pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
-/// JetBrains Mono 500. Uppercase labels, metadata, navigation.
+/// JetBrains Mono 500. Uppercase labels and metadata.
 pub const MONO_LABEL: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_LABEL);
-
-/// JetBrains Mono 500, tracked for navigation.
-pub const MONO_NAV: Font = face(theme::MONO_FAMILY, font::Weight::Medium, theme::TRACK_NAV);
 
 /// Archivo 600, tracked for the splash wordmark.
 pub const SPLASH: Font = face(
@@ -372,17 +369,13 @@ mod tests {
         assert_eq!(BODY.tracking, font::Tracking::NONE);
         assert_eq!(MONO.tracking, font::Tracking::NONE);
         assert_eq!(MONO_LABEL.tracking, font::Tracking(theme::TRACK_LABEL));
-        assert_eq!(MONO_NAV.tracking, font::Tracking(theme::TRACK_NAV));
         assert_eq!(DISPLAY.tracking, font::Tracking(theme::TRACK_WORDMARK));
         assert_eq!(SPLASH.tracking, font::Tracking(theme::TRACK_SPLASH));
-        // Navigation is set tighter than a label, as the system has it.
-        const { assert!(MONO_NAV.tracking.0 < MONO_LABEL.tracking.0) };
     }
 
     #[test]
     fn a_tracked_face_shares_the_registered_family() {
         // Tracking is a request about setting, not a different typeface.
-        assert_eq!(MONO_LABEL.family, MONO_NAV.family);
         assert_eq!(SPLASH.family, DISPLAY.family);
     }
 

@@ -54,7 +54,40 @@ fn a_real_kore_iso_boots_to_ready() {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
-    let firmware = vkore_vm::runtime::Runtime::for_qemu(&qemu)
+    let (dir, mut machine) = start_machine(&qemu, iso);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
+        machine.poll(std::time::Duration::from_millis(500)).unwrap();
+        if !machine.running() {
+            let console = machine.console().unwrap_or_default();
+            let console = String::from_utf8_lossy(&console);
+            let tail = console
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!(
+                "QEMU exited: {:?}\nLast console lines:\n{tail}",
+                machine.readiness()
+            );
+        }
+    }
+    let readiness = machine.readiness().clone();
+    assert_eq!(readiness.stage(), Stage::Ready, "{readiness:?}");
+    assert_eq!(readiness.version.as_deref(), Some("0.40.0"));
+    let shot = dir.path().join("screen.ppm");
+    machine.screendump(&shot).unwrap();
+    assert!(std::fs::metadata(&shot).unwrap().len() > 1280 * 800 * 3);
+    machine.stop(std::time::Duration::from_secs(5)).unwrap();
+    assert!(!machine.running());
+}
+
+fn start_machine(qemu: &std::path::Path, iso: PathBuf) -> (tempfile::TempDir, Machine) {
+    let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .expect("valid QEMU runtime")
         .map(|runtime| runtime.firmware)
         .or_else(firmware::discover)
@@ -76,7 +109,7 @@ fn a_real_kore_iso_boots_to_ready() {
     let accel = HostCaps::probe()
         .choose(vkore_vm::AccelChoice::Auto, Vendor::Intel)
         .unwrap();
-    let caps = QemuCaps::probe(&qemu, Vendor::Intel, accel).unwrap();
+    let caps = QemuCaps::probe(qemu, Vendor::Intel, accel).unwrap();
     let spec = MachineSpec {
         name: "test".into(),
         iso,
@@ -96,18 +129,43 @@ fn a_real_kore_iso_boots_to_ready() {
         debugcon_log: dir.path().join("debugcon.log"),
         qmp_socket: dir.path().join("qmp.sock"),
     };
-    let mut machine = Machine::start(&qemu, &caps, &spec, &dir.path().join("qemu.log")).unwrap();
+    let machine = Machine::start(qemu, &caps, &spec, &dir.path().join("qemu.log")).unwrap();
+    (dir, machine)
+}
+
+/// Kernel self-test images intentionally omit the production runtime and shut
+/// down after PASS. Keep their acceptance separate from shell/volume readiness.
+#[test]
+fn a_kernel_self_test_iso_passes_and_powers_off() {
+    let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_BOOT_ISO"))
+    else {
+        return;
+    };
+    let (dir, mut machine) = start_machine(&qemu, iso);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
-    while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
-        machine.poll(std::time::Duration::from_millis(500)).unwrap();
-        assert!(machine.running(), "QEMU exited: {:?}", machine.readiness());
+    let mut captured = false;
+    while std::time::Instant::now() < deadline {
+        machine.poll(std::time::Duration::from_millis(200)).unwrap();
+        if machine.readiness().display.is_some() && !captured && machine.running() {
+            let shot = dir.path().join("boot.ppm");
+            machine.screendump(&shot).unwrap();
+            assert!(std::fs::metadata(shot).unwrap().len() > 1280 * 800 * 3);
+            captured = true;
+        }
+        if !machine.running() {
+            break;
+        }
     }
-    let readiness = machine.readiness().clone();
-    assert_eq!(readiness.stage(), Stage::Ready, "{readiness:?}");
-    assert_eq!(readiness.version.as_deref(), Some("0.40.0"));
-    let shot = dir.path().join("screen.ppm");
-    machine.screendump(&shot).unwrap();
-    assert!(std::fs::metadata(&shot).unwrap().len() > 1280 * 800 * 3);
-    machine.stop(std::time::Duration::from_secs(5)).unwrap();
-    assert!(!machine.running());
+    assert!(!machine.running(), "kernel self-test did not power off");
+    let bytes = machine.console().unwrap();
+    let console = String::from_utf8_lossy(&bytes);
+    assert!(
+        console.contains("boot_test: PASS"),
+        "kernel self-test did not pass"
+    );
+    assert!(
+        console.contains("power: S5"),
+        "guest did not request power off"
+    );
+    assert!(captured, "no guest framebuffer was captured through QMP");
 }

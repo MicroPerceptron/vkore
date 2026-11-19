@@ -52,6 +52,20 @@ You need a Kore x86_64 ISO, `qemu-system-x86_64` (8.2 or newer) with OVMF
 (`ovmf` on Debian and Ubuntu), and the Rust toolchain pinned in
 [rust-toolchain.toml](rust-toolchain.toml); `rustup` installs it on first build.
 
+Linux NPU discovery also requires the libudev development files and pkg-config,
+including when building only the CLI. On Debian/Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y pkg-config libudev-dev
+```
+
+If `libudev-sys` reports that `libudev.pc` is missing, install these packages
+and retry the build. `pkg-config --modversion libudev` should print a version.
+The runtime library alone is insufficient; distribution packages install the
+development metadata in the standard search path, so no `PKG_CONFIG_PATH`
+override is normally needed.
+
 ```sh
 cargo build --release -p vkored -p vkore-ui
 ```

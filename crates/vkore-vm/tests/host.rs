@@ -54,7 +54,11 @@ fn a_real_kore_iso_boots_to_ready() {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
-    let firmware = firmware::discover().expect("an installed UEFI firmware descriptor");
+    let firmware = vkore_vm::runtime::Runtime::for_qemu(&qemu)
+        .expect("valid QEMU runtime")
+        .map(|runtime| runtime.firmware)
+        .or_else(firmware::discover)
+        .expect("bundled firmware or an installed UEFI firmware descriptor");
     let dir = tempfile::tempdir().unwrap();
     let disk = dir.path().join("disk.raw");
     std::fs::File::create(&disk)

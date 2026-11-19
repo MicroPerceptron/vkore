@@ -11,7 +11,7 @@ SHA-256 (matching the installed Homebrew 11.0.1 source receipt used during
 integration). A pin update requires rebuilding both host bundles, capability
 probes, and a real Kore ISO boot. Version numbers do not replace device probes.
 
-Use Python 3.12 or newer, a C/C++ toolchain, Meson 1.9.1, Ninja and pkg-config.
+Use Python 3.12 or newer, a C/C++ toolchain, Meson 1.9.1, setuptools 80.9.0, wheel 0.45.1, Ninja and pkg-config.
 Linux additionally needs glib, pixman, libslirp, zlib and GTK development
 packages plus patchelf. macOS needs Xcode command-line tools and Homebrew
 glib, pixman and libslirp. The workflow lists the exact setup commands.

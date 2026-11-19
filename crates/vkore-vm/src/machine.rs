@@ -326,7 +326,7 @@ impl Machine {
         Ok(())
     }
 
-    /// The console log, from its start.
+    /// The first 4 MiB of the console log, matching a bounded preview.
     pub fn console(&self) -> Result<Vec<u8>, MachineError> {
         let mut file = File::open(&self.serial)
             .map_err(|error| MachineError::Io(self.serial.clone(), error))?;

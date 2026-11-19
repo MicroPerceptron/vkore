@@ -5,6 +5,10 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ## [0.3.0] - 2026-11-19
 
+### Changed
+- Move the desktop version to the bottom of the sidebar and include the build commit, with explicit dirty and unknown-source labels.
+- Check hardware permissions together on Done/Save; prompt only when elevation is needed and preserve the draft if authorization fails.
+
 ### Fixed
 - Show the actual native host page size and explain why macOS QEMU uses automatic system pages; do not offer Linux-only hugepage controls on unsupported hosts.
 - Distinguish unavailable hugepage backends from inaccessible or depleted Linux pools.

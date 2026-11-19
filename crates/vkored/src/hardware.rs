@@ -155,6 +155,42 @@ pub fn needs_authorization(config: &MachineConfig, host: &HostResources) -> bool
             .is_some_and(|n| n < lock_budget(config.memory_mib))
 }
 
+/// Validate the complete selection before requesting its permissions once.
+/// Desktop completion and launch share this entry point; noninteractive callers
+/// continue to use validation without invoking an authentication agent.
+pub fn authorize_configuration(config: &MachineConfig, host: &HostResources) -> Result<(), String> {
+    authorize_with(config, host, authorize_memory)
+}
+
+fn authorize_with(
+    config: &MachineConfig,
+    host: &HostResources,
+    authorize: impl FnOnce(u32) -> Result<(), String>,
+) -> Result<(), String> {
+    validate_host(config, host)?;
+    if needs_authorization(config, host) {
+        authorize(config.memory_mib)?;
+    }
+    Ok(())
+}
+
+/// Finish a new machine's hardware draft. Storage admission precedes any
+/// authorization; no image or machine needs to exist yet.
+pub fn prepare(config: &MachineConfig, root: &Path) -> Result<HostResources, String> {
+    let host = HostResources::probe(root)?;
+    validate_host(config, &host)?;
+    if config.resources.reserve_storage && config.disk_mib > host.storage_available_mib {
+        return Err("not enough free storage for this reservation".into());
+    }
+    authorize_configuration(config, &host)?;
+    let host = HostResources::probe(root)?;
+    validate_host(config, &host)?;
+    if config.resources.reserve_storage && config.disk_mib > host.storage_available_mib {
+        return Err("not enough free storage for this reservation".into());
+    }
+    Ok(host)
+}
+
 /// Raise only this user's vKore process limit. QEMU stays unprivileged and
 /// inherits it. No shell, privileged QEMU, arbitrary helper, or password input.
 /// pkexec uses the desktop's authentication agent and handles cancellation.
@@ -239,6 +275,47 @@ pub fn save(
     disk_mib: u64,
     resources: Resources,
 ) -> Result<(), String> {
+    save_with(
+        store,
+        name,
+        cpus,
+        memory_mib,
+        disk_mib,
+        resources,
+        |_, _| Ok(()),
+    )
+}
+
+/// Desktop save: hold the session lease through validation, authorization and
+/// persistence. A denied request never changes the saved configuration.
+pub fn save_authorized(
+    store: &MachineStore,
+    name: &str,
+    cpus: u16,
+    memory_mib: u32,
+    disk_mib: u64,
+    resources: Resources,
+) -> Result<(), String> {
+    save_with(
+        store,
+        name,
+        cpus,
+        memory_mib,
+        disk_mib,
+        resources,
+        authorize_configuration,
+    )
+}
+
+fn save_with(
+    store: &MachineStore,
+    name: &str,
+    cpus: u16,
+    memory_mib: u32,
+    disk_mib: u64,
+    resources: Resources,
+    authorize: impl FnOnce(&MachineConfig, &HostResources) -> Result<(), String>,
+) -> Result<(), String> {
     store.get(name).map_err(|e| e.to_string())?;
     let paths = store.state().machine(name);
     let _lease = lease(&paths.dir).map_err(|e| e.to_string())?;
@@ -253,6 +330,16 @@ pub fn save(
     config.memory_mib = memory_mib;
     config.disk_mib = disk_mib;
     config.resources = resources;
+    let host = HostResources::probe(store.state().root())?;
+    validate_host(&config, &host)?;
+    if !paths.disk.exists()
+        && config.resources.reserve_storage
+        && disk_mib > host.storage_available_mib
+    {
+        return Err("not enough free storage for this reservation".into());
+    }
+    authorize(&config, &host)?;
+    // Authorization can wait for the user; don't persist a now-invalid choice.
     let host = HostResources::probe(store.state().root())?;
     validate_host(&config, &host)?;
     if !paths.disk.exists()
@@ -300,6 +387,58 @@ mod tests {
             memlock_bytes: Some(65536),
         }
     }
+    #[test]
+    fn authorization_is_batched_after_validation_and_skips_unneeded_requests() {
+        let mut h = host();
+        let mut c = MachineConfig::new("demo", "/image.iso");
+        (c.cpus, c.memory_mib, c.disk_mib, c.resources) = defaults(&h, c.requirements);
+        let mut calls = 0;
+        authorize_with(&c, &h, |mib| {
+            calls += 1;
+            assert_eq!(mib, c.memory_mib);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            authorize_with(&c, &h, |_| Err("denied".into())),
+            Err("denied".into())
+        );
+        c.cpus = 1;
+        assert!(authorize_with(&c, &h, |_| panic!("invalid draft prompted")).is_err());
+        c.cpus = 4;
+        h.memlock_bytes = Some(lock_budget(c.memory_mib));
+        authorize_with(&c, &h, |_| panic!("sufficient limit prompted")).unwrap();
+        h.memlock_bytes = None;
+        authorize_with(&c, &h, |_| panic!("unlimited lock budget prompted")).unwrap();
+        h.memlock_bytes = Some(0);
+        c.resources.pin_memory = false;
+        authorize_with(&c, &h, |_| panic!("unpinned memory prompted")).unwrap();
+        h.memory_pinning = false;
+        authorize_with(&c, &h, |_| panic!("unsupported host prompted")).unwrap();
+    }
+
+    #[test]
+    fn denied_save_preserves_config_and_releases_session_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MachineStore::new(crate::State::open(dir.path()).unwrap());
+        let c = MachineConfig::new("demo", "/image.iso");
+        store.create(&c).unwrap();
+        let result = save_with(&store, "demo", 2, 2048, 1024, Default::default(), |_, _| {
+            assert!(lease(&store.state().machine("demo").dir).is_err());
+            Err("cancelled".into())
+        });
+        assert_eq!(result, Err("cancelled".into()));
+        assert_eq!(store.get("demo").unwrap(), c);
+        assert!(lease(&store.state().machine("demo").dir).is_ok());
+        assert!(
+            save_with(&store, "demo", 1, 2048, 1024, Default::default(), |_, _| {
+                panic!("invalid settings prompted")
+            })
+            .is_err()
+        );
+    }
+
     #[test]
     fn unsupported_page_backing_is_distinct_from_an_exhausted_pool() {
         let mut h = host();
@@ -359,16 +498,32 @@ mod tests {
         let paths = store.state().machine("demo");
         let held = lease(&paths.dir).unwrap();
         assert!(
-            save(&store, "demo", 2, 2048, 4096, Default::default())
-                .unwrap_err()
-                .contains("busy")
+            save_with(
+                &store,
+                "demo",
+                2,
+                2048,
+                4096,
+                Default::default(),
+                |_, _| panic!("busy machine prompted")
+            )
+            .unwrap_err()
+            .contains("busy")
         );
         drop(held);
         std::fs::write(&paths.disk, b"preserved").unwrap();
         assert!(
-            save(&store, "demo", 2, 2048, 8192, Default::default())
-                .unwrap_err()
-                .contains("fixed")
+            save_with(
+                &store,
+                "demo",
+                2,
+                2048,
+                8192,
+                Default::default(),
+                |_, _| panic!("fixed disk change prompted")
+            )
+            .unwrap_err()
+            .contains("fixed")
         );
         assert_eq!(store.get("demo").unwrap(), c);
         assert_eq!(std::fs::read(paths.disk).unwrap(), b"preserved");

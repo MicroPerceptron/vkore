@@ -17,6 +17,14 @@ This repository currently uses normal `MAJOR.MINOR.PATCH` releases. Pre-release
 and build suffixes are valid SemVer, but are not enabled by our release policy.
 Version 0.x signals an evolving public API. It does not promise 1.0 stability.
 
+The desktop shows `v<version>-<short commit>` at the bottom of the sidebar.
+Tracked source modifications append `-dirty`; untracked local files do not.
+The build script watches Git HEAD, refs, index and tracked files, including linked
+worktrees, so a new commit rebuilds the label even when source content is unchanged.
+Source archives show `-unknown` unless the builder provides the full hexadecimal
+`VKORE_BUILD_COMMIT`; in a checkout this must match HEAD. This label is diagnostic
+metadata, not a change to the package's semantic version or release tag.
+
 ## Every product PR
 
 Compare against the current target branch, add a new top entry in

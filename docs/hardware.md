@@ -82,14 +82,24 @@ rejects `mem-lock=on` with an unimplemented locking error. No authentication
 prompt can add a missing backend. See [QEMU's memfd backend](https://github.com/qemu/qemu/blob/v11.0.1/backends/hostmem-memfd.c)
 and [native page sizing](https://github.com/qemu/qemu/blob/v11.0.1/util/mmap-alloc.c).
 
-The desktop's **Authorize memory** action (also requested before launch when
-needed) raises the current vKore process's memory-lock limit to guest RAM plus a
-bounded 1 GiB emulator allowance. It first uses the existing hard limit; if
+The desktop checks the complete hardware selection when **Done** (new machine)
+or **Save hardware** (existing machine) is clicked. It validates CPU, memory,
+and storage before requesting permissions together. The editor stays open with
+the draft intact if validation or authentication fails; controls are frozen while
+a request is pending. Saved machines hold their session lease through this step,
+so they cannot be launched or edited concurrently.
+
+Memory locking is currently the only setting requiring elevation. The shared
+completion/launch authorization path raises the current vKore process's
+memory-lock limit to guest RAM plus a bounded 1 GiB emulator allowance. No popup
+appears when pinning is off or the process already has enough permission. It
+first uses the existing hard limit without prompting; if
 necessary it invokes `/usr/bin/pkexec --disable-internal-agent /usr/bin/prlimit`
 with only the current PID and numeric limit. The registered desktop polkit agent
 presents authentication. No password enters vKore, no shell is invoked, no
 privileged QEMU is launched, and no persistent system configuration is changed.
-QEMU inherits the limit. Cancellation, denial, missing agent and a two-minute
+QEMU inherits the limit. Limits last only for this app process; launch rechecks
+and may request authorization after restarting vKore. Cancellation, denial, missing agent and a two-minute
 timeout return visible errors. QEMU's actual locking failure remains fatal.
 The CLI reports a needed authorization rather than prompting on a hidden worker.
 

@@ -40,6 +40,7 @@ pub enum Update {
     Created(Result<(), String>),
     Hardware(Result<Box<vkore_vm::hardware::HostResources>, String>),
     HardwareSaved(Result<(), String>),
+    HardwarePrepared(Result<Box<vkore_vm::hardware::HostResources>, String>),
 }
 
 /// A machine the view started.
@@ -128,7 +129,7 @@ pub enum MachineMessage {
     SaveHardware,
     CancelHardware,
     RefreshHardware,
-    AuthorizeMemory(u32),
+    FinishHardware,
     Start(String, bool),
     Stop(String),
     FormName(String),
@@ -204,6 +205,15 @@ impl State {
     }
 
     pub fn update(&mut self, message: MachineMessage, proxy: &EventLoopProxy<UserEvent>) {
+        // Freeze the draft and its target until completion. Stop remains usable.
+        if self.hardware_busy
+            && !matches!(
+                message,
+                MachineMessage::Stop(_) | MachineMessage::CancelImport
+            )
+        {
+            return;
+        }
         match message {
             MachineMessage::Select(name) => {
                 self.configure_new = false;
@@ -252,12 +262,13 @@ impl State {
                     let root = self.state_root.clone();
                     let proxy = proxy.clone();
                     self.hardware_busy = true;
+                    self.status = "Checking hardware settings and permissions…".into();
                     thread::spawn(move || {
                         let result = VkoreState::open(root)
                             .map(MachineStore::new)
                             .map_err(|e| e.to_string())
                             .and_then(|store| {
-                                vkored::hardware::save(
+                                vkored::hardware::save_authorized(
                                     &store,
                                     &name,
                                     draft.cpus,
@@ -271,8 +282,24 @@ impl State {
                     });
                 }
             }
-            MachineMessage::RefreshHardware => self.refresh_hardware(None, proxy.clone()),
-            MachineMessage::AuthorizeMemory(mib) => self.refresh_hardware(Some(mib), proxy.clone()),
+            MachineMessage::RefreshHardware => self.refresh_hardware(proxy.clone()),
+            MachineMessage::FinishHardware => {
+                if self.configure_new && self.importing.is_none() {
+                    let mut config = MachineConfig::new("draft", "/pending.iso");
+                    self.form_hardware.apply(&mut config);
+                    let root = self.state_root.clone();
+                    let proxy = proxy.clone();
+                    self.hardware_busy = true;
+                    self.status = "Checking hardware settings and permissions…".into();
+                    thread::spawn(move || {
+                        let result = vkored::hardware::prepare(&config, &root).map(Box::new);
+                        let _ = proxy.send_event(UserEvent::Machine(
+                            String::new(),
+                            Update::HardwarePrepared(result),
+                        ));
+                    });
+                }
+            }
             MachineMessage::Refresh => self.refresh(),
             MachineMessage::FormName(value) => self.form_name = value,
             MachineMessage::SelectImage(id) => {
@@ -310,24 +337,15 @@ impl State {
         }
     }
 
-    fn refresh_hardware(&mut self, authorize: Option<u32>, proxy: EventLoopProxy<UserEvent>) {
+    fn refresh_hardware(&mut self, proxy: EventLoopProxy<UserEvent>) {
         if self.hardware_busy {
             return;
         }
         self.hardware_busy = true;
-        self.status = if authorize.is_some() {
-            "Waiting for system authorization…"
-        } else {
-            "Refreshing host resources…"
-        }
-        .into();
+        self.status = "Refreshing host resources…".into();
         let root = self.state_root.clone();
         thread::spawn(move || {
-            let result = authorize
-                .map(vkored::hardware::authorize_memory)
-                .unwrap_or(Ok(()))
-                .and_then(|()| vkore_vm::hardware::HostResources::probe(&root))
-                .map(Box::new);
+            let result = vkore_vm::hardware::HostResources::probe(&root).map(Box::new);
             let _ = proxy.send_event(UserEvent::Machine(String::new(), Update::Hardware(result)));
         });
     }
@@ -460,6 +478,17 @@ impl State {
                     Err(error) => self.status = error,
                 }
             }
+            Update::HardwarePrepared(result) => {
+                self.hardware_busy = false;
+                match result {
+                    Ok(host) => {
+                        self.host = Ok(*host);
+                        self.configure_new = false;
+                        self.status = "Hardware settings ready".into();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
             Update::HardwareSaved(result) => {
                 self.hardware_busy = false;
                 match result {
@@ -561,13 +590,10 @@ fn run_machine(
         .map_err(|error| error.to_string())?;
     let config = store.get(name).map_err(|e| e.to_string())?;
     let host = vkore_vm::hardware::HostResources::probe(root)?;
-    vkored::hardware::validate_host(&config, &host)?;
-    if vkored::hardware::needs_authorization(&config, &host) {
-        send(Update::Line(
-            "Waiting for system authorization to pin memory…".into(),
-        ));
-        vkored::hardware::authorize_memory(config.memory_mib)?;
-    }
+    send(Update::Line(
+        "Checking hardware settings and permissions…".into(),
+    ));
+    vkored::hardware::authorize_configuration(&config, &host)?;
     let mut sink = |event: &Event| match event {
         Event::Stage { stage, .. } => {
             send(Update::Stage(*stage));
@@ -864,7 +890,8 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             button(ty.control("Done"))
                 .height(ty.control_height()).padding([8,14])
                 .style(widgets::button_style(widgets::Button::Primary))
-                .on_press(wrap(MachineMessage::ConfigureNew(false))),
+                .on_press_maybe((!state.hardware_busy && state.importing.is_none())
+                    .then_some(wrap(MachineMessage::FinishHardware))),
         ].spacing(18)).height(Length::Fill).into(),
         None => ty.empty_state(
             crate::visuals::Icon::Machine,
@@ -1083,4 +1110,42 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         page = page.push(ty.data(state.status.as_str(), theme::TEXT_MUTED));
     }
     widgets::page_frame(page)
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn completion_closes_only_after_success_and_preserves_denied_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = State::new(dir.path().to_owned());
+        state.configure_new = true;
+        state.hardware_busy = true;
+        state.form_hardware.memory_mib = 4096;
+        state.machine_update(
+            String::new(),
+            Update::HardwarePrepared(Err("cancelled".into())),
+        );
+        assert!(state.configure_new);
+        assert!(!state.hardware_busy);
+        assert_eq!(state.form_hardware.memory_mib, 4096);
+        assert_eq!(state.status, "cancelled");
+        let host = vkore_vm::hardware::HostResources::probe(dir.path()).unwrap();
+        state.hardware_busy = true;
+        state.machine_update(String::new(), Update::HardwarePrepared(Ok(Box::new(host))));
+        assert!(!state.configure_new);
+        assert!(!state.hardware_busy);
+        let config = MachineConfig::new("demo", "/image.iso");
+        state.edit_hardware = Some((
+            "demo".into(),
+            crate::hardware::Draft::from_config(&config, false),
+        ));
+        state.hardware_busy = true;
+        state.machine_update("demo".into(), Update::HardwareSaved(Err("denied".into())));
+        assert!(state.edit_hardware.is_some());
+        assert!(!state.hardware_busy);
+        state.machine_update("demo".into(), Update::HardwareSaved(Ok(())));
+        assert!(state.edit_hardware.is_none());
+    }
 }

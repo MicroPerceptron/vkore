@@ -93,6 +93,11 @@ pub struct HostResources {
     pub storage_available_mib: u64,
     pub cpu_pinning: bool,
     pub memory_pinning: bool,
+    /// Native host page granularity; independent of Kore's guest page tables.
+    pub system_page_bytes: usize,
+    /// Whether this platform supports vKore's explicit Linux hugetlb backend.
+    /// Pool accessibility and capacity are reported separately in `hugepages`.
+    pub hugetlb_supported: bool,
     pub hugepages: Vec<HugePool>,
     pub memlock_bytes: Option<u64>,
 }
@@ -156,6 +161,8 @@ impl HostResources {
             storage_available_mib: stat.f_bavail.saturating_mul(stat.f_frsize) >> 20,
             cpu_pinning: cfg!(target_os = "linux"),
             memory_pinning: cfg!(target_os = "linux"),
+            system_page_bytes: rustix::param::page_size(),
+            hugetlb_supported: cfg!(target_os = "linux"),
             hugepages: platform::hugepages(),
             memlock_bytes: rustix::process::getrlimit(rustix::process::Resource::Memlock).current,
         })
@@ -181,10 +188,11 @@ impl HostResources {
     }
     pub fn huge_available(&self, page: PageSize, memory_mib: u32) -> bool {
         page == PageSize::System
-            || self
-                .hugepages
-                .iter()
-                .any(|pool| pool.page == page && pool.free_mib >= u64::from(memory_mib))
+            || (self.hugetlb_supported
+                && self
+                    .hugepages
+                    .iter()
+                    .any(|pool| pool.page == page && pool.free_mib >= u64::from(memory_mib)))
     }
 }
 
@@ -470,6 +478,13 @@ mod tests {
     fn real_host_snapshot_has_memory_and_storage() {
         let host = HostResources::probe(&std::env::temp_dir()).unwrap();
         assert!(host.memory_mib > 0 && host.physical_cores > 0);
+        assert_eq!(host.system_page_bytes, rustix::param::page_size());
+        assert!(host.system_page_bytes.is_power_of_two());
+        assert!(host.huge_available(PageSize::System, u32::MAX));
+        if !host.hugetlb_supported {
+            assert!(!host.huge_available(PageSize::Huge2M, 2048));
+            assert!(!host.huge_available(PageSize::Huge1G, 2048));
+        }
         assert!(!host.storage.is_empty());
     }
 }

@@ -130,6 +130,9 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
             "this host QEMU does not support memory locking; turn off memory pinning".into(),
         );
     }
+    if r.pages != PageSize::System && !host.hugetlb_supported {
+        return Err("explicit hugepage backing requires Linux; choose Automatic (system pages) on this host".into());
+    }
     if !host.huge_available(r.pages, config.memory_mib) {
         return Err(format!(
             "not enough reserved {} on this host; choose system pages or provision the host hugepage pool",
@@ -288,12 +291,32 @@ mod tests {
             storage_available_mib: 102400,
             cpu_pinning: true,
             memory_pinning: true,
+            system_page_bytes: 4096,
+            hugetlb_supported: true,
             hugepages: vec![vkore_vm::hardware::HugePool {
                 page: PageSize::Huge2M,
                 free_mib: 16384,
             }],
             memlock_bytes: Some(65536),
         }
+    }
+    #[test]
+    fn unsupported_page_backing_is_distinct_from_an_exhausted_pool() {
+        let mut h = host();
+        let mut c = MachineConfig::new("pages", "/fixture.iso");
+        c.resources.pages = PageSize::Huge2M;
+        h.hugetlb_supported = false;
+        assert!(
+            validate_host(&c, &h)
+                .unwrap_err()
+                .contains("requires Linux")
+        );
+        c.resources.pages = PageSize::System;
+        validate_host(&c, &h).unwrap();
+        h.hugetlb_supported = true;
+        h.hugepages.clear();
+        c.resources.pages = PageSize::Huge2M;
+        assert!(validate_host(&c, &h).unwrap_err().contains("pool"));
     }
     #[test]
     fn recommendations_use_physical_cores_and_half_physical_ram() {

@@ -3,6 +3,16 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.3.0] - 2026-11-19
+
+### Fixed
+- Show the actual native host page size and explain why macOS QEMU uses automatic system pages; do not offer Linux-only hugepage controls on unsupported hosts.
+- Distinguish unavailable hugepage backends from inaccessible or depleted Linux pools.
+- Allow saved memory pinning to be turned off after moving a machine to a host that cannot support it.
+
+### Breaking
+- `HostResources` adds `system_page_bytes` and `hugetlb_supported` diagnostics. Rust consumers constructing snapshots must supply these fields; saved machine configurations remain compatible.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added

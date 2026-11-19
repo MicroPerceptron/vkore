@@ -97,7 +97,7 @@ impl Draft {
                     self.resources.host_cpus = host.preferred_cpus(self.cpus);
                 }
             }
-            Change::PinMemory if host.memory_pinning => {
+            Change::PinMemory if host.memory_pinning || self.resources.pin_memory => {
                 self.resources.pin_memory = !self.resources.pin_memory
             }
             Change::Reserve if !self.storage_fixed => {
@@ -449,7 +449,7 @@ pub fn view<'a>(
             ty,
             "Pin memory in RAM",
             draft.resources.pin_memory,
-            host.memory_pinning && !busy,
+            (host.memory_pinning || draft.resources.pin_memory) && !busy,
             send(Change::PinMemory)
         ),
     ]
@@ -487,18 +487,63 @@ pub fn view<'a>(
                 false,
             ));
     }
-    memory = memory.push(ty.label("Physical page size", theme::TEXT_MUTED));
-    let mut pages = row![].spacing(6);
-    for page in [PageSize::System, PageSize::Huge2M, PageSize::Huge1G] {
-        pages = pages.push(action(
-            ty,
-            page.label(),
-            (!busy && host.huge_available(page, draft.memory_mib))
-                .then(|| send(Change::Page(page))),
-            draft.resources.pages == page,
+    memory = memory.push(ty.label("Host memory pages", theme::TEXT_MUTED));
+    let mut pages = row![action(
+        ty,
+        &format!("Automatic · {} KiB", host.system_page_bytes / 1024),
+        (!busy).then(|| send(Change::Page(PageSize::System))),
+        draft.resources.pages == PageSize::System,
+    )]
+    .spacing(6);
+    if host.hugetlb_supported {
+        for page in [PageSize::Huge2M, PageSize::Huge1G] {
+            pages = pages.push(action(
+                ty,
+                page.label(),
+                (!busy && host.huge_available(page, draft.memory_mib))
+                    .then(|| send(Change::Page(page))),
+                draft.resources.pages == page,
+            ));
+        }
+        memory = memory.push(pages.wrap());
+        for page in [PageSize::Huge2M, PageSize::Huge1G] {
+            if !host.huge_available(page, draft.memory_mib) {
+                let reason = match host.hugepages.iter().find(|pool| pool.page == page) {
+                    Some(pool) => format!(
+                        "{}: {:.1} GiB available in the pool; {:.1} GiB needed.",
+                        page.label(),
+                        pool.free_mib as f64 / 1024.,
+                        f64::from(draft.memory_mib) / 1024.
+                    ),
+                    None => format!(
+                        "{}: no accessible reserved pool on this host.",
+                        page.label()
+                    ),
+                };
+                memory = memory.push(ty.body(reason, 12., theme::TEXT_MUTED));
+            }
+        }
+    } else {
+        memory = memory.push(pages.wrap()).push(ty.body(
+            "Automatic uses this host's native pages. QEMU's explicit 2 MiB and 1 GiB hugepage backing requires Linux; it is unavailable on this host.",
+            12., theme::TEXT_MUTED,
         ));
+        if draft.resources.pages != PageSize::System {
+            memory = memory.push(ty.body(
+                format!(
+                    "Saved choice: {}. Choose Automatic to use this machine on this host.",
+                    draft.resources.pages.label()
+                ),
+                12.,
+                theme::WARNING,
+            ));
+        }
     }
-    memory = memory.push(pages.wrap()).push(ty.body("2 MiB is preferred when an accessible hugepage pool has enough space. Unavailable sizes are disabled.", 12., theme::TEXT_MUTED));
+    memory = memory.push(ty.body(
+        "This controls host memory backing, not page sizes inside Kore.",
+        12.,
+        theme::TEXT_MUTED,
+    ));
     for node in &host.memory_nodes {
         memory = memory.push(ty.data(
             format!(
@@ -632,6 +677,28 @@ mod tests {
             })
             .collect();
         host
+    }
+    #[test]
+    fn unsupported_saved_memory_choices_can_be_disabled_without_enabling_them() {
+        let mut host = host();
+        host.memory_pinning = false;
+        host.hugetlb_supported = false;
+        host.system_page_bytes = 16384;
+        let mut draft = Draft::new(Some(&host), Requirements::default());
+        assert_eq!(draft.resources.pages, PageSize::System);
+        assert!(!draft.resources.pin_memory);
+        // A machine copied from a Linux host needs explicit recovery, not a
+        // silent downgrade or an unsupported switch that cannot be turned off.
+        draft.resources.pages = PageSize::Huge2M;
+        draft.resources.pin_memory = true;
+        draft.change(Change::Page(PageSize::System), &host);
+        draft.change(Change::PinMemory, &host);
+        assert_eq!(draft.resources.pages, PageSize::System);
+        assert!(!draft.resources.pin_memory);
+        draft.change(Change::Page(PageSize::Huge1G), &host);
+        draft.change(Change::PinMemory, &host);
+        assert_eq!(draft.resources.pages, PageSize::System);
+        assert!(!draft.resources.pin_memory);
     }
     #[test]
     fn exact_threads_and_count_stay_in_sync_and_respect_minimum() {

@@ -62,7 +62,25 @@ synthetic two-node topology remains separate from host NUMA topology.
 On Linux, memory pinning selects QEMU `-overcommit mem-lock=on`; hugepages use
 `memory-backend-memfd,hugetlb=on,hugetlbsize=...,prealloc=on` on each guest NUMA
 node. This is physical residency, not host NUMA placement. macOS QEMU memory
-locking and hugetlb selection are unavailable and visibly disabled.
+locking and hugetlb selection are unavailable. The memory panel instead shows
+**Automatic** with the probed native page size (16 KiB on the tested Apple
+Silicon host). The Linux-only hugepage buttons are omitted and the limitation
+is explained. This is host RAM backing, not the guest's page-table granularity.
+The native size comes from rustix's safe platform query, not an architecture
+constant. On Linux, unavailable choices explain whether there is no accessible
+pool or not enough pool capacity.
+
+A saved unsupported page choice remains visible as a warning until the user
+selects Automatic. Unsupported saved memory pinning can still be switched off;
+it cannot be re-enabled. Launch validates both choices and never silently
+substitutes them. The `vkore hardware` snapshot includes the native page size
+and whether the launcher's explicit hugetlb backing is supported.
+
+The packaged macOS QEMU 11.0.1 advertises RAM/file/shm memory backends, but no
+`memory-backend-memfd`; its RAM backend has no hugepage-size property. It also
+rejects `mem-lock=on` with an unimplemented locking error. No authentication
+prompt can add a missing backend. See [QEMU's memfd backend](https://github.com/qemu/qemu/blob/v11.0.1/backends/hostmem-memfd.c)
+and [native page sizing](https://github.com/qemu/qemu/blob/v11.0.1/util/mmap-alloc.c).
 
 The desktop's **Authorize memory** action (also requested before launch when
 needed) raises the current vKore process's memory-lock limit to guest RAM plus a

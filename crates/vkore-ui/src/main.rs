@@ -997,6 +997,8 @@ mod tests {
         host.storage_available_mib = 131072;
         host.cpu_pinning = true;
         host.memory_pinning = true;
+        host.hugetlb_supported = true;
+        host.system_page_bytes = 4096;
         host.memlock_bytes = Some(65536);
         host.cores = (0..8)
             .map(|id| vkore_vm::hardware::Core {
@@ -1047,6 +1049,60 @@ mod tests {
                         );
                         assert!(refused.is_empty(), "{refused:?}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macos_memory_controls_show_native_pages_and_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = machines::State::new(root.path().to_owned());
+        let host = state.host.as_mut().unwrap();
+        host.cpu_name = "Apple M4".into();
+        host.core_summary = "4 Performance · 6 Efficiency".into();
+        host.physical_cores = 10;
+        host.logical_cpus = 10;
+        host.cpu_pinning = false;
+        host.memory_pinning = false;
+        host.hugetlb_supported = false;
+        host.system_page_bytes = 16384;
+        host.memory_mib = 16384;
+        host.available_memory_mib = 8192;
+        host.free_memory_mib = 512;
+        host.memory_nodes.clear();
+        host.hugepages.clear();
+        state.form_hardware = hardware::Draft::new(Some(host), Default::default());
+        state.configure_new = true;
+        for recovery in [false, true] {
+            state.form_hardware.resources.pages = if recovery {
+                vkore_vm::hardware::PageSize::Huge2M
+            } else {
+                vkore_vm::hardware::PageSize::System
+            };
+            state.form_hardware.resources.pin_memory = recovery;
+            for (width, height) in [(900., 560.), (1280., 1200.)] {
+                for appearance in [Theme::Light, Theme::Dark] {
+                    let ty = Typography::default();
+                    let shell = container(row![
+                        sidebar(Page::Machines, 0, "", ty),
+                        machines::view(&state, ty)
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                    let (_, refused) = draw_at_scale(
+                        shell.into(),
+                        Size::new(width, height),
+                        &appearance,
+                        1.,
+                        Some(if recovery {
+                            "macos-memory-recovery"
+                        } else {
+                            "macos-memory"
+                        }),
+                    );
+                    assert!(refused.is_empty(), "{refused:?}");
                 }
             }
         }

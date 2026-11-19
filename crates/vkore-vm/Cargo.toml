@@ -17,7 +17,7 @@ serde_json.workspace = true
 # Generated QAPI vocabulary only; keep our bounded, id-correlated transport.
 qapi-qmp = "=0.15.0"
 qapi-spec = "=0.3.2"
-rustix = { version = "1.1.4", features = ["event", "thread", "process", "fs"] }
+rustix = { version = "1.1.4", features = ["event", "thread", "process", "fs", "param"] }
 # Kore publishes boot media digests as SHA-256 (release SHA256SUMS).
 sha2 = "0.10.9"
 # MIT; query CPU/memory/disks only, no process inventory or background sampling.

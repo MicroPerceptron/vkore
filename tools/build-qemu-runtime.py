@@ -155,6 +155,14 @@ def smoke(root):
                 process.stdout.close()
 
 
+def source_filter(member, destination):
+    # EDK2's optional host emulator contains a deliberate /usr/include/X11
+    # symlink. We install release firmware blobs, never build that host tool.
+    if member.issym() and member.name.endswith("/roms/edk2/EmulatorPkg/Unix/Host/X11IncludeHack"):
+        return None
+    return tarfile.data_filter(member, destination)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path)
@@ -188,7 +196,7 @@ def main():
     if digest(archive) != lock["sha256"]:
         raise RuntimeError("QEMU source checksum differs from packaging/qemu.lock.json")
     with tarfile.open(archive) as source:
-        source.extractall(work / "source", filter="data")
+        source.extractall(work / "source", filter=source_filter)
     source = work / "source" / f'qemu-{lock["version"]}'
     build, stage = work / "build", work / "qemu-runtime"
     build.mkdir()

@@ -54,6 +54,11 @@ enum Command {
     Machine(MachineCommand),
     /// A Kore volume: a raw disk image, a disk's block device (Linux), or @MACHINE
     Volume(VolumeArgs),
+    /// Run the local OpenAI-compatible API (guest backend not connected yet)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: std::net::SocketAddr,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,9 +108,12 @@ enum WritebackArg {
 #[derive(Args)]
 struct CreateArgs {
     name: String,
-    /// The Kore x86_64 ISO the machine boots
+    /// A local Kore x86_64 ISO or an HTTPS download link
     #[arg(long)]
-    iso: PathBuf,
+    iso: String,
+    /// Expected SHA-256 of the image, checked before creating the machine
+    #[arg(long)]
+    sha256: Option<String>,
     #[arg(long, default_value_t = 4096)]
     disk_mib: u64,
     #[arg(long, default_value_t = 4)]
@@ -286,6 +294,21 @@ fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
         }
         Command::Machine(command) => machine(store(cli.state)?, command),
         Command::Volume(arguments) => volume(cli.state, arguments),
+        Command::Serve { listen } => {
+            let interrupted = Arc::new(AtomicBool::new(false));
+            let signal = interrupted.clone();
+            ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
+                .map_err(|e| e.to_string())?;
+            let server =
+                vkored::inference::Server::start(listen, Arc::new(vkored::inference::Unavailable))?;
+            println!("OpenAI-compatible API: http://{}/v1", server.address);
+            println!("No guest inference backend is connected; chat requests return HTTP 503.");
+            while !interrupted.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            drop(server);
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -319,8 +342,30 @@ fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
 fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Failure> {
     match command {
         MachineCommand::Create(arguments) => {
+            let source = arguments.iso.clone();
+            let digest = arguments.sha256.clone();
             let config = create_config(arguments)?;
-            store.create(&config).map_err(|error| error.to_string())?;
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let signal = cancelled.clone();
+            ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
+                .map_err(|e| e.to_string())?;
+            let config = vkored::images::create(
+                &store,
+                config,
+                &source,
+                digest.as_deref(),
+                &cancelled,
+                |progress| {
+                    eprintln!(
+                        "downloaded {} MiB{}",
+                        progress.bytes >> 20,
+                        progress
+                            .total
+                            .map(|n| format!(" / {} MiB", n >> 20))
+                            .unwrap_or_default()
+                    );
+                },
+            )?;
             println!(
                 "created machine {} (disk is created at its first boot)",
                 config.name
@@ -396,7 +441,7 @@ fn create_config(arguments: CreateArgs) -> Result<MachineConfig, Failure> {
     let absolute = |path: &Path| {
         std::fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))
     };
-    let mut config = MachineConfig::new(arguments.name, absolute(&arguments.iso)?);
+    let mut config = MachineConfig::new(arguments.name, "/pending.iso");
     config.disk_mib = arguments.disk_mib;
     config.cpus = arguments.cpus;
     config.memory_mib = arguments.memory_mib;

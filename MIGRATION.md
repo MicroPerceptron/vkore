@@ -60,3 +60,18 @@ Linux testing of the original workspace code found that `cap-std` keeps a
 directory as an `O_PATH` descriptor, which `flistxattr` cannot take; it was
 reopened relative to that descriptor. `vkore-volume`'s export uses `cap-std`
 and `cap-fs-ext` (`open_dir_nofollow`) for the same root confinement.
+
+## Downloaded images and a local API
+
+The next frontend pass adds managed HTTPS ISO acquisition and a loopback HTTP
+API in `vkored`, shared by the desktop and CLI. Neither requires a new guest
+contract or a libkore pin change. The API uses host-side OpenAI request/response
+types and a `Backend` interface, not a proposed guest protocol. The production
+adapter remains disconnected: no models are advertised and inference returns
+503. Reconnecting it must still follow the Kore-owned, libkore-exported channel
+path above. The old agent UI and HostLink implementation remain retired.
+
+The desktop image selector uses the embedded [official catalog v1](docs/image-catalog.md),
+with required size, digest and compatibility metadata. The runtime resolves
+image IDs itself. No official artifacts are populated yet; remote catalog
+updates and their signature/trust protocol are outside v1.

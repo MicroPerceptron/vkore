@@ -52,9 +52,9 @@ pub struct WorkspaceConfig {
 pub struct MachineConfig {
     pub schema_version: u32,
     pub name: String,
-    /// The Kore ISO it boots: the caller's artifact.
+    /// The Kore ISO it boots: a local artifact or a managed download.
     pub iso: PathBuf,
-    /// The SHA-256 the ISO had when the machine last booted it.
+    /// The SHA-256 at import or the most recent boot.
     #[serde(default)]
     pub iso_sha256: Option<String>,
     pub disk_mib: u64,
@@ -234,7 +234,24 @@ impl MachineStore {
             return Err(StoreError::Exists(config.name.clone()));
         }
         private_dir(&paths.dir).map_err(|error| StoreError::Io(paths.dir.clone(), error))?;
-        self.save(config)
+        // Another importer may have finished while this one downloaded. Publish
+        // a new configuration without ever replacing that machine's identity.
+        let mut partial = tempfile::NamedTempFile::new_in(&paths.dir)
+            .map_err(|error| StoreError::Io(paths.dir.clone(), error))?;
+        serde_json::to_writer_pretty(&mut partial, config)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        partial
+            .as_file()
+            .sync_all()
+            .map_err(|error| StoreError::Io(paths.dir.clone(), error))?;
+        partial.persist_noclobber(&paths.config).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                StoreError::Exists(config.name.clone())
+            } else {
+                StoreError::Io(paths.config, error.error)
+            }
+        })?;
+        Ok(())
     }
 
     /// Replace a machine's configuration in one rename.
@@ -329,6 +346,28 @@ mod tests {
         store.remove("demo").unwrap();
         assert!(matches!(store.get("demo"), Err(StoreError::NotFound(_))));
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_creators_cannot_replace_the_winning_machine() {
+        let (_dir, store) = store();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers = [2, 8].map(|cpus| {
+            let state = store.state().clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut config = MachineConfig::new("demo", "/kore.iso");
+                config.cpus = cpus;
+                barrier.wait();
+                MachineStore::new(state).create(&config).map(|()| cpus)
+            })
+        });
+        let results = workers.map(|worker| worker.join().unwrap());
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            store.get("demo").unwrap().cpus,
+            *results.iter().find_map(|r| r.as_ref().ok()).unwrap()
+        );
     }
 
     #[test]

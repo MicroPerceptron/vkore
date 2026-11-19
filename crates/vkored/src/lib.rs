@@ -8,12 +8,16 @@
 //!   terminal's home, follows the boot to readiness, stops it, and collects
 //!   and applies what the machine changed under the project's bounds.
 //!
-//! The ISO is always the caller's: vKore never builds or fetches Kore, and
-//! records the SHA-256 of every image it boots.
+//! [`images`] imports a local ISO or downloads one from a caller-provided HTTPS
+//! link, retaining its SHA-256. [`inference`] exposes a local HTTP API; its
+//! guest backend remains disconnected until libkore exports the Kore channel.
 
 #![cfg(unix)]
 
+pub mod catalog;
 pub mod config;
+pub mod images;
+pub mod inference;
 pub mod run;
 pub mod state;
 

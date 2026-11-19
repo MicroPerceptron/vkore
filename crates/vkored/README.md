@@ -30,7 +30,8 @@ desktop links in-process, and the `vkore` command line over it.
 ```text
 vkore probe                               what this host and its QEMU can boot
 vkore iso ISO                             an ISO's SHA-256 and paging mode
-vkore machine create NAME --iso ISO       a machine (see --help for its options)
+vkore machine create NAME --iso ISO_OR_HTTPS_URL [--sha256 DIGEST]
+vkore serve [--listen 127.0.0.1:8080]      local API; Ctrl-C stops it
 vkore machine list | show NAME
 vkore machine run NAME                    boot; Ctrl-C asks it to stop
 vkore machine changes NAME                what the last boot changed in its project
@@ -49,3 +50,21 @@ captures newest first with their record; `--get DIR` copies them out, creating
 
 A volume command refuses a disk a running machine holds; stop the machine
 first.
+
+The desktop resolves IDs from the bundled [official image catalog](../../docs/image-catalog.md),
+requiring its exact length and digest. The catalog is empty until official
+artifacts are supplied. The CLI retains explicit local/custom ISO import with
+an optional digest. Both use the same acquisition engine. Downloads use HTTPS (including
+redirects), at most five redirects, a 64 GiB image limit, 15-second connection
+and read timeouts, and a one-hour request timeout. Transfer buffers are 64 KiB.
+Temporary files are private and removed on error/cancellation; successful
+images are inspected, checked against the expected digest when supplied, synced and published
+without replacement under `images/SHA256.iso`. Existing cached bytes are checked
+before reuse. No release URL is assumed, no build is performed and existing
+local-path configurations continue to load. Source URLs are not persisted,
+because signed links can contain credentials. Cached images remain until the
+user removes them; automatic cache eviction and resuming downloads are deferred.
+
+The [local API](../../docs/inference.md) is a host adapter with a typed backend
+interface. The production backend is explicitly unavailable until Kore owns a
+channel exported through libkore. There is no mock model or fallback provider.

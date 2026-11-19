@@ -167,7 +167,7 @@ impl canvas::Program<Message, Theme, AxUi> for Mark {
                     && let Some(screen) = logo::SHAPES.iter().find(|shape| shape.id == "screen")
                 {
                     frame.fill(&Path::new(|builder| svg_into(builder, screen.data)), {
-                        let mut color = theme::rgb(theme::TEXT);
+                        let mut color = theme::rgb(0xF2F0EC);
                         color.a = alpha;
                         color
                     });
@@ -217,19 +217,22 @@ pub fn overlay<'a>(phase: Phase) -> crate::UiElement<'a> {
             iced_widget::text("KORE AGENTS")
                 .font(crate::fonts::SPLASH)
                 .size(theme::SIZE_DISPLAY)
-                .color({
-                    let mut color = theme::rgb(theme::TEXT);
-                    color.a = phase.wordmark * opacity;
-                    color
+                .style(move |appearance| iced_widget::text::Style {
+                    color: Some(theme::rgba(
+                        appearance,
+                        theme::TEXT,
+                        phase.wordmark * opacity
+                    )),
                 }),
         ]
         .spacing(34)
         .align_x(alignment::Horizontal::Center),
     )
     .center(Length::Fill)
-    .style(move |_| {
-        let mut style = theme::panel(theme::BACKGROUND, None, 0.0);
+    .style(move |appearance| {
+        let mut style = theme::panel(appearance, theme::BACKGROUND, None, 0.0);
         style.background = Some(iced_core::Background::Color(theme::rgba(
+            appearance,
             theme::BACKGROUND,
             opacity,
         )));

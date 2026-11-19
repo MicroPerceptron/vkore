@@ -11,6 +11,15 @@ description = "vKore's runtime: Kore machines and their volumes on a Linux or ma
 serde.workspace = true
 serde_json.workspace = true
 vkore-vm = { path = "../vkore-vm" }
+# Reuse the workspace's TLS client; decode no compressed response bodies.
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+tempfile = "3.23.0"
+url = "2"
+# Maintained MIT HTTP stack; HTTP/1 only, no websocket, HTTP/2 or macros.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 
 [target.'cfg(unix)'.dependencies]
 vkore-volume = { path = "../vkore-volume" }
@@ -19,7 +28,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = "3.5.2"
 
 [dev-dependencies]
-tempfile = "3.23.0"
+tower = { version = "0.5", features = ["util"] }
 
 [lib]
 name = "vkored"

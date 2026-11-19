@@ -28,8 +28,10 @@ vkored = { path = "../vkored" }
 vkore-vm = { path = "../vkore-vm" }
 vkore-volume = { path = "../vkore-volume" }
 
-[dev-dependencies]
 tempfile = "3.27"
+[target.'cfg(target_os = "linux")'.dependencies]
+# Iced's provider supplies XDG portal updates missing from Winit on Linux.
+mundy = { version = "0.2", default-features = false, features = ["async-io", "callback", "color-scheme"] }
 
 [[bin]]
 name = "vkore-ui"

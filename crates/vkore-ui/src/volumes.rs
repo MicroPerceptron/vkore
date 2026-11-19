@@ -13,7 +13,7 @@ use std::{
 };
 
 use iced_core::{Length, alignment};
-use iced_widget::{button, column, container, row, scrollable, space, text_input};
+use iced_widget::{button, column, container, row, space, text_input};
 use iced_winit::winit::event_loop::EventLoopProxy;
 
 use vkore_volume::{
@@ -630,19 +630,29 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     for machine in machines {
         let input = format!("@{machine}");
         quick = quick.push(
-            button(widgets::mono(input.clone(), theme::TEXT_SECONDARY))
+            button(widgets::data(input.clone(), theme::TEXT_SECONDARY))
                 .padding([4, 8])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press(wrap(VolumeMessage::DiskInput(input))),
         );
     }
-    let mut page = column![widgets::display("Volumes"), open_row, quick].spacing(theme::SPACE_4);
     let Some(label) = &state.label else {
-        return container(page.push(widgets::data(state.status.as_str(), theme::TEXT_MUTED)))
-            .padding(theme::SPACE_6)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+        let connect = container(column![
+            container(widgets::empty_state(crate::visuals::Icon::Volume,
+                "Your files, closer to Kore",
+                "Browse a stopped machine's volume, inspect captures and move project files between Kore and this computer.")).height(240),
+            widgets::label("Disk image, device or machine", theme::TEXT_MUTED),
+            open_row, quick,
+            widgets::data(state.status.as_str(), theme::TEXT_MUTED),
+        ].spacing(16)).padding(24).width(Length::Fill.max(760)).style(widgets::card);
+        return widgets::page_frame(
+            column![
+                widgets::page_header("Volumes", "Explore the files inside your Kore workspace."),
+                widgets::scroll(container(connect).center_x(Length::Fill).padding([24, 0]))
+                    .height(Length::Fill),
+            ]
+            .spacing(24),
+        );
     };
 
     let kind = match state.kind {
@@ -755,14 +765,16 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
 
     let detail = detail_pane(state);
     let body = row![
-        container(scrollable(list).height(Length::Fill))
+        container(widgets::scroll(list).height(Length::Fill))
             .width(Length::FillPortion(3))
+            .padding(12)
+            .style(widgets::card)
             .height(Length::Fill),
         container(detail)
             .width(Length::FillPortion(2))
             .height(Length::Fill)
             .padding(theme::SPACE_4)
-            .style(|_| theme::panel(theme::PANEL, Some(theme::BORDER), theme::RADIUS_LG)),
+            .style(widgets::card),
     ]
     .spacing(theme::SPACE_4)
     .height(Length::Fill);
@@ -798,8 +810,8 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     .spacing(theme::SPACE_2)
     .align_y(alignment::Vertical::Center);
 
-    page = column![
-        widgets::display("Volumes"),
+    let page = column![
+        widgets::page_header("Volumes", "Explore the files inside your Kore workspace."),
         header,
         places,
         crumbs,
@@ -815,11 +827,7 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
         ),
     ]
     .spacing(theme::SPACE_2);
-    container(page)
-        .padding(theme::SPACE_6)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    widgets::page_frame(page)
 }
 
 fn place_button<'a>(label: &'a str, place: Place, current: Place) -> UiElement<'a> {
@@ -838,12 +846,11 @@ fn detail_pane(state: &State) -> UiElement<'_> {
         .selected_entry()
         .filter(|entry| entry.kind == EntryKind::File)
     else {
-        return widgets::body(
-            "Select a file to see what it holds. Directories open on select.",
-            theme::SIZE_SM,
-            theme::TEXT_MUTED,
-        )
-        .into();
+        return widgets::empty_state(
+            crate::visuals::Icon::Volume,
+            "Take a closer look",
+            "Select a file to inspect its contents and capture details.",
+        );
     };
     let mut pane = column![
         widgets::data(entry.name.as_str(), theme::TEXT).size(theme::SIZE_MD),
@@ -915,9 +922,7 @@ fn detail_pane(state: &State) -> UiElement<'_> {
                 theme::TEXT_SECONDARY,
             ));
             pane = pane.push(
-                scrollable(widgets::mono(text.as_str(), theme::TEXT))
-                    .height(Length::Fill)
-                    .style(widgets::hidden_scrollbar),
+                widgets::scroll(widgets::mono(text.as_str(), theme::TEXT)).height(Length::Fill),
             );
         }
         Some(Ok(Summary::Binary { len, head })) => {

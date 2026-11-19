@@ -1,48 +1,164 @@
 //! MONOLITH design tokens.
 //!
-//! The published system is the source of truth for every colour, face, size,
-//! radius, and step here. Widgets read these constants instead of carrying
+//! The published dark system and its light counterpart share every face, size,
+//! radius, and spacing step. Widgets read semantic colors instead of carrying
 //! literals so a token change lands everywhere at once.
 //!
 //! Two rules the system treats as non-negotiable, enforced by the helpers
 //! below rather than by convention:
 //!
 //! - Magenta is never a fill. It appears as text, one-pixel borders, and small
-//!   marks. Selection is a magenta border with off-white text; the primary
-//!   button is a black fill with a magenta border.
+//!   marks. Selection and primary buttons use a magenta border with
+//!   theme-appropriate text and surfaces.
 //! - Nothing casts a shadow. Every edge in the system is a border.
 
 use iced_core::{Background, Border, Color, Shadow};
 
-/// Page background.
-pub const BACKGROUND: u32 = 0x0A0A0C;
-/// Panel and card fill.
-pub const PANEL: u32 = 0x131316;
-/// The well a log sits in, a step darker than the page.
-pub const PANEL_FILE: u32 = 0x0C0C0F;
-/// Hovered ghost row fill.
-pub const HOVER: u32 = 0x1B1B20;
-/// Hairline border.
-pub const BORDER: u32 = 0x2A2A30;
-/// Primary off-white text.
-pub const TEXT: u32 = 0xF2F0EC;
-/// Secondary text.
-pub const TEXT_SECONDARY: u32 = 0xB9B9BE;
-/// Muted text, used for mono metadata.
-pub const TEXT_MUTED: u32 = 0x8B8B90;
-/// The single accent.
-pub const MAGENTA: u32 = 0xCE15C4;
-/// Success.
-pub const SUCCESS: u32 = 0x3FCB6E;
-/// Warning, and the colour of external paths.
-pub const WARNING: u32 = 0xE8A23D;
-/// Error.
-pub const ERROR: u32 = 0xE8433D;
+/// A semantic color, resolved at draw time from the active Iced theme.
+/// Keeping the role typed prevents literal logo colors from being remapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tone {
+    dark: u32,
+    light: u32,
+}
+
+pub const BACKGROUND: Tone = Tone {
+    dark: 0x0A0A0C,
+    light: 0xF5F4F1,
+};
+pub const PANEL: Tone = Tone {
+    dark: 0x131316,
+    light: 0xFFFFFF,
+};
+pub const PANEL_FILE: Tone = Tone {
+    dark: 0x0C0C0F,
+    light: 0xECEBE8,
+};
+pub const HOVER: Tone = Tone {
+    dark: 0x1B1B20,
+    light: 0xE5E3E0,
+};
+pub const BORDER: Tone = Tone {
+    dark: 0x2A2A30,
+    light: 0x8A878F,
+};
+/// Quiet separators for surfaces; input boundaries retain BORDER contrast.
+pub const SEPARATOR: Tone = Tone {
+    dark: 0x28282F,
+    light: 0xDFDDE3,
+};
+pub const TEXT: Tone = Tone {
+    dark: 0xF2F0EC,
+    light: 0x202026,
+};
+pub const TEXT_SECONDARY: Tone = Tone {
+    dark: 0xB9B9BE,
+    light: 0x4D4B55,
+};
+pub const TEXT_MUTED: Tone = Tone {
+    dark: 0x8B8B90,
+    light: 0x62606A,
+};
+pub const MAGENTA: Tone = Tone {
+    dark: 0xCE15C4,
+    light: 0xA30D9A,
+};
+pub const SUCCESS: Tone = Tone {
+    dark: 0x3FCB6E,
+    light: 0x176D38,
+};
+pub const WARNING: Tone = Tone {
+    dark: 0xE8A23D,
+    light: 0x885000,
+};
+pub const ERROR: Tone = Tone {
+    dark: 0xE8433D,
+    light: 0xB32620,
+};
+
+/// User choice, stored separately from machine configuration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub fn iced(self, system_dark: Option<bool>) -> iced_core::Theme {
+        match self {
+            Self::System if system_dark == Some(false) => iced_core::Theme::Light,
+            Self::System => iced_core::Theme::Dark,
+            Self::Light => iced_core::Theme::Light,
+            Self::Dark => iced_core::Theme::Dark,
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "system" => Ok(Self::System),
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err("appearance must be system, light or dark".into()),
+        }
+    }
+
+    pub fn load(root: &std::path::Path) -> std::io::Result<Self> {
+        use std::io::Read;
+        let file = match std::fs::File::open(root.join("appearance")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut text = String::new();
+        file.take(17).read_to_string(&mut text)?;
+        if text.len() > 16 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "appearance preference exceeds 16 bytes",
+            ));
+        }
+        Self::parse(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn save(self, root: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(root)?;
+        file.write_all(match self {
+            Self::System => b"system\n",
+            Self::Light => b"light\n",
+            Self::Dark => b"dark\n",
+        })?;
+        file.as_file().sync_all()?;
+        file.persist(root.join("appearance")).map_err(|e| e.error)?;
+        Ok(())
+    }
+}
+
+/// Resolve a role without global state; different windows/tests can use
+/// different themes without affecting one another.
+pub fn color(appearance: &iced_core::Theme, tone: Tone) -> Color {
+    rgb(if matches!(appearance, iced_core::Theme::Light) {
+        tone.light
+    } else {
+        tone.dark
+    })
+}
+
+/// Text styling is resolved during drawing, including cached widget trees.
+pub fn text(tone: Tone) -> impl Fn(&iced_core::Theme) -> iced_widget::text::Style + Copy {
+    move |appearance| iced_widget::text::Style {
+        color: Some(color(appearance, tone)),
+    }
+}
 
 /// Radius for buttons and fields.
-pub const RADIUS_MD: f32 = 4.0;
+pub const RADIUS_MD: f32 = 6.0;
 /// Radius for panels and cards.
-pub const RADIUS_LG: f32 = 6.0;
+pub const RADIUS_LG: f32 = 10.0;
 
 /// Spacing scale. The unit is 8px; 4 is the one permitted half step.
 pub const SPACE_1: f32 = 4.0;
@@ -57,26 +173,24 @@ pub const SPACE_6: f32 = 24.0;
 /// use the small one.
 pub const CONTROL_SM: f32 = 32.0;
 
-/// Type scale. Caps are used only above 22px.
+/// Type scale for data, body copy and page headings.
 pub const SIZE_MONO: f32 = 12.0;
 /// Body small, and every field and list row.
 pub const SIZE_SM: f32 = 14.0;
 /// Body.
 pub const SIZE_MD: f32 = 16.0;
 /// Display, used for dialog titles and section heads.
-pub const SIZE_DISPLAY: f32 = 22.0;
+pub const SIZE_DISPLAY: f32 = 30.0;
 
-/// Display face. Archivo 600, uppercase.
+/// Display face. Archivo 600.
 pub const DISPLAY_FAMILY: &str = "Archivo";
 /// Body face. Space Grotesk 400.
 pub const BODY_FAMILY: &str = "Space Grotesk";
-/// Mono face, used for labels, metadata, navigation, paths, and logs.
+/// Mono face, used for labels, metadata, paths, and logs.
 pub const MONO_FAMILY: &str = "JetBrains Mono";
 
 /// Tracking on uppercase mono labels and metadata.
 pub const TRACK_LABEL: f32 = 0.06;
-/// Tracking on navigation, which the system sets slightly tighter.
-pub const TRACK_NAV: f32 = 0.04;
 /// Tracking on the sidebar and dialog wordmarks.
 pub const TRACK_WORDMARK: f32 = 0.01;
 /// Tracking on the splash wordmark, which is set widest.
@@ -101,17 +215,17 @@ pub fn rgb(hex: u32) -> Color {
 }
 
 /// Expands a packed token at a given alpha.
-pub fn rgba(hex: u32, alpha: f32) -> Color {
+pub fn rgba(appearance: &iced_core::Theme, tone: Tone, alpha: f32) -> Color {
     Color {
         a: alpha,
-        ..rgb(hex)
+        ..color(appearance, tone)
     }
 }
 
 /// A one-pixel border in `hex`, at `radius`.
-pub fn border(hex: u32, radius: f32) -> Border {
+pub fn border(appearance: &iced_core::Theme, tone: Tone, radius: f32) -> Border {
     Border {
-        color: rgb(hex),
+        color: color(appearance, tone),
         width: 1.0,
         radius: radius.into(),
     }
@@ -127,11 +241,16 @@ pub const fn no_shadow() -> Shadow {
 }
 
 /// A panel: a token fill, an optional one-pixel border, and a radius.
-pub fn panel(fill: u32, edge: Option<u32>, radius: f32) -> iced_widget::container::Style {
+pub fn panel(
+    appearance: &iced_core::Theme,
+    fill: Tone,
+    edge: Option<Tone>,
+    radius: f32,
+) -> iced_widget::container::Style {
     iced_widget::container::Style {
-        background: Some(Background::Color(rgb(fill))),
+        background: Some(Background::Color(color(appearance, fill))),
         border: match edge {
-            Some(edge) => border(edge, radius),
+            Some(edge) => border(appearance, edge, radius),
             None => Border {
                 color: Color::TRANSPARENT,
                 width: 0.0,
@@ -148,10 +267,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_appearance_tracks_reported_changes_without_changing_explicit_choices() {
+        use iced_core::Theme;
+        assert_eq!(Appearance::System.iced(Some(false)), Theme::Light);
+        assert_eq!(Appearance::System.iced(Some(true)), Theme::Dark);
+        assert_eq!(Appearance::System.iced(None), Theme::Dark);
+        for reported in [None, Some(false), Some(true)] {
+            assert_eq!(Appearance::Light.iced(reported), Theme::Light);
+            assert_eq!(Appearance::Dark.iced(reported), Theme::Dark);
+        }
+    }
+
+    #[test]
+    fn light_text_and_control_edges_have_readable_contrast() {
+        fn luminance(hex: u32) -> f64 {
+            let linear = |value| {
+                let x = f64::from(value) / 255.0;
+                if x <= 0.04045 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear((hex >> 16) & 255)
+                + 0.7152 * linear((hex >> 8) & 255)
+                + 0.0722 * linear(hex & 255)
+        }
+        let contrast = |a, b| {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        for surface in [BACKGROUND, PANEL, PANEL_FILE, HOVER] {
+            for foreground in [
+                TEXT,
+                TEXT_SECONDARY,
+                TEXT_MUTED,
+                MAGENTA,
+                SUCCESS,
+                WARNING,
+                ERROR,
+            ] {
+                assert!(
+                    contrast(surface.light, foreground.light) >= 4.5,
+                    "{foreground:?} on {surface:?}"
+                );
+            }
+        }
+        assert!(contrast(BACKGROUND.light, BORDER.light) >= 3.0);
+    }
+
+    #[test]
+    fn appearance_is_persistent_bounded_and_rejects_bad_data() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(Appearance::load(root.path()).unwrap(), Appearance::System);
+        for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
+            choice.save(root.path()).unwrap();
+            assert_eq!(Appearance::load(root.path()).unwrap(), choice);
+        }
+        for invalid in ["unknown".to_owned(), "light".to_owned() + &" ".repeat(100)] {
+            std::fs::write(root.path().join("appearance"), invalid).unwrap();
+            assert_eq!(
+                Appearance::load(root.path()).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
     fn tokens_expand_to_their_published_channels() {
-        assert_eq!(rgb(MAGENTA), Color::from_rgb8(0xCE, 0x15, 0xC4));
-        assert_eq!(rgb(TEXT), Color::from_rgb8(0xF2, 0xF0, 0xEC));
-        assert_eq!(rgb(BACKGROUND), Color::from_rgb8(0x0A, 0x0A, 0x0C));
+        assert_eq!(
+            color(&iced_core::Theme::Dark, MAGENTA),
+            Color::from_rgb8(0xCE, 0x15, 0xC4)
+        );
+        assert_eq!(
+            color(&iced_core::Theme::Dark, TEXT),
+            Color::from_rgb8(0xF2, 0xF0, 0xEC)
+        );
+        assert_eq!(
+            color(&iced_core::Theme::Dark, BACKGROUND),
+            Color::from_rgb8(0x0A, 0x0A, 0x0C)
+        );
     }
 
     #[test]
@@ -163,9 +358,9 @@ mod tests {
 
     #[test]
     fn panels_carry_a_border_and_never_a_shadow() {
-        let styled = panel(PANEL, Some(BORDER), RADIUS_LG);
+        let styled = panel(&iced_core::Theme::Dark, PANEL, Some(BORDER), RADIUS_LG);
         assert_eq!(styled.border.width, 1.0);
-        assert_eq!(styled.border.color, rgb(BORDER));
+        assert_eq!(styled.border.color, color(&iced_core::Theme::Dark, BORDER));
         assert_eq!(styled.shadow.color, Color::TRANSPARENT);
         assert_eq!(styled.shadow.blur_radius, 0.0);
     }

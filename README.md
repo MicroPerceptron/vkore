@@ -16,7 +16,8 @@ Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
 
 ## What it does today
 
-- **Machines.** `vkore machine create` records a machine for an ISO;
+- **Machines.** `vkore machine create` accepts a local ISO or an HTTPS image
+  link, downloads and verifies it into managed storage, and records the machine;
   `vkore machine run` probes the host's QEMU, firmware and acceleration, checks
   the ISO (SHA-256, the paging mode its bootloader asks for), boots it, and
   reports the boot's stages from Kore's own console markers: kernel, shell,
@@ -36,6 +37,11 @@ Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
   changed and `vkore machine apply` writes it back, within explicit file and
   byte bounds.
 
+- **Local API (first pass).** `vkore serve`, or **Start API** in
+  Settings, exposes an OpenAI-compatible text-chat HTTP surface on
+  loopback. The guest inference channel is not connected yet: model discovery
+  is empty and chat returns HTTP 503. See [the API contract](docs/inference.md).
+
 ## Quick start (Linux)
 
 You need a Kore x86_64 ISO, `qemu-system-x86_64` (8.2 or newer) with OVMF
@@ -51,6 +57,8 @@ and stop:
 
 ```sh
 target/release/vkore machine create demo --iso /path/to/kore-x86-release.iso
+# Or use your image publisher's HTTPS link:
+# target/release/vkore machine create inference --iso "$IMAGE_URL" --sha256 "$IMAGE_SHA256"
 ```
 
 ```sh
@@ -86,7 +94,7 @@ Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
 
 ## The desktop
 
-`vkore-ui` has two pages.
+`vkore-ui` has three pages.
 
 - **Volumes** opens a machine's disk (`@name`), an image, or a block device and
   lands in terminal 0's screenshots. Terminal homes and the volume root are one
@@ -95,10 +103,15 @@ Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
   hands a file to the host's own viewer, **Save** copies it out (never over an
   existing file), **Import** installs a host file or folder into the open
   directory, and **Remove** asks twice.
-- **Machines** creates machines from an ISO, starts them in a window or
+- **Machines** selects an official image from a bundled release catalog
+  (currently empty until official downloads are supplied), starts machines in a window or
   headless, follows their boot, and stops them. Starting a machine whose disk
   the Volumes page holds closes the browser first and reopens it when the
   machine stops, so what you captured is what you see next.
+- **Settings** holds desktop preferences. **Appearance** offers System, Light
+  and Dark, applies changes immediately and remembers the choice. System follows
+  the host color scheme.
+  **Local API** starts and stops the loopback server and saves its port.
 
 The desktop draws with [Iced](https://iced.rs) over Axiom, Micro Perceptron's
 software renderer; there is no browser, daemon or login. Every string that
@@ -238,6 +251,7 @@ rules are in [AGENTS.md](AGENTS.md).
 ## Documentation
 
 - [The desktop](docs/desktop.md)
+- [Official image catalog contract](docs/image-catalog.md)
 - [Compatibility: Kore, libkore, QEMU and the guest contract](docs/compatibility.md)
 - [Migration: from HostLink to libkore](MIGRATION.md)
 - [Approval and standing-policy model](docs/policy.md)

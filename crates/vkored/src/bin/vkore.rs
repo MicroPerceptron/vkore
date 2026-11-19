@@ -47,6 +47,8 @@ enum Command {
         #[arg(long)]
         qemu: Option<PathBuf>,
     },
+    /// Discover host CPU, memory and storage resources
+    Hardware,
     /// Inspect a Kore ISO: its SHA-256 and the paging mode it boots
     Iso { iso: PathBuf },
     /// Kore machines
@@ -64,7 +66,7 @@ enum Command {
 #[derive(Subcommand)]
 enum MachineCommand {
     /// Create a machine that boots ISO
-    Create(CreateArgs),
+    Create(Box<CreateArgs>),
     /// List machines
     List,
     /// Show a machine's configuration
@@ -116,10 +118,25 @@ struct CreateArgs {
     sha256: Option<String>,
     #[arg(long, default_value_t = 4096)]
     disk_mib: u64,
-    #[arg(long, default_value_t = 4)]
-    cpus: u16,
-    #[arg(long, default_value_t = 4096)]
-    memory_mib: u32,
+    /// Defaults to half the physical cores, at least two
+    #[arg(long)]
+    cpus: Option<u16>,
+    /// Defaults to half physical memory, at least 2048 MiB
+    #[arg(long)]
+    memory_mib: Option<u32>,
+    #[arg(long)]
+    no_cpu_pinning: bool,
+    #[arg(long)]
+    no_memory_pinning: bool,
+    /// Host logical CPU IDs, in guest CPU order
+    #[arg(long, value_delimiter = ',')]
+    host_cpus: Vec<u32>,
+    /// Physical page size; defaults to 2m when a usable pool is available
+    #[arg(long, value_parser = ["system", "2m", "1g"])]
+    pages: Option<String>,
+    /// Use a sparse disk instead of reserving space at first launch
+    #[arg(long)]
+    sparse: bool,
     /// The IOMMU vendor [default: this host's, so it can accelerate]
     #[arg(long, value_enum)]
     vendor: Option<VendorArg>,
@@ -284,6 +301,15 @@ fn qemu(explicit: Option<PathBuf>) -> Result<PathBuf, Failure> {
 fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
     match cli.command {
         Command::Probe { qemu: path } => probe(qemu(path)?),
+        Command::Hardware => {
+            let store = store(cli.state)?;
+            let host = vkore_vm::hardware::HostResources::probe(store.state().root())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&host).map_err(|e| e.to_string())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Iso { iso } => {
             let medium = BootMedium::inspect(&iso).map_err(|error| error.to_string())?;
             println!(
@@ -348,7 +374,7 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
         MachineCommand::Create(arguments) => {
             let source = arguments.iso.clone();
             let digest = arguments.sha256.clone();
-            let config = create_config(arguments)?;
+            let config = create_config(*arguments, store.state().root())?;
             let cancelled = Arc::new(AtomicBool::new(false));
             let signal = cancelled.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
@@ -441,14 +467,33 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
     }
 }
 
-fn create_config(arguments: CreateArgs) -> Result<MachineConfig, Failure> {
+fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConfig, Failure> {
     let absolute = |path: &Path| {
         std::fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))
     };
     let mut config = MachineConfig::new(arguments.name, "/pending.iso");
     config.disk_mib = arguments.disk_mib;
-    config.cpus = arguments.cpus;
-    config.memory_mib = arguments.memory_mib;
+    let host = vkore_vm::hardware::HostResources::probe(state_root)?;
+    let (cpus, memory, _, resources) = vkored::hardware::defaults(&host, config.requirements);
+    config.cpus = arguments.cpus.unwrap_or(cpus);
+    config.memory_mib = arguments.memory_mib.unwrap_or(memory);
+    config.resources = resources;
+    config.resources.pin_cpus &= !arguments.no_cpu_pinning;
+    config.resources.pin_memory &= !arguments.no_memory_pinning;
+    config.resources.host_cpus = if arguments.host_cpus.is_empty() {
+        host.preferred_cpus(config.cpus)
+    } else {
+        arguments.host_cpus
+    };
+    config.resources.reserve_storage = !arguments.sparse;
+    if let Some(page) = arguments.pages {
+        config.resources.pages = match page.as_str() {
+            "2m" => vkore_vm::hardware::PageSize::Huge2M,
+            "1g" => vkore_vm::hardware::PageSize::Huge1G,
+            _ => vkore_vm::hardware::PageSize::System,
+        };
+    }
+    vkored::hardware::validate_host(&config, &host)?;
     config.vendor = arguments.vendor.map(|vendor| match vendor {
         VendorArg::Intel => Vendor::Intel,
         VendorArg::Amd => Vendor::Amd,

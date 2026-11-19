@@ -49,7 +49,7 @@ pub fn create(
 /// the runtime, so a view cannot substitute a URL or omit verification.
 pub fn create_official(
     store: &MachineStore,
-    config: MachineConfig,
+    mut config: MachineConfig,
     image_id: &str,
     cancelled: &AtomicBool,
     progress: impl Fn(Progress),
@@ -58,6 +58,8 @@ pub fn create_official(
     let image = catalog
         .get(image_id)
         .ok_or("select an available official image")?;
+    config.requirements = image.minimum;
+    crate::hardware::validate(&config)?;
     create_from_source(
         store,
         config,

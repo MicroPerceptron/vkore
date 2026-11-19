@@ -373,6 +373,22 @@ pub fn card(appearance: &Theme) -> container::Style {
     )
 }
 
+/// Resource sliders share the workspace accent and neutral track.
+pub fn resource_slider(
+    appearance: &Theme,
+    status: iced_widget::slider::Status,
+) -> iced_widget::slider::Style {
+    let mut style = iced_widget::slider::default(appearance, status);
+    style.rail.backgrounds = (
+        theme::color(appearance, theme::MAGENTA).into(),
+        theme::color(appearance, theme::BORDER).into(),
+    );
+    style.handle.background = theme::color(appearance, theme::PANEL).into();
+    style.handle.border_color = theme::color(appearance, theme::MAGENTA);
+    style.handle.border_width = 2.;
+    style
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

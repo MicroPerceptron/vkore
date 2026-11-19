@@ -16,6 +16,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod hardware;
 pub mod images;
 pub mod inference;
 pub mod run;

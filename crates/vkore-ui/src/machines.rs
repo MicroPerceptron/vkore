@@ -37,6 +37,8 @@ pub enum Update {
     Finished(Result<String, String>),
     ImportProgress(vkored::images::Progress),
     Created(Result<(), String>),
+    Hardware(Result<vkore_vm::hardware::HostResources, String>),
+    HardwareSaved(Result<(), String>),
 }
 
 /// A machine the view started.
@@ -95,6 +97,11 @@ pub struct Finished {
 /// Machines, and the form that creates one.
 pub struct State {
     pub state_root: PathBuf,
+    pub host: Result<vkore_vm::hardware::HostResources, String>,
+    pub form_hardware: crate::hardware::Draft,
+    pub edit_hardware: Option<(String, crate::hardware::Draft)>,
+    hardware_busy: bool,
+    pub configure_new: bool,
     pub configs: Vec<MachineConfig>,
     pub selected: Option<String>,
     pub running: BTreeMap<String, Running>,
@@ -114,6 +121,13 @@ pub struct State {
 #[derive(Debug, Clone)]
 pub enum MachineMessage {
     Select(String),
+    Hardware(bool, crate::hardware::Change),
+    EditHardware(String),
+    ConfigureNew(bool),
+    SaveHardware,
+    CancelHardware,
+    RefreshHardware,
+    AuthorizeMemory(u32),
     Start(String, bool),
     Stop(String),
     FormName(String),
@@ -127,7 +141,14 @@ pub enum MachineMessage {
 
 impl State {
     pub fn new(state_root: PathBuf) -> Self {
+        let host = vkore_vm::hardware::HostResources::probe(&state_root);
+        let form_hardware = crate::hardware::Draft::new(host.as_ref().ok(), Default::default());
         let mut state = Self {
+            host,
+            form_hardware,
+            edit_hardware: None,
+            hardware_busy: false,
+            configure_new: false,
             state_root,
             configs: Vec::new(),
             selected: None,
@@ -183,13 +204,84 @@ impl State {
 
     pub fn update(&mut self, message: MachineMessage, proxy: &EventLoopProxy<UserEvent>) {
         match message {
-            MachineMessage::Select(name) => self.selected = Some(name),
+            MachineMessage::Select(name) => {
+                self.configure_new = false;
+                self.selected = Some(name);
+                self.edit_hardware = None;
+            }
+            MachineMessage::Hardware(editing, change) => {
+                if !self.hardware_busy
+                    && self.importing.is_none()
+                    && let Ok(host) = &self.host
+                {
+                    if editing {
+                        if let Some((_, draft)) = &mut self.edit_hardware {
+                            draft.change(change, host);
+                        }
+                    } else {
+                        self.form_hardware.change(change, host);
+                    }
+                }
+            }
+            MachineMessage::ConfigureNew(open) => {
+                self.configure_new = open;
+                self.edit_hardware = None;
+            }
+            MachineMessage::EditHardware(name) => {
+                self.configure_new = false;
+                if !self.running.contains_key(&name)
+                    && let Some(config) = self.configs.iter().find(|c| c.name == name)
+                {
+                    let fixed = self
+                        .store()
+                        .is_ok_and(|s| s.state().machine(&name).disk.exists());
+                    self.edit_hardware =
+                        Some((name, crate::hardware::Draft::from_config(config, fixed)));
+                }
+            }
+            MachineMessage::CancelHardware => {
+                if !self.hardware_busy {
+                    self.edit_hardware = None;
+                }
+            }
+            MachineMessage::SaveHardware => {
+                if !self.hardware_busy
+                    && let Some((name, draft)) = self.edit_hardware.clone()
+                {
+                    let root = self.state_root.clone();
+                    let proxy = proxy.clone();
+                    self.hardware_busy = true;
+                    thread::spawn(move || {
+                        let result = VkoreState::open(root)
+                            .map(MachineStore::new)
+                            .map_err(|e| e.to_string())
+                            .and_then(|store| {
+                                vkored::hardware::save(
+                                    &store,
+                                    &name,
+                                    draft.cpus,
+                                    draft.memory_mib,
+                                    draft.disk_mib,
+                                    draft.resources,
+                                )
+                            });
+                        let _ = proxy
+                            .send_event(UserEvent::Machine(name, Update::HardwareSaved(result)));
+                    });
+                }
+            }
+            MachineMessage::RefreshHardware => self.refresh_hardware(None, proxy.clone()),
+            MachineMessage::AuthorizeMemory(mib) => self.refresh_hardware(Some(mib), proxy.clone()),
             MachineMessage::Refresh => self.refresh(),
             MachineMessage::FormName(value) => self.form_name = value,
             MachineMessage::SelectImage(id) => {
                 if self.importing.is_none()
                     && self.official_images.iter().any(|image| image.id == id)
                 {
+                    if let Some(image) = self.official_images.iter().find(|i| i.id == id) {
+                        self.form_hardware =
+                            crate::hardware::Draft::new(self.host.as_ref().ok(), image.minimum);
+                    }
                     self.selected_image = Some(id);
                     self.image_menu_open = false;
                 }
@@ -217,6 +309,27 @@ impl State {
         }
     }
 
+    fn refresh_hardware(&mut self, authorize: Option<u32>, proxy: EventLoopProxy<UserEvent>) {
+        if self.hardware_busy {
+            return;
+        }
+        self.hardware_busy = true;
+        self.status = if authorize.is_some() {
+            "Waiting for system authorization…"
+        } else {
+            "Refreshing host resources…"
+        }
+        .into();
+        let root = self.state_root.clone();
+        thread::spawn(move || {
+            let result = authorize
+                .map(vkored::hardware::authorize_memory)
+                .unwrap_or(Ok(()))
+                .and_then(|()| vkore_vm::hardware::HostResources::probe(&root));
+            let _ = proxy.send_event(UserEvent::Machine(String::new(), Update::Hardware(result)));
+        });
+    }
+
     fn create(&mut self, proxy: EventLoopProxy<UserEvent>) {
         if self.importing.is_some() {
             return;
@@ -235,6 +348,12 @@ impl State {
         };
         let created = (|| {
             let mut config = MachineConfig::new(self.form_name.trim(), "/pending.iso");
+            self.form_hardware.apply(&mut config);
+            let host = self.host.as_ref().map_err(Clone::clone)?;
+            vkored::hardware::validate_host(&config, host)?;
+            if config.resources.reserve_storage && config.disk_mib > host.storage_available_mib {
+                return Err("not enough free storage for this reservation".into());
+            }
             if !self.form_workspace.trim().is_empty() {
                 let root = absolute(&self.form_workspace)?;
                 let name = root
@@ -329,6 +448,27 @@ impl State {
 
     pub fn machine_update(&mut self, name: String, update: Update) {
         match update {
+            Update::Hardware(result) => {
+                self.hardware_busy = false;
+                match result {
+                    Ok(host) => {
+                        self.host = Ok(host);
+                        self.status = "Host resources refreshed".into();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            Update::HardwareSaved(result) => {
+                self.hardware_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.edit_hardware = None;
+                        self.refresh();
+                        self.status = "Hardware settings saved".into();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
             Update::ImportProgress(progress) => {
                 self.status = format!(
                     "Downloading image: {} MiB{}",
@@ -346,6 +486,7 @@ impl State {
                 }
                 match result {
                     Ok(()) => {
+                        self.configure_new = false;
                         self.status = format!("Created {name}");
                         self.selected = Some(name);
                         self.refresh();
@@ -416,6 +557,15 @@ fn run_machine(
     let store = VkoreState::open(root)
         .map(MachineStore::new)
         .map_err(|error| error.to_string())?;
+    let config = store.get(name).map_err(|e| e.to_string())?;
+    let host = vkore_vm::hardware::HostResources::probe(root)?;
+    vkored::hardware::validate_host(&config, &host)?;
+    if vkored::hardware::needs_authorization(&config, &host) {
+        send(Update::Line(
+            "Waiting for system authorization to pin memory…".into(),
+        ));
+        vkored::hardware::authorize_memory(config.memory_mib)?;
+    }
     let mut sink = |event: &Event| match event {
         Event::Stage { stage, .. } => {
             send(Update::Stage(*stage));
@@ -641,6 +791,32 @@ pub fn view(state: &State) -> UiElement<'_> {
                 }),
             theme::TEXT_MUTED
         ),
+        widgets::label("Hardware", theme::TEXT_MUTED),
+        widgets::data(
+            format!(
+                "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk",
+                state.form_hardware.cpus,
+                f64::from(state.form_hardware.memory_mib) / 1024.,
+                state.form_hardware.disk_mib as f64 / 1024.
+            ),
+            theme::TEXT_SECONDARY
+        ),
+        widgets::data(
+            format!(
+                "Image minimum: {} CPUs · {} MiB RAM · {} MiB disk",
+                state.form_hardware.minimum.cpus,
+                state.form_hardware.minimum.memory_mib,
+                state.form_hardware.minimum.disk_mib
+            ),
+            theme::TEXT_MUTED
+        ),
+        button(widgets::control("Configure hardware"))
+            .height(theme::CONTROL_SM)
+            .padding([8, 14])
+            .style(widgets::button_style(widgets::Button::Secondary))
+            .on_press_maybe(
+                (state.importing.is_none()).then_some(wrap(MachineMessage::ConfigureNew(true)))
+            ),
         widgets::label("Project folder · optional", theme::TEXT_MUTED),
         text_input("/path/to/project", &state.form_workspace)
             .on_input(|value| wrap(MachineMessage::FormWorkspace(value)))
@@ -681,6 +857,15 @@ pub fn view(state: &State) -> UiElement<'_> {
         .as_ref()
         .and_then(|name| state.configs.iter().find(|config| &config.name == name))
     {
+        _ if state.configure_new => widgets::scroll(column![
+            widgets::body("New machine hardware",23.,theme::TEXT),
+            widgets::body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
+            crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some()),
+            button(widgets::control("Done"))
+                .height(theme::CONTROL_SM).padding([8,14])
+                .style(widgets::button_style(widgets::Button::Primary))
+                .on_press(wrap(MachineMessage::ConfigureNew(false))),
+        ].spacing(18)).height(Length::Fill).into(),
         None => widgets::empty_state(
             crate::visuals::Icon::Machine,
             if state.configs.is_empty() {
@@ -694,6 +879,42 @@ pub fn view(state: &State) -> UiElement<'_> {
                 "Select a machine to see its resources, manage its power and follow its boot."
             },
         ),
+        Some(config)
+            if state
+                .edit_hardware
+                .as_ref()
+                .is_some_and(|(name, _)| name == &config.name) =>
+        {
+            let (_, draft) = state.edit_hardware.as_ref().unwrap();
+            widgets::scroll(
+                column![
+                    widgets::data(format!("Configure {}", config.name), theme::TEXT).size(23.),
+                    crate::hardware::view(draft, &state.host, true, state.hardware_busy),
+                    row![
+                        button(widgets::control("Save hardware"))
+                            .height(theme::CONTROL_SM)
+                            .padding([8, 14])
+                            .style(widgets::button_style(widgets::Button::Primary))
+                            .on_press_maybe(
+                                (!state.hardware_busy)
+                                    .then_some(wrap(MachineMessage::SaveHardware))
+                            ),
+                        button(widgets::control("Cancel"))
+                            .height(theme::CONTROL_SM)
+                            .padding([8, 14])
+                            .style(widgets::button_style(widgets::Button::Secondary))
+                            .on_press_maybe(
+                                (!state.hardware_busy)
+                                    .then_some(wrap(MachineMessage::CancelHardware))
+                            ),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(18),
+            )
+            .height(Length::Fill)
+            .into()
+        }
         Some(config) => {
             let running = state.running.get(&config.name);
             let (status, tone) =
@@ -772,7 +993,33 @@ pub fn view(state: &State) -> UiElement<'_> {
                 ],
             }
             .spacing(theme::SPACE_2);
-            pane = pane.push(controls);
+            pane = pane.push(controls.wrap());
+            if running.is_none() {
+                pane = pane.push(
+                    button(widgets::control("Configure hardware"))
+                        .height(theme::CONTROL_SM)
+                        .padding([8, 14])
+                        .style(widgets::button_style(widgets::Button::Secondary))
+                        .on_press(wrap(MachineMessage::EditHardware(config.name.clone()))),
+                );
+            }
+            pane = pane.push(widgets::data(
+                format!(
+                    "CPU pinning: {} · memory pinning: {} · {}",
+                    if config.resources.pin_cpus {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    if config.resources.pin_memory {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    config.resources.pages.label()
+                ),
+                theme::TEXT_MUTED,
+            ));
             let finished = state.finished.get(&config.name);
             if let Some(finished) = finished {
                 pane = pane.push(widgets::data(finished.summary.as_str(), theme::TEXT_MUTED));

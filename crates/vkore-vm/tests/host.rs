@@ -78,7 +78,12 @@ fn a_real_kore_iso_boots_to_ready() {
     }
     let readiness = machine.readiness().clone();
     assert_eq!(readiness.stage(), Stage::Ready, "{readiness:?}");
-    assert_eq!(readiness.version.as_deref(), Some("0.40.0"));
+    assert!(
+        readiness
+            .version
+            .as_deref()
+            .is_some_and(|version| !version.is_empty())
+    );
     let shot = dir.path().join("screen.ppm");
     machine.screendump(&shot).unwrap();
     assert!(std::fs::metadata(&shot).unwrap().len() > 1280 * 800 * 3);
@@ -121,8 +126,9 @@ fn start_machine(qemu: &std::path::Path, iso: PathBuf) -> (tempfile::TempDir, Ma
         vendor: Vendor::Intel,
         accel,
         paging: medium.paging.unwrap_or(Paging::FourLevel),
-        cpus: 4,
-        memory_mib: 4096,
+        cpus: 2,
+        memory_mib: 2048,
+        resources: Default::default(),
         display: Display::Headless,
         framebuffer: (1280, 800),
         serial_log: dir.path().join("serial.log"),

@@ -60,6 +60,10 @@ pub struct MachineConfig {
     pub disk_mib: u64,
     pub cpus: u16,
     pub memory_mib: u32,
+    #[serde(default)]
+    pub resources: vkore_vm::hardware::Resources,
+    #[serde(default)]
+    pub requirements: crate::hardware::Requirements,
     /// The IOMMU vendor; absent, the host's own (so it can accelerate).
     #[serde(default)]
     pub vendor: Option<Vendor>,
@@ -102,6 +106,8 @@ impl MachineConfig {
             disk_mib: 4096,
             cpus: 4,
             memory_mib: 4096,
+            resources: Default::default(),
+            requirements: Default::default(),
             vendor: None,
             accel: AccelChoice::Auto,
             framebuffer: (1280, 800),
@@ -269,6 +275,7 @@ impl MachineStore {
     pub fn remove(&self, name: &str) -> Result<(), StoreError> {
         self.get(name)?;
         let paths = self.state.machine(name);
+        let _lease = crate::hardware::lease(&paths.dir)?;
         let _ = fs::remove_file(&paths.qmp);
         fs::remove_dir_all(&paths.dir).map_err(|error| StoreError::Io(paths.dir, error))
     }
@@ -295,9 +302,7 @@ pub fn validate(config: &MachineConfig) -> Result<(), StoreError> {
             config.iso.display()
         ));
     }
-    if !(16..=1 << 22).contains(&config.disk_mib) {
-        return invalid(format!("a {} MiB disk: 16 MiB to 4 TiB", config.disk_mib));
-    }
+    crate::hardware::validate(config).map_err(StoreError::Invalid)?;
     if let Some(workspace) = &config.workspace {
         if !workspace.root.is_absolute() {
             return invalid(format!(
@@ -431,6 +436,24 @@ mod tests {
         assert!(matches!(store.get("demo"), Err(StoreError::Invalid(_))));
     }
 
+    #[test]
+    fn legacy_configs_preserve_policy_and_new_resources_roundtrip() {
+        let (_dir, store) = store();
+        let mut c = MachineConfig::new("demo", "/image.iso");
+        store.create(&c).unwrap();
+        let path = store.state().machine("demo").config;
+        let mut value = serde_json::to_value(&c).unwrap();
+        value.as_object_mut().unwrap().remove("resources");
+        value.as_object_mut().unwrap().remove("requirements");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(store.get("demo").unwrap(), c);
+        c.resources.pin_cpus = true;
+        c.resources.host_cpus = vec![1, 3, 5, 7];
+        c.resources.pin_memory = true;
+        c.resources.pages = vkore_vm::hardware::PageSize::Huge2M;
+        store.save(&c).unwrap();
+        assert_eq!(store.get("demo").unwrap(), c);
+    }
     #[test]
     fn broad_roots_are_named() {
         assert!(broad_root_warning(Path::new("/")).is_some());

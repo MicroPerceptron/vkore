@@ -104,6 +104,58 @@ impl Disk {
         Self::new(path)
     }
 
+    /// Reserve backing blocks before publishing a new raw image. On macOS,
+    /// rustix first asks for a contiguous extent; Linux fallocate leaves extent
+    /// placement to the filesystem. Never claim physical contiguity on SSD/COW.
+    /// Failure leaves no partially-created disk at the destination.
+    pub fn create_reserved_image(path: impl AsRef<Path>, bytes: u64) -> Result<Self, Error> {
+        let path = path.as_ref();
+        if bytes < 16 << 20 || !bytes.is_multiple_of(1 << 20) {
+            return Err(Error::Path(
+                "disk size must be whole MiB, at least 16 MiB".into(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::Path("disk needs a parent directory".into()))?;
+        let mut partial =
+            tempfile::NamedTempFile::new_in(parent).map_err(|e| Error::host(path, e))?;
+        rustix::fs::fallocate(
+            partial.as_file(),
+            rustix::fs::FallocateFlags::empty(),
+            0,
+            bytes,
+        )
+        .map_err(|e| Error::host(path, e.into()))?;
+        // APFS can accept F_PREALLOCATE yet release unwritten reservations
+        // when the descriptor closes. Materialize blank blocks only when the
+        // allocated-size report says the reservation is not durable backing.
+        if partial
+            .as_file()
+            .metadata()
+            .map_err(|e| Error::host(path, e))?
+            .blocks()
+            .saturating_mul(512)
+            < bytes
+        {
+            use std::io::Write;
+            let zeros = vec![0u8; 1 << 20];
+            for _ in 0..(bytes >> 20) {
+                partial
+                    .write_all(&zeros)
+                    .map_err(|e| Error::host(path, e))?;
+            }
+        }
+        partial
+            .as_file()
+            .sync_all()
+            .map_err(|e| Error::host(path, e))?;
+        partial
+            .persist_noclobber(path)
+            .map_err(|e| Error::host(path, e.error))?;
+        Self::new(path)
+    }
+
     /// Format blank roots as Kore's first boot would. Only an image is ever
     /// formatted here: a machine formats its own disk at its first boot.
     pub fn format(&self) -> Result<u64, Error> {
@@ -125,6 +177,18 @@ impl Disk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reservation_is_allocated_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reserved.raw");
+        Disk::create_reserved_image(&path, 16 << 20).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), 16 << 20);
+        assert!(meta.blocks() * 512 >= meta.len());
+        assert!(Disk::create_reserved_image(&path, 32 << 20).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 16 << 20);
+    }
 
     #[test]
     fn an_image_is_a_regular_file_and_nothing_else_is_a_disk() {

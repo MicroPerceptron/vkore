@@ -73,3 +73,11 @@ host. SR-IOV readiness and inference throughput are not asserted by the catalog.
 Version, profile and source revision describe the selected artifact. Resource
 sizes remain machine configuration; the catalog does not invent guest endpoints,
 boot markers, model readiness or QEMU hardware requirements ahead of their owners.
+
+### Resource minimums
+
+An image may include `"minimum": {"cpus": 2, "memory_mib": 2048, "disk_mib": 1024}`.
+Omitting it uses those baseline requirements. Entries may raise, never lower,
+them (up to 128 CPUs, 1 TiB RAM and 4 TiB storage). The runtime persists and
+enforces these minimums during import, configuration and launch. See
+[hardware setup](hardware.md) for defaults, placement and platform support.

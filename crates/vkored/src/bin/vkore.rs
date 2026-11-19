@@ -313,13 +313,17 @@ fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
 }
 
 fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
+    let runtime = vkore_vm::runtime::Runtime::for_qemu(&qemu)
+        .map_err(|error| format!("QEMU runtime: {error}"))?;
     let host = HostCaps::probe();
     let vendor = host.native_vendor();
     let accel = host
         .choose(AccelChoice::Auto, vendor)
         .map_err(|error| error.to_string())?;
     let caps = QemuCaps::probe(&qemu, vendor, accel).map_err(|error| error.to_string())?;
-    let firmware = firmware::discover();
+    let firmware = runtime
+        .map(|runtime| runtime.firmware)
+        .or_else(firmware::discover);
     let report = serde_json::json!({
         "qemu": qemu,
         "host": host,

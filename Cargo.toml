@@ -49,3 +49,8 @@ opt-level = 2
 # without duplicating debug records for every upstream QEMU command and event.
 [profile.dev.package.qapi-qmp]
 debug = 0
+
+# Bundle/image verification hashes hundreds of MiB on the launch path. Keep
+# the digest's compression loop optimized in development builds too.
+[profile.dev.package.sha2]
+opt-level = 3

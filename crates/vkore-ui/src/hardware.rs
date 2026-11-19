@@ -257,12 +257,17 @@ pub fn view<'a>(
         .push(ram_slider)
         .push(widgets::data(
             format!(
-                "{:.1} GiB physical · {:.1} GiB available",
+                "{:.1} GiB physical · {:.1} GiB free",
                 host.memory_mib as f64 / 1024.,
-                host.available_memory_mib as f64 / 1024.
+                host.free_memory_mib as f64 / 1024.
             ),
             theme::TEXT_MUTED,
         ))
+        .push(widgets::data(
+            format!("{:.1} GiB free or reclaimable (OS estimate)", host.available_memory_mib as f64 / 1024.),
+            theme::TEXT_MUTED,
+        ))
+        .push(widgets::body("Free memory is unused. Reclaimable memory includes pages the system can recover; it is not a reservation.", 12., theme::TEXT_MUTED))
         .push(switch(
             "Pin memory in RAM",
             draft.resources.pin_memory,

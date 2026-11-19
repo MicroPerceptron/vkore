@@ -85,7 +85,9 @@ allocation. On filesystems such as APFS that release unwritten reservations
 on close, blank blocks are materialized in bounded 1 MiB chunks before
 publication. No sparse fallback occurs on allocation failure. A filesystem may
 fragment an allocation, and COW filesystems or SSD translation cannot promise
-physical contiguity. Sparse allocation remains an explicit opt-out.
+physical contiguity. Reserved disks disable guest discard/unmap and automatic
+zero detection so TRIM cannot release the reservation. Sparse allocation remains
+an explicit opt-out.
 
 After creation, size and reservation mode are fixed. A file truncate is not a
 safe DagFS resize protocol. This implementation changes no DagFS bytes and
@@ -95,17 +97,31 @@ volume ownership and engine locking remain intact.
 
 ## Dependencies and evidence
 
-- `sysinfo = 0.37.2`: MIT, maintained upstream, Rust 1.88 minimum; only `system`
+- `sysinfo = 0.40.4`: MIT, maintained upstream, Rust 1.95 minimum; only `system`
   and `disk` features. It wraps platform calls with upstream unsafe FFI; no
   process enumeration or periodic sampling is used. Platform Objective-C bindings
-  are reused on macOS. This compatible release avoids unrelated API migration.
+  are reused on macOS. This release includes the upstream macOS memory-accounting correction;
+  the earlier formula could subtract compressed storage and saturate at zero.
 - Existing `rustix = 1.1.4`: safe affinity, resource-limit and allocation APIs.
   No new application unsafe code. fs4 was evaluated but its allocation path
   delegates to rustix, so another wrapper dependency adds no value here.
 - hwlocality was evaluated for topology/binding; its alpha API and additional
   libhwloc C runtime were unnecessary for this bounded CPU/memory/storage scope.
 
-References: [sysinfo](https://docs.rs/sysinfo/0.37.2/sysinfo/),
+References: [sysinfo](https://docs.rs/sysinfo/0.40.4/sysinfo/),
 [Linux hybrid topology](https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/intel-hybrid.txt),
 [QEMU memory options](https://www.qemu.org/docs/master/system/qemu-manpage.html),
 [polkit authentication](https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html).
+
+The public CI hardware job checks the unchanged `vkore-vm`, `vkore-volume` and
+`vkored` sources in an isolated workspace on Linux and macOS. Cargo otherwise
+resolves the desktop's private Axiom pin even for `-p vkore-vm`, and the public
+runner has no credentials for it. Full workspace Clippy/tests and desktop
+rendering are separate local gates; backend CI does not claim desktop coverage.
+
+The memory panel distinguishes immediately free RAM from the OS estimate of
+free-or-reclaimable RAM. On macOS the latter follows XNU's non-compressed
+available-memory accounting (active + inactive + free, with speculative pages
+already in free). It does not mean those pages are unused or guarantee an
+allocation without memory pressure. See
+[Apple's accounting](https://github.com/apple-oss-distributions/xnu/blob/main/doc/vm/memorystatus_notify.md#available-memory).

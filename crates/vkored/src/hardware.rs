@@ -281,6 +281,7 @@ mod tests {
             core_summary: String::new(),
             memory_mib: 32768,
             available_memory_mib: 24576,
+            free_memory_mib: 8192,
             memory_nodes: vec![],
             storage: vec![],
             storage_path: "/".into(),

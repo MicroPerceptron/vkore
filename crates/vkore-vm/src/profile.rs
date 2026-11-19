@@ -417,7 +417,14 @@ impl MachineSpec {
             "-device".into(),
             "e1000e,id=nic0,netdev=net0,bus=rp0".into(),
             "-drive".into(),
-            format!("file={disk},if=none,id=nvme0,format=raw,cache=none,discard=unmap"),
+            format!(
+                "file={disk},if=none,id=nvme0,format=raw,cache=none,discard={},detect-zeroes=off",
+                if self.resources.reserve_storage {
+                    "ignore"
+                } else {
+                    "unmap"
+                }
+            ),
             "-device".into(),
             format!(
                 "nvme,id=nvme_dev0,serial=nvme0,drive=nvme0,bus=rp1,max_ioqpairs={},msix_qsize=65",
@@ -523,6 +530,16 @@ mod tests {
     }
 
     #[test]
+    fn reserved_disks_do_not_allow_guest_discard_to_release_the_reservation() {
+        let mut machine = spec();
+        machine.resources.reserve_storage = true;
+        let args = machine.arguments(&caps()).unwrap();
+        assert!(args.iter().any(
+            |arg| arg.contains("id=nvme0") && arg.contains("discard=ignore,detect-zeroes=off")
+        ));
+    }
+
+    #[test]
     fn the_gate_topology_on_qemu_8_under_tcg() {
         let arguments = spec().arguments(&caps()).unwrap();
         let line = joined(&arguments);
@@ -536,7 +553,7 @@ mod tests {
             "-numa hmat-lb,initiator=1,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=100G",
             "-no-user-config -nodefaults -no-reboot -rtc base=utc,clock=host -boot menu=off,strict=on -monitor none -display none",
             "-device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,x-scalable-mode=on,snoop-control=on,dma-translation=on,aw-bits=48",
-            "-drive file=/m/disk.raw,if=none,id=nvme0,format=raw,cache=none,discard=unmap -device nvme,id=nvme_dev0,serial=nvme0,drive=nvme0,bus=rp1,max_ioqpairs=4,msix_qsize=65",
+            "-drive file=/m/disk.raw,if=none,id=nvme0,format=raw,cache=none,discard=unmap,detect-zeroes=off -device nvme,id=nvme_dev0,serial=nvme0,drive=nvme0,bus=rp1,max_ioqpairs=4,msix_qsize=65",
             "-device usb-kbd,id=primary-kbd,bus=xhci.0,port=1 -device usb-mouse,id=primary-mouse,bus=xhci.0,port=3",
             "-device bochs-display,bus=rp_fb,xres=1280,yres=800,vgamem=16M",
             "-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=/m/vars.fd",

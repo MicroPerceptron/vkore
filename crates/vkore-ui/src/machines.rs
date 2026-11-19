@@ -37,7 +37,7 @@ pub enum Update {
     Finished(Result<String, String>),
     ImportProgress(vkored::images::Progress),
     Created(Result<(), String>),
-    Hardware(Result<vkore_vm::hardware::HostResources, String>),
+    Hardware(Result<Box<vkore_vm::hardware::HostResources>, String>),
     HardwareSaved(Result<(), String>),
 }
 
@@ -325,7 +325,8 @@ impl State {
             let result = authorize
                 .map(vkored::hardware::authorize_memory)
                 .unwrap_or(Ok(()))
-                .and_then(|()| vkore_vm::hardware::HostResources::probe(&root));
+                .and_then(|()| vkore_vm::hardware::HostResources::probe(&root))
+                .map(Box::new);
             let _ = proxy.send_event(UserEvent::Machine(String::new(), Update::Hardware(result)));
         });
     }
@@ -452,7 +453,7 @@ impl State {
                 self.hardware_busy = false;
                 match result {
                     Ok(host) => {
-                        self.host = Ok(host);
+                        self.host = Ok(*host);
                         self.status = "Host resources refreshed".into();
                     }
                     Err(error) => self.status = error,

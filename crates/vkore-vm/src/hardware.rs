@@ -86,6 +86,7 @@ pub struct HostResources {
     pub core_summary: String,
     pub memory_mib: u64,
     pub available_memory_mib: u64,
+    pub free_memory_mib: u64,
     pub memory_nodes: Vec<MemoryNode>,
     pub storage: Vec<Storage>,
     pub storage_path: PathBuf,
@@ -97,7 +98,7 @@ pub struct HostResources {
 }
 impl HostResources {
     pub fn probe(storage_path: &Path) -> Result<Self, String> {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().map_err(|e| format!("host discovery: {e}"))?;
         system.refresh_memory();
         system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
         let mut path = storage_path.to_path_buf();
@@ -108,7 +109,8 @@ impl HostResources {
         }
         let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         let stat = rustix::fs::statvfs(&path).map_err(|e| format!("storage capacity: {e}"))?;
-        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let disks = sysinfo::Disks::new_with_refreshed_list()
+            .map_err(|e| format!("storage discovery: {e}"))?;
         let storage = disks
             .iter()
             .take(256)
@@ -148,6 +150,7 @@ impl HostResources {
             memory_nodes: platform::memory_nodes(),
             memory_mib: system.total_memory() >> 20,
             available_memory_mib: system.available_memory() >> 20,
+            free_memory_mib: system.free_memory() >> 20,
             storage,
             storage_path: path,
             storage_available_mib: stat.f_bavail.saturating_mul(stat.f_frsize) >> 20,

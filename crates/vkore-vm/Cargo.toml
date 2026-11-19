@@ -21,7 +21,7 @@ rustix = { version = "1.1.4", features = ["event", "thread", "process", "fs"] }
 # Kore publishes boot media digests as SHA-256 (release SHA256SUMS).
 sha2 = "0.10.9"
 # MIT; query CPU/memory/disks only, no process inventory or background sampling.
-sysinfo = { version = "=0.37.2", default-features = false, features = ["system", "disk"] }
+sysinfo = { version = "=0.40.4", default-features = false, features = ["system", "disk"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"

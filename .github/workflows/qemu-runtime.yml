@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'packaging/**'
+      - 'crates/vkore-vm/**'
+      - 'crates/vkored/src/run.rs'
       - 'tools/*qemu*'
       - '.github/workflows/qemu-runtime.yml'
   workflow_dispatch:

@@ -108,6 +108,16 @@ VKORE_TEST_QEMU=/path/to/qemu-system-x86_64 \
 VKORE_TEST_ISO=/path/to/kore.iso cargo test -p vkore-vm --test host -- --nocapture
 ```
 
+Kernel-only self-test ISOs use a separate opt-in gate:
+
+```sh
+VKORE_TEST_QEMU=/path/to/qemu-system-x86_64 \
+VKORE_TEST_BOOT_ISO=/path/to/kore-boot-test.iso cargo test -p vkore-vm --test host -- --nocapture
+```
+
+This checks the kernel PASS marker, a real QMP framebuffer capture and guest
+ACPI S5 shutdown. It does not substitute for production shell/volume readiness.
+
 The QEMU runtime workflow builds Linux x86_64 and macOS arm64 bundles separately
 from Cargo. A successful smoke test does not prove SR-IOV, physical hardware
 performance or the current Kore boot contract; those require the real image

@@ -715,8 +715,13 @@ pub(crate) fn npu_inventory<'a>(
                 theme::TEXT_MUTED,
             ));
             if let Some(group) = pci.iommu_group {
+                let membership = match pci.group_members.len() {
+                    0 => "membership unavailable".into(),
+                    1 => "1 device".into(),
+                    count => format!("{count} devices"),
+                };
                 card = card.push(ty.data(
-                    format!("IOMMU group {group} · {} devices", pci.group_members.len()),
+                    format!("IOMMU group {group} · {membership}"),
                     theme::TEXT_MUTED,
                 ));
             }

@@ -389,6 +389,41 @@ pub fn resource_slider(
     style
 }
 
+/// A native switch with neutral fills and the workspace selection outline.
+pub fn resource_toggle(
+    appearance: &Theme,
+    status: iced_widget::toggler::Status,
+) -> iced_widget::toggler::Style {
+    use iced_widget::toggler::Status;
+    let (selected, disabled) = match status {
+        Status::Active { is_toggled } | Status::Hovered { is_toggled } => (is_toggled, false),
+        Status::Disabled { is_toggled } => (is_toggled, true),
+    };
+    let mut style = iced_widget::toggler::default(appearance, status);
+    let color = |tone| {
+        let mut color = theme::color(appearance, tone);
+        if disabled {
+            color.a *= 0.4;
+        }
+        color
+    };
+    style.background = color(theme::PANEL).into();
+    style.foreground = color(if selected {
+        theme::TEXT
+    } else {
+        theme::TEXT_MUTED
+    })
+    .into();
+    style.background_border_width = 1.;
+    style.background_border_color = color(if selected {
+        theme::MAGENTA
+    } else {
+        theme::BORDER
+    });
+    style.text_color = Some(color(theme::TEXT));
+    style
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

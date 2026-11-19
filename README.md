@@ -264,3 +264,8 @@ rules are in [AGENTS.md](AGENTS.md).
 
 vKore is licensed under the [Mozilla Public License 2.0](LICENSE). See
 [NOTICE.md](NOTICE.md) for attribution.
+
+## Versions
+
+vKore uses one workspace release version. See [the changelog](CHANGELOG.md) and
+[versioning policy](docs/versioning.md) for SemVer rules and CI checks.

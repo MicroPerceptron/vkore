@@ -5,6 +5,14 @@ stopped machines. Changes to an existing machine take effect after **Save
 hardware**. CPU, RAM and disk controls use the host snapshot; refresh that
 snapshot after changing host resources. Launch always probes again.
 
+The processor panel shows a core map grouped by socket and reported core type.
+Each tile is one physical core; its CPU buttons are the available hardware
+threads, including SMT siblings. Selecting threads updates the guest CPU count,
+with the image minimum enforced. The count slider and stepper preserve current
+choices and add threads spread over cores when needed. Placement shortcuts can
+spread the selection or restrict it to reported performance/efficiency cores;
+a smaller pool reduces the guest count, never below the image minimum.
+
 ## Admission and defaults
 
 `vkored::hardware` owns policy. Every image requires at least 2 guest CPUs,

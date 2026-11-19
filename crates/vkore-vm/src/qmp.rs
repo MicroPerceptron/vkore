@@ -11,12 +11,13 @@
 use std::{
     collections::VecDeque,
     fmt,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::Path,
     time::{Duration, Instant},
 };
 
+use qapi_qmp as api;
 use serde_json::{Value, json};
 
 /// How long a command waits for its reply.
@@ -24,12 +25,32 @@ const REPLY_WAIT: Duration = Duration::from_secs(10);
 
 /// The longest line QMP sends here; a longer one is not QEMU's.
 const MAX_LINE: u64 = 1 << 20;
+const MAX_EVENTS: usize = 256;
+const MAX_EVENT_BYTES: usize = 4 << 20;
+
+/// Known events use the upstream QAPI vocabulary. Newer QEMU events retain
+/// their envelope so a new optional event does not break an older client.
+#[derive(Debug)]
+pub enum Event {
+    Known(Box<api::Event>),
+    Unknown(Value),
+}
+
+impl Event {
+    pub fn into_value(self) -> Value {
+        match self {
+            Self::Known(event) => serde_json::to_value(event).expect("QAPI event serializes"),
+            Self::Unknown(value) => value,
+        }
+    }
+}
 
 /// A QMP connection, past capability negotiation.
 pub struct Qmp {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
-    events: VecDeque<Value>,
+    events: VecDeque<(Event, usize)>,
+    event_bytes: usize,
     /// The line being read when a timeout fell; its rest is still to come.
     partial: Vec<u8>,
     /// The id the next command carries; every earlier one has been sent.
@@ -72,8 +93,24 @@ impl Qmp {
     /// Connect to `socket`, waiting up to `patience` for QEMU to create it,
     /// and leave capability negotiation behind.
     pub fn connect(socket: &Path, patience: Duration) -> Result<Self, QmpError> {
+        Self::connect_while(socket, patience, || Ok(true))
+    }
+
+    /// Stop waiting immediately if the supervised emulator exits.
+    pub(crate) fn connect_while(
+        socket: &Path,
+        patience: Duration,
+        mut alive: impl FnMut() -> io::Result<bool>,
+    ) -> Result<Self, QmpError> {
         let deadline = Instant::now() + patience;
         let stream = loop {
+            if !alive()? {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "QEMU exited before QMP was ready",
+                )
+                .into());
+            }
             match UnixStream::connect(socket) {
                 Ok(stream) => break stream,
                 Err(error)
@@ -93,22 +130,33 @@ impl Qmp {
             reader: BufReader::new(stream),
             writer,
             events: VecDeque::new(),
+            event_bytes: 0,
             partial: Vec::new(),
             next_id: 1,
             reply_wait: REPLY_WAIT,
         };
         let greeting = qmp
-            .read_message(REPLY_WAIT)?
-            .ok_or_else(|| timed_out("its greeting", REPLY_WAIT))?;
+            .read_message(deadline.saturating_duration_since(Instant::now()))?
+            .ok_or_else(|| timed_out("its greeting", patience))?;
         if greeting.get("QMP").is_none() {
             return Err(QmpError::Protocol(greeting.to_string()));
         }
-        qmp.execute("qmp_capabilities", None)?;
+        qmp.reply_wait = deadline.saturating_duration_since(Instant::now());
+        if qmp.reply_wait.is_zero() {
+            return Err(timed_out("negotiation", patience));
+        }
+        qmp.writer.set_write_timeout(Some(qmp.reply_wait))?;
+        qmp.execute(&api::qmp_capabilities { enable: None })?;
+        qmp.reply_wait = REPLY_WAIT;
+        qmp.writer.set_write_timeout(Some(REPLY_WAIT))?;
         Ok(qmp)
     }
 
     /// Send `command` and answer its id, without waiting for the reply.
-    fn send(&mut self, command: &str, arguments: Option<Value>) -> Result<u64, QmpError> {
+    fn send<C: api::QmpCommand>(&mut self, command: &C) -> Result<u64, QmpError> {
+        let arguments =
+            serde_json::to_value(command).map_err(|error| QmpError::Protocol(error.to_string()))?;
+        let command = C::NAME;
         if command.is_empty()
             || !command
                 .bytes()
@@ -118,37 +166,40 @@ impl Qmp {
         }
         let id = self.next_id;
         let mut message = json!({ "execute": command, "id": id });
-        if let Some(arguments) = arguments {
-            message["arguments"] = arguments;
-        }
+        message["arguments"] = arguments;
         let mut line = message.to_string();
         line.push('\n');
         self.writer.write_all(line.as_bytes())?;
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| QmpError::Protocol("command ids exhausted".into()))?;
         Ok(id)
     }
 
     /// Run `command` and answer its `return` value; events read meanwhile
     /// are kept for [`Qmp::next_event`].
-    pub fn execute(&mut self, command: &str, arguments: Option<Value>) -> Result<Value, QmpError> {
-        let id = self.send(command, arguments)?;
+    pub fn execute<C: api::QmpCommand>(&mut self, command: &C) -> Result<C::Ok, QmpError> {
+        let id = self.send(command)?;
         let deadline = Instant::now() + self.reply_wait;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let message = self
                 .read_message(left)?
-                .ok_or_else(|| timed_out(command, self.reply_wait))?;
+                .ok_or_else(|| timed_out(C::NAME, self.reply_wait))?;
             if let Some(reply) = self.file(message, Some(id))? {
-                return reply;
+                return serde_json::from_value(reply?)
+                    .map_err(|error| QmpError::Protocol(format!("{} response: {error}", C::NAME)));
             }
         }
     }
 
     /// The next event, waiting up to `wait` for one; `None` when none came.
-    pub fn next_event(&mut self, wait: Duration) -> Result<Option<Value>, QmpError> {
+    pub fn next_event(&mut self, wait: Duration) -> Result<Option<Event>, QmpError> {
         let deadline = Instant::now() + wait;
         loop {
-            if let Some(event) = self.events.pop_front() {
+            if let Some((event, bytes)) = self.events.pop_front() {
+                self.event_bytes -= bytes;
                 return Ok(Some(event));
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -170,7 +221,19 @@ impl Qmp {
         awaited: Option<u64>,
     ) -> Result<Option<Result<Value, QmpError>>, QmpError> {
         if message.get("event").is_some() {
-            self.events.push_back(message);
+            let bytes = message.to_string().len();
+            if self.events.len() >= MAX_EVENTS || self.event_bytes + bytes > MAX_EVENT_BYTES {
+                return Err(QmpError::Protocol("event queue limit exceeded".into()));
+            }
+            if !message["event"].is_string() {
+                return Err(QmpError::Protocol("event name is not a string".into()));
+            }
+            let event = match serde_json::from_value(message.clone()) {
+                Ok(event) => Event::Known(Box::new(event)),
+                Err(_) => Event::Unknown(message),
+            };
+            self.events.push_back((event, bytes));
+            self.event_bytes += bytes;
             return Ok(None);
         }
         let reply = message.get("return").is_some() || message.get("error").is_some();
@@ -190,44 +253,63 @@ impl Qmp {
     /// The next line, as JSON, waiting up to `wait` for it to complete;
     /// `None` when it did not. What was read of it stays for the next call.
     fn read_message(&mut self, wait: Duration) -> Result<Option<Value>, QmpError> {
-        // A zero timeout means none to the socket: the floor keeps it a wait.
-        self.reader
-            .get_ref()
-            .set_read_timeout(Some(wait.max(Duration::from_millis(1))))?;
-        let room = MAX_LINE.saturating_sub(self.partial.len() as u64);
-        match (&mut self.reader)
-            .take(room)
-            .read_until(b'\n', &mut self.partial)
-        {
-            Ok(_) if self.partial.ends_with(b"\n") => {
+        let deadline = Instant::now() + wait;
+        loop {
+            if self.partial.len() as u64 >= MAX_LINE {
+                return Err(QmpError::Protocol(format!(
+                    "a line longer than {MAX_LINE} bytes"
+                )));
+            }
+            if self.reader.buffer().is_empty() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let timeout = rustix::event::Timespec::try_from(remaining)
+                    .map_err(|_| QmpError::Protocol("QMP timeout is too large".into()))?;
+                let mut descriptors = [rustix::event::PollFd::new(
+                    self.reader.get_ref(),
+                    rustix::event::PollFlags::IN,
+                )];
+                match rustix::event::poll(&mut descriptors, Some(&timeout)) {
+                    Ok(0) => return Ok(None),
+                    Ok(_) => {}
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(error) => return Err(io::Error::from(error).into()),
+                }
+            }
+            let buffer = self.reader.fill_buf()?;
+            if buffer.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "QEMU closed its machine protocol",
+                )
+                .into());
+            }
+            let length = buffer
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(buffer.len(), |n| n + 1)
+                .min(MAX_LINE as usize - self.partial.len());
+            self.partial.extend_from_slice(&buffer[..length]);
+            self.reader.consume(length);
+            if self.partial.ends_with(b"\n") {
                 let line = std::mem::take(&mut self.partial);
-                serde_json::from_slice(&line).map(Some).map_err(|_| {
-                    QmpError::Protocol(String::from_utf8_lossy(&line).trim().to_owned())
-                })
+                return serde_json::from_slice(&line)
+                    .map(Some)
+                    .map_err(|error| QmpError::Protocol(format!("invalid JSON: {error}")));
             }
-            Ok(_) if self.partial.len() as u64 >= MAX_LINE => Err(QmpError::Protocol(format!(
-                "a line longer than {MAX_LINE} bytes"
-            ))),
-            Ok(_) => Err(QmpError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "QEMU closed its machine protocol",
-            ))),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                Ok(None)
+            if Instant::now() >= deadline {
+                return Ok(None);
             }
-            Err(error) => Err(error.into()),
         }
     }
 
     /// `running`, `paused`, `shutdown`, … as QEMU reports the run state.
-    pub fn status(&mut self) -> Result<String, QmpError> {
-        let status = self.execute("query-status", None)?;
-        Ok(status["status"].as_str().unwrap_or("unknown").to_owned())
+    pub fn status(&mut self) -> Result<api::StatusInfo, QmpError> {
+        self.execute(&api::query_status {})
+    }
+
+    /// Release CPUs only after the supervisor has checked the stopped machine.
+    pub fn resume(&mut self) -> Result<(), QmpError> {
+        self.execute(&api::cont {}).map(drop)
     }
 
     /// Press the machine's ACPI power button.
@@ -236,13 +318,13 @@ impl Qmp {
     /// for seconds, and a stop's grace period should be its only wait. The
     /// reply is dropped as late when it comes.
     pub fn power_button(&mut self) -> Result<(), QmpError> {
-        self.send("system_powerdown", None).map(drop)
+        self.send(&api::system_powerdown {}).map(drop)
     }
 
     /// End QEMU at once: the guest gets no notice. Not waited for either:
     /// the caller watches the process end.
     pub fn quit(&mut self) -> Result<(), QmpError> {
-        self.send("quit", None).map(drop)
+        self.send(&api::quit {}).map(drop)
     }
 
     /// Write the guest's screen to `path` as PPM.
@@ -250,8 +332,13 @@ impl Qmp {
         let filename = path
             .to_str()
             .ok_or_else(|| QmpError::Protocol(format!("{} is not UTF-8", path.display())))?;
-        self.execute("screendump", Some(json!({ "filename": filename })))
-            .map(drop)
+        self.execute(&api::screendump {
+            filename: filename.into(),
+            device: None,
+            head: None,
+            format: None,
+        })
+        .map(drop)
     }
 
     /// Press and release keys together, as QEMU names them (`ctrl`,
@@ -259,10 +346,17 @@ impl Qmp {
     pub fn send_keys(&mut self, keys: &[&str]) -> Result<(), QmpError> {
         let keys = keys
             .iter()
-            .map(|key| json!({ "type": "qcode", "data": key }))
-            .collect::<Vec<_>>();
-        self.execute("send-key", Some(json!({ "keys": keys })))
-            .map(drop)
+            .map(|key| {
+                key.parse()
+                    .map(|data| api::KeyValue::qcode(api::QKeyCodeWrapper { data }))
+                    .map_err(|_| QmpError::Protocol(format!("unknown QEMU key {key:?}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.execute(&api::send_key {
+            keys,
+            hold_time: None,
+        })
+        .map(drop)
     }
 }
 
@@ -341,16 +435,25 @@ mod tests {
         });
         let mut qmp = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
         qmp.power_button().unwrap();
+        let sent = qmp.send_keys(&["print"]);
         assert!(matches!(
-            qmp.send_keys(&["print"]),
+            sent,
             Err(QmpError::Command { class, .. }) if class == "GenericError"
         ));
-        let first = qmp.next_event(Duration::from_secs(5)).unwrap().unwrap();
+        let first = qmp
+            .next_event(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .into_value();
         assert_eq!(first["event"], "POWERDOWN");
-        let second = qmp.next_event(Duration::from_secs(5)).unwrap().unwrap();
+        let second = qmp
+            .next_event(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .into_value();
         assert_eq!(second["data"]["reason"], "guest-shutdown");
         server.join().unwrap();
-        assert!(qmp.execute("bad name", None).is_err());
+        assert!(qmp.send_keys(&["not-a-key"]).is_err());
     }
 
     #[test]
@@ -364,7 +467,7 @@ mod tests {
             writeln!(stream, r#"{{"return": {{}}, "id": {button}}}"#).unwrap();
             writeln!(
                 stream,
-                r#"{{"return": {{"status": "running"}}, "id": {status}}}"#
+                r#"{{"return": {{"status": "running", "running": true, "singlestep": false}}, "id": {status}}}"#
             )
             .unwrap();
             // And one that outlived its command's wait, read as an event is.
@@ -375,13 +478,17 @@ mod tests {
         });
         let mut qmp = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
         qmp.power_button().unwrap();
-        assert_eq!(qmp.status().unwrap(), "running");
+        assert!(qmp.status().unwrap().running);
         qmp.reply_wait = Duration::from_millis(50);
         assert!(matches!(
-            qmp.execute("query-status", None),
+            qmp.status(),
             Err(QmpError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
         ));
-        let event = qmp.next_event(Duration::from_secs(5)).unwrap().unwrap();
+        let event = qmp
+            .next_event(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .into_value();
         assert_eq!(event["event"], "STOP");
         server.join().unwrap();
     }
@@ -396,7 +503,11 @@ mod tests {
         });
         let mut qmp = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
         assert!(qmp.next_event(Duration::from_millis(50)).unwrap().is_none());
-        let event = qmp.next_event(Duration::from_secs(5)).unwrap().unwrap();
+        let event = qmp
+            .next_event(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .into_value();
         assert_eq!(event["event"], "POWERDOWN");
         server.join().unwrap();
     }
@@ -420,5 +531,50 @@ mod tests {
         }
         assert!(matches!(refused, Some(Err(QmpError::Protocol(_)))));
         server.join().unwrap();
+    }
+    #[test]
+    fn typed_responses_reject_missing_required_fields() {
+        let (_dir, socket, server) = qemu(|reader, stream| {
+            let (id, _) = command(reader);
+            writeln!(stream, r#"{{"return": {{}}, "id": {id}}}"#).unwrap();
+        });
+        let mut qmp = Qmp::connect(&socket, Duration::from_secs(2)).unwrap();
+        assert!(matches!(qmp.status(), Err(QmpError::Protocol(_))));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn event_flood_is_bounded_and_unknown_events_survive() {
+        let (_dir, socket, server) = qemu(|_, _| {});
+        let mut qmp = Qmp::connect(&socket, Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        let event = json!({"event": "FUTURE_EVENT", "data": {"value": 7}});
+        for _ in 0..MAX_EVENTS {
+            qmp.file(event.clone(), None).unwrap();
+        }
+        assert!(matches!(
+            qmp.file(event.clone(), None),
+            Err(QmpError::Protocol(_))
+        ));
+        assert_eq!(
+            qmp.next_event(Duration::ZERO)
+                .unwrap()
+                .unwrap()
+                .into_value(),
+            event
+        );
+        qmp.file(event, None).unwrap();
+    }
+
+    #[test]
+    fn failed_process_does_not_wait_for_socket_deadline() {
+        let start = Instant::now();
+        assert!(
+            Qmp::connect_while(Path::new("/no/socket"), Duration::from_secs(10), || Ok(
+                false
+            ))
+            .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

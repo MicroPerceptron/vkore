@@ -44,3 +44,8 @@ unsafe_op_in_unsafe_fn = "deny"
 # Keep that hot path optimized even for `cargo run` development launches.
 [profile.dev.package.vkore-ui]
 opt-level = 2
+
+# The generated QMP vocabulary is large; keep application debug information
+# without duplicating debug records for every upstream QEMU command and event.
+[profile.dev.package.qapi-qmp]
+debug = 0

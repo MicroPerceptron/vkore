@@ -21,6 +21,7 @@ pub mod probe;
 pub mod profile;
 pub mod qmp;
 pub mod readiness;
+pub mod runtime;
 
 pub use firmware::Firmware;
 pub use machine::{Machine, MachineError, MachineEvent, StopOutcome};

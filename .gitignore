@@ -30,3 +30,6 @@ target
 
 # Local screenshots and generated review artifacts
 /artifacts/
+
+# Python packaging helpers
+__pycache__/

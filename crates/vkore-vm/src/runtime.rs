@@ -90,6 +90,7 @@ impl Runtime {
                 return Err(invalid(format!("QEMU bundle omits {required}")));
             }
         }
+        let mut total_bytes = 0u64;
         for (name, expected) in &manifest.files {
             let path = Path::new(name);
             if path
@@ -109,6 +110,10 @@ impl Runtime {
             let mut file = fs::File::open(&full)?;
             if !file.metadata()?.is_file() {
                 return Err(invalid("QEMU bundle asset is not a regular file"));
+            }
+            total_bytes = total_bytes.saturating_add(file.metadata()?.len());
+            if total_bytes > 1 << 30 {
+                return Err(invalid("QEMU bundle assets exceed 1 GiB"));
             }
             let mut hash = Sha256::new();
             let mut buffer = [0; 64 << 10];

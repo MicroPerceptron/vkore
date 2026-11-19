@@ -146,6 +146,14 @@ impl Machine {
                             "QEMU ran before launch checks completed".into(),
                         ));
                     }
+                    let cpus = qmp.execute(&qapi_qmp::query_cpus_fast {})?;
+                    if cpus.len() != usize::from(spec.cpus) {
+                        return Err(QmpError::Protocol(format!(
+                            "QEMU created {} CPUs; {} requested",
+                            cpus.len(),
+                            spec.cpus
+                        )));
+                    }
                     qmp.resume()
                 })();
                 if let Err(error) = ready {

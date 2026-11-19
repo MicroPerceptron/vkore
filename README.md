@@ -44,6 +44,10 @@ Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
 
 ## Quick start (Linux)
 
+Release packagers can build a pinned, relocatable QEMU runtime with matching
+firmware using the [separate QEMU packaging pipeline](docs/qemu-runtime.md).
+Normal Cargo builds do not build QEMU.
+
 You need a Kore x86_64 ISO, `qemu-system-x86_64` (8.2 or newer) with OVMF
 (`ovmf` on Debian and Ubuntu), and the Rust toolchain pinned in
 [rust-toolchain.toml](rust-toolchain.toml); `rustup` installs it on first build.

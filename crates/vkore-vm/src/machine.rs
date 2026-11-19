@@ -12,6 +12,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom},
+    os::unix::{fs::FileTypeExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -102,14 +103,21 @@ impl Machine {
         spec: &MachineSpec,
         qemu_log: &Path,
     ) -> Result<Self, MachineError> {
-        let arguments = spec.arguments(caps)?;
+        let mut arguments = spec.arguments(caps)?;
+        // Keep guest CPUs stopped until QMP negotiation and launch checks finish.
+        arguments.push("-S".into());
+        if let Some(runtime) = crate::runtime::Runtime::for_qemu(qemu)
+            .map_err(|error| MachineError::Io(qemu.to_path_buf(), error))?
+        {
+            arguments.extend(["-L".into(), runtime.data.display().to_string()]);
+        }
         let io = |path: &Path| {
             let path = path.to_path_buf();
             move |error| MachineError::Io(path, error)
         };
         // A fresh console: readiness reads from its first byte.
+        prepare_socket(&spec.qmp_socket).map_err(io(&spec.qmp_socket))?;
         File::create(&spec.serial_log).map_err(io(&spec.serial_log))?;
-        let _ = fs::remove_file(&spec.qmp_socket);
         let log = File::create(qemu_log).map_err(io(qemu_log))?;
         let errors = log.try_clone().map_err(io(qemu_log))?;
         let child = Command::new(qemu)
@@ -128,13 +136,28 @@ impl Machine {
             exited: None,
             started: Instant::now(),
         };
-        match Qmp::connect(&spec.qmp_socket, Duration::from_secs(10)) {
-            Ok(qmp) => machine.qmp = Some(qmp),
+        match Qmp::connect_while(&spec.qmp_socket, Duration::from_secs(10), || {
+            machine.child.try_wait().map(|status| status.is_none())
+        }) {
+            Ok(mut qmp) => {
+                let ready = (|| {
+                    if qmp.status()?.running {
+                        return Err(QmpError::Protocol(
+                            "QEMU ran before launch checks completed".into(),
+                        ));
+                    }
+                    qmp.resume()
+                })();
+                if let Err(error) = ready {
+                    machine.kill_and_reap();
+                    return Err(error.into());
+                }
+                machine.qmp = Some(qmp);
+            }
             Err(error) => {
                 // QEMU refused its own command line: report what it said.
-                let _ = machine.child.kill();
-                let _ = machine.child.wait();
-                let said = fs::read_to_string(qemu_log).unwrap_or_default();
+                machine.kill_and_reap();
+                let said = log_tail(qemu_log).unwrap_or_default();
                 return Err(MachineError::Io(
                     qemu.to_path_buf(),
                     io::Error::other(format!("QEMU did not start ({error}): {}", said.trim())),
@@ -142,6 +165,12 @@ impl Machine {
             }
         }
         Ok(machine)
+    }
+
+    fn kill_and_reap(&mut self) {
+        let _ = self.child.kill();
+        self.exited = self.child.wait().ok();
+        self.qmp = None;
     }
 
     pub fn id(&self) -> u32 {
@@ -191,10 +220,13 @@ impl Machine {
                 Duration::from_millis(1)
             };
             match qmp.next_event(wait) {
-                Ok(Some(event)) => events.push(MachineEvent::Qemu(
-                    event["event"].as_str().unwrap_or("").to_owned(),
-                    event.get("data").cloned().unwrap_or_default(),
-                )),
+                Ok(Some(event)) => {
+                    let event = event.into_value();
+                    events.push(MachineEvent::Qemu(
+                        event["event"].as_str().unwrap_or("").to_owned(),
+                        event.get("data").cloned().unwrap_or_default(),
+                    ));
+                }
                 Ok(None) => {}
                 // QEMU closed the protocol: it is exiting.
                 Err(_) => self.qmp = None,
@@ -267,11 +299,7 @@ impl Machine {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = self.child.kill();
-        if let Ok(status) = self.child.wait() {
-            self.exited = Some(status);
-        }
-        self.qmp = None;
+        self.kill_and_reap();
     }
 
     /// The guest's screen, as a PPM image at `path`.
@@ -305,7 +333,8 @@ impl Machine {
         file.seek(SeekFrom::Start(0))
             .map_err(|error| MachineError::Io(self.serial.clone(), error))?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(4 << 20)
+            .read_to_end(&mut bytes)
             .map_err(|error| MachineError::Io(self.serial.clone(), error))?;
         Ok(bytes)
     }
@@ -327,4 +356,67 @@ pub fn private_vars(template: &Path, destination: &Path) -> io::Result<()> {
         .open(destination)?;
     io::copy(&mut source, &mut target)?;
     target.sync_all()
+}
+
+/// Keep failure diagnostics bounded even if an emulator floods its log.
+fn log_tail(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(64 << 10)))?;
+    let mut bytes = Vec::new();
+    file.take(64 << 10).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Never unlink a live monitor or an unexpected file at the monitor path.
+fn prepare_socket(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "QMP path is not a stale socket",
+        ));
+    }
+    match UnixStream::connect(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a machine already owns this QMP socket",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => fs::remove_file(path),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn launch_does_not_unlink_live_sockets_or_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        fs::write(&path, b"keep").unwrap();
+        assert!(prepare_socket(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        fs::remove_file(&path).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        assert!(prepare_socket(&path).is_err());
+        drop(listener);
+        prepare_socket(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failure_log_reads_only_the_bounded_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qemu.log");
+        let bytes = vec![b'x'; 128 << 10];
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(log_tail(&path).unwrap().len(), 64 << 10);
+    }
 }

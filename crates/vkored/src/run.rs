@@ -135,10 +135,18 @@ pub enum Event {
     },
 }
 
-/// The QEMU vKore runs: `$VKORE_QEMU`, else `qemu-system-x86_64` on `PATH`.
+/// Explicit QEMU override, packaged runtime, then the host PATH.
 pub fn default_qemu() -> Option<PathBuf> {
     if let Some(qemu) = std::env::var_os("VKORE_QEMU") {
         return Some(qemu.into());
+    }
+    if let Some(qemu) = std::env::current_exe().ok().and_then(|exe| {
+        vkore_vm::runtime::bundled_qemu(
+            &exe,
+            std::env::var_os("VKORE_QEMU_BUNDLE").map(PathBuf::from),
+        )
+    }) {
+        return Some(qemu);
     }
     let name = "qemu-system-x86_64";
     std::env::var_os("PATH").and_then(|path| {
@@ -150,6 +158,8 @@ pub fn default_qemu() -> Option<PathBuf> {
 
 /// Establish what `config` will boot on `qemu`, without starting it.
 pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunError> {
+    let runtime = vkore_vm::runtime::Runtime::for_qemu(qemu)
+        .map_err(|error| RunError::Host(format!("QEMU runtime: {error}")))?;
     let host = HostCaps::probe();
     let vendor = config.vendor.unwrap_or_else(|| host.native_vendor());
     let accel = host
@@ -164,14 +174,17 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
             vars_template: chosen.vars_template.clone(),
             format: chosen.format.clone(),
         },
-        None => firmware::discover().ok_or_else(|| {
-            RunError::Host(
-                "no UEFI firmware for x86_64 q35 without Secure Boot among QEMU's firmware \
+        None => runtime
+            .map(|r| r.firmware)
+            .or_else(firmware::discover)
+            .ok_or_else(|| {
+                RunError::Host(
+                    "no UEFI firmware for x86_64 q35 without Secure Boot among QEMU's firmware \
                  descriptors (install OVMF/edk2, or name one with --firmware-code and \
                  --firmware-vars)"
-                    .into(),
-            )
-        })?,
+                        .into(),
+                )
+            })?,
     };
     let medium =
         BootMedium::inspect(&config.iso).map_err(|error| RunError::Media(error.to_string()))?;

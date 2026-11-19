@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 
 spec = importlib.util.spec_from_file_location("runtime", Path(__file__).with_name("build-qemu-runtime.py"))
@@ -21,6 +22,16 @@ class RuntimeTests(unittest.TestCase):
                 (root / "bundle.json").write_text(json.dumps({"files": files}))
                 with self.assertRaises(RuntimeError):
                     runtime.verify(root)
+
+    def test_source_extraction_excludes_only_unused_edk2_host_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            member = tarfile.TarInfo("qemu/roms/edk2/EmulatorPkg/Unix/Host/X11IncludeHack")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "/usr/include/X11"
+            self.assertIsNone(runtime.source_filter(member, directory))
+            member.name = "qemu/unexpected"
+            with self.assertRaises(tarfile.AbsoluteLinkError):
+                runtime.source_filter(member, directory)
 
     def test_symlinks_are_not_assets(self):
         with tempfile.TemporaryDirectory() as directory:

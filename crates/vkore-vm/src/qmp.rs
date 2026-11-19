@@ -148,7 +148,6 @@ impl Qmp {
         qmp.writer.set_write_timeout(Some(qmp.reply_wait))?;
         qmp.execute(&api::qmp_capabilities { enable: None })?;
         qmp.reply_wait = REPLY_WAIT;
-        qmp.writer.set_write_timeout(Some(REPLY_WAIT))?;
         Ok(qmp)
     }
 

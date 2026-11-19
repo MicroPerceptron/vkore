@@ -138,9 +138,8 @@ impl Qmp {
         let greeting = qmp
             .read_message(deadline.saturating_duration_since(Instant::now()))?
             .ok_or_else(|| timed_out("its greeting", patience))?;
-        if greeting.get("QMP").is_none() {
-            return Err(QmpError::Protocol(greeting.to_string()));
-        }
+        serde_json::from_value::<api::QapiCapabilities>(greeting)
+            .map_err(|error| QmpError::Protocol(format!("greeting: {error}")))?;
         qmp.reply_wait = deadline.saturating_duration_since(Instant::now());
         if qmp.reply_wait.is_zero() {
             return Err(timed_out("negotiation", patience));
@@ -183,6 +182,9 @@ impl Qmp {
         let deadline = Instant::now() + self.reply_wait;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(timed_out(C::NAME, self.reply_wait));
+            }
             let message = self
                 .read_message(left)?
                 .ok_or_else(|| timed_out(C::NAME, self.reply_wait))?;
@@ -205,6 +207,9 @@ impl Qmp {
             match self.read_message(left)? {
                 Some(message) => {
                     self.file(message, None)?;
+                    if self.events.is_empty() && Instant::now() >= deadline {
+                        return Ok(None);
+                    }
                 }
                 None => return Ok(None),
             }
@@ -387,7 +392,7 @@ mod tests {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             writeln!(
                 stream,
-                r#"{{"QMP": {{"version": {{}}, "capabilities": []}}}}"#
+                r#"{{"QMP": {{"version": {{"qemu": {{"major": 11, "minor": 0, "micro": 1}}, "package": ""}}, "capabilities": []}}}}"#
             )
             .unwrap();
             let (id, name) = command(&mut reader);

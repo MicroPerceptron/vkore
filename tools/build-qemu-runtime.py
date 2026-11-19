@@ -91,7 +91,43 @@ def bundle_libraries(root, system):
                 "@loader_path/../lib" if destination == root / BINARY else "@loader_path", destination)
     if system == "Darwin":
         for _, path in reversed(pending):
-            run("codesign", "--force", "--sign", "-", path)
+            signing = ["codesign", "--force", "--sign", "-"]
+            if path == root / BINARY:
+                signing += ["--entitlements", root / "share/qemu/vkore-hvf.entitlements"]
+            run(*signing, path)
+
+
+def package(stage, source, output, lock, system):
+    # Firmware, VGA BIOS and other data are installed by QEMU's own Meson rules.
+    # Preserve the upstream license texts alongside the exact source provenance.
+    licenses = stage / "licenses"
+    licenses.mkdir()
+    for name in ("COPYING", "COPYING.LIB"):
+        shutil.copy2(source / name, licenses / name)
+    shutil.copytree(source / "pc-bios" / "descriptors", licenses / "firmware-descriptors")
+    for path in (source / "pc-bios").glob("*LICENSE*"):
+        shutil.copy2(path, licenses / path.name)
+    shutil.copy2(REPO / "packaging/qemu.lock.json", stage / "source.json")
+    if system == "Darwin":
+        shutil.copy2(source / "accel/hvf/entitlements.plist", stage / "share/qemu/vkore-hvf.entitlements")
+    bundle_libraries(stage, system)
+    # Store plain files only, including any installed symlink aliases.
+    for path in sorted(stage.rglob("*")):
+        if path.is_symlink():
+            data = path.read_bytes()
+            path.unlink()
+            path.write_bytes(data)
+    manifest = {"schema": 1, "version": lock["version"], "source_sha256": lock["sha256"],
+                "host_os": "macos" if system == "Darwin" else "linux",
+                "host_arch": {"arm64": "aarch64", "AMD64": "x86_64"}.get(platform.machine(), platform.machine()),
+                "files": {str(p.relative_to(stage)): digest(p) for p in sorted(stage.rglob("*")) if p.is_file()}}
+    (stage / "bundle.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    verify(stage)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    stage.rename(output)
+    verify(output)  # Exercise relocation, not only the build-tree installation.
+    smoke(output)
+    print(f"Verified QEMU runtime: {output}")
 
 
 def verify(root):
@@ -103,6 +139,11 @@ def verify(root):
         full = root / path
         if full.is_symlink() or not full.is_file() or digest(full) != expected:
             raise RuntimeError(f"runtime integrity check failed: {name}")
+    required = {str(BINARY)} | {f"share/qemu/{name}" for name in FIRMWARE}
+    if not required.issubset(manifest["files"]):
+        raise RuntimeError("runtime manifest omits executable or firmware")
+    if manifest.get("schema") != 1 or not manifest.get("version"):
+        raise RuntimeError("unsupported runtime manifest")
     output = run(root / BINARY, "--version", capture_output=True, text=True).stdout
     if f'version {manifest["version"]}' not in output:
         raise RuntimeError("runtime version differs from lock")
@@ -192,8 +233,16 @@ def main():
     if archive is None:
         archive = work / "qemu.tar.xz"
         with urllib.request.urlopen(lock["url"], timeout=60) as response, archive.open("xb") as target:
-            shutil.copyfileobj(response, target)
-    if digest(archive) != lock["sha256"]:
+            remaining = lock["bytes"]
+            while remaining:
+                chunk = response.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise RuntimeError("QEMU source download was truncated")
+                target.write(chunk)
+                remaining -= len(chunk)
+            if response.read(1):
+                raise RuntimeError("QEMU source download exceeds pinned size")
+    if archive.stat().st_size != lock["bytes"] or digest(archive) != lock["sha256"]:
         raise RuntimeError("QEMU source checksum differs from packaging/qemu.lock.json")
     with tarfile.open(archive) as source:
         source.extractall(work / "source", filter=source_filter)
@@ -206,37 +255,15 @@ def main():
              "--enable-install-blobs", "--enable-tcg", "--enable-slirp",
              "--enable-vnc", "--enable-pixman", "--disable-rust"]
     flags += ["--enable-kvm", "--enable-gtk"] if system == "Linux" else ["--enable-hvf", "--enable-cocoa"]
-    run(source / "configure", *flags, cwd=build)
+    build_env = os.environ.copy()
+    if system == "Darwin":
+        # A host may have GNU binutils ahead of Apple's Mach-O tools on PATH.
+        for variable, tool in (("AR", "ar"), ("RANLIB", "ranlib")):
+            build_env[variable] = run("xcrun", "--find", tool, capture_output=True, text=True).stdout.strip()
+    run(source / "configure", *flags, cwd=build, env=build_env)
     run("ninja", "-C", build, f"-j{args.jobs}")
     run("ninja", "-C", build, "install")
-    # Firmware, VGA BIOS and other data are installed by QEMU's own Meson rules.
-    # Preserve the upstream license texts alongside the exact source provenance.
-    licenses = stage / "licenses"
-    licenses.mkdir()
-    for name in ("COPYING", "COPYING.LIB"):
-        shutil.copy2(source / name, licenses / name)
-    shutil.copytree(source / "pc-bios" / "descriptors", licenses / "firmware-descriptors")
-    for path in (source / "pc-bios").glob("*LICENSE*"):
-        shutil.copy2(path, licenses / path.name)
-    shutil.copy2(REPO / "packaging/qemu.lock.json", stage / "source.json")
-    bundle_libraries(stage, system)
-    # Store plain files only, including any installed symlink aliases.
-    for path in sorted(stage.rglob("*")):
-        if path.is_symlink():
-            data = path.read_bytes()
-            path.unlink()
-            path.write_bytes(data)
-    manifest = {"schema": 1, "version": lock["version"], "source_sha256": lock["sha256"],
-                "host_os": "macos" if system == "Darwin" else "linux",
-                "host_arch": {"arm64": "aarch64", "AMD64": "x86_64"}.get(platform.machine(), platform.machine()),
-                "files": {str(p.relative_to(stage)): digest(p) for p in sorted(stage.rglob("*")) if p.is_file()}}
-    (stage / "bundle.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    verify(stage)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    stage.rename(output)
-    verify(output)  # Exercise relocation, not only the build-tree installation.
-    smoke(output)
-    print(f"Verified QEMU runtime: {output}")
+    package(stage, source, output, lock, system)
 
 
 if __name__ == "__main__":

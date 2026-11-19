@@ -52,7 +52,7 @@ libexec/vkore/qemu-runtime/
 ```
 
 A macOS app can instead put it at `Contents/Resources/qemu-runtime` beside
-`Contents/MacOS/vkore-ui`. Native binaries are ad-hoc signed after relocation;
+`Contents/MacOS/vkore-ui`. Native binaries are ad-hoc signed after relocation, retaining the upstream HVF entitlement;
 distribution signing/notarization must be applied before generating the final
 manifest, since signing changes checksummed bytes. CI artifacts are development
 bundles, not signed application releases.
@@ -91,7 +91,7 @@ portable polling with an overall read deadline, avoiding repeated socket-timeout
 updates after peer shutdown on macOS. Partial lines survive timeouts.
 
 The supervisor starts guest CPUs paused, negotiates QMP, checks the stopped
-state and explicitly resumes. Failed setup kills and reaps the child; failure
+state and requested vCPU count, then explicitly resumes. Failed setup kills and reaps the child; failure
 logs are bounded to a 64 KiB tail. Runtime firmware templates remain read-only,
 and each machine retains its private variable store. This establishes the
 pre-resume boundary for future core placement and privileged resource setup;

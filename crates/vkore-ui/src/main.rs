@@ -1067,6 +1067,110 @@ mod tests {
     }
 
     #[test]
+    fn npu_inventory_renders_devices_routes_and_failure_states() {
+        use vkore_vm::devices::{DiscoveryStatus, Inventory, Npu, Pci, Platform, Source, Vendor};
+        let device = Npu {
+            id: "pci:0001:00:0b.0".into(),
+            name: "Intel NPU · Panther Lake".into(),
+            vendor: Vendor::Intel,
+            source: Source::LinuxPci,
+            driver: Some("ivpu".into()),
+            core_count: None,
+            pci: Some(Pci {
+                address: "0001:00:0b.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0xb03e,
+                revision: Some(1),
+                iommu_group: Some(12),
+                group_members: vec!["0001:00:0b.0".into()],
+                physical_function: None,
+                total_vfs: Some(0),
+                enabled_vfs: None,
+            }),
+        };
+        for scenario in ["linux", "macos", "windows", "empty", "failed", "partial"] {
+            let mut inventory = Inventory::empty(Platform::Linux);
+            match scenario {
+                "linux" => inventory.devices.push(device.clone()),
+                "macos" => {
+                    inventory.platform = Platform::MacOs;
+                    inventory.devices.push(Npu {
+                        id: "coreml:neural-engine:0".into(),
+                        name: "Apple Neural Engine".into(),
+                        vendor: Vendor::Apple,
+                        source: Source::CoreMl,
+                        driver: None,
+                        core_count: Some(16),
+                        pci: None,
+                    });
+                }
+                "windows" => {
+                    inventory.platform = Platform::Windows;
+                    inventory.devices.push(Npu {
+                        id: "dxcore:12345678".into(),
+                        name: "Qualcomm Hexagon NPU".into(),
+                        vendor: Vendor::Qualcomm,
+                        source: Source::WindowsDxCore,
+                        driver: None,
+                        core_count: None,
+                        pci: None,
+                    });
+                }
+                "failed" => {
+                    inventory = Inventory::unavailable(
+                        Platform::Windows,
+                        "Windows NPU discovery is unavailable",
+                    )
+                }
+                "partial" => {
+                    inventory.status = DiscoveryStatus::Partial;
+                    inventory.warnings.push(GUEST_TEXT.into());
+                    let mut external = device.clone();
+                    external.name = GUEST_TEXT.into();
+                    inventory.devices.push(external);
+                }
+                _ => {}
+            }
+            for (width, height) in [(900., 560.), (1280., 900.)] {
+                for appearance in [Theme::Light, Theme::Dark] {
+                    let ty = if width < 1000. {
+                        Typography {
+                            text_size: typography::TextSize::ExtraLarge,
+                            preset: typography::FontPreset::Mono,
+                        }
+                    } else {
+                        Typography::default()
+                    };
+                    let content = widgets::page_frame(
+                        iced_widget::column![
+                            ty.page_header(
+                                "Machine hardware",
+                                "Neural processors and guest access"
+                            ),
+                            widgets::scroll(hardware::npu_inventory(&inventory, ty))
+                                .height(Length::Fill),
+                        ]
+                        .spacing(18),
+                    );
+                    let shell = container(row![sidebar(Page::Machines, 0, "", ty), content])
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                    let snapshot = format!("npus-{scenario}");
+                    let (_, refused) = draw_at_scale(
+                        shell.into(),
+                        Size::new(width, height),
+                        &appearance,
+                        1.,
+                        Some(&snapshot),
+                    );
+                    assert!(refused.is_empty(), "{scenario}: {refused:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn macos_memory_controls_show_native_pages_and_recovery() {
         let root = tempfile::tempdir().unwrap();
         let mut state = machines::State::new(root.path().to_owned());

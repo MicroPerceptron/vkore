@@ -1,0 +1,33 @@
+[package]
+name = "vkore-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Read-only host NPU discovery, independently portable across Linux, Windows and macOS."
+
+[dependencies]
+serde.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# MIT; owns libudev handles and provides kernel device identity without shell parsing.
+udev = { version = "=0.9.3", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Existing objc2 ecosystem; select only the Core ML device enumeration surface.
+objc2 = "0.6.4"
+objc2-core-ml = { version = "=0.3.2", default-features = false, features = ["std", "MLModel", "MLModel_MLComputeDevice", "MLComputeDeviceProtocol", "MLNeuralEngineComputeDevice"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSArray"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# MIT/Apache; DXCore is loaded on demand so older systems report unavailable discovery.
+windows = { version = "=0.62.2", features = ["Win32_Graphics_DXCore", "Win32_Foundation"] }
+libloading = "0.8.9"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ name = "vkore_vm"
 path = "src/lib.rs"
 
 [dependencies]
+vkore-devices = { path = "../vkore-devices" }
 serde.workspace = true
 serde_json.workspace = true
 # Generated QAPI vocabulary only; keep our bounded, id-correlated transport.

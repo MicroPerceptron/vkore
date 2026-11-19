@@ -79,6 +79,8 @@ pub struct HugePool {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct HostResources {
+    /// Discovery failure is reported inside the inventory, never as missing RAM/CPU.
+    pub npus: vkore_devices::Inventory,
     pub cpu_name: String,
     pub physical_cores: usize,
     pub logical_cpus: usize,
@@ -143,6 +145,7 @@ impl HostResources {
             return Err("host CPU or memory topology is unavailable".into());
         }
         Ok(Self {
+            npus: vkore_devices::discover(),
             cpu_name: system
                 .cpus()
                 .first()

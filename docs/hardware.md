@@ -161,3 +161,78 @@ available-memory accounting (active + inactive + free, with speculative pages
 already in free). It does not mean those pages are unused or guarantee an
 allocation without memory pressure. See
 [Apple's accounting](https://github.com/apple-oss-distributions/xnu/blob/main/doc/vm/memorystatus_notify.md#available-memory).
+
+## Neural processor discovery
+
+Hardware setup includes a read-only **Neural processors** section. It reports
+host devices and three separate routes: dedicated assignment, SR-IOV virtual
+functions, and shared execution through virtio-accel. No route is selectable in
+this release: device assignment and the host/guest virtio-accel connection are
+not implemented. Discovery never detaches a driver, provisions a VF, opens a
+model, requests administrator access or changes a machine's saved settings.
+
+`vkore-devices` is an independently portable inventory crate; `vkore-vm` includes
+its snapshot in `HostResources.npus`, and `vkored::hardware::npu_routes` owns the
+route assessment shown by the UI. The existing **Refresh host** action replaces
+the inventory. `vkore hardware` reports it as JSON; `cargo run -p vkore-devices
+--example inventory` reports only devices and also runs on Windows. This does
+not make the current Unix-dependent desktop or VM launcher Windows-compatible.
+
+- **Linux:** libudev supplies canonical PCI device paths. Known Intel ivpu and
+  AMD XDNA vendor/device IDs identify unbound and VFIO-bound NPUs too; known
+  native drivers recognize newer IDs. PCI class alone never identifies an NPU.
+  Probes read revision, driver, IOMMU group members, physical-function links,
+  `sriov_totalvfs` and `sriov_numvfs`. This first Linux inventory does not cover
+  non-PCI/platform NPUs or unknown vendors. ID references are the upstream
+  [Intel driver](https://github.com/torvalds/linux/blob/master/drivers/accel/ivpu/ivpu_drv.h)
+  and [AMD driver](https://github.com/torvalds/linux/blob/master/drivers/accel/amdxdna/amdxdna_pci_drv.c),
+  not a copy of Kore's driver tables. Detection says nothing about guest support.
+- **Windows:** Microsoft's DXCore NPU hardware-type attribute enumerates
+  driver-exposed NPUs, including devices without a Direct3D user-mode driver.
+  Generic ML capability alone is insufficient (GPUs can expose it). The system
+  DXCore DLL is loaded on demand; older Windows returns an unavailable report.
+  A missing driver can hide an NPU. No PCI topology or SR-IOV capability is
+  inferred from a device name or vendor ID. LUIDs identify this snapshot only.
+- **macOS:** Core ML's `MLModel.availableComputeDevices` reports Neural Engine
+  devices available to Core ML. Availability is checked before sending the
+  macOS 14+ selector; core count is queried only when that property exists.
+  This matches the Core ML backend's discovery boundary, rather than assuming
+  that every Apple processor has an accessible ANE. Core ML may schedule some
+  operations on the CPU. The ordinal is not a persistent hardware identifier.
+
+Successful empty discovery, partial discovery and unavailable discovery are
+separate states. Ancillary Linux metadata failures retain identified devices
+and report warnings. Snapshots retain at most 64 NPUs and 16 warnings; strings
+are capped at 256 characters, individual sysfs reads at 4096 bytes, and PCI
+scanning at 4096 devices. Host strings use the desktop's escaped data font.
+
+An IOMMU group is evidence of a candidate route, not proof of isolation/reset
+safety or QEMU/image compatibility. SR-IOV is reported only from actual sysfs
+capabilities or an existing VF relationship. Runtime installations and model
+capabilities are not probed: OpenVINO, XDNA and Hexagon are candidate backends,
+not claims of working virtio-accel access. VFIO-bound or driverless Linux NPUs
+explicitly need host setup before a native runtime can use them.
+
+### Dependency decision
+
+- `udev` 0.9.3 (MIT) supplies owned libudev enumeration handles on Linux. Its
+  native dependency is libudev; it adds no background monitor here.
+- `windows` 0.62.2 (MIT/Apache-2.0) supplies DXCore types and COM ownership.
+  `libloading` 0.8.9 keeps DXCore optional at process startup. The newer NPU
+  attribute GUID is taken from Microsoft's published DirectX-Headers because
+  this binding's SDK metadata does not yet contain it.
+- `objc2-core-ml` 0.3.2 (Zlib/Apache-2.0/MIT) supplies the Core ML device APIs.
+  Only device-related features are enabled; no Metal backend, model compilation
+  or vendor runtime is bundled. Retained objects and the autorelease pool stay
+  inside each probe. Platform FFI calls have local safety explanations.
+- `pci-info` 0.4.0 was inspected but not adopted: its documented location/domain
+  limitations make it unsuitable as an assignment identity source, its Linux
+  backend adds no value over authoritative udev paths, and it misses integrated
+  ANE devices. Maintaining a second inventory would also require ambiguous
+  PCI-to-DXCore correlation. `hwlocality`/libvirt add broader native management
+  dependencies without replacing the NPU-specific enumeration needed here.
+
+CI builds/tests this crate independently on Linux, Windows and macOS and runs
+its read-only inventory example. A CI runner with no NPU validates empty-device
+handling, not physical NPU access. Native-device, guest-inference and performance
+validation remain separate evidence.

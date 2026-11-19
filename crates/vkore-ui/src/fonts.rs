@@ -1,8 +1,9 @@
 //! MONOLITH face registration.
 //!
-//! The design uses four faces: Archivo 600 for display, Space Grotesk 400 for
+//! The default design uses four faces: Archivo 600 for display, Space Grotesk 400 for
 //! body, and JetBrains Mono at 400 and 500 for machine-shaped strings and
-//! uppercase labels. They are registered once at startup so shaping can select
+//! uppercase labels. Bundled DM Sans is an additional interface preset.
+//! They are registered once at startup so shaping can select
 //! them and the backend can install their coverage resources, and they are the
 //! only faces shaping may select: see [`register`].
 
@@ -33,6 +34,7 @@ pub struct Faces {
 /// is built: a renderer, or a paragraph, made earlier may already hold a host
 /// face that confinement removes.
 pub fn register() -> Result<Faces, axui_iced::TextError> {
+    axui_iced::register_font(axui_fonts::DM_SANS)?;
     let faces = Faces {
         display: axui_iced::register_font(theme::DISPLAY_BYTES)?,
         body: axui_iced::register_font(theme::BODY_BYTES)?,
@@ -225,6 +227,8 @@ pub const DISPLAY: Font = face(
 );
 /// Space Grotesk 400. Prose, prompts, answers, field values.
 pub const BODY: Font = face(theme::BODY_FAMILY, font::Weight::Normal, 0.0);
+/// Bundled DM Sans, also used by Axiom itself.
+pub const SANS: Font = face("DM Sans", font::Weight::Normal, 0.0);
 /// JetBrains Mono 400. Logs, JSON, paths, agent and tool names.
 pub const MONO: Font = face(theme::MONO_FAMILY, font::Weight::Normal, 0.0);
 /// JetBrains Mono 500. Uppercase labels and metadata.

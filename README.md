@@ -114,7 +114,9 @@ Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
   machine stops, so what you captured is what you see next.
 - **Settings** holds desktop preferences. **Appearance** offers System, Light
   and Dark, applies changes immediately and remembers the choice. System follows
-  the host color scheme.
+  the host color scheme. Text controls offer Small, Default, Large and Extra large
+  sizes, plus bundled Space Grotesk, DM Sans and JetBrains Mono interface fonts.
+  Text preferences apply immediately, persist, and include a reset action.
   **Local API** starts and stops the loopback server and saves its port.
 
 The desktop draws with [Iced](https://iced.rs) over Axiom, Micro Perceptron's

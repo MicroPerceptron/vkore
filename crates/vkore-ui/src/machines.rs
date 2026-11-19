@@ -4,6 +4,7 @@
 //! follows the boot, relays every event to the view, and stops the machine
 //! when asked (the power button, then QEMU's end) or when the window closes.
 
+use crate::typography::Typography;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -664,12 +665,12 @@ fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
 }
 
 /// The machines page.
-pub fn view(state: &State) -> UiElement<'_> {
-    let mut list = column![widgets::label("Your machines", theme::TEXT_MUTED)].spacing(10);
+pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
+    let mut list = column![ty.label("Your machines", theme::TEXT_MUTED)].spacing(10);
     if state.configs.is_empty() {
         list = list
-            .push(widgets::body("No machines yet", 15., theme::TEXT))
-            .push(widgets::body(
+            .push(ty.body("No machines yet", 15., theme::TEXT))
+            .push(ty.body(
                 "Add an official image below to get started.",
                 13.,
                 theme::TEXT_MUTED,
@@ -684,9 +685,10 @@ pub fn view(state: &State) -> UiElement<'_> {
         list = list.push(
             button(
                 row![
-                    widgets::data(config.name.as_str(), theme::TEXT).size(theme::SIZE_SM),
+                    ty.data(config.name.as_str(), theme::TEXT)
+                        .size(ty.size(theme::SIZE_SM)),
                     space::horizontal(),
-                    widgets::badge(label, color),
+                    ty.badge(label, color),
                 ]
                 .align_y(alignment::Vertical::Center),
             )
@@ -715,8 +717,8 @@ pub fn view(state: &State) -> UiElement<'_> {
     let mut images = column![
         button(
             row![
-                widgets::data(label, theme::TEXT).width(Length::Fill),
-                widgets::mono(
+                ty.data(label, theme::TEXT).width(Length::Fill),
+                ty.mono(
                     if state.image_menu_open { "^" } else { "v" },
                     theme::TEXT_MUTED
                 ),
@@ -737,16 +739,13 @@ pub fn view(state: &State) -> UiElement<'_> {
         let mut options = column![].spacing(theme::SPACE_1);
         for image in &state.official_images {
             options = options.push(
-                button(widgets::data(
-                    format!("{} ({})", image.name, image.version),
-                    theme::TEXT,
-                ))
-                .width(Length::Fill)
-                .padding([7, 10])
-                .style(widgets::button_style(widgets::Button::Row(
-                    Some(&image.id) == state.selected_image.as_ref(),
-                )))
-                .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
+                button(ty.data(format!("{} ({})", image.name, image.version), theme::TEXT))
+                    .width(Length::Fill)
+                    .padding([7, 10])
+                    .style(widgets::button_style(widgets::Button::Row(
+                        Some(&image.id) == state.selected_image.as_ref(),
+                    )))
+                    .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
             );
         }
         images = images.push(
@@ -770,18 +769,18 @@ pub fn view(state: &State) -> UiElement<'_> {
         None
     };
     let form = column![
-        widgets::body("Create a machine", 18., theme::TEXT),
-        widgets::body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
-        widgets::label("Machine name", theme::TEXT_MUTED),
+        ty.body("Create a machine", 18., theme::TEXT),
+        ty.body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
+        ty.label("Machine name", theme::TEXT_MUTED),
         text_input("e.g. inference", &state.form_name)
             .on_input(|value| wrap(MachineMessage::FormName(value)))
             .font(fonts::MONO)
             .padding([7, 10])
-            .size(theme::SIZE_SM)
+            .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        widgets::label("Official image", theme::TEXT_MUTED),
+        ty.label("Official image", theme::TEXT_MUTED),
         images,
-        widgets::data(
+        ty.data(
             state
                 .catalog_error
                 .as_deref()
@@ -792,8 +791,8 @@ pub fn view(state: &State) -> UiElement<'_> {
                 }),
             theme::TEXT_MUTED
         ),
-        widgets::label("Hardware", theme::TEXT_MUTED),
-        widgets::data(
+        ty.label("Hardware", theme::TEXT_MUTED),
+        ty.data(
             format!(
                 "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk",
                 state.form_hardware.cpus,
@@ -802,7 +801,7 @@ pub fn view(state: &State) -> UiElement<'_> {
             ),
             theme::TEXT_SECONDARY
         ),
-        widgets::data(
+        ty.data(
             format!(
                 "Image minimum: {} CPUs · {} MiB RAM · {} MiB disk",
                 state.form_hardware.minimum.cpus,
@@ -811,26 +810,26 @@ pub fn view(state: &State) -> UiElement<'_> {
             ),
             theme::TEXT_MUTED
         ),
-        button(widgets::control("Configure hardware"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Configure hardware"))
+            .height(ty.control_height())
             .padding([8, 14])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(
                 (state.importing.is_none()).then_some(wrap(MachineMessage::ConfigureNew(true)))
             ),
-        widgets::label("Project folder · optional", theme::TEXT_MUTED),
+        ty.label("Project folder · optional", theme::TEXT_MUTED),
         text_input("/path/to/project", &state.form_workspace)
             .on_input(|value| wrap(MachineMessage::FormWorkspace(value)))
             .font(fonts::MONO)
             .padding([7, 10])
-            .size(theme::SIZE_SM)
+            .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        button(widgets::control(if state.importing.is_some() {
+        button(ty.control(if state.importing.is_some() {
             "Cancel import"
         } else {
             "Create machine"
         }))
-        .height(theme::CONTROL_SM)
+        .height(ty.control_height())
         .padding([8, 14])
         .style(widgets::button_style(widgets::Button::Primary))
         .on_press_maybe(create_action),
@@ -859,15 +858,15 @@ pub fn view(state: &State) -> UiElement<'_> {
         .and_then(|name| state.configs.iter().find(|config| &config.name == name))
     {
         _ if state.configure_new => widgets::scroll(column![
-            widgets::body("New machine hardware",23.,theme::TEXT),
-            widgets::body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
-            crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some()),
-            button(widgets::control("Done"))
-                .height(theme::CONTROL_SM).padding([8,14])
+            ty.body("New machine hardware",23.,theme::TEXT),
+            ty.body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
+            crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some(),ty),
+            button(ty.control("Done"))
+                .height(ty.control_height()).padding([8,14])
                 .style(widgets::button_style(widgets::Button::Primary))
                 .on_press(wrap(MachineMessage::ConfigureNew(false))),
         ].spacing(18)).height(Length::Fill).into(),
-        None => widgets::empty_state(
+        None => ty.empty_state(
             crate::visuals::Icon::Machine,
             if state.configs.is_empty() {
                 "A home for your Kore machines"
@@ -889,19 +888,19 @@ pub fn view(state: &State) -> UiElement<'_> {
             let (_, draft) = state.edit_hardware.as_ref().unwrap();
             widgets::scroll(
                 column![
-                    widgets::data(format!("Configure {}", config.name), theme::TEXT).size(23.),
-                    crate::hardware::view(draft, &state.host, true, state.hardware_busy),
+                    ty.data(format!("Configure {}", config.name), theme::TEXT).size(ty.size(23.)),
+                    crate::hardware::view(draft, &state.host, true, state.hardware_busy, ty),
                     row![
-                        button(widgets::control("Save hardware"))
-                            .height(theme::CONTROL_SM)
+                        button(ty.control("Save hardware"))
+                            .height(ty.control_height())
                             .padding([8, 14])
                             .style(widgets::button_style(widgets::Button::Primary))
                             .on_press_maybe(
                                 (!state.hardware_busy)
                                     .then_some(wrap(MachineMessage::SaveHardware))
                             ),
-                        button(widgets::control("Cancel"))
-                            .height(theme::CONTROL_SM)
+                        button(ty.control("Cancel"))
+                            .height(ty.control_height())
                             .padding([8, 14])
                             .style(widgets::button_style(widgets::Button::Secondary))
                             .on_press_maybe(
@@ -923,9 +922,9 @@ pub fn view(state: &State) -> UiElement<'_> {
             let metric = |label, value: String, unit| {
                 container(
                     column![
-                        widgets::label(label, theme::TEXT_MUTED),
-                        widgets::data(value, theme::TEXT).size(20.),
-                        widgets::body(unit, 12., theme::TEXT_MUTED)
+                        ty.label(label, theme::TEXT_MUTED),
+                        ty.data(value, theme::TEXT).size(ty.size(20.)),
+                        ty.body(unit, 12., theme::TEXT_MUTED)
                     ]
                     .spacing(8),
                 )
@@ -935,23 +934,23 @@ pub fn view(state: &State) -> UiElement<'_> {
             };
             let mut pane = column![
                 row![
-                    widgets::data(config.name.as_str(), theme::TEXT).size(23.),
+                    ty.data(config.name.as_str(), theme::TEXT).size(ty.size(23.)),
                     space::horizontal(),
-                    widgets::badge(status, tone)
+                    ty.badge(status, tone)
                 ]
                 .spacing(12)
                 .align_y(alignment::Vertical::Center),
-                widgets::body("Machine overview", 13., theme::TEXT_MUTED),
+                ty.body("Machine overview", 13., theme::TEXT_MUTED),
                 row![
                     metric("CPUs", config.cpus.to_string(), "cores"),
                     metric("Memory", config.memory_mib.to_string(), "MiB"),
                     metric("Disk", config.disk_mib.to_string(), "MiB")
                 ]
                 .spacing(10),
-                widgets::label("Boot image", theme::TEXT_MUTED),
-                widgets::data(config.iso.display().to_string(), theme::TEXT_SECONDARY),
-                widgets::label("SHA-256", theme::TEXT_MUTED),
-                widgets::data(
+                ty.label("Boot image", theme::TEXT_MUTED),
+                ty.data(config.iso.display().to_string(), theme::TEXT_SECONDARY),
+                ty.label("SHA-256", theme::TEXT_MUTED),
+                ty.data(
                     config
                         .iso_sha256
                         .as_deref()
@@ -961,7 +960,7 @@ pub fn view(state: &State) -> UiElement<'_> {
             ]
             .spacing(14);
             if let Some(workspace) = &config.workspace {
-                pane = pane.push(widgets::data(
+                pane = pane.push(ty.data(
                     format!(
                         "project  {} → ~{}/{} ({:?})",
                         workspace.root.display(),
@@ -974,20 +973,20 @@ pub fn view(state: &State) -> UiElement<'_> {
             }
             let controls = match running {
                 None => row![
-                    button(widgets::control("Start in a window"))
-                        .height(theme::CONTROL_SM)
+                    button(ty.control("Start in a window"))
+                        .height(ty.control_height())
                         .padding([8, 14])
                         .style(widgets::button_style(widgets::Button::Primary))
                         .on_press(wrap(MachineMessage::Start(config.name.clone(), true))),
-                    button(widgets::control("Start headless"))
-                        .height(theme::CONTROL_SM)
+                    button(ty.control("Start headless"))
+                        .height(ty.control_height())
                         .padding([8, 14])
                         .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press(wrap(MachineMessage::Start(config.name.clone(), false))),
                 ],
                 Some(_) => row![
-                    button(widgets::control("Stop"))
-                        .height(theme::CONTROL_SM)
+                    button(ty.control("Stop"))
+                        .height(ty.control_height())
                         .padding([8, 14])
                         .style(widgets::button_style(widgets::Button::Danger))
                         .on_press(wrap(MachineMessage::Stop(config.name.clone()))),
@@ -997,14 +996,14 @@ pub fn view(state: &State) -> UiElement<'_> {
             pane = pane.push(controls.wrap());
             if running.is_none() {
                 pane = pane.push(
-                    button(widgets::control("Configure hardware"))
-                        .height(theme::CONTROL_SM)
+                    button(ty.control("Configure hardware"))
+                        .height(ty.control_height())
                         .padding([8, 14])
                         .style(widgets::button_style(widgets::Button::Secondary))
                         .on_press(wrap(MachineMessage::EditHardware(config.name.clone()))),
                 );
             }
-            pane = pane.push(widgets::data(
+            pane = pane.push(ty.data(
                 format!(
                     "CPU pinning: {} · memory pinning: {} · {}",
                     if config.resources.pin_cpus {
@@ -1023,20 +1022,20 @@ pub fn view(state: &State) -> UiElement<'_> {
             ));
             let finished = state.finished.get(&config.name);
             if let Some(finished) = finished {
-                pane = pane.push(widgets::data(finished.summary.as_str(), theme::TEXT_MUTED));
+                pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
             }
             let log = match (running, finished) {
                 (Some(running), _) => running.log.as_str(),
                 (None, Some(finished)) => finished.log.as_str(),
                 (None, None) => "",
             };
-            pane = pane.push(widgets::label("Boot activity", theme::TEXT_MUTED));
+            pane = pane.push(ty.label("Boot activity", theme::TEXT_MUTED));
             if log.is_empty() {
                 pane = pane.push(
                     container(
                         column![
-                            widgets::body("Ready when you are", 16., theme::TEXT),
-                            widgets::body(
+                            ty.body("Ready when you are", 16., theme::TEXT),
+                            ty.body(
                                 "Start this machine to follow its boot activity here.",
                                 13.,
                                 theme::TEXT_MUTED
@@ -1051,7 +1050,7 @@ pub fn view(state: &State) -> UiElement<'_> {
             } else {
                 pane = pane.push(
                     container(
-                        widgets::scroll(widgets::mono(log, theme::TEXT_SECONDARY))
+                        widgets::scroll(ty.mono(log, theme::TEXT_SECONDARY))
                             .height(220)
                             .anchor_bottom(),
                     )
@@ -1066,7 +1065,7 @@ pub fn view(state: &State) -> UiElement<'_> {
         }
     };
     let mut page = column![
-        widgets::page_header("Machines", "Your Kore guests, ready for work."),
+        ty.page_header("Machines", "Your Kore guests, ready for work."),
         row![
             left,
             container(detail)
@@ -1081,7 +1080,7 @@ pub fn view(state: &State) -> UiElement<'_> {
     ]
     .spacing(theme::SPACE_4);
     if !state.status.is_empty() {
-        page = page.push(widgets::data(state.status.as_str(), theme::TEXT_MUTED));
+        page = page.push(ty.data(state.status.as_str(), theme::TEXT_MUTED));
     }
     widgets::page_frame(page)
 }

@@ -1,5 +1,6 @@
 //! Hardware form. Admission and defaults live in vkored; this module only
 //! edits a draft and presents the current host snapshot.
+use crate::typography::Typography;
 use crate::{Message, UiElement, machines::MachineMessage, theme, widgets};
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, slider, space, toggler};
@@ -156,14 +157,20 @@ fn placement(host: &HostResources, kind: Option<&str>, count: u16) -> Vec<u32> {
         .take(usize::from(count))
         .collect()
 }
-fn action(label: &str, message: Option<Message>, selected: bool) -> UiElement<'static> {
-    button(widgets::body(label.to_owned(), 13., theme::TEXT))
+fn action(
+    ty: Typography,
+    label: &str,
+    message: Option<Message>,
+    selected: bool,
+) -> UiElement<'static> {
+    button(ty.body(label.to_owned(), 13., theme::TEXT))
         .padding([7, 10])
         .style(widgets::button_style(widgets::Button::Choice(selected)))
         .on_press_maybe(message)
         .into()
 }
 fn switch(
+    ty: Typography,
     label: &'static str,
     enabled: bool,
     available: bool,
@@ -171,8 +178,8 @@ fn switch(
 ) -> UiElement<'static> {
     toggler(enabled)
         .label(label)
-        .font(crate::fonts::BODY)
-        .text_size(13)
+        .font(ty.font())
+        .text_size(ty.size(13.))
         .size(20)
         .spacing(10)
         .style(widgets::resource_toggle)
@@ -188,11 +195,11 @@ fn section<'a>(content: impl Into<UiElement<'a>>) -> UiElement<'a> {
         })
         .into()
 }
-fn heading(title: &'static str, value: String) -> UiElement<'static> {
+fn heading(ty: Typography, title: &'static str, value: String) -> UiElement<'static> {
     row![
-        widgets::body(title, 18., theme::TEXT),
+        ty.body(title, 18., theme::TEXT),
         space::horizontal(),
-        widgets::badge(value, theme::TEXT),
+        ty.badge(value, theme::TEXT),
     ]
     .align_y(alignment::Vertical::Center)
     .spacing(12)
@@ -203,10 +210,11 @@ pub fn view<'a>(
     host: &'a Result<HostResources, String>,
     editing: bool,
     busy: bool,
+    ty: Typography,
 ) -> UiElement<'a> {
     let send = move |c| Message::Machine(MachineMessage::Hardware(editing, c));
     let Ok(host) = host else {
-        return widgets::data(host.as_ref().unwrap_err(), theme::ERROR).into();
+        return ty.data(host.as_ref().unwrap_err(), theme::ERROR).into();
     };
     let max_cpu = (host.logical_cpus.min(128) as u16).max(draft.minimum.cpus);
     let max_ram = (host.memory_mib.min(1 << 20) as u32).max(draft.minimum.memory_mib);
@@ -215,9 +223,9 @@ pub fn view<'a>(
         .storage_available_mib
         .clamp(draft.minimum.disk_mib, 1 << 22) as u32;
     let mut cpu = column![
-        heading("Processors", format!("{} guest CPUs", draft.cpus)),
-        widgets::data(&host.cpu_name, theme::TEXT_SECONDARY),
-        widgets::data(
+        heading(ty, "Processors", format!("{} guest CPUs", draft.cpus)),
+        ty.data(&host.cpu_name, theme::TEXT_SECONDARY),
+        ty.data(
             format!(
                 "{} physical cores · {} logical CPUs",
                 host.physical_cores, host.logical_cpus
@@ -227,12 +235,13 @@ pub fn view<'a>(
     ]
     .spacing(12);
     if !host.core_summary.is_empty() {
-        cpu = cpu.push(widgets::data(&host.core_summary, theme::TEXT_MUTED));
+        cpu = cpu.push(ty.data(&host.core_summary, theme::TEXT_MUTED));
     }
     cpu = cpu
         .push(
             row![
                 action(
+                    ty,
                     "−",
                     (!busy && draft.cpus > draft.minimum.cpus)
                         .then(|| send(Change::Cpus(draft.cpus.saturating_sub(1)))),
@@ -244,6 +253,7 @@ pub fn view<'a>(
                 .step(1u16)
                 .style(widgets::resource_slider),
                 action(
+                    ty,
                     "+",
                     (!busy && draft.cpus < max_cpu)
                         .then(|| send(Change::Cpus(draft.cpus.saturating_add(1)))),
@@ -254,28 +264,30 @@ pub fn view<'a>(
             .align_y(alignment::Vertical::Center),
         )
         .push(row![
-            widgets::body(
+            ty.body(
                 format!("Minimum {}", draft.minimum.cpus),
                 12.,
                 theme::TEXT_MUTED
             ),
             space::horizontal(),
-            widgets::body(
+            ty.body(
                 format!("{} available", host.logical_cpus),
                 12.,
                 theme::TEXT_MUTED
             ),
         ])
         .push(switch(
+            ty,
             "Pin guest CPUs",
             draft.resources.pin_cpus,
             host.cpu_pinning && !busy,
             send(Change::PinCpus),
         ));
     if host.cpu_pinning {
-        cpu = cpu.push(widgets::body("Keep each guest CPU on a chosen host thread. Pinning does not reserve the core exclusively.", 12., theme::TEXT_MUTED));
+        cpu = cpu.push(ty.body("Keep each guest CPU on a chosen host thread. Pinning does not reserve the core exclusively.", 12., theme::TEXT_MUTED));
         if draft.resources.pin_cpus {
             cpu = cpu.push(action(
+                ty,
                 if draft.show_cores {
                     "Hide core map"
                 } else {
@@ -286,6 +298,7 @@ pub fn view<'a>(
             ));
             if draft.show_cores {
                 let mut presets = row![action(
+                    ty,
                     "Spread across cores",
                     (!busy).then(|| send(Change::Placement(None))),
                     false
@@ -297,6 +310,7 @@ pub fn view<'a>(
                 ] {
                     if host.cores.iter().any(|core| core.kind == kind) {
                         presets = presets.push(action(
+                            ty,
                             label,
                             (!busy
                                 && placement(host, Some(kind), 128).len()
@@ -307,7 +321,7 @@ pub fn view<'a>(
                     }
                 }
                 cpu = cpu.push(presets.wrap())
-                    .push(widgets::body(format!("Select threads to adjust the CPU count. Keep at least {} selected. Siblings share one physical core.", draft.minimum.cpus), 12., theme::TEXT_MUTED));
+                    .push(ty.body(format!("Select threads to adjust the CPU count. Keep at least {} selected. Siblings share one physical core.", draft.minimum.cpus), 12., theme::TEXT_MUTED));
                 let mut groups = std::collections::BTreeMap::new();
                 for core in &host.cores {
                     groups
@@ -341,6 +355,7 @@ pub fn view<'a>(
                                 draft.resources.host_cpus.len() < 128
                             };
                             threads = threads.push(action(
+                                ty,
                                 &format!("CPU {id}"),
                                 (!busy && can_change).then(|| send(Change::Core(id))),
                                 active,
@@ -350,13 +365,9 @@ pub fn view<'a>(
                             container(
                                 column![
                                     row![
-                                        widgets::body(
-                                            format!("Core {}", core.id),
-                                            13.,
-                                            theme::TEXT
-                                        ),
+                                        ty.body(format!("Core {}", core.id), 13., theme::TEXT),
                                         space::horizontal(),
-                                        widgets::body(
+                                        ty.body(
                                             format!("{selected}/{}", core.threads.len()),
                                             11.,
                                             theme::TEXT_MUTED
@@ -385,10 +396,7 @@ pub fn view<'a>(
                     }
                     map = map.push(
                         column![
-                            widgets::data(
-                                format!("{kind} · socket {socket}"),
-                                theme::TEXT_SECONDARY
-                            ),
+                            ty.data(format!("{kind} · socket {socket}"), theme::TEXT_SECONDARY),
                             tiles.wrap()
                         ]
                         .spacing(8),
@@ -403,14 +411,15 @@ pub fn view<'a>(
                 );
             }
             if draft.resources.host_cpus.len() != usize::from(draft.cpus) {
-                cpu = cpu.push(widgets::body("This saved selection no longer matches the CPU count. Choose a placement preset or adjust the count.", 12., theme::WARNING));
+                cpu = cpu.push(ty.body("This saved selection no longer matches the CPU count. Choose a placement preset or adjust the count.", 12., theme::WARNING));
             }
         }
     } else {
-        cpu = cpu.push(widgets::body("macOS manages core placement. You can adjust the CPU count; exact pinning is unavailable.", 12., theme::TEXT_MUTED));
+        cpu = cpu.push(ty.body("macOS manages core placement. You can adjust the CPU count; exact pinning is unavailable.", 12., theme::TEXT_MUTED));
     }
     let mut memory = column![
         heading(
+            ty,
             "Memory",
             format!("{:.2} GiB", f64::from(draft.memory_mib) / 1024.)
         ),
@@ -421,7 +430,7 @@ pub fn view<'a>(
         )
         .step(ram_step)
         .style(widgets::resource_slider),
-        widgets::data(
+        ty.data(
             format!(
                 "{:.1} GiB physical · {:.1} GiB free",
                 host.memory_mib as f64 / 1024.,
@@ -429,7 +438,7 @@ pub fn view<'a>(
             ),
             theme::TEXT_MUTED
         ),
-        widgets::data(
+        ty.data(
             format!(
                 "{:.1} GiB free or reclaimable (OS estimate)",
                 host.available_memory_mib as f64 / 1024.
@@ -437,6 +446,7 @@ pub fn view<'a>(
             theme::TEXT_MUTED
         ),
         switch(
+            ty,
             "Pin memory in RAM",
             draft.resources.pin_memory,
             host.memory_pinning && !busy,
@@ -447,12 +457,12 @@ pub fn view<'a>(
     if draft.resources.pages == PageSize::System
         && u64::from(draft.memory_mib) > host.available_memory_mib
     {
-        memory = memory.push(widgets::body(if draft.resources.pin_memory {
+        memory = memory.push(ty.body(if draft.resources.pin_memory {
             "Not enough available RAM to pin this allocation. Reduce it or close other workloads."
         } else { "This exceeds currently available RAM. The host may swap; reduce the allocation or close other workloads." }, 12., theme::WARNING));
     }
     if !host.memory_pinning {
-        memory = memory.push(widgets::body(
+        memory = memory.push(ty.body(
             "Memory locking is unavailable in QEMU on this host.",
             12.,
             theme::TEXT_MUTED,
@@ -463,12 +473,13 @@ pub fn view<'a>(
             .is_some_and(|n| n < vkored::hardware::lock_budget(draft.memory_mib))
     {
         memory = memory
-            .push(widgets::body(
+            .push(ty.body(
                 "System authorization is needed to keep this memory resident.",
                 12.,
                 theme::WARNING,
             ))
             .push(action(
+                ty,
                 "Authorize memory…",
                 (!busy).then_some(Message::Machine(MachineMessage::AuthorizeMemory(
                     draft.memory_mib,
@@ -476,19 +487,20 @@ pub fn view<'a>(
                 false,
             ));
     }
-    memory = memory.push(widgets::label("Physical page size", theme::TEXT_MUTED));
+    memory = memory.push(ty.label("Physical page size", theme::TEXT_MUTED));
     let mut pages = row![].spacing(6);
     for page in [PageSize::System, PageSize::Huge2M, PageSize::Huge1G] {
         pages = pages.push(action(
+            ty,
             page.label(),
             (!busy && host.huge_available(page, draft.memory_mib))
                 .then(|| send(Change::Page(page))),
             draft.resources.pages == page,
         ));
     }
-    memory = memory.push(pages.wrap()).push(widgets::body("2 MiB is preferred when an accessible hugepage pool has enough space. Unavailable sizes are disabled.", 12., theme::TEXT_MUTED));
+    memory = memory.push(pages.wrap()).push(ty.body("2 MiB is preferred when an accessible hugepage pool has enough space. Unavailable sizes are disabled.", 12., theme::TEXT_MUTED));
     for node in &host.memory_nodes {
-        memory = memory.push(widgets::data(
+        memory = memory.push(ty.data(
             format!(
                 "NUMA {} · {:.1} GiB · CPUs {}",
                 node.id,
@@ -499,12 +511,13 @@ pub fn view<'a>(
         ));
     }
     let mut storage = column![heading(
+        ty,
         "Storage",
         format!("{:.1} GiB", draft.disk_mib as f64 / 1024.)
     )]
     .spacing(12);
     if draft.storage_fixed {
-        storage = storage.push(widgets::body(
+        storage = storage.push(ty.body(
             "Disk size and reservation are fixed after first launch.",
             12.,
             theme::TEXT_MUTED,
@@ -521,6 +534,7 @@ pub fn view<'a>(
                 .style(widgets::resource_slider),
             )
             .push(switch(
+                ty,
                 "Reserve disk space",
                 draft.resources.reserve_storage,
                 !busy,
@@ -528,19 +542,20 @@ pub fn view<'a>(
             ));
     }
     storage = storage
-        .push(widgets::data(
+        .push(ty.data(
             format!(
                 "{:.1} GiB free on the storage filesystem",
                 host.storage_available_mib as f64 / 1024.
             ),
             theme::TEXT_MUTED,
         ))
-        .push(widgets::body(
+        .push(ty.body(
             "Reserves space at first launch and requests contiguous placement where supported.",
             12.,
             theme::TEXT_MUTED,
         ))
         .push(action(
+            ty,
             if draft.show_storage {
                 "Hide storage details"
             } else {
@@ -550,12 +565,12 @@ pub fn view<'a>(
             draft.show_storage,
         ));
     if draft.show_storage {
-        storage = storage.push(widgets::data(
+        storage = storage.push(ty.data(
             host.storage_path.display().to_string(),
             theme::TEXT_SECONDARY,
         ));
         for disk in &host.storage {
-            storage = storage.push(widgets::data(
+            storage = storage.push(ty.data(
                 format!(
                     "{} · {} · {} · {:.1} GiB free / {:.1} GiB · {}",
                     disk.device,
@@ -573,11 +588,13 @@ pub fn view<'a>(
         column![
             row![
                 action(
+                    ty,
                     "Use recommended settings",
                     (!busy).then(|| send(Change::Defaults)),
                     false
                 ),
                 action(
+                    ty,
                     "Refresh host",
                     (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
                     false

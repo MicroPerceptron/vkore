@@ -48,7 +48,7 @@ four. Missing one is missing the goal.
 - Exports never follow a symlink, never overwrite unasked, and publish only a
   synced file.
 - QMP commands carry ids; a late reply is dropped, never taken for the next one.
-- In the desktop, text from outside the binary goes through `widgets::data` (or
+- In the desktop, text from outside the binary goes through `Typography::data` (or
   `fonts::shown`): it shapes in one registered face, escapes what that face
   cannot draw, and shows controls and invisible characters. Shaping is confined
   to the bundled faces (`fonts::register`), so a host font can never stand in.

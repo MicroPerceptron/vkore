@@ -10,6 +10,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Host-aware hardware configuration with CPU topology, core selection, memory and storage controls, Linux pinning and desktop authorization.
 - Local OpenAI-compatible API controls and port configuration in Settings; guest inference transport remains pending.
 - System, light and dark appearance, responsive desktop layout, and a visible app version.
+- Persistent text-size controls and bundled Space Grotesk, DM Sans and JetBrains Mono interface-font presets with a live preview.
 - Verified, relocatable QEMU runtime bundles built independently of Cargo.
 
 ### Fixed

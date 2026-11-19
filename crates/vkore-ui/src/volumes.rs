@@ -6,6 +6,7 @@
 //! the view never blocks on the disk. Installing or removing closes the
 //! browser, writes through Kore's all-or-nothing publication, and reopens.
 
+use crate::typography::Typography;
 use std::{
     path::{Path, PathBuf},
     sync::mpsc,
@@ -606,7 +607,7 @@ fn wrap(message: VolumeMessage) -> Message {
 }
 
 /// The browser.
-pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
+pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElement<'a> {
     let open_row = row![
         text_input(
             "/path/to/disk.raw, /dev/nvme0n1p5, or @machine",
@@ -616,10 +617,10 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
         .on_submit(wrap(VolumeMessage::Open))
         .font(fonts::MONO)
         .padding([7, 10])
-        .size(theme::SIZE_SM)
+        .size(ty.size(theme::SIZE_SM))
         .style(widgets::field),
-        button(widgets::control("Open"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Open"))
+            .height(ty.control_height())
             .padding([8, 14])
             .style(widgets::button_style(widgets::Button::Primary))
             .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::Open))),
@@ -630,7 +631,7 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     for machine in machines {
         let input = format!("@{machine}");
         quick = quick.push(
-            button(widgets::data(input.clone(), theme::TEXT_SECONDARY))
+            button(ty.data(input.clone(), theme::TEXT_SECONDARY))
                 .padding([4, 8])
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press(wrap(VolumeMessage::DiskInput(input))),
@@ -638,16 +639,16 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     }
     let Some(label) = &state.label else {
         let connect = container(column![
-            container(widgets::empty_state(crate::visuals::Icon::Volume,
+            container(ty.empty_state(crate::visuals::Icon::Volume,
                 "Your files, closer to Kore",
                 "Browse a stopped machine's volume, inspect captures and move project files between Kore and this computer.")).height(240),
-            widgets::label("Disk image, device or machine", theme::TEXT_MUTED),
+            ty.label("Disk image, device or machine", theme::TEXT_MUTED),
             open_row, quick,
-            widgets::data(state.status.as_str(), theme::TEXT_MUTED),
+            ty.data(state.status.as_str(), theme::TEXT_MUTED),
         ].spacing(16)).padding(24).width(Length::Fill.max(760)).style(widgets::card);
         return widgets::page_frame(
             column![
-                widgets::page_header("Volumes", "Explore the files inside your Kore workspace."),
+                ty.page_header("Volumes", "Explore the files inside your Kore workspace."),
                 widgets::scroll(container(connect).center_x(Length::Fill).padding([24, 0]))
                     .height(Length::Fill),
             ]
@@ -660,7 +661,7 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
         _ => "image",
     };
     let header = row![
-        widgets::data(
+        ty.data(
             format!(
                 "{label} · {kind} · generation {}{}",
                 state.generation,
@@ -673,13 +674,13 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
             theme::TEXT_SECONDARY,
         ),
         space::horizontal(),
-        button(widgets::control("Refresh"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Refresh"))
+            .height(ty.control_height())
             .padding([6, 12])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press(wrap(VolumeMessage::Refresh)),
-        button(widgets::control("Close"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Close"))
+            .height(ty.control_height())
             .padding([6, 12])
             .style(widgets::button_style(widgets::Button::Ghost))
             .on_press(wrap(VolumeMessage::Close)),
@@ -687,13 +688,13 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     .spacing(theme::SPACE_2)
     .align_y(alignment::Vertical::Center);
     let places = row![
-        place_button("Terminal 0", Place::Home(0), state.place),
-        place_button("Terminal 1", Place::Home(1), state.place),
-        place_button("Volume root", Place::Root, state.place),
+        place_button(ty, "Terminal 0", Place::Home(0), state.place),
+        place_button(ty, "Terminal 1", Place::Home(1), state.place),
+        place_button(ty, "Volume root", Place::Root, state.place),
     ]
     .spacing(theme::SPACE_1);
     let mut crumbs = row![
-        button(widgets::mono(
+        button(ty.mono(
             match state.place {
                 Place::Home(face) => format!("~{face}"),
                 Place::Root => "/".into(),
@@ -710,10 +711,10 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
         // The root's own crumb is `/`: a separator before its first
         // component would read `/ / work`.
         if depth > 0 || matches!(state.place, Place::Home(_)) {
-            crumbs = crumbs.push(widgets::mono("/", theme::TEXT_MUTED));
+            crumbs = crumbs.push(ty.mono("/", theme::TEXT_MUTED));
         }
         crumbs = crumbs.push(
-            button(widgets::data(name.as_str(), theme::TEXT))
+            button(ty.data(name.as_str(), theme::TEXT))
                 .padding([4, 6])
                 .style(widgets::button_style(widgets::Button::Ghost))
                 .on_press(wrap(VolumeMessage::Crumb(depth + 1))),
@@ -732,10 +733,11 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
                 list = list.push(
                     button(
                         row![
-                            widgets::mono(glyph, theme::MAGENTA),
-                            widgets::data(entry.name.as_str(), theme::TEXT).size(theme::SIZE_SM),
+                            ty.mono(glyph, theme::MAGENTA),
+                            ty.data(entry.name.as_str(), theme::TEXT)
+                                .size(ty.size(theme::SIZE_SM)),
                             space::horizontal(),
-                            widgets::mono(detail, theme::TEXT_MUTED),
+                            ty.mono(detail, theme::TEXT_MUTED),
                         ]
                         .spacing(theme::SPACE_2)
                         .align_y(alignment::Vertical::Center),
@@ -748,22 +750,18 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
             }
         }
         Some(Listing::EmptyHome) => {
-            list = list.push(widgets::body(
+            list = list.push(ty.body(
                 "This terminal's home is created at its machine's first boot.",
                 theme::SIZE_SM,
                 theme::TEXT_MUTED,
             ));
         }
         Some(Listing::File { .. }) | Some(Listing::Directory { .. }) | None => {
-            list = list.push(widgets::body(
-                "Nothing here.",
-                theme::SIZE_SM,
-                theme::TEXT_MUTED,
-            ));
+            list = list.push(ty.body("Nothing here.", theme::SIZE_SM, theme::TEXT_MUTED));
         }
     }
 
-    let detail = detail_pane(state);
+    let detail = detail_pane(state, ty);
     let body = row![
         container(widgets::scroll(list).height(Length::Fill))
             .width(Length::FillPortion(3))
@@ -784,10 +782,10 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
             .on_input(|value| wrap(VolumeMessage::ExportInput(value)))
             .font(fonts::MONO)
             .padding([7, 10])
-            .size(theme::SIZE_SM)
+            .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        button(widgets::control("Save here"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Save here"))
+            .height(ty.control_height())
             .padding([8, 14])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::Export))),
@@ -796,10 +794,10 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
             .on_submit(wrap(VolumeMessage::Import))
             .font(fonts::MONO)
             .padding([7, 10])
-            .size(theme::SIZE_SM)
+            .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        button(widgets::control("Import"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Import"))
+            .height(ty.control_height())
             .padding([8, 14])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(
@@ -811,13 +809,13 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     .align_y(alignment::Vertical::Center);
 
     let page = column![
-        widgets::page_header("Volumes", "Explore the files inside your Kore workspace."),
+        ty.page_header("Volumes", "Explore the files inside your Kore workspace."),
         header,
         places,
         crumbs,
         body,
         transfer,
-        widgets::data(
+        ty.data(
             if state.busy {
                 "working…"
             } else {
@@ -830,9 +828,9 @@ pub fn view<'a>(state: &'a State, machines: &[String]) -> UiElement<'a> {
     widgets::page_frame(page)
 }
 
-fn place_button<'a>(label: &'a str, place: Place, current: Place) -> UiElement<'a> {
-    button(widgets::control(label))
-        .height(theme::CONTROL_SM)
+fn place_button<'a>(ty: Typography, label: &'a str, place: Place, current: Place) -> UiElement<'a> {
+    button(ty.control(label))
+        .height(ty.control_height())
         .padding([6, 12])
         .style(widgets::button_style(widgets::Button::Choice(
             place == current,
@@ -841,37 +839,35 @@ fn place_button<'a>(label: &'a str, place: Place, current: Place) -> UiElement<'
         .into()
 }
 
-fn detail_pane(state: &State) -> UiElement<'_> {
+fn detail_pane(state: &State, ty: Typography) -> UiElement<'_> {
     let Some(entry) = state
         .selected_entry()
         .filter(|entry| entry.kind == EntryKind::File)
     else {
-        return widgets::empty_state(
+        return ty.empty_state(
             crate::visuals::Icon::Volume,
             "Take a closer look",
             "Select a file to inspect its contents and capture details.",
         );
     };
     let mut pane = column![
-        widgets::data(entry.name.as_str(), theme::TEXT).size(theme::SIZE_MD),
-        widgets::mono(size(entry.len), theme::TEXT_MUTED),
+        ty.data(entry.name.as_str(), theme::TEXT)
+            .size(ty.size(theme::SIZE_MD)),
+        ty.mono(size(entry.len), theme::TEXT_MUTED),
     ]
     .spacing(theme::SPACE_2);
     match state.summary.as_ref().map(|(_, summary)| summary) {
-        None => pane = pane.push(widgets::mono("reading…", theme::TEXT_MUTED)),
-        Some(Err(error)) => pane = pane.push(widgets::data(error.as_str(), theme::ERROR)),
+        None => pane = pane.push(ty.mono("reading…", theme::TEXT_MUTED)),
+        Some(Err(error)) => pane = pane.push(ty.data(error.as_str(), theme::ERROR)),
         Some(Ok(Summary::Image {
             width,
             height,
             capture,
             text,
         })) => {
-            pane = pane.push(widgets::mono(
-                format!("PNG · {width}×{height}"),
-                theme::TEXT_SECONDARY,
-            ));
+            pane = pane.push(ty.mono(format!("PNG · {width}×{height}"), theme::TEXT_SECONDARY));
             if let Some(capture) = capture {
-                pane = pane.push(widgets::label("Kore capture", theme::MAGENTA));
+                pane = pane.push(ty.label("Kore capture", theme::MAGENTA));
                 for (key, value) in [
                     ("build", &capture.kernel_build),
                     ("taken", &capture.created),
@@ -883,7 +879,7 @@ fn detail_pane(state: &State) -> UiElement<'_> {
                     ("uptime ms", &capture.uptime_ms),
                 ] {
                     if let Some(value) = value {
-                        pane = pane.push(widgets::data(format!("{key:<10} {value}"), theme::TEXT));
+                        pane = pane.push(ty.data(format!("{key:<10} {value}"), theme::TEXT));
                     }
                 }
                 // What Kore said beyond the record's own keywords.
@@ -895,17 +891,11 @@ fn detail_pane(state: &State) -> UiElement<'_> {
                     .take(16)
                 {
                     let key = &key["kore:".len()..];
-                    pane = pane.push(widgets::data(
-                        format!("{key:<10} {value}"),
-                        theme::TEXT_SECONDARY,
-                    ));
+                    pane = pane.push(ty.data(format!("{key:<10} {value}"), theme::TEXT_SECONDARY));
                 }
             } else if !text.is_empty() {
                 for (key, value) in text.iter().take(8) {
-                    pane = pane.push(widgets::data(
-                        format!("{key}: {value}"),
-                        theme::TEXT_SECONDARY,
-                    ));
+                    pane = pane.push(ty.data(format!("{key}: {value}"), theme::TEXT_SECONDARY));
                 }
             }
         }
@@ -914,42 +904,38 @@ fn detail_pane(state: &State) -> UiElement<'_> {
             lines,
             truncated,
         })) => {
-            pane = pane.push(widgets::mono(
+            pane = pane.push(ty.mono(
                 format!(
                     "text · {lines} lines{}",
                     if *truncated { " (first part)" } else { "" }
                 ),
                 theme::TEXT_SECONDARY,
             ));
-            pane = pane.push(
-                widgets::scroll(widgets::mono(text.as_str(), theme::TEXT)).height(Length::Fill),
-            );
+            pane = pane
+                .push(widgets::scroll(ty.mono(text.as_str(), theme::TEXT)).height(Length::Fill));
         }
         Some(Ok(Summary::Binary { len, head })) => {
-            pane = pane.push(widgets::mono(
-                format!("binary · {}", size(*len)),
-                theme::TEXT_SECONDARY,
-            ));
-            pane = pane.push(widgets::mono(head.as_str(), theme::TEXT_MUTED));
+            pane = pane.push(ty.mono(format!("binary · {}", size(*len)), theme::TEXT_SECONDARY));
+            pane = pane.push(ty.mono(head.as_str(), theme::TEXT_MUTED));
         }
     }
     let actions = row![
-        button(widgets::control("Open"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Open"))
+            .height(ty.control_height())
             .padding([6, 12])
             .style(widgets::button_style(widgets::Button::Primary))
             .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::View))),
-        button(widgets::control("Save"))
-            .height(theme::CONTROL_SM)
+        button(ty.control("Save"))
+            .height(ty.control_height())
             .padding([6, 12])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::Export))),
-        button(widgets::control(if state.confirm_remove {
+        button(ty.control(if state.confirm_remove {
             "Confirm remove"
         } else {
             "Remove"
         }))
-        .height(theme::CONTROL_SM)
+        .height(ty.control_height())
         .padding([6, 12])
         .style(widgets::button_style(widgets::Button::Danger))
         .on_press_maybe(

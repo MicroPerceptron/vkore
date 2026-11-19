@@ -2,6 +2,10 @@
 //! from the host through Kore's own engine. Rendered with Iced over Axiom's
 //! software rasterizer; no browser, no daemon, no login.
 
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
 mod fonts;
 mod hardware;
 mod logo;
@@ -270,11 +274,6 @@ fn sidebar(current: Page, running: usize, status: &str, ty: Typography) -> UiEle
         nav("Settings", Page::Settings, visuals::Icon::Settings),
         container(
             column![
-                ty.body(
-                    concat!("vKore v", env!("CARGO_PKG_VERSION")),
-                    12.,
-                    theme::TEXT_MUTED
-                ),
                 ty.body("On this computer", 12., theme::TEXT_SECONDARY),
                 ty.badge(
                     if running == 0 {
@@ -297,6 +296,19 @@ fn sidebar(current: Page, running: usize, status: &str, ty: Typography) -> UiEle
     if !status.is_empty() {
         rail = rail.push(ty.data(status, theme::ERROR));
     }
+    rail = rail.push(
+        container(ty.body(
+            concat!(
+                "v",
+                env!("CARGO_PKG_VERSION"),
+                "-",
+                env!("VKORE_BUILD_REVISION")
+            ),
+            12.,
+            theme::TEXT_MUTED,
+        ))
+        .padding([0, 4]),
+    );
     container(rail)
         .padding(18)
         .width(224)

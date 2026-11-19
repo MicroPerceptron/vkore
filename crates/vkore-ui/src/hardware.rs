@@ -472,20 +472,11 @@ pub fn view<'a>(
             .memlock_bytes
             .is_some_and(|n| n < vkored::hardware::lock_budget(draft.memory_mib))
     {
-        memory = memory
-            .push(ty.body(
-                "System authorization is needed to keep this memory resident.",
-                12.,
-                theme::WARNING,
-            ))
-            .push(action(
-                ty,
-                "Authorize memory…",
-                (!busy).then_some(Message::Machine(MachineMessage::AuthorizeMemory(
-                    draft.memory_mib,
-                ))),
-                false,
-            ));
+        memory = memory.push(ty.body(
+            "Permissions are checked when you finish. System authorization appears only if needed.",
+            12.,
+            theme::TEXT_MUTED,
+        ));
     }
     memory = memory.push(ty.label("Host memory pages", theme::TEXT_MUTED));
     let mut pages = row![action(

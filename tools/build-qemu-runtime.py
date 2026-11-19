@@ -204,7 +204,7 @@ def main():
              "--without-default-features", "--disable-download", "--disable-docs",
              "--disable-tools", "--disable-guest-agent", "--disable-modules",
              "--enable-install-blobs", "--enable-tcg", "--enable-slirp",
-             "--enable-vnc", "--enable-pixman", "--enable-zlib"]
+             "--enable-vnc", "--enable-pixman", "--disable-rust"]
     flags += ["--enable-kvm", "--enable-gtk"] if system == "Linux" else ["--enable-hvf", "--enable-cocoa"]
     run(source / "configure", *flags, cwd=build)
     run("ninja", "-C", build, f"-j{args.jobs}")

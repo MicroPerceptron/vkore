@@ -28,6 +28,14 @@ use crate::{
 /// The most console bytes read per poll, so a flood cannot stall a caller.
 const READ_CHUNK: usize = 256 << 10;
 
+/// Startup may populate/lock guest RAM and establish VFIO DMA mappings before
+/// QMP negotiation completes. Allow 10 s for fixed setup plus 2 s per GiB,
+/// rounded up. This is patience, not a throughput claim. MachineSpec admission
+/// bounds RAM to 1 TiB, so the longest wait is 2058 s; process exit fails early.
+fn startup_patience(memory_mib: u32) -> Duration {
+    Duration::from_secs(10 + 2 * u64::from(memory_mib).div_ceil(1024))
+}
+
 /// What happened to a machine since the last poll.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MachineEvent {
@@ -167,7 +175,7 @@ impl Machine {
             exited: None,
             started: Instant::now(),
         };
-        match Qmp::connect_while(&spec.qmp_socket, Duration::from_secs(10), || {
+        match Qmp::connect_while(&spec.qmp_socket, startup_patience(spec.memory_mib), || {
             machine.child.try_wait().map(|status| status.is_none())
         }) {
             Ok(mut qmp) => {
@@ -467,6 +475,48 @@ fn prepare_socket(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn startup_window_scales_with_ram_including_partial_gib() {
+        assert_eq!(startup_patience(2048), Duration::from_secs(14));
+        assert_eq!(startup_patience(8192), Duration::from_secs(26));
+        assert_eq!(startup_patience(65536), Duration::from_secs(138));
+        assert_eq!(startup_patience(65537), Duration::from_secs(140));
+        assert_eq!(startup_patience(1 << 20), Duration::from_secs(2058));
+    }
+
+    #[test]
+    fn memory_scaled_startup_allows_negotiation_after_ten_seconds() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            writeln!(stream, r#"{{"QMP": {{"version": {{"qemu": {{"major": 10, "minor": 0, "micro": 0}}, "package": ""}}, "capabilities": []}}}}"#).unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["execute"], "qmp_capabilities");
+            // QEMU can expose the socket/greeting before memory setup finishes.
+            // The larger window must cover negotiation too, not just connect().
+            std::thread::sleep(Duration::from_secs(11));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"return": {}, "id": request["id"]})
+            )
+            .unwrap();
+        });
+        let connected = Qmp::connect_while(&path, startup_patience(8192), || Ok(true));
+        server.join().unwrap();
+        connected.unwrap();
+    }
 
     #[test]
     fn launch_does_not_unlink_live_sockets_or_files() {

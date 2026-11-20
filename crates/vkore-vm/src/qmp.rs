@@ -131,6 +131,7 @@ impl Qmp {
     /// guardian's paused QEMU probes through a socketpair wired to stdio).
     pub(crate) fn from_stream(stream: UnixStream, patience: Duration) -> Result<Self, QmpError> {
         let deadline = Instant::now() + patience;
+        // Only the startup reply wait scales; writes keep their normal bound.
         stream.set_write_timeout(Some(REPLY_WAIT))?;
         let writer = stream.try_clone()?;
         let mut qmp = Self {
@@ -151,7 +152,6 @@ impl Qmp {
         if qmp.reply_wait.is_zero() {
             return Err(timed_out("negotiation", patience));
         }
-        qmp.writer.set_write_timeout(Some(qmp.reply_wait))?;
         qmp.execute(&api::qmp_capabilities { enable: None })?;
         qmp.reply_wait = REPLY_WAIT;
         Ok(qmp)
@@ -445,6 +445,8 @@ mod tests {
             .unwrap();
         });
         let mut qmp = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
+        assert_eq!(qmp.reply_wait, REPLY_WAIT);
+        assert_eq!(qmp.writer.write_timeout().unwrap(), Some(REPLY_WAIT));
         qmp.power_button().unwrap();
         let sent = qmp.send_keys(&["print"]);
         assert!(matches!(

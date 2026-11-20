@@ -10,6 +10,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
 
 ### Fixed
+- Scale QEMU startup negotiation patience with guest RAM (10 seconds plus 2 seconds per GiB) so large memory configurations are not killed by the former fixed 10-second deadline.
 - Budget locked memory for every assigned accelerator, including GPU VFs, so combined NPU/GPU launches can map all guest RAM. Keep the physical-address check based on actual guest RAM.
 - Use device-neutral `pt` names for QEMU passthrough devices and ports.
 - Cap guest physical address bits at the negotiated Intel VFIO DMA width so firmware places RAM-backed PCI BARs within that address space.

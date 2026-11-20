@@ -20,6 +20,7 @@ pub struct Draft {
 }
 #[derive(Clone, Debug)]
 pub enum Change {
+    Passthrough(vkore_vm::passthrough::Selection),
     Cpus(u16),
     Memory(u32),
     Disk(u32),
@@ -75,6 +76,24 @@ impl Draft {
     }
     pub fn change(&mut self, change: Change, host: &HostResources) {
         match change {
+            Change::Passthrough(selection) => {
+                if let Some(index) = self
+                    .resources
+                    .passthrough
+                    .iter()
+                    .position(|s| *s == selection)
+                {
+                    self.resources.passthrough.remove(index);
+                } else if self.resources.passthrough.len() < vkore_vm::passthrough::MAX_DEVICES
+                    && host.npus.devices.iter().any(|device| {
+                        vkore_vm::passthrough::Selection::from_device(device).as_ref()
+                            == Some(&selection)
+                            && vkore_vm::passthrough::eligible(device).is_ok()
+                    })
+                {
+                    self.resources.passthrough.push(selection);
+                }
+            }
             Change::Cpus(n) => {
                 self.cpus = n;
                 let preferred = host.preferred_cpus(u16::MAX);
@@ -640,7 +659,13 @@ pub fn view<'a>(
             .wrap(),
             section(cpu),
             section(memory),
-            section(npu_inventory(&host.npus, ty)),
+            section(npu_inventory(
+                &host.npus,
+                &draft.resources.passthrough,
+                editing,
+                busy,
+                ty
+            )),
             section(storage),
         ]
         .spacing(16),
@@ -652,6 +677,9 @@ pub fn view<'a>(
 
 pub(crate) fn npu_inventory<'a>(
     inventory: &'a vkore_vm::devices::Inventory,
+    selected: &'a [vkore_vm::passthrough::Selection],
+    editing: bool,
+    busy: bool,
     ty: Typography,
 ) -> iced_widget::Column<'a, Message, iced_core::Theme, crate::AxUi> {
     use vkore_vm::devices::DiscoveryStatus;
@@ -671,7 +699,7 @@ pub(crate) fn npu_inventory<'a>(
         ]
         .align_y(alignment::Vertical::Center),
         ty.body(
-            "Devices reported by your host. Guest accelerator connections are not available yet.",
+            "Assign a Linux NPU exclusively to this guest. Shared accelerator connections are not available yet.",
             12.,
             theme::TEXT_MUTED
         ),
@@ -697,6 +725,29 @@ pub(crate) fn npu_inventory<'a>(
             ),
         ]
         .spacing(8);
+        if let Some(selection) = vkore_vm::passthrough::Selection::from_device(device) {
+            let enabled = selected.contains(&selection);
+            let eligibility = vkore_vm::passthrough::eligible(device);
+            card = card.push(switch(
+                ty,
+                "Full passthrough",
+                enabled,
+                !busy
+                    && (enabled
+                        || (eligibility.is_ok()
+                            && selected.len() < vkore_vm::passthrough::MAX_DEVICES)),
+                Message::Machine(MachineMessage::Hardware(
+                    editing,
+                    Change::Passthrough(selection),
+                )),
+            ));
+            card = card.push(ty.body(
+                "While the guest runs, this NPU is unavailable to host apps. vKore restores its host driver after shutdown. Passthrough locks guest RAM for DMA even when memory pinning is off. Setup and launch may request system authentication.",
+                12., theme::TEXT_MUTED));
+            if let Err(reason) = eligibility {
+                card = card.push(ty.data(reason, theme::WARNING));
+            }
+        }
         if let Some(cores) = device.core_count {
             card = card.push(ty.data(
                 format!("{cores} Neural Engine cores"),
@@ -757,6 +808,17 @@ pub(crate) fn npu_inventory<'a>(
                 .style(widgets::card),
         );
     }
+    for selection in selected.iter().filter(|s| {
+        !inventory
+            .devices
+            .iter()
+            .any(|d| vkore_vm::passthrough::Selection::from_device(d).as_ref() == Some(*s))
+    }) {
+        content = content.push(column![
+            ty.data(format!("Saved NPU {} is missing or changed. Disable it to use this configuration on the current host.",selection.address), theme::WARNING),
+            switch(ty, "Full passthrough", true, !busy, Message::Machine(MachineMessage::Hardware(editing, Change::Passthrough(selection.clone())))),
+        ].spacing(8));
+    }
     content
 }
 
@@ -779,6 +841,29 @@ mod tests {
             })
             .collect();
         host
+    }
+    #[test]
+    fn missing_saved_passthrough_can_be_disabled_and_cannot_be_reenabled() {
+        let mut host = host();
+        host.npus.devices.clear();
+        let selected = vkore_vm::passthrough::Selection {
+            address: "0000:00:0b.0".into(),
+            vendor_id: 0x8086,
+            device_id: 0x643e,
+        };
+        let mut config = MachineConfig::new("demo", "/image.iso");
+        config.resources.passthrough.push(selected.clone());
+        let mut draft = Draft::from_config(&config, false);
+        assert_eq!(
+            draft.resources.passthrough.as_slice(),
+            std::slice::from_ref(&selected)
+        );
+        draft.change(Change::Passthrough(selected.clone()), &host);
+        assert!(draft.resources.passthrough.is_empty());
+        draft.change(Change::Passthrough(selected), &host);
+        assert!(draft.resources.passthrough.is_empty());
+        draft.apply(&mut config);
+        assert!(config.resources.passthrough.is_empty());
     }
     #[test]
     fn unsupported_saved_memory_choices_can_be_disabled_without_enabling_them() {

@@ -163,8 +163,10 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         vkore_vm::hardware::HostResources::probe(config.iso.parent().unwrap_or(Path::new("/")))
             .map_err(RunError::Host)?;
     crate::hardware::validate_host(config, &host_resources).map_err(RunError::Host)?;
-    if crate::hardware::needs_authorization(config, &host_resources) {
-        return Err(RunError::Host("memory pinning needs authorization: use Authorize memory in the hardware panel, or turn off memory pinning".into()));
+    if config.resources.passthrough.is_empty()
+        && crate::hardware::needs_authorization(config, &host_resources)
+    {
+        return Err(RunError::Host("memory pinning needs authorization: finish hardware setup with Done/Save hardware, or turn off memory pinning".into()));
     }
     let runtime = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .map_err(|error| RunError::Host(format!("QEMU runtime: {error}")))?;
@@ -175,6 +177,14 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         .map_err(|error| RunError::Host(error.to_string()))?;
     let qemu_caps =
         QemuCaps::probe(qemu, vendor, accel).map_err(|error| RunError::Host(error.to_string()))?;
+    if !config.resources.passthrough.is_empty()
+        && (accel != vkore_vm::Accel::Kvm || !qemu_caps.vfio_iommufd)
+    {
+        return Err(RunError::Host(
+            "NPU passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support."
+                .into(),
+        ));
+    }
     let firmware = match &config.firmware {
         Some(chosen) => Firmware {
             descriptor: None,

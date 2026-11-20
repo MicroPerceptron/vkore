@@ -86,6 +86,11 @@ impl From<QmpError> for MachineError {
 /// A running (or exited) Kore machine.
 pub struct Machine {
     child: Child,
+    qemu_pid: u32,
+    qemu_log: PathBuf,
+    managed: bool,
+    /// The guardian owns QEMU and restores host drivers after reaping it.
+    device_control: Option<std::process::ChildStdin>,
     qmp: Option<Qmp>,
     serial: PathBuf,
     console: Option<File>,
@@ -120,15 +125,38 @@ impl Machine {
         File::create(&spec.serial_log).map_err(io(&spec.serial_log))?;
         let log = File::create(qemu_log).map_err(io(qemu_log))?;
         let errors = log.try_clone().map_err(io(qemu_log))?;
-        let child = Command::new(qemu)
-            .args(&arguments)
-            .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(errors)
-            .spawn()
-            .map_err(io(qemu))?;
+        let (child, qemu_pid, device_control) = if spec.resources.passthrough.is_empty() {
+            let child = Command::new(qemu)
+                .args(&arguments)
+                .stdin(Stdio::null())
+                .stdout(log)
+                .stderr(errors)
+                .spawn()
+                .map_err(io(qemu))?;
+            let pid = child.id();
+            (child, pid, None)
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                let started = crate::passthrough::launch(
+                    qemu,
+                    arguments,
+                    &spec.resources.passthrough,
+                    (u64::from(spec.memory_mib) + 1024) << 20,
+                    errors,
+                )
+                .map_err(|error| MachineError::Io(qemu.to_owned(), std::io::Error::other(error)))?;
+                (started.child, started.pid, Some(started.control))
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(ProfileError::Unsupported("NPU passthrough requires Linux.".into()).into());
+        };
         let mut machine = Self {
             child,
+            qemu_pid,
+            qemu_log: qemu_log.to_owned(),
+            managed: device_control.is_some(),
+            device_control,
             qmp: None,
             serial: spec.serial_log.clone(),
             console: None,
@@ -164,7 +192,7 @@ impl Machine {
                             _ => Err(QmpError::Protocol("QEMU reported a non-x86 CPU".into())),
                         })
                         .collect::<Result<_, _>>()?;
-                    crate::hardware::bind_vcpus(machine.child.id(), &threads, &spec.resources)
+                    crate::hardware::bind_vcpus(machine.qemu_pid, &threads, &spec.resources)
                         .map_err(QmpError::Protocol)?;
                     qmp.resume()
                 })();
@@ -188,13 +216,15 @@ impl Machine {
     }
 
     fn kill_and_reap(&mut self) {
-        let _ = self.child.kill();
+        if self.device_control.take().is_none() {
+            let _ = self.child.kill();
+        }
         self.exited = self.child.wait().ok();
         self.qmp = None;
     }
 
     pub fn id(&self) -> u32 {
-        self.child.id()
+        self.qemu_pid
     }
 
     pub fn readiness(&self) -> &Readiness {
@@ -263,9 +293,23 @@ impl Machine {
                     .into_iter()
                     .map(MachineEvent::Stage),
             );
+            self.check_guardian(status)?;
             events.push(MachineEvent::Exited(status.code()));
         }
         Ok(events)
+    }
+
+    fn check_guardian(&self, status: ExitStatus) -> Result<(), MachineError> {
+        if self.managed && status.code() == Some(125) {
+            return Err(MachineError::Io(
+                self.qemu_log.clone(),
+                io::Error::other(format!(
+                    "NPU guardian failed; host driver restoration may need attention: {}",
+                    log_tail(&self.qemu_log).unwrap_or_default().trim()
+                )),
+            ));
+        }
+        Ok(())
     }
 
     fn read_console(&mut self) -> Result<Vec<u8>, MachineError> {
@@ -287,7 +331,8 @@ impl Machine {
 
     /// Ask the guest to power off, wait up to `grace` for it, then end QEMU.
     pub fn stop(&mut self, grace: Duration) -> Result<StopOutcome, MachineError> {
-        if self.reap().is_some() {
+        if let Some(status) = self.reap() {
+            self.check_guardian(status)?;
             return Ok(StopOutcome::AlreadyStopped);
         }
         if let Some(qmp) = self.qmp.as_mut() {
@@ -295,12 +340,16 @@ impl Machine {
         }
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
-            if self.reap().is_some() {
+            if let Some(status) = self.reap() {
+                self.check_guardian(status)?;
                 return Ok(StopOutcome::Graceful);
             }
             self.poll(Duration::from_millis(200))?;
         }
         self.force();
+        if let Some(status) = self.exited {
+            self.check_guardian(status)?;
+        }
         Ok(StopOutcome::Forced)
     }
 
@@ -427,7 +476,19 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         assert!(prepare_socket(&path).is_err());
         drop(listener);
-        prepare_socket(&path).unwrap();
+        // Another test may be between fork and exec, temporarily retaining a
+        // CLOEXEC copy of the listener. It is correctly treated as live until
+        // exec closes that copy; do not assume the close is instantly visible.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match prepare_socket(&path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == io::ErrorKind::AddrInUse && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) => panic!("stale socket: {e}"),
+            }
+        }
         assert!(!path.exists());
     }
 

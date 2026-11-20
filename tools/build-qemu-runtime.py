@@ -154,6 +154,14 @@ def verify(root):
 
 def smoke(root):
     """Negotiate QMP against the relocated binary and bundled UEFI assets."""
+    if platform.system() == "Linux":
+        # Exercise compiled capabilities without opening or assigning a host device.
+        for kind, name, properties in (("-device", "vfio-pci", ("fd=", "iommufd=")),
+                                       ("-object", "iommufd", ("fd=",))):
+            result = run(root / BINARY, kind, name + ",help", capture_output=True, text=True)
+            help_text = result.stdout + result.stderr
+            if any(not any(line.lstrip().startswith(prop) for line in help_text.splitlines()) for prop in properties):
+                raise RuntimeError(f"packaged QEMU lacks required {name} FD passing support")
     with tempfile.TemporaryDirectory() as directory:
         vars_path = Path(directory) / "vars.fd"
         shutil.copy2(root / "share/qemu" / FIRMWARE[1], vars_path)

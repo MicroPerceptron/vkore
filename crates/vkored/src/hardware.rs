@@ -54,6 +54,7 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
         memory,
         minimum.disk_mib.max(4096),
         Resources {
+            passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
             host_cpus: host.preferred_cpus(cpus),
             pin_memory: host.memory_pinning,
@@ -104,7 +105,7 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
     if u64::from(config.memory_mib) > host.memory_mib {
         return Err("guest RAM exceeds physical host memory".into());
     }
-    if config.resources.pin_memory
+    if (config.resources.pin_memory || !config.resources.passthrough.is_empty())
         && config.resources.pages == PageSize::System
         && u64::from(config.memory_mib) > host.available_memory_mib
     {
@@ -113,6 +114,14 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
         );
     }
     let r = &config.resources;
+    vkore_vm::passthrough::validate_inventory(&r.passthrough, &host.npus)?;
+    vkore_vm::passthrough::check_host(&r.passthrough)?;
+    if !r.passthrough.is_empty() && !cfg!(target_os = "linux") {
+        return Err(
+            "NPU passthrough requires Linux; remove the saved device selections on this host."
+                .into(),
+        );
+    }
     if r.pin_cpus {
         if !host.cpu_pinning {
             return Err(
@@ -159,6 +168,13 @@ pub fn needs_authorization(config: &MachineConfig, host: &HostResources) -> bool
 /// Desktop completion and launch share this entry point; noninteractive callers
 /// continue to use validation without invoking an authentication agent.
 pub fn authorize_configuration(config: &MachineConfig, host: &HostResources) -> Result<(), String> {
+    if !config.resources.passthrough.is_empty() {
+        validate_host(config, host)?;
+        return vkore_vm::passthrough::authorize(
+            &config.resources.passthrough,
+            Some(lock_budget(config.memory_mib)),
+        );
+    }
     authorize_with(config, host, authorize_memory)
 }
 
@@ -560,6 +576,7 @@ mod tests {
 /// complete launch/ownership implementation exists, irrespective of PCI identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessStatus {
+    Configurable,
     Pending,
     NeedsSetup,
     Unavailable,
@@ -568,6 +585,7 @@ pub enum AccessStatus {
 impl AccessStatus {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Configurable => "Can configure",
             Self::Pending => "Not connected yet",
             Self::NeedsSetup => "Needs host setup",
             Self::Unavailable => "Unavailable",
@@ -601,10 +619,15 @@ pub fn npu_routes(device: &vkore_vm::devices::Npu) -> [AccessRoute; 3] {
             NeedsSetup,
             "No IOMMU group was reported. Host isolation must be available before assignment.",
         ),
+        Some(_) if vkore_vm::passthrough::eligible(device).is_ok() => route(
+            "Dedicated device",
+            Configurable,
+            "Enable Full passthrough to assign this NPU at launch. Function-level reset, Linux KVM and QEMU IOMMUFD support are required; guest driver support must be tested with your image.",
+        ),
         Some(_) => route(
             "Dedicated device",
-            Pending,
-            "PCI device detected. Guest assignment, group isolation and reset support still need validation.",
+            Unavailable,
+            "Whole-device assignment requires a supported physical NPU in its own IOMMU group, with no enabled VFs.",
         ),
         None if device.source == Source::CoreMl => route(
             "Dedicated device",
@@ -713,7 +736,7 @@ mod npu_tests {
     fn identity_never_implies_sriov_or_runtime_readiness() {
         let mut npu = device();
         let routes = npu_routes(&npu);
-        assert_eq!(routes[0].status, AccessStatus::Pending);
+        assert_eq!(routes[0].status, AccessStatus::Configurable);
         assert_eq!(routes[1].status, AccessStatus::Unavailable);
         assert_eq!(routes[2].status, AccessStatus::Unknown);
         npu.pci.as_mut().unwrap().total_vfs = Some(4);

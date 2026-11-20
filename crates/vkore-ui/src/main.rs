@@ -664,6 +664,9 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
 }
 
 fn main() {
+    if let Some(code) = vkore_vm::passthrough::helper_entry() {
+        std::process::exit(code);
+    }
     let options = parse_launch_options(std::env::args().skip(1)).unwrap_or_else(|error| {
         eprintln!("vkore-ui: {error}");
         std::process::exit(2);
@@ -1088,10 +1091,13 @@ mod tests {
                 enabled_vfs: None,
             }),
         };
-        for scenario in ["linux", "macos", "windows", "empty", "failed", "partial"] {
+        for scenario in [
+            "linux", "selected", "missing", "busy", "macos", "windows", "empty", "failed",
+            "partial",
+        ] {
             let mut inventory = Inventory::empty(Platform::Linux);
             match scenario {
-                "linux" => inventory.devices.push(device.clone()),
+                "linux" | "selected" | "busy" => inventory.devices.push(device.clone()),
                 "macos" => {
                     inventory.platform = Platform::MacOs;
                     inventory.devices.push(Npu {
@@ -1131,6 +1137,11 @@ mod tests {
                 }
                 _ => {}
             }
+            let selected = if matches!(scenario, "selected" | "missing" | "busy") {
+                vec![vkore_vm::passthrough::Selection::from_device(&device).unwrap()]
+            } else {
+                vec![]
+            };
             for (width, height) in [(900., 560.), (1280., 900.)] {
                 for appearance in [Theme::Light, Theme::Dark] {
                     let ty = if width < 1000. {
@@ -1147,8 +1158,14 @@ mod tests {
                                 "Machine hardware",
                                 "Neural processors and guest access"
                             ),
-                            widgets::scroll(hardware::npu_inventory(&inventory, ty))
-                                .height(Length::Fill),
+                            widgets::scroll(hardware::npu_inventory(
+                                &inventory,
+                                &selected,
+                                false,
+                                scenario == "busy",
+                                ty
+                            ))
+                            .height(Length::Fill),
                         ]
                         .spacing(18),
                     );

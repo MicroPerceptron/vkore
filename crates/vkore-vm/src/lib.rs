@@ -14,10 +14,13 @@
 //!
 //! No Kore checkout is needed: the ISO is a caller-supplied artifact.
 
+#![cfg_attr(target_os = "linux", feature(setgroups))]
+
 pub mod firmware;
 pub mod hardware;
 pub mod machine;
 pub mod media;
+pub mod passthrough;
 pub mod probe;
 pub mod profile;
 pub mod qmp;

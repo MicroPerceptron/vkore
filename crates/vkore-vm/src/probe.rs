@@ -45,6 +45,8 @@ pub enum AccelChoice {
 /// What the probed QEMU realizes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct QemuCaps {
+    /// VFIO cdev FD passing backed by an iommufd object.
+    pub vfio_iommufd: bool,
     pub version: (u32, u32, u32),
     /// `scalable-mode` (QEMU 11 and later) or `x-scalable-mode`.
     pub vtd_scalable_property: &'static str,
@@ -187,6 +189,17 @@ impl QemuCaps {
             ],
         )?;
         Ok(Self {
+            vfio_iommufd: {
+                let help = run(qemu, &["-device", "vfio-pci,help"])?;
+                let property =
+                    |name: &str| help.lines().any(|line| line.trim_start().starts_with(name));
+                cfg!(target_os = "linux")
+                    && property("fd=")
+                    && property("iommufd=")
+                    && run(qemu, &["-object", "iommufd,help"])?
+                        .lines()
+                        .any(|line| line.trim_start().starts_with("fd="))
+            },
             version,
             vtd_scalable_property,
             vtd_sva,

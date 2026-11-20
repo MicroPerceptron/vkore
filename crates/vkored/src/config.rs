@@ -451,6 +451,11 @@ mod tests {
         c.resources.host_cpus = vec![1, 3, 5, 7];
         c.resources.pin_memory = true;
         c.resources.pages = vkore_vm::hardware::PageSize::Huge2M;
+        c.resources.passthrough = vec![vkore_vm::passthrough::Selection {
+            address: "0000:00:0b.0".into(),
+            vendor_id: 0x8086,
+            device_id: 0x643e,
+        }];
         store.save(&c).unwrap();
         assert_eq!(store.get("demo").unwrap(), c);
     }

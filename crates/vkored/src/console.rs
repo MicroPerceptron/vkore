@@ -6,7 +6,7 @@ use std::{
     os::unix::net::UnixStream,
     path::Path,
 };
-pub use terminal::{COLS, Color, Output, ROWS, Run, Style};
+pub use terminal::{COLS, Color, MAX_COLS, MAX_ROWS, Output, ROWS, Run, Style};
 
 pub const MAX_LINE_BYTES: usize = 1024;
 pub const MAX_PENDING_BYTES: usize = 16 << 10;
@@ -59,6 +59,12 @@ impl Console {
 
     pub fn output(&self) -> &Output {
         &self.terminal.output
+    }
+
+    /// Resize the host terminal grid. The COM2 stream has no guest resize
+    /// protocol: changing geometry never injects bytes into the shell input.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> bool {
+        self.terminal.resize(rows, cols)
     }
 
     /// Queue terminal input verbatim. Preserve typeahead across partial writes,
@@ -174,6 +180,26 @@ fn transient(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resizing_never_injects_shell_input_or_discards_typeahead() {
+        let (stream, mut guest) = UnixStream::pair().unwrap();
+        guest.set_nonblocking(true).unwrap();
+        let mut console = Console::from_stream(stream).unwrap();
+        console.resize(20, 80);
+        console.poll();
+        let mut bytes = [0; 16];
+        assert_eq!(
+            guest.read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        console.send_input(b"help\r").unwrap();
+        console.resize(40, 160);
+        console.poll();
+        let count = guest.read(&mut bytes).unwrap();
+        assert_eq!(&bytes[..count], b"help\r");
+        assert_eq!((console.output().rows, console.output().cols), (40, 160));
+    }
 
     #[test]
     fn lines_are_bounded_explicit_and_never_replayed_after_disconnect() {

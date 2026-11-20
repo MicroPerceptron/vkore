@@ -93,6 +93,10 @@ fn boot_and_edit_command(reserve_storage: bool) {
             );
         }
         assert!(console.transcript().contains("terminal:0> "));
+        // Adapt the host viewport before typing; a resize must not send a
+        // guessed control sequence to the guest's line editor.
+        assert!(console.resize(30, 96));
+        assert!(!console.resize(30, 96));
         // Type an intentional typo, erase it and submit through the same raw
         // input path as the desktop. Kore owns the editing and echo.
         for bytes in [b"h".as_slice(), b"e", b"x", b"\x7f", b"l", b"p", b"\r"] {

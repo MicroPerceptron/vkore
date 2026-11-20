@@ -307,6 +307,33 @@ Guest driver and nested-IOMMU compatibility still need validation on each
 NPU/image combination. See [QEMU's IOMMUFD FD passing](https://www.qemu.org/docs/master/devel/vfio-iommufd.html)
 and [Linux VFIO](https://www.kernel.org/doc/html/latest/driver-api/vfio.html).
 
+For Intel passthrough, the guest uses second-level DMA translation with
+scalable mode, caching and interrupt remapping enabled. Snoop control is off:
+QEMU's VFIO notifier rejects it. PASID/first-level translation is not advertised
+by this assignment profile. Non-passthrough profiles retain their existing
+settings.
+
+The authorized guardian realizes the selected devices in a small **paused QEMU
+probe** before the actual guest starts. It tries the supported 48-bit and 39-bit
+second-level address widths in descending order, selecting the widest one whose
+QMP status reaches `prelaunch`. QEMU checks the effective kernel IOVA ranges
+for every attached device; no CPU-width or PCI-model heuristic substitutes for
+that check. A 41-bit host therefore selects 39 bits if that candidate realizes.
+Configurations whose RAM plus the below-4-GiB address-hole allowance cannot fit
+are rejected. If neither candidate works, launch fails with diagnostics.
+
+Each probe uses 128 MiB of RAM, read-only firmware code, and no guest disk,
+writable firmware variables, networking or running guest CPUs. Probes and the
+actual launch run unprivileged with the same leased NPUs. Each attempt owns
+fresh VFIO/IOMMUFD descriptors and is reaped before the next opens them; failure
+or cancellation returns through driver restoration. The chosen width is logged
+in the QEMU log. This is capability negotiation during an authorized device
+handoff, so Done/Save remains nondestructive and does not run these probes.
+
+References: [QEMU's effective VFIO address width](https://github.com/qemu/qemu/blob/v10.2.0/hw/vfio/device.c#L358-L373),
+[VT-d host checks and supported widths](https://github.com/qemu/qemu/blob/v10.2.0/hw/i386/intel_iommu.c),
+[the VFIO snoop-control restriction](https://github.com/qemu/qemu/blob/v10.2.0/hw/i386/intel_iommu.c#L3714-L3719).
+
 **Done/Save hardware** batches the device checks and locked-memory budget in
 one polkit request. It may load `vfio-pci` and `iommufd`, but does not detach a
 device. With no passthrough selected, the existing memory-only authorization
@@ -329,7 +356,9 @@ unchanged. No shell command or arbitrary program is executed as root.
 The helper owns QEMU's lifetime. After guest exit it closes/reaps QEMU before
 restoring the original driver, override and reset method. Failed preparation
 rolls back partial changes. Parent-pipe closure (including desktop crashes),
-INT, TERM and HUP stop/reap the child before restoration. A failed restoration
+Explicit INT, TERM and HUP stop/reap the child before restoration. The guardian
+has its own process group so terminal Ctrl-C reaches the CLI, which requests
+normal QMP shutdown, rather than racing the guardian's forced cleanup. A failed restoration
 is reported in the QEMU log and as a guardian error; it is not reported as a
 successful handoff. Forcibly killing the privileged guardian itself with
 SIGKILL cannot run cleanup and may leave a device VFIO-bound; this release has
@@ -345,3 +374,20 @@ partial-failure rollback, restoration retries, and guest termination on parent
 disconnect. Those tests and the ordinary Kore boot gate do not establish a
 physical NPU passthrough or inference result. That acceptance still requires a
 Linux host, a compatible image, and observation of host-driver restoration.
+
+### Gigatron validation boundary
+
+The [Gigatron report on PR #58](https://github.com/MicroPerceptron/vkore/pull/58#issuecomment-7027330485)
+tested Lunar Lake NPU `8086:643e` with QEMU 10.2.1 and a specifically hashed Kore
+0.40.0 ISO. The unchanged `369e78c` launch failed before boot. A diagnostic
+wrapper using `aw-bits=39,snoop-control=off` reached readiness, executed the
+Aftershock NPU lighting workload and reopened it successfully. A separate
+normal-stop run exited zero and restored the original driver, override and
+reset method. Interrupted wrapper runs restored the driver but exited 143;
+they do not establish clean interrupted shutdown.
+
+Those manual findings motivate the managed negotiation above; they do not
+validate the newly integrated probes or signal isolation on physical hardware.
+`IOMMU_IOAS_MAP failed: Bad address, PCI BAR?` and PCI BAR peer-to-peer warnings
+remain visible. Successful lighting does not establish P2P support, inference
+numerical parity, throughput, other NPUs, or other image/QEMU combinations.

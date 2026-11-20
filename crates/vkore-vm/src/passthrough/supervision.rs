@@ -47,6 +47,35 @@ pub(super) fn supervise(
         }
     }
 }
+/// A successful probe realizes all devices but never executes guest code.
+/// Always reap the emulator before its caller can reopen VFIO descriptors.
+pub(super) fn probe_paused(
+    child: Child,
+    stream: std::os::unix::net::UnixStream,
+) -> Result<(), String> {
+    let mut guest = Guest(child);
+    let mut qmp =
+        crate::qmp::Qmp::from_stream(stream, Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    let status = qmp.status().map_err(|e| e.to_string())?;
+    if status.running || status.status != qapi_qmp::RunState::prelaunch {
+        return Err("IOMMU probe did not stay in prelaunch state.".into());
+    }
+    qmp.quit().map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = guest.0.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("IOMMU probe exited with {status}."))
+            };
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("IOMMU probe did not exit after QMP quit.".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +84,44 @@ mod tests {
         process::{Command, Stdio},
         time::Instant,
     };
+    #[test]
+    fn probe_rejects_running_cpus_and_reaps_before_returning() {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            writeln!(server, "{}", serde_json::json!({"QMP":{"version":{"qemu":{"major":10,"minor":2,"micro":1},"package":"fixture"},"capabilities":[]}})).unwrap();
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            for expected in ["qmp_capabilities", "query-status"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["execute"], expected);
+                let result = if expected == "query-status" {
+                    serde_json::json!({"running":true,"singlestep":false,"status":"running"})
+                } else {
+                    serde_json::json!({})
+                };
+                writeln!(
+                    server,
+                    "{}",
+                    serde_json::json!({"return":result,"id":request["id"]})
+                )
+                .unwrap();
+            }
+        });
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+        assert!(
+            probe_paused(child, client)
+                .unwrap_err()
+                .contains("prelaunch")
+        );
+        assert_eq!(
+            rustix::process::test_kill_process(pid),
+            Err(rustix::io::Errno::SRCH)
+        );
+        peer.join().unwrap();
+    }
     #[test]
     fn parent_disconnect_stops_and_reaps_the_guest() {
         let (parent, guardian) = UnixStream::pair().unwrap();

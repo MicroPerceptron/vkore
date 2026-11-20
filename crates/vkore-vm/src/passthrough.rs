@@ -157,6 +157,8 @@ fn fd_arguments(args: &mut [String], selected: &[Selection], fds: &[i32]) -> Res
 
 #[cfg(any(target_os = "linux", test))]
 mod handoff;
+#[cfg(any(target_os = "linux", test))]
+mod iommu;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(any(target_os = "linux", test))]

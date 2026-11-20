@@ -108,6 +108,11 @@ pub enum Event {
     Started {
         pid: u32,
     },
+    /// A console image's shell is on COM2, reachable at `socket` while the
+    /// machine runs.
+    Console {
+        socket: PathBuf,
+    },
     Stage {
         stage: Stage,
         uptime_ms: u128,
@@ -366,10 +371,16 @@ impl Session {
             serial_log: paths.serial.clone(),
             debugcon_log: paths.debugcon.clone(),
             qmp_socket: paths.qmp.clone(),
+            console_socket: checked.medium.console.then(|| paths.console.clone()),
         };
         let machine = Machine::start(qemu, &checked.qemu_caps, &spec, &paths.qemu_log)
             .map_err(|error| RunError::Machine(error.to_string()))?;
         record.emit(&Event::Started { pid: machine.id() });
+        if let Some(socket) = &spec.console_socket {
+            record.emit(&Event::Console {
+                socket: socket.clone(),
+            });
+        }
         let Recorder { transcript, .. } = record;
         Ok(Self {
             _lease: lease,

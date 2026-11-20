@@ -32,7 +32,8 @@ pub enum Stage {
     Kernel,
     /// Every service row founded and ready.
     Services,
-    /// The shell answers: the desktop is usable.
+    /// The shell answers: Kore is usable (on its screen, or on COM2 for a
+    /// console image).
     Shell,
     /// Applications are seeded and the terminals' homes exist.
     Ready,

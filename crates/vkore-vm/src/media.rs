@@ -41,6 +41,10 @@ pub struct BootMedium {
     pub sha256: String,
     /// The paging mode its Limine configuration names, when it has one.
     pub paging: Option<Paging>,
+    /// Whether the image is a console image: its Limine configuration loads
+    /// Kore's console row (`kore-svc-console`), which fills the display
+    /// round and puts the first shell on COM2 instead of a screen.
+    pub console: bool,
 }
 
 /// Why a medium could not be read.
@@ -79,14 +83,15 @@ impl BootMedium {
                     MediaError::Format(format!("{}: {message}", path.display()))
                 }
             })?;
-        let paging = config
-            .as_deref()
-            .and_then(|text| paging_mode(&String::from_utf8_lossy(text)));
+        let text = config.as_deref().map(String::from_utf8_lossy);
+        let paging = text.as_deref().and_then(paging_mode);
+        let console = text.as_deref().is_some_and(loads_console);
         Ok(Self {
             path: path.to_path_buf(),
             bytes,
             sha256,
             paging,
+            console,
         })
     }
 }
@@ -103,6 +108,16 @@ pub fn paging_mode(config: &str) -> Option<Paging> {
             "5level" => Some(Paging::FiveLevel),
             _ => None,
         }
+    })
+}
+
+/// Whether the configuration loads Kore's console row, the module a console
+/// image's display round is filled by (`module_string: kore-svc-console`).
+pub fn loads_console(config: &str) -> bool {
+    config.lines().any(|line| {
+        line.trim().split_once(':').is_some_and(|(key, value)| {
+            key.trim() == "module_string" && value.trim() == "kore-svc-console"
+        })
     })
 }
 
@@ -350,6 +365,17 @@ mod tests {
             Some(Paging::FourLevel)
         );
         assert_eq!(paging_mode("kaslr: no"), None);
+    }
+
+    #[test]
+    fn a_console_image_is_known_by_its_console_row() {
+        assert!(loads_console(
+            "    module_path: boot():/boot/kore-svc-console.elf\n    module_string: kore-svc-console\n"
+        ));
+        assert!(!loads_console(
+            "    module_path: boot():/boot/kore-svc-compositor.elf\n    module_string: kore-svc-compositor\n"
+        ));
+        assert!(!loads_console("# module_string: kore-svc-consoles\n"));
     }
 
     #[test]

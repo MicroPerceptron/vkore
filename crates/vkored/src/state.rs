@@ -83,6 +83,7 @@ impl State {
             runs: dir.join("runs"),
             scratch: dir.join("scratch"),
             qmp: runtime.join(format!("{name}.qmp")),
+            console: runtime.join(format!("{name}.console")),
             dir,
         }
     }
@@ -103,6 +104,8 @@ pub struct MachinePaths {
     pub runs: PathBuf,
     pub scratch: PathBuf,
     pub qmp: PathBuf,
+    /// A console image's shell line (COM2), while the machine runs.
+    pub console: PathBuf,
 }
 
 /// Create `path` (and its parents) and make it private to this user.

@@ -37,7 +37,7 @@ unpinned/system-page/sparse behavior; new CLI and desktop creation use host
 recommendations. All configurations are subject to the baseline minimums.
 `vkore hardware` reports the snapshot as JSON. CLI creation also offers
 `--cpus`, `--memory-mib`, `--host-cpus`, `--no-cpu-pinning`,
-`--no-memory-pinning`, `--pages system|2m|1g` and `--sparse`.
+`--no-memory-pinning`, `--pages system|2m|1g`, `--sparse` and `--passthrough PCI_ADDRESS`.
 
 ## Host discovery and CPU placement
 
@@ -282,7 +282,10 @@ validation remain separate evidence.
 ## Linux whole-NPU passthrough
 
 Enable **Full passthrough** on a device card, then finish with **Done** or
-**Save hardware**. Turning it off removes the device from subsequent launches.
+**Save hardware**. From the command line, `vkore machine create
+--passthrough 0000:00:0b.0` records the same selection (repeat it for more
+devices; `vkore hardware` lists the addresses), and `vkore machine run` asks
+for the same authorization at launch. Turning it off removes the device from subsequent launches.
 The configuration records PCI address, vendor ID and device ID; launch refuses
 missing or changed identities. Missing saved selections remain visible and can
 be disabled, including on another operating system. Existing configurations

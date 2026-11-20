@@ -97,6 +97,10 @@ pub struct MachineSpec {
     pub serial_log: PathBuf,
     pub debugcon_log: PathBuf,
     pub qmp_socket: PathBuf,
+    /// A console image's shell line: COM2, attached to a listening Unix
+    /// socket here. COM1 stays the kernel's console, whose markers vKore
+    /// follows; the two never interleave.
+    pub console_socket: Option<PathBuf>,
 }
 
 /// A specification QEMU cannot be given.
@@ -277,6 +281,19 @@ impl MachineSpec {
                 "longer than a Unix socket path can be",
             ));
         }
+        let console = match &self.console_socket {
+            Some(socket) => {
+                let path = option_path(socket)?;
+                if path.len() > SUN_PATH_MAX {
+                    return Err(ProfileError::Path(
+                        socket.clone(),
+                        "longer than a Unix socket path can be",
+                    ));
+                }
+                Some(path)
+            }
+            None => None,
+        };
 
         let paging_cpu = match self.paging {
             Paging::FourLevel => "",
@@ -493,6 +510,17 @@ impl MachineSpec {
             "-cdrom".into(),
             iso.into(),
         ]);
+        if let Some(console) = console {
+            // The PC's COM2 address and line, which QEMU's DSDT describes
+            // as a PNP0501 with that _CRS; Kore withholds only the port its
+            // own console decodes (COM1), so its serial row claims this one.
+            arguments.extend([
+                "-chardev".into(),
+                format!("socket,id=kcon,path={console},server=on,wait=off"),
+                "-device".into(),
+                "isa-serial,chardev=kcon,iobase=0x2f8,irq=3".into(),
+            ]);
+        }
         arguments.extend(crate::passthrough::arguments(&self.resources.passthrough));
         Ok(arguments)
     }
@@ -534,7 +562,25 @@ mod tests {
             serial_log: "/m/serial.log".into(),
             debugcon_log: "/m/debugcon.log".into(),
             qmp_socket: "/m/qmp.sock".into(),
+            console_socket: None,
         }
+    }
+
+    #[test]
+    fn a_console_image_gets_its_shell_line_on_com2() {
+        let plain = joined(&spec().arguments(&caps()).unwrap());
+        assert!(!plain.contains("isa-serial"));
+        let mut console = spec();
+        console.console_socket = Some("/m/console.sock".into());
+        let line = joined(&console.arguments(&caps()).unwrap());
+        assert!(line.contains(
+            "-chardev socket,id=kcon,path=/m/console.sock,server=on,wait=off \
+             -device isa-serial,chardev=kcon,iobase=0x2f8,irq=3"
+        ));
+        assert!(
+            line.contains("-serial file:/m/serial.log"),
+            "COM1 stays the kernel's"
+        );
     }
 
     fn joined(arguments: &[String]) -> String {

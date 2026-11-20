@@ -10,6 +10,8 @@ use vkore_vm::hardware::{HostResources, PageSize, Resources};
 
 /// Maximum virtual disk capacity, shared by admission and the desktop.
 pub const MAX_DISK_MIB: u64 = 1 << 22;
+/// New inference machines need room for model weights and working files.
+pub const DEFAULT_DISK_MIB: u64 = 32 * 1024;
 
 /// Reservation must fit the host; sparse disks may grow up to the format limit.
 pub fn disk_limit(host: &HostResources, reserve: bool) -> u64 {
@@ -64,9 +66,7 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
     (
         cpus,
         memory,
-        minimum
-            .disk_mib
-            .max((32 * 1024).min(host.storage_available_mib / 1024 * 1024)),
+        minimum.disk_mib.max(DEFAULT_DISK_MIB),
         Resources {
             gpu_vfs: Vec::new(),
             guest_numa: vkore_vm::hardware::GuestNuma::Single,
@@ -477,11 +477,11 @@ mod tests {
         let min = Requirements::default();
         assert_eq!(defaults(&h, min).2, 32 * 1024);
         h.storage_available_mib = 7 * 1024 + 512;
-        assert_eq!(defaults(&h, min).2, 7 * 1024);
+        assert_eq!(defaults(&h, min).2, DEFAULT_DISK_MIB); // Do not silently shrink.
         assert_eq!(disk_limit(&h, true), h.storage_available_mib);
         assert_eq!(disk_limit(&h, false), MAX_DISK_MIB);
         h.storage_available_mib = 512;
-        assert_eq!(defaults(&h, min).2, min.disk_mib); // Admission reports insufficient space.
+        assert_eq!(defaults(&h, min).2, DEFAULT_DISK_MIB); // Admission reports insufficient space.
         h.storage_available_mib = u64::MAX;
         assert_eq!(disk_limit(&h, true), MAX_DISK_MIB);
     }

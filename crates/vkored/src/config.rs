@@ -96,14 +96,14 @@ pub struct FirmwareConfig {
 }
 
 impl MachineConfig {
-    /// A machine named `name` booting `iso`, with the gate's resources.
+    /// A machine named `name` booting `iso`, with baseline resource defaults.
     pub fn new(name: impl Into<String>, iso: impl Into<PathBuf>) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             name: name.into(),
             iso: iso.into(),
             iso_sha256: None,
-            disk_mib: 4096,
+            disk_mib: crate::hardware::DEFAULT_DISK_MIB,
             cpus: 4,
             memory_mib: 4096,
             resources: Default::default(),

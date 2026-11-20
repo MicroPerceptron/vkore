@@ -151,10 +151,21 @@ capacity and free space. Machine disks remain in the vKore state filesystem;
 the displayed reservation capacity is queried for that path, including APFS
 mount aliases. Selecting an arbitrary physical disk is outside this UI.
 
-New desktop drafts target **32 GiB**, reduced to whole GiB of currently free
-space when necessary, while respecting the image minimum. The capacity field
-accepts GiB (fractional values round up to a whole MiB); presets cover 16, 32,
-64, 128, 256, 512 and 1024 GiB. The slider uses a logarithmic scale so smaller
+New machines default to **32 GiB** in both desktop and CLI flows, or the image
+minimum if larger. Low free space does not silently shrink the default: the
+panel reports insufficient space and reservation fails until the user selects
+a smaller capacity, frees space, or explicitly turns off reservation.
+
+RAM and disk fields accept GiB (fractional values round up to a whole MiB).
+Presets are generated at runtime from powers of two and their halfway points,
+including 8/12/16 GiB RAM and 16/24/32/48/64/96/128 GiB disks, continuing upward
+within the current limits. RAM presets respect physical capacity, image minimums
+and page/NUMA alignment. Disk presets respect the reservation capacity, or the
+sparse-disk limit when reservation is off. Precise RAM input preserves the
+requested value and reports invalid range/alignment rather than silently
+clamping it. RAM recommendations remain half the host's physical memory.
+
+The disk slider uses a logarithmic scale so smaller
 allocations remain practical on large hosts. Backend admission caps disks at
 4 TiB. Reserved disks must fit current free space. With reservation off, sparse
 disks can exceed currently free space, with a warning that future guest writes

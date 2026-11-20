@@ -116,7 +116,8 @@ struct CreateArgs {
     /// Expected SHA-256 of the image, checked before creating the machine
     #[arg(long)]
     sha256: Option<String>,
-    #[arg(long, default_value_t = 4096)]
+    /// Virtual disk capacity in MiB (defaults to 32 GiB)
+    #[arg(long, default_value_t = vkored::hardware::DEFAULT_DISK_MIB)]
     disk_mib: u64,
     /// Defaults to half the physical cores, at least two
     #[arg(long)]
@@ -1024,4 +1025,39 @@ fn shots(disk: &Disk, face: u8, get: Option<PathBuf>, json: bool) -> Result<(), 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_default_matches_new_configs_and_allows_explicit_capacity() {
+        for (extra, expected) in [
+            (None, vkored::hardware::DEFAULT_DISK_MIB),
+            (Some("49152"), 49152),
+        ] {
+            let mut args = vec![
+                "vkore",
+                "machine",
+                "create",
+                "inference",
+                "--iso",
+                "/image.iso",
+            ];
+            if let Some(value) = extra {
+                args.extend(["--disk-mib", value]);
+            }
+            let Command::Machine(MachineCommand::Create(create)) =
+                Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected machine create");
+            };
+            assert_eq!(create.disk_mib, expected);
+        }
+        assert_eq!(
+            MachineConfig::new("inference", "/image.iso").disk_mib,
+            32 * 1024
+        );
+    }
 }

@@ -32,7 +32,7 @@ const READ_CHUNK: usize = 256 << 10;
 /// QMP negotiation completes. Allow 10 s for fixed setup plus 2 s per GiB,
 /// rounded up. This is patience, not a throughput claim. MachineSpec admission
 /// bounds RAM to 1 TiB, so the longest wait is 2058 s; process exit fails early.
-fn startup_patience(memory_mib: u32) -> Duration {
+pub(crate) fn startup_patience(memory_mib: u32) -> Duration {
     Duration::from_secs(10 + 2 * u64::from(memory_mib).div_ceil(1024))
 }
 
@@ -136,7 +136,9 @@ impl Machine {
         File::create(&spec.serial_log).map_err(io(&spec.serial_log))?;
         let log = File::create(qemu_log).map_err(io(qemu_log))?;
         let errors = log.try_clone().map_err(io(qemu_log))?;
-        let (child, qemu_pid, device_control) = if spec.resources.passthrough.is_empty() {
+        let (child, qemu_pid, device_control) = if spec.resources.passthrough.is_empty()
+            && spec.resources.pages == crate::hardware::PageSize::System
+        {
             let child = Command::new(qemu)
                 .args(&arguments)
                 .stdin(Stdio::null())
@@ -154,13 +156,18 @@ impl Machine {
                     arguments,
                     &spec.resources.passthrough,
                     spec.memory_mib,
+                    spec.resources.pages,
+                    spec.resources.guest_numa,
                     errors,
                 )
                 .map_err(|error| MachineError::Io(qemu.to_owned(), std::io::Error::other(error)))?;
                 (started.child, started.pid, Some(started.control))
             }
             #[cfg(not(target_os = "linux"))]
-            return Err(ProfileError::Unsupported("NPU passthrough requires Linux.".into()).into());
+            return Err(ProfileError::Unsupported(
+                "Managed accelerators and hugepages require Linux.".into(),
+            )
+            .into());
         };
         let mut machine = Self {
             child,

@@ -224,16 +224,18 @@ pub fn authorize(
     selected: &[Selection],
     gpus: &[gpu::Assignment],
     memory_mib: u32,
+    pages: crate::hardware::PageSize,
+    numa: crate::hardware::GuestNuma,
 ) -> Result<(), String> {
     validate_selections(selected)?;
     gpu::validate(gpus, selected.len())?;
     lock_budget(memory_mib, selected.len() + gpus.len())?;
     #[cfg(target_os = "linux")]
-    return linux::authorize(selected, gpus, memory_mib);
+    return linux::authorize(selected, gpus, memory_mib, pages, numa);
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (memory_mib, gpus);
-        Err("Accelerator passthrough requires Linux.".into())
+        let _ = (memory_mib, gpus, pages, numa);
+        Err("Managed accelerators and hugepages require Linux.".into())
     }
 }
 

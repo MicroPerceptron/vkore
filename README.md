@@ -112,7 +112,9 @@ byte at a time, which QEMU's chipset does not decode, so it never hears the
 button; there a stop ends QEMU after `--grace` seconds (10 by default) and the
 volume keeps its last committed state. Kore's main fixes that at `7074bda2`.
 Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
-(or `--state`).
+(or `--state`). Relative state paths such as `--state ../vkore-state` resolve
+from the launch directory; vKore creates the directory if needed and uses its
+absolute path for subsequent operations.
 
 ## The desktop
 

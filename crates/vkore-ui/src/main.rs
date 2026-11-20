@@ -706,6 +706,18 @@ fn main() {
             eprintln!("vkore-ui: no state directory: set $HOME or pass --state");
             std::process::exit(2);
         });
+    // Resolve/create state before probing storage or loading preferences.
+    // Discovery and launch helpers must share one absolute root, even when
+    // the requested relative directory does not exist yet.
+    let state_root = vkored::State::open(&state_root)
+        .map(|state| state.root().to_owned())
+        .unwrap_or_else(|error| {
+            eprintln!(
+                "vkore-ui: state directory {}: {error}",
+                state_root.display()
+            );
+            std::process::exit(2);
+        });
     // Before any renderer exists: registering the faces also confines shaping
     // to the faces Axiom can draw.
     if let Err(error) = fonts::register() {

@@ -13,6 +13,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
 
 ### Fixed
+- Resolve relative state directories before storage discovery and keep absolute paths for workers and privileged launches, including new directories and `..` components.
 - Configure the native TLS connector explicitly for catalog and image HTTPS requests.
 - Compact host memory before hugepage preparation and keep full guest RAM when hugepages cover only part of it. Fall back to mixed transparent/base pages without changing NUMA layout, and report realized backing in boot activity.
 - Keep a guest line longer than the console grid as one line, in the screen and in scrollback, so the console pane reflows it instead of breaking it mid-word at column 120.

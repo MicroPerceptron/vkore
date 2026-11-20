@@ -348,6 +348,10 @@ struct App {
     redraw: bool,
     redraw_requested: bool,
     last_frame: Option<Instant>,
+    /// The window asked to close while machines ran: they are stopping (each
+    /// within its own grace period), and the app exits once the last one has
+    /// finished, so a guest powers off rather than losing its QEMU.
+    closing: bool,
 }
 
 impl App {
@@ -521,9 +525,12 @@ impl ApplicationHandler<UserEvent> for App {
         window.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         self.model.user_event(event);
         self.redraw = true;
+        if self.closing && self.model.machines.running.is_empty() {
+            event_loop.exit();
+        }
     }
 
     fn window_event(
@@ -554,10 +561,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::CloseRequested => {
-                // Machines started here stop with the window.
+                // Machines started here stop with the window: pressing their
+                // power buttons and leaving now would end QEMU under a guest
+                // still shutting down. Wait for them to finish; a second
+                // close leaves at once.
                 self.model.settings.stop();
                 self.model.machines.stop_all();
-                event_loop.exit();
+                if self.closing || self.model.machines.running.is_empty() {
+                    event_loop.exit();
+                } else {
+                    self.closing = true;
+                    let count = self.model.machines.running.len();
+                    self.model.machines.status = format!(
+                        "Stopping {count} machine{} before closing; close again to leave now",
+                        if count == 1 { "" } else { "s" }
+                    );
+                    self.redraw = true;
+                    window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = mouse::Cursor::Available(conversion::cursor_position(
@@ -748,6 +769,7 @@ fn main() {
         redraw: true,
         redraw_requested: false,
         last_frame: None,
+        closing: false,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");

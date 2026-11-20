@@ -349,6 +349,11 @@ impl MachineSpec {
         ];
         crate::hardware::validate_binding(&self.resources, self.cpus)
             .map_err(ProfileError::Unsupported)?;
+        if !self.resources.passthrough.is_empty()
+            && (!cfg!(target_os = "linux") || self.accel != Accel::Kvm || !qemu.vfio_iommufd)
+        {
+            return Err(ProfileError::Unsupported("NPU passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support.".into()));
+        }
         let page_mib = self.resources.pages.mib();
         if page_mib != 0
             && (!cfg!(target_os = "linux") || !self.memory_mib.is_multiple_of(2 * page_mib))
@@ -483,6 +488,7 @@ impl MachineSpec {
             "-cdrom".into(),
             iso.into(),
         ]);
+        arguments.extend(crate::passthrough::arguments(&self.resources.passthrough));
         Ok(arguments)
     }
 }
@@ -493,6 +499,7 @@ mod tests {
 
     fn caps() -> QemuCaps {
         QemuCaps {
+            vfio_iommufd: false,
             version: (8, 2, 2),
             vtd_scalable_property: "x-scalable-mode",
             vtd_sva: false,
@@ -527,6 +534,33 @@ mod tests {
 
     fn joined(arguments: &[String]) -> String {
         arguments.join(" ")
+    }
+
+    #[test]
+    fn passthrough_never_silently_falls_back_to_tcg_or_legacy_vfio() {
+        let mut machine = spec();
+        machine
+            .resources
+            .passthrough
+            .push(crate::passthrough::Selection {
+                address: "0000:00:0b.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0x643e,
+            });
+        let mut capabilities = caps();
+        assert!(machine.arguments(&capabilities).is_err());
+        machine.accel = Accel::Kvm;
+        assert!(machine.arguments(&capabilities).is_err());
+        capabilities.vfio_iommufd = true;
+        if cfg!(target_os = "linux") {
+            let args = machine.arguments(&capabilities).unwrap();
+            assert!(args.iter().any(|s| s == "iommufd,id=vkore_iommu"));
+            assert!(args.iter().any(
+                |s| s == "vfio-pci,host=0000:00:0b.0,id=npu0,bus=npu_port0,iommufd=vkore_iommu"
+            ));
+        } else {
+            assert!(machine.arguments(&capabilities).is_err());
+        }
     }
 
     #[test]

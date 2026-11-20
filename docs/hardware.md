@@ -89,7 +89,8 @@ the draft intact if validation or authentication fails; controls are frozen whil
 a request is pending. Saved machines hold their session lease through this step,
 so they cannot be launched or edited concurrently.
 
-Memory locking is currently the only setting requiring elevation. The shared
+For configurations without NPU passthrough, memory locking is the only setting
+requiring elevation. The shared
 completion/launch authorization path raises the current vKore process's
 memory-lock limit to guest RAM plus a bounded 1 GiB emulator allowance. No popup
 appears when pinning is off or the process already has enough permission. It
@@ -164,12 +165,12 @@ allocation without memory pressure. See
 
 ## Neural processor discovery
 
-Hardware setup includes a read-only **Neural processors** section. It reports
-host devices and three separate routes: dedicated assignment, SR-IOV virtual
-functions, and shared execution through virtio-accel. No route is selectable in
-this release: device assignment and the host/guest virtio-accel connection are
-not implemented. Discovery never detaches a driver, provisions a VF, opens a
-model, requests administrator access or changes a machine's saved settings.
+Hardware setup includes a **Neural processors** section. It reports host devices
+and three separate routes: dedicated assignment, SR-IOV virtual functions, and
+shared execution through virtio-accel. Linux Intel/AMD physical NPUs now have a
+**Full passthrough** switch. SR-IOV provisioning and shared guest connections
+remain unavailable. Discovery itself stays read-only; editing the switch never
+changes a host driver.
 
 `vkore-devices` is an independently portable inventory crate; `vkore-vm` includes
 its snapshot in `HostResources.npus`, and `vkored::hardware::npu_routes` owns the
@@ -236,3 +237,70 @@ CI builds/tests this crate independently on Linux, Windows and macOS and runs
 its read-only inventory example. A CI runner with no NPU validates empty-device
 handling, not physical NPU access. Native-device, guest-inference and performance
 validation remain separate evidence.
+
+## Linux whole-NPU passthrough
+
+Enable **Full passthrough** on a device card, then finish with **Done** or
+**Save hardware**. Turning it off removes the device from subsequent launches.
+The configuration records PCI address, vendor ID and device ID; launch refuses
+missing or changed identities. Missing saved selections remain visible and can
+be disabled, including on another operating system. Existing configurations
+have no assignments by default. At most four NPUs may be selected.
+
+This first implementation admits Intel/AMD physical NPUs in a single-device
+IOMMU group, with no enabled VFs, and a supported native driver (`ivpu`,
+`intel_vpu`, `amdxdna`), no driver, or `vfio-pci`. Shared groups and virtual
+functions are refused. The host must report PCI function-level reset (`flr` or
+`af_flr`); vKore temporarily restricts reset to that method, never bus reset.
+Close host NPU workloads before setup/launch. The privileged check scans open
+native accelerator and VFIO device handles and refuses a busy device, but this
+snapshot cannot prevent another host application from opening it afterwards.
+
+Launch requires Linux KVM, a kernel with IOMMUFD and VFIO cdev support, and QEMU
+with the `vfio-pci` `fd`/`iommufd` properties and the `iommufd` object's `fd`
+property. These are probed instead of assumed from a version number. This
+avoids the legacy VFIO container's incompatibility with Intel first-stage
+virtual-IOMMU translation. The packaged Linux QEMU smoke gate checks these
+properties. No fallback disables the guest IOMMU, isolation or interrupt safety.
+Guest driver and nested-IOMMU compatibility still need validation on each
+NPU/image combination. See [QEMU's IOMMUFD FD passing](https://www.qemu.org/docs/master/devel/vfio-iommufd.html)
+and [Linux VFIO](https://www.kernel.org/doc/html/latest/driver-api/vfio.html).
+
+**Done/Save hardware** batches the device checks and locked-memory budget in
+one polkit request. It may load `vfio-pci` and `iommufd`, but does not detach a
+device. With no passthrough selected, the existing memory-only authorization
+path is unchanged. Starting a machine obtains fresh authority and may ask again
+according to the host's polkit policy. No passwords are collected by vKore.
+VFIO pins guest RAM for DMA even with the general memory-pinning option off;
+admission checks available RAM and the guardian sets its own bounded memlock
+budget (guest RAM plus 1 GiB), inherited by QEMU.
+
+The CLI and desktop have an early, private helper entry point, re-executed with
+`pkexec --disable-internal-agent`. It independently checks the polkit caller,
+selected identities, isolation, reset and driver state, and takes root-owned
+per-device leases under `/run/vkore-vfio`. A bounded request describes the
+unprivileged QEMU launch. Only sysfs operations, module loading, resource limits
+and opening the selected device handles happen with privilege. QEMU drops to
+the caller's UID/GID/groups, with `no_new_privs`, before exec. It receives only
+the selected VFIO cdev FDs and an IOMMUFD; global device ownership and ACLs are
+unchanged. No shell command or arbitrary program is executed as root.
+
+The helper owns QEMU's lifetime. After guest exit it closes/reaps QEMU before
+restoring the original driver, override and reset method. Failed preparation
+rolls back partial changes. Parent-pipe closure (including desktop crashes),
+INT, TERM and HUP stop/reap the child before restoration. A failed restoration
+is reported in the QEMU log and as a guardian error; it is not reported as a
+successful handoff. Forcibly killing the privileged guardian itself with
+SIGKILL cannot run cleanup and may leave a device VFIO-bound; this release has
+no persistent recovery journal. Reboot restores nonpersistent sysfs overrides.
+
+The implementation reuses the existing `rustix` and `ctrlc` dependencies.
+`rust-vmm/vfio-ioctls` was evaluated, but QEMU owns VFIO/IOMMUFD ioctls and DMA
+mapping here. Adding a second VFIO device manager would compete with QEMU;
+the host helper needs only sysfs lifecycle operations and FD passing.
+
+Tests cover admission, saved identity, stale selection removal, QEMU arguments,
+partial-failure rollback, restoration retries, and guest termination on parent
+disconnect. Those tests and the ordinary Kore boot gate do not establish a
+physical NPU passthrough or inference result. That acceptance still requires a
+Linux host, a compatible image, and observation of host-driver restoration.

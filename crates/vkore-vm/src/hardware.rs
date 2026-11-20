@@ -36,6 +36,9 @@ impl PageSize {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
+    /// Explicit whole-device assignments; identity is checked again before use.
+    #[serde(default)]
+    pub passthrough: Vec<crate::passthrough::Selection>,
     #[serde(default)]
     pub pin_cpus: bool,
     /// One distinct host logical CPU per vCPU, in guest CPU-index order.
@@ -200,6 +203,7 @@ impl HostResources {
 }
 
 pub fn validate_binding(resources: &Resources, cpus: u16) -> Result<(), String> {
+    crate::passthrough::validate_selections(&resources.passthrough)?;
     if resources.host_cpus.len() > 128 {
         return Err("at most 128 host CPU selections".into());
     }

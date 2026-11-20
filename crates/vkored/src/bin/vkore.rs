@@ -274,6 +274,9 @@ enum VolumeCommand {
 type Failure = String;
 
 fn main() -> ExitCode {
+    if let Some(code) = vkore_vm::passthrough::helper_entry() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     let cli = Cli::parse();
     match run_cli(cli) {
         Ok(code) => code,

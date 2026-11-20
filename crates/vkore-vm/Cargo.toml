@@ -24,6 +24,10 @@ sha2 = "0.10.9"
 # MIT; query CPU/memory/disks only, no process inventory or background sampling.
 sysinfo = { version = "=0.40.4", default-features = false, features = ["system", "disk"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Reuse the CLI's signal handler so the guardian also cleans up on TERM/HUP.
+ctrlc = { version = "3.5.2", features = ["termination"] }
+
 [dev-dependencies]
 tempfile = "3.23.0"
 

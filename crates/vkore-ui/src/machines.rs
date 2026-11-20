@@ -593,7 +593,12 @@ fn run_machine(
     send(Update::Line(
         "Checking hardware settings and permissions…".into(),
     ));
-    vkored::hardware::authorize_configuration(&config, &host)?;
+    if config.resources.passthrough.is_empty() {
+        vkored::hardware::authorize_configuration(&config, &host)?;
+    } else {
+        // The device guardian batches launch permissions and locked DMA memory.
+        vkored::hardware::validate_host(&config, &host)?;
+    }
     let mut sink = |event: &Event| match event {
         Event::Stage { stage, .. } => {
             send(Update::Stage(*stage));

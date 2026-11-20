@@ -22,6 +22,6 @@ x11 = []
 wayland = []
 
 [dependencies]
-axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "ac9d9a4045bc4b41d40b2c1cd0fd1e09cb494cf2" }
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false }
 iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false }

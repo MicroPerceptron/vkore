@@ -11,6 +11,10 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Linux whole-NPU passthrough controls with persisted PCI identity, exclusive IOMMU-group admission, and QEMU VFIO/IOMMUFD launch support.
 - A polkit-authorized device guardian that passes opened device handles to unprivileged QEMU, checks function-level reset, and restores host drivers after guest exit or failed launch.
 
+### Fixed
+- Negotiate Intel passthrough address width using paused, unprivileged QEMU probes with the selected devices; disable incompatible snoop control while retaining DMA translation and interrupt remapping.
+- Isolate the device guardian from terminal Ctrl-C so the CLI owns graceful shutdown; explicit guardian signals and parent disconnect still restore host drivers.
+
 ### Breaking
 - `Resources` adds passthrough selections and `QemuCaps` adds probed VFIO/IOMMUFD support. Older saved configurations still default to no passthrough.
 

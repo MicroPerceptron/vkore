@@ -313,15 +313,20 @@ impl MachineSpec {
                 ),
             ),
         };
+        // Managed VFIO uses second-level translation. PASID/first-level and
+        // snoop control are not supported by this assignment profile. The
+        // guardian realizes 48/39-bit candidates before starting guest CPUs.
+        let assigned = !self.resources.passthrough.is_empty();
         let iommu = match self.vendor {
             Vendor::Intel => format!(
-                "intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,{}=on,{}snoop-control=on,dma-translation=on,aw-bits=48",
+                "intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,{}=on,{}snoop-control={},dma-translation=on,aw-bits=48",
                 qemu.vtd_scalable_property,
-                if qemu.vtd_sva {
+                if qemu.vtd_sva && !assigned {
                     "x-pasid-mode=on,x-flts=on,"
                 } else {
                     ""
-                }
+                },
+                if assigned { "off" } else { "on" }
             ),
             Vendor::Amd if qemu.amd_dma_remap => {
                 "amd-iommu,intremap=on,device-iotlb=on,xtsup=on,dma-remap=on".to_owned()
@@ -552,8 +557,13 @@ mod tests {
         machine.accel = Accel::Kvm;
         assert!(machine.arguments(&capabilities).is_err());
         capabilities.vfio_iommufd = true;
+        capabilities.vtd_sva = true;
         if cfg!(target_os = "linux") {
             let args = machine.arguments(&capabilities).unwrap();
+            let iommu = args.iter().find(|a| a.starts_with("intel-iommu,")).unwrap();
+            assert!(iommu.contains("snoop-control=off"));
+            assert!(iommu.contains("intremap=on") && iommu.contains("dma-translation=on"));
+            assert!(!iommu.contains("x-flts=on") && !iommu.contains("x-pasid-mode=on"));
             assert!(args.iter().any(|s| s == "iommufd,id=vkore_iommu"));
             assert!(args.iter().any(
                 |s| s == "vfio-pci,host=0000:00:0b.0,id=npu0,bus=npu_port0,iommufd=vkore_iommu"

@@ -124,6 +124,13 @@ impl Qmp {
                 Err(error) => return Err(error.into()),
             }
         };
+        Self::from_stream(stream, deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Negotiate over an already connected private socket (also used for the
+    /// guardian's paused QEMU probes through a socketpair wired to stdio).
+    pub(crate) fn from_stream(stream: UnixStream, patience: Duration) -> Result<Self, QmpError> {
+        let deadline = Instant::now() + patience;
         stream.set_write_timeout(Some(REPLY_WAIT))?;
         let writer = stream.try_clone()?;
         let mut qmp = Self {

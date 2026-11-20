@@ -64,6 +64,9 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
         .arg("--disable-internal-agent")
         .arg(std::env::current_exe().map_err(|e| e.to_string())?)
         .arg("--vkore-device-helper")
+        // Terminal Ctrl-C belongs to the CLI; it requests graceful QMP stop.
+        // Parent-pipe EOF and explicit signals still clean up the guardian.
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(errors.map_or(Stdio::null(), Stdio::from));
@@ -605,9 +608,11 @@ impl Bound {
             _lease: lease,
         })
     }
-    fn bind(&mut self) -> Result<File, String> {
+    fn bind(&mut self) -> Result<(), String> {
         let (_, method) = reset_method(&self.path)?;
-        self.handoff.bind(method)?;
+        self.handoff.bind(method)
+    }
+    fn open(&self) -> Result<File, String> {
         let mut entries = fs::read_dir(self.path.join("vfio-dev")).map_err(|e| {
             format!("VFIO device interface is unavailable; this host needs VFIO cdev support: {e}")
         })?;
@@ -647,6 +652,61 @@ impl Drop for Bound {
         }
     }
 }
+fn qemu_command(
+    parent: u32,
+    qemu: &Path,
+    mut arguments: Vec<String>,
+    environment: &[(String, String)],
+    bound: &[Bound],
+    selected: &[Selection],
+) -> Result<Command, String> {
+    // Recheck identity immediately before every unprivileged child.
+    let caller = caller(parent)?;
+    let iommu = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/iommu")
+        .map_err(|e| e.to_string())?;
+    let mut fds = vec![iommu];
+    for selection in selected {
+        let device = bound
+            .iter()
+            .find(|b| b.address == selection.address)
+            .ok_or("Missing leased NPU.")?;
+        fds.push(device.open()?);
+    }
+    fd_arguments(
+        &mut arguments,
+        selected,
+        &fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
+    )?;
+    let mut command = Command::new(qemu);
+    command
+        .args(arguments)
+        .env_clear()
+        .envs(environment.iter().map(|(k, v)| (k, v)))
+        .current_dir("/")
+        .uid(caller.uid)
+        .gid(caller.gid)
+        .groups(&caller.groups)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::io::stderr()))
+        .stderr(Stdio::inherit());
+    // SAFETY: the child-only hook performs only prctl/fcntl syscalls; allocation
+    // and credentials are prepared before fork. Parent FDs remain CLOEXEC.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::thread::set_no_new_privs(true)?;
+            for fd in &fds {
+                fcntl_setfd(fd, FdFlags::empty())?;
+            }
+            Ok(())
+        });
+    }
+    Ok(command)
+}
+
 fn cancelled() -> Result<bool, String> {
     if STOP.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(true);
@@ -682,7 +742,7 @@ fn serve() -> Result<i32, String> {
         }
     }
     let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let caller = caller(request.parent)?;
+    caller(request.parent)?;
     validate_selections(&request.selected)?;
     if request.selected.is_empty() {
         return Err("No NPU was selected.".into());
@@ -726,56 +786,46 @@ fn serve() -> Result<i32, String> {
     if cancelled()? {
         return Err("NPU launch was cancelled.".into());
     }
-    let iommu = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/iommu")
-        .map_err(|e| e.to_string())?;
-    let mut fds = vec![iommu];
-    for selection in &request.selected {
-        let device = bound
-            .iter_mut()
-            .find(|b| b.address == selection.address)
-            .unwrap();
-        fds.push(device.bind()?);
+    let plan = super::iommu::IntelProbe::plan(&launch.arguments)?;
+    let memory = request
+        .memory_bytes
+        .ok_or("Missing DMA memory budget.")?
+        .checked_sub(1 << 30)
+        .ok_or("Invalid DMA memory budget.")?;
+    for device in &mut bound {
+        device.bind()?;
     }
-    // The generated argument layout is verified before any privileged FD is
-    // inherited. It remains safe if a caller substitutes its own executable:
-    // that executable receives only the explicitly authorized device handles,
-    // and runs as the caller, never as root.
-    fd_arguments(
-        &mut launch.arguments,
-        &request.selected,
-        &fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
-    )?;
+    if let Some(plan) = plan {
+        // The probe has no guest disk, writable firmware, or running vCPU.
+        // Reopen cdev/IOMMUFD handles for each attempt and for the real guest:
+        // retaining a parent's copy would keep a failed probe's binding alive.
+        let width = plan.choose(&mut launch.arguments, memory, |width| {
+            if cancelled()? { return Err("NPU launch was cancelled.".into()); }
+            eprintln!("vKore: probing assigned devices with Intel VT-d {width}-bit DMA translation (CPUs stopped).");
+            let arguments = plan.arguments(width, &request.selected);
+            let (stream, emulator) = std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
+            let mut probe = qemu_command(request.parent, &launch.qemu, arguments, &launch.environment, &bound, &request.selected)?;
+            probe.stdin(Stdio::from(std::os::fd::OwnedFd::from(emulator.try_clone().map_err(|e| e.to_string())?)))
+                .stdout(Stdio::from(std::os::fd::OwnedFd::from(emulator)));
+            let child = probe.spawn().map_err(|e| e.to_string())?;
+            drop(probe);
+            super::supervision::probe_paused(child, stream)
+        })?;
+        eprintln!(
+            "vKore: assigned Intel VT-d uses aw-bits={width}, snoop-control=off; DMA translation and interrupt remapping remain enabled."
+        );
+    }
     if cancelled()? {
         return Err("NPU launch was cancelled.".into());
     }
-    let mut command = Command::new(&launch.qemu);
-    command
-        .args(&launch.arguments)
-        .env_clear()
-        .envs(launch.environment)
-        .current_dir("/")
-        .uid(caller.uid)
-        .gid(caller.gid)
-        .groups(&caller.groups)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(std::io::stderr()))
-        .stderr(Stdio::inherit());
-    // SAFETY: this child-only hook performs only prctl and fcntl syscalls.
-    // All allocation and credential setup is prepared before fork. The parent's
-    // FDs retain CLOEXEC, so concurrent parent launches cannot inherit them.
-    unsafe {
-        command.pre_exec(move || {
-            rustix::thread::set_no_new_privs(true)?;
-            for fd in &fds {
-                fcntl_setfd(fd, FdFlags::empty())?;
-            }
-            Ok(())
-        });
-    }
+    let mut command = qemu_command(
+        request.parent,
+        &launch.qemu,
+        launch.arguments,
+        &launch.environment,
+        &bound,
+        &request.selected,
+    )?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot launch unprivileged QEMU: {e}"))?;

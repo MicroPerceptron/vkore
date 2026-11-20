@@ -163,7 +163,8 @@ draws the same on every host whatever fonts the host has installed.
   bitmaps, but the desktop does not decode a screenshot yet. **Open** shows
   them in the host's viewer.
 - The desktop needs Axiom, which is not public yet.
-- Only x86_64 Linux has been run (under Xvfb, with QEMU's TCG).
+- Terminal resize updates the host grid; the serial connection does not yet
+  notify guest applications of geometry changes.
 
 ## Guest terminal
 
@@ -181,9 +182,18 @@ disconnection. Clipboard reads that finish after focus changes are discarded.
 
 Click elsewhere, change pages, deactivate the window, or press Ctrl+Shift+Esc to
 release the keyboard. Stopped sessions show a read-only screen. The serial
-terminal has a fixed 120-column, 24-row viewport plus bounded scrollback; both
-axes can scroll in a smaller pane. Window resizing does not invent a guest
-terminal-size protocol. Cursor positioning, colors and alternate screens use
+grid adapts to the pane width, window height and text-size preference, using
+the bundled mono face's actual cell advance. The terminal occupies 60% of the
+page height, with bounded scrollback and a 160–1600 logical-pixel height. The
+grid is bounded to 512 columns and 256 rows. Light, dark and system appearance
+apply to the terminal surface, cursor and ANSI palette too; explicit RGB colors
+from the guest remain unchanged.
+
+Resizing preserves terminal modes and uses the VT parser's screen-resize
+semantics (shrinking can crop existing columns; new output wraps at the new
+width). It does not inject a guest terminal-size protocol into COM2: programs
+that maintain their own geometry are not yet notified. Stopped screens retain
+their last grid dimensions. Cursor positioning, colors and alternate screens use
 the existing VT parser. Guest control strings cannot change the host clipboard
 or window. All visible guest text still uses the bundled mono face and the
 usual control/unsupported-glyph escaping.

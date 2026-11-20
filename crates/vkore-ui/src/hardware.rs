@@ -3,7 +3,7 @@
 use crate::typography::Typography;
 use crate::{Message, UiElement, machines::MachineMessage, theme, widgets};
 use iced_core::{Length, alignment};
-use iced_widget::{button, column, container, row, slider, space, toggler};
+use iced_widget::{button, column, container, row, slider, space, text_input, toggler};
 use vkore_vm::hardware::{HostResources, PageSize, Resources};
 use vkored::{MachineConfig, hardware::Requirements};
 
@@ -12,6 +12,7 @@ pub struct Draft {
     pub cpus: u16,
     pub memory_mib: u32,
     pub disk_mib: u64,
+    disk_gib: String,
     pub resources: Resources,
     pub minimum: Requirements,
     pub storage_fixed: bool,
@@ -24,6 +25,7 @@ pub enum Change {
     Cpus(u16),
     Memory(u32),
     Disk(u32),
+    DiskText(String),
     PinCpus,
     PinMemory,
     Reserve,
@@ -48,6 +50,7 @@ impl Draft {
             cpus,
             memory_mib,
             disk_mib,
+            disk_gib: disk_text(disk_mib),
             resources,
             minimum,
             storage_fixed: false,
@@ -60,6 +63,7 @@ impl Draft {
             cpus: c.cpus,
             memory_mib: c.memory_mib,
             disk_mib: c.disk_mib,
+            disk_gib: disk_text(c.disk_mib),
             resources: c.resources.clone(),
             minimum: c.requirements,
             storage_fixed,
@@ -109,7 +113,16 @@ impl Draft {
                 }
             }
             Change::Memory(n) => self.memory_mib = n,
-            Change::Disk(n) if !self.storage_fixed => self.disk_mib = u64::from(n),
+            Change::Disk(n) if !self.storage_fixed => {
+                self.disk_mib = u64::from(n);
+                self.disk_gib = disk_text(self.disk_mib);
+            }
+            Change::DiskText(value) if !self.storage_fixed => {
+                if value.len() <= 16 && value.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+                    self.disk_mib = parse_disk(&value).unwrap_or(0);
+                    self.disk_gib = value;
+                }
+            }
             Change::PinCpus if host.cpu_pinning => {
                 self.resources.pin_cpus = !self.resources.pin_cpus;
                 if self.resources.pin_cpus {
@@ -152,6 +165,7 @@ impl Draft {
                 let mut fresh = Self::new(Some(host), self.minimum);
                 if self.storage_fixed {
                     fresh.disk_mib = self.disk_mib;
+                    fresh.disk_gib = self.disk_gib.clone();
                     fresh.resources.reserve_storage = self.resources.reserve_storage;
                     fresh.storage_fixed = true;
                 }
@@ -160,6 +174,13 @@ impl Draft {
             _ => {}
         }
     }
+}
+fn disk_text(mib: u64) -> String {
+    (mib as f64 / 1024.).to_string()
+}
+fn parse_disk(value: &str) -> Option<u64> {
+    let gib: f64 = value.parse().ok()?;
+    (gib.is_finite() && gib > 0. && gib <= 4096.).then(|| (gib * 1024.).ceil() as u64)
 }
 // Placement edits only the draft. Host admission and the launch mapping remain
 // owned by vkored. Keep physical-core spreading from the shared host snapshot.
@@ -238,9 +259,6 @@ pub fn view<'a>(
     let max_cpu = (host.logical_cpus.min(128) as u16).max(draft.minimum.cpus);
     let max_ram = (host.memory_mib.min(1 << 20) as u32).max(draft.minimum.memory_mib);
     let ram_step = (draft.resources.pages.mib() * 2).max(2);
-    let max_disk = host
-        .storage_available_mib
-        .clamp(draft.minimum.disk_mib, 1 << 22) as u32;
     let mut cpu = column![
         heading(ty, "Processors", format!("{} guest CPUs", draft.cpus)),
         ty.data(&host.cpu_name, theme::TEXT_SECONDARY),
@@ -565,6 +583,52 @@ pub fn view<'a>(
             theme::TEXT_MUTED,
         ));
     }
+    container(
+        column![
+            row![
+                action(
+                    ty,
+                    "Use recommended settings",
+                    (!busy).then(|| send(Change::Defaults)),
+                    false
+                ),
+                action(
+                    ty,
+                    "Refresh host",
+                    (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
+                    false
+                )
+            ]
+            .spacing(8)
+            .wrap(),
+            section(cpu),
+            section(memory),
+            section(npu_inventory(
+                &host.npus,
+                &draft.resources.passthrough,
+                editing,
+                busy,
+                ty
+            )),
+            storage_view(draft, host, editing, busy, ty),
+        ]
+        .spacing(16),
+    )
+    .padding(iced_core::Padding::default().right(14))
+    .width(Length::Fill)
+    .into()
+}
+
+pub(crate) fn storage_view<'a>(
+    draft: &'a Draft,
+    host: &'a HostResources,
+    editing: bool,
+    busy: bool,
+    ty: Typography,
+) -> UiElement<'a> {
+    let send = move |c| Message::Machine(MachineMessage::Hardware(editing, c));
+    let max_disk = vkored::hardware::disk_limit(host, draft.resources.reserve_storage)
+        .max(draft.minimum.disk_mib) as u32;
     let mut storage = column![heading(
         ty,
         "Storage",
@@ -578,23 +642,58 @@ pub fn view<'a>(
             theme::TEXT_MUTED,
         ));
     } else {
-        storage = storage
-            .push(
-                slider(
-                    draft.minimum.disk_mib as u32..=max_disk,
-                    draft.disk_mib as u32,
-                    move |n| send(Change::Disk(n)),
-                )
-                .step(1024u32)
-                .style(widgets::resource_slider),
-            )
-            .push(switch(
+        let minimum = draft.minimum.disk_mib as u32;
+        // A logarithmic scale keeps small allocations usable on multi-TiB hosts.
+        let low = (f64::from(minimum) / 1024.).log2();
+        let high = (f64::from(max_disk) / 1024.).log2();
+        let mut presets = row![].spacing(6);
+        for gib in [16, 32, 64, 128, 256, 512, 1024] {
+            let mib = gib * 1024;
+            presets = presets.push(action(
                 ty,
-                "Reserve disk space",
-                draft.resources.reserve_storage,
-                !busy,
-                send(Change::Reserve),
+                &format!("{gib} GiB"),
+                (!busy && mib >= minimum && mib <= max_disk).then(|| send(Change::Disk(mib))),
+                draft.disk_mib == u64::from(mib),
             ));
+        }
+        storage = storage
+            .push(row![
+                ty.body("Capacity", 13., theme::TEXT),
+                text_input("32", &draft.disk_gib)
+                    .on_input_maybe((!busy).then_some(move |s| send(Change::DiskText(s))))
+                    .font(ty.font()).size(ty.size(14.)).padding([7, 10])
+                    .width(110).style(widgets::field),
+                ty.body("GiB", 13., theme::TEXT_MUTED),
+            ].spacing(10).align_y(alignment::Vertical::Center))
+            .push(slider(low..=high, (draft.disk_mib.max(1) as f64 / 1024.).log2().clamp(low, high),
+                move |n| send(Change::Disk(((n.exp2().round() as u32) * 1024).clamp(minimum, max_disk))))
+                .step(0.01).style(widgets::resource_slider))
+            .push(row![
+                ty.body(format!("Minimum {:.1} GiB", f64::from(minimum) / 1024.), 12., theme::TEXT_MUTED),
+                space::horizontal(),
+                ty.body(format!("Up to {:.1} GiB", f64::from(max_disk) / 1024.), 12., theme::TEXT_MUTED),
+            ])
+            .push(presets.wrap())
+            .push(ty.body("Allow room for model weights and working files. Size can be changed until first launch.", 12., theme::TEXT_MUTED))
+            .push(switch(ty, "Reserve disk space", draft.resources.reserve_storage, !busy, send(Change::Reserve)));
+        if draft.disk_mib < draft.minimum.disk_mib
+            || draft.disk_mib > vkored::hardware::MAX_DISK_MIB
+        {
+            storage = storage.push(ty.body(
+                format!(
+                    "Enter a capacity from {:.1} to 4096 GiB.",
+                    draft.minimum.disk_mib as f64 / 1024.
+                ),
+                12.,
+                theme::ERROR,
+            ));
+        } else if draft.disk_mib > host.storage_available_mib {
+            storage = storage.push(ty.body(if draft.resources.reserve_storage {
+                "Not enough free space to reserve this disk. Reduce its size, free space, or turn off reservation."
+            } else {
+                "This sparse disk can grow beyond currently free space. Free more space before filling it; guest writes can fail if the host runs out."
+            }, 12., theme::WARNING));
+        }
     }
     storage = storage
         .push(ty.data(
@@ -605,7 +704,11 @@ pub fn view<'a>(
             theme::TEXT_MUTED,
         ))
         .push(ty.body(
-            "Reserves space at first launch and requests contiguous placement where supported.",
+            if draft.resources.reserve_storage {
+                "Reserves space at first launch and requests contiguous placement where supported."
+            } else {
+                "Sparse allocation uses space as data is written; capacity is not reserved."
+            },
             12.,
             theme::TEXT_MUTED,
         ))
@@ -639,40 +742,7 @@ pub fn view<'a>(
             ));
         }
     }
-    container(
-        column![
-            row![
-                action(
-                    ty,
-                    "Use recommended settings",
-                    (!busy).then(|| send(Change::Defaults)),
-                    false
-                ),
-                action(
-                    ty,
-                    "Refresh host",
-                    (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
-                    false
-                )
-            ]
-            .spacing(8)
-            .wrap(),
-            section(cpu),
-            section(memory),
-            section(npu_inventory(
-                &host.npus,
-                &draft.resources.passthrough,
-                editing,
-                busy,
-                ty
-            )),
-            section(storage),
-        ]
-        .spacing(16),
-    )
-    .padding(iced_core::Padding::default().right(14))
-    .width(Length::Fill)
-    .into()
+    section(storage)
 }
 
 pub(crate) fn npu_inventory<'a>(
@@ -841,6 +911,42 @@ mod tests {
             })
             .collect();
         host
+    }
+    #[test]
+    fn disk_controls_support_model_sized_and_sparse_allocations() {
+        let mut host = host();
+        host.storage_available_mib = 8 * 1024;
+        let mut draft = Draft::new(Some(&host), Requirements::default());
+        assert_eq!(draft.disk_mib, 8 * 1024);
+        draft.change(Change::Reserve, &host);
+        assert_eq!(vkored::hardware::disk_limit(&host, false), 4 * 1024 * 1024);
+        draft.change(Change::Disk(128 * 1024), &host);
+        assert_eq!(draft.disk_gib, "128");
+        draft.change(Change::DiskText("256.5".into()), &host);
+        assert_eq!(draft.disk_mib, 256 * 1024 + 512);
+        draft.change(Change::Reserve, &host);
+        assert_eq!(draft.disk_mib, 256 * 1024 + 512); // Never silently shrink.
+        draft.change(Change::DiskText("".into()), &host);
+        let mut config = MachineConfig::new("draft", "/image.iso");
+        draft.apply(&mut config);
+        assert!(vkored::hardware::validate(&config).is_err());
+        draft.change(Change::DiskText("4097".into()), &host);
+        assert_eq!(draft.disk_mib, 0);
+        draft.change(Change::DiskText("4096".into()), &host);
+        assert_eq!(draft.disk_mib, 1 << 22);
+        draft.storage_fixed = true;
+        draft.change(Change::Disk(32 * 1024), &host);
+        draft.change(Change::DiskText("64".into()), &host);
+        assert_eq!(draft.disk_mib, 1 << 22);
+    }
+    #[test]
+    fn disk_text_round_trips_exact_mib_and_rejects_invalid_numbers() {
+        for mib in [1024, 1537, 32768, 262145, 1 << 22] {
+            assert_eq!(parse_disk(&disk_text(mib)), Some(mib));
+        }
+        for value in ["", "0", "-1", "NaN", "inf", "2.3.4", "4096.01"] {
+            assert_eq!(parse_disk(value), None);
+        }
     }
     #[test]
     fn missing_saved_passthrough_can_be_disabled_and_cannot_be_reenabled() {

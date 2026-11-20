@@ -285,3 +285,17 @@ vKore is licensed under the [Mozilla Public License 2.0](LICENSE). See
 
 vKore uses one workspace release version. See [the changelog](CHANGELOG.md) and
 [versioning policy](docs/versioning.md) for SemVer rules and CI checks.
+
+### Linux authentication prompts
+
+For short vKore-specific hardware and memory authentication messages, install
+the polkit descriptions after building:
+
+```sh
+python3 tools/install-linux-policy.py --executable target/release/vkore-ui
+```
+
+Include `--executable target/release/vkore` too if you use the CLI. This one-time
+installation needs administrator approval. Reinstall if the executable moves;
+otherwise normal rebuilds keep using the policy. Without it, authorization still
+works with the system's generic command prompt. See [hardware setup](docs/hardware.md#linux-authentication-descriptions).

@@ -8,6 +8,18 @@ use std::{
 };
 use vkore_vm::hardware::{HostResources, PageSize, Resources};
 
+/// Maximum virtual disk capacity, shared by admission and the desktop.
+pub const MAX_DISK_MIB: u64 = 1 << 22;
+
+/// Reservation must fit the host; sparse disks may grow up to the format limit.
+pub fn disk_limit(host: &HostResources, reserve: bool) -> u64 {
+    if reserve {
+        host.storage_available_mib.min(MAX_DISK_MIB)
+    } else {
+        MAX_DISK_MIB
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requirements {
@@ -28,7 +40,7 @@ impl Requirements {
     pub fn validate(self) -> Result<(), String> {
         if !(2..=128).contains(&self.cpus)
             || !(2048..=1 << 20).contains(&self.memory_mib)
-            || !(1024..=1 << 22).contains(&self.disk_mib)
+            || !(1024..=MAX_DISK_MIB).contains(&self.disk_mib)
         {
             return Err("image requirements must be within 2–128 CPUs, 2 GiB–1 TiB RAM and 1 GiB–4 TiB storage".into());
         }
@@ -52,7 +64,9 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
     (
         cpus,
         memory,
-        minimum.disk_mib.max(4096),
+        minimum
+            .disk_mib
+            .max((32 * 1024).min(host.storage_available_mib / 1024 * 1024)),
         Resources {
             passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
@@ -78,7 +92,7 @@ pub fn validate(config: &MachineConfig) -> Result<(), String> {
             min.memory_mib
         ));
     }
-    if !(min.disk_mib..=1 << 22).contains(&config.disk_mib) {
+    if !(min.disk_mib..=MAX_DISK_MIB).contains(&config.disk_mib) {
         return Err(format!(
             "this image needs at least {} MiB storage (maximum 4 TiB)",
             min.disk_mib
@@ -232,30 +246,14 @@ pub fn authorize_memory(memory_mib: u32) -> Result<(), String> {
             )
             .map_err(|e| e.to_string());
         }
-        let mut child = std::process::Command::new("/usr/bin/pkexec")
-            .args(["--disable-internal-agent", "/usr/bin/prlimit", "--pid", &std::process::id().to_string(), &format!("--memlock={budget}:{budget}")])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().map_err(|_| "memory authorization requires polkit, a desktop authentication agent and /usr/bin/prlimit")?;
-        let started = std::time::Instant::now();
-        loop {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                if status.success()
-                    && getrlimit(Resource::Memlock)
-                        .current
-                        .is_none_or(|n| n >= budget)
-                {
-                    return Ok(());
-                }
-                return Err("memory authorization was cancelled or denied; retry or turn off memory pinning".into());
-            }
-            if started.elapsed() > std::time::Duration::from_secs(120) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(
-                    "memory authorization timed out; retry or turn off memory pinning".into(),
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        vkore_vm::passthrough::authorize_memory_limit(memory_mib)?;
+        if getrlimit(Resource::Memlock)
+            .current
+            .is_none_or(|n| n >= budget)
+        {
+            Ok(())
+        } else {
+            Err("Memory authorization did not provide the requested limit.".into())
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -405,6 +403,20 @@ mod tests {
         }
     }
     #[test]
+    fn storage_defaults_and_limits_match_reservation_policy() {
+        let mut h = host();
+        let min = Requirements::default();
+        assert_eq!(defaults(&h, min).2, 32 * 1024);
+        h.storage_available_mib = 7 * 1024 + 512;
+        assert_eq!(defaults(&h, min).2, 7 * 1024);
+        assert_eq!(disk_limit(&h, true), h.storage_available_mib);
+        assert_eq!(disk_limit(&h, false), MAX_DISK_MIB);
+        h.storage_available_mib = 512;
+        assert_eq!(defaults(&h, min).2, min.disk_mib); // Admission reports insufficient space.
+        h.storage_available_mib = u64::MAX;
+        assert_eq!(disk_limit(&h, true), MAX_DISK_MIB);
+    }
+    #[test]
     fn authorization_is_batched_after_validation_and_skips_unneeded_requests() {
         let mut h = host();
         let mut c = MachineConfig::new("demo", "/image.iso");
@@ -478,7 +490,7 @@ mod tests {
     fn recommendations_use_physical_cores_and_half_physical_ram() {
         let h = host();
         let (cpu, ram, disk, r) = defaults(&h, Requirements::default());
-        assert_eq!((cpu, ram, disk), (4, 16384, 4096));
+        assert_eq!((cpu, ram, disk), (4, 16384, 32768));
         assert_eq!(r.host_cpus, vec![0, 1, 2, 3]);
         assert!(r.pin_cpus && r.pin_memory && r.reserve_storage);
         assert_eq!(r.pages, PageSize::Huge2M);

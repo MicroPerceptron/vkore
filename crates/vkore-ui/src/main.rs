@@ -1070,6 +1070,58 @@ mod tests {
     }
 
     #[test]
+    fn storage_controls_render_model_sizes_at_compact_and_large_fonts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = vkore_vm::hardware::HostResources::probe(root.path()).unwrap();
+        host.storage_available_mib = 96 * 1024;
+        for sparse in [false, true] {
+            let mut draft = hardware::Draft::new(Some(&host), Default::default());
+            if sparse {
+                draft.change(hardware::Change::Reserve, &host);
+            }
+            draft.change(
+                hardware::Change::Disk(if sparse { 256 } else { 64 } * 1024),
+                &host,
+            );
+            for ty in [
+                Typography::default(),
+                Typography {
+                    text_size: typography::TextSize::ExtraLarge,
+                    preset: typography::FontPreset::Mono,
+                },
+            ] {
+                for (width, height) in [(900., 560.), (1280., 900.)] {
+                    for appearance in [Theme::Light, Theme::Dark] {
+                        let content = widgets::page_frame(
+                            widgets::scroll(hardware::storage_view(
+                                &draft, &host, false, false, ty,
+                            ))
+                            .height(Length::Fill),
+                        );
+                        let shell = container(row![sidebar(Page::Machines, 0, "", ty), content])
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                        let (_, refused) = draw_at_scale(
+                            shell.into(),
+                            Size::new(width, height),
+                            &appearance,
+                            1.,
+                            Some(match (sparse, ty == Typography::default()) {
+                                (false, true) => "storage-reserved",
+                                (true, true) => "storage-sparse",
+                                (false, false) => "storage-reserved-large",
+                                (true, false) => "storage-sparse-large",
+                            }),
+                        );
+                        assert!(refused.is_empty(), "{refused:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn npu_inventory_renders_devices_routes_and_failure_states() {
         use vkore_vm::devices::{DiscoveryStatus, Inventory, Npu, Pci, Platform, Source, Vendor};
         let device = Npu {

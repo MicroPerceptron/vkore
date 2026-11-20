@@ -30,6 +30,8 @@ jobs:
           sudo apt-get install -y pkg-config libssl-dev libxkbcommon-dev libwayland-dev libudev-dev
       - name: Install pinned Rust
         run: rustup toolchain install nightly-2026-07-13 --profile minimal --component clippy --component rustfmt
+      - name: Authentication policy tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_linux_policy.py'
       - name: Formatting
         run: cargo fmt --all -- --check
       # The public runner cannot fetch the desktop's private Axiom pin.

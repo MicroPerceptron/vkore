@@ -846,6 +846,12 @@ mod tests {
                 );
                 assert!(content.width <= 1440. && content.x >= frame.x + 23.);
                 assert!(content.x + content.width <= frame.x + frame.width - 23.);
+                if let Some(memory) = self.get("hardware-memory") {
+                    assert!(
+                        memory.x + memory.width <= content.x + content.width + 1.,
+                        "memory panel overflows: {memory:?}, page: {content:?}"
+                    );
+                }
                 if let (Some(list), Some(detail)) =
                     (self.get("machine-list"), self.get("machine-detail"))
                 {
@@ -1092,6 +1098,45 @@ mod tests {
                         assert!(refused.is_empty(), "{refused:?}");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn memory_controls_render_presets_and_precise_input() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = vkore_vm::hardware::HostResources::probe(root.path()).unwrap();
+        host.memory_mib = 128 * 1024;
+        host.available_memory_mib = 80 * 1024;
+        host.memory_nodes.clear();
+        let mut draft = hardware::Draft::new(Some(&host), Default::default());
+        draft.change(hardware::Change::MemoryText("12.5".into()), &host);
+        for (width, height) in [(900., 560.), (1280., 900.)] {
+            let ty = if width < 1000. {
+                Typography {
+                    text_size: typography::TextSize::ExtraLarge,
+                    preset: typography::FontPreset::Mono,
+                }
+            } else {
+                Typography::default()
+            };
+            for appearance in [Theme::Light, Theme::Dark] {
+                let content = widgets::page_frame(
+                    widgets::scroll(hardware::memory_view(&draft, &host, false, false, ty))
+                        .height(Length::Fill),
+                );
+                let shell = container(row![sidebar(Page::Machines, 0, "", ty), content])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                let (_, refused) = draw_at_scale(
+                    shell.into(),
+                    Size::new(width, height),
+                    &appearance,
+                    1.,
+                    Some("memory-capacity"),
+                );
+                assert!(refused.is_empty(), "{refused:?}");
             }
         }
     }

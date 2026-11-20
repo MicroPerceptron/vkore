@@ -11,6 +11,7 @@ use vkored::{MachineConfig, hardware::Requirements};
 pub struct Draft {
     pub cpus: u16,
     pub memory_mib: u32,
+    memory_gib: String,
     pub disk_mib: u64,
     disk_gib: String,
     pub resources: Resources,
@@ -26,6 +27,7 @@ pub enum Change {
     GuestNuma(GuestNuma),
     Gpu(vkore_vm::passthrough::gpu::Assignment, bool),
     Memory(u32),
+    MemoryText(String),
     Disk(u32),
     DiskText(String),
     PinCpus,
@@ -45,14 +47,15 @@ impl Draft {
             .unwrap_or((
                 minimum.cpus,
                 minimum.memory_mib,
-                minimum.disk_mib,
+                minimum.disk_mib.max(vkored::hardware::DEFAULT_DISK_MIB),
                 Resources::default(),
             ));
         Self {
             cpus,
             memory_mib,
+            memory_gib: size_text(u64::from(memory_mib)),
             disk_mib,
-            disk_gib: disk_text(disk_mib),
+            disk_gib: size_text(disk_mib),
             resources,
             minimum,
             storage_fixed: false,
@@ -64,8 +67,9 @@ impl Draft {
         Self {
             cpus: c.cpus,
             memory_mib: c.memory_mib,
+            memory_gib: size_text(u64::from(c.memory_mib)),
             disk_mib: c.disk_mib,
-            disk_gib: disk_text(c.disk_mib),
+            disk_gib: size_text(c.disk_mib),
             resources: c.resources.clone(),
             minimum: c.requirements,
             storage_fixed,
@@ -135,14 +139,24 @@ impl Draft {
                 self.resources.guest_numa = topology;
                 let step = topology.alignment(self.resources.pages);
                 self.memory_mib = self.memory_mib.div_ceil(step) * step;
+                self.memory_gib = size_text(u64::from(self.memory_mib));
             }
-            Change::Memory(n) => self.memory_mib = n,
+            Change::Memory(n) => {
+                self.memory_mib = n;
+                self.memory_gib = size_text(u64::from(n));
+            }
+            Change::MemoryText(value) => {
+                if size_input(&value) {
+                    self.memory_mib = parse_size(&value, 1 << 20).unwrap_or(0) as u32;
+                    self.memory_gib = value;
+                }
+            }
             Change::Disk(n) if !self.storage_fixed => {
                 self.disk_mib = u64::from(n);
-                self.disk_gib = disk_text(self.disk_mib);
+                self.disk_gib = size_text(self.disk_mib);
             }
             Change::DiskText(value) if !self.storage_fixed => {
-                if value.len() <= 16 && value.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+                if size_input(&value) {
                     self.disk_mib = parse_disk(&value).unwrap_or(0);
                     self.disk_gib = value;
                 }
@@ -165,6 +179,7 @@ impl Draft {
                     .memory_mib
                     .div_ceil(self.resources.guest_numa.alignment(page))
                     * self.resources.guest_numa.alignment(page);
+                self.memory_gib = size_text(u64::from(self.memory_mib));
             }
             Change::Core(id) if self.resources.pin_cpus && host.cpu_pinning => {
                 if let Some(index) = self.resources.host_cpus.iter().position(|c| *c == id) {
@@ -201,12 +216,35 @@ impl Draft {
         }
     }
 }
-fn disk_text(mib: u64) -> String {
+fn size_text(mib: u64) -> String {
     (mib as f64 / 1024.).to_string()
 }
-fn parse_disk(value: &str) -> Option<u64> {
+fn size_input(value: &str) -> bool {
+    value.len() <= 16 && value.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+fn parse_size(value: &str, maximum_mib: u64) -> Option<u64> {
     let gib: f64 = value.parse().ok()?;
-    (gib.is_finite() && gib > 0. && gib <= 4096.).then(|| (gib * 1024.).ceil() as u64)
+    (gib.is_finite() && gib > 0. && gib <= maximum_mib as f64 / 1024.)
+        .then(|| (gib * 1024.).ceil() as u64)
+}
+fn parse_disk(value: &str) -> Option<u64> {
+    parse_size(value, vkored::hardware::MAX_DISK_MIB)
+}
+/// Common capacities (powers of two and their halfway points), filtered by
+/// the current host and image limits. Inputs remain available between presets.
+fn size_presets(minimum: u64, maximum: u64, alignment: u64) -> Vec<u32> {
+    let maximum = maximum.min(vkored::hardware::MAX_DISK_MIB);
+    let mut sizes = Vec::new();
+    let mut base = 2 * 1024u64;
+    while base <= maximum {
+        for size in [base, base + base / 2] {
+            if size >= minimum && size <= maximum && size.is_multiple_of(alignment) {
+                sizes.push(size as u32);
+            }
+        }
+        base *= 2;
+    }
+    sizes
 }
 // Placement edits only the draft. Host admission and the launch mapping remain
 // owned by vkored. Keep physical-core spreading from the shared host snapshot.
@@ -283,8 +321,6 @@ pub fn view<'a>(
         return ty.data(host.as_ref().unwrap_err(), theme::ERROR).into();
     };
     let max_cpu = (host.logical_cpus.min(128) as u16).max(draft.minimum.cpus);
-    let max_ram = (host.memory_mib.min(1 << 20) as u32).max(draft.minimum.memory_mib);
-    let ram_step = draft.resources.guest_numa.alignment(draft.resources.pages);
     let mut cpu = column![
         heading(ty, "Processors", format!("{} guest CPUs", draft.cpus)),
         ty.data(&host.cpu_name, theme::TEXT_SECONDARY),
@@ -480,15 +516,89 @@ pub fn view<'a>(
     } else {
         cpu = cpu.push(ty.body("macOS manages core placement. You can adjust the CPU count; exact pinning is unavailable.", 12., theme::TEXT_MUTED));
     }
+    container(
+        column![
+            row![
+                action(
+                    ty,
+                    "Use recommended settings",
+                    (!busy).then(|| send(Change::Defaults)),
+                    false
+                ),
+                action(
+                    ty,
+                    "Refresh host",
+                    (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
+                    false
+                )
+            ]
+            .spacing(8)
+            .wrap(),
+            section(cpu),
+            memory_view(draft, host, editing, busy, ty),
+            section(npu_inventory(
+                &host.npus,
+                &draft.resources.passthrough,
+                editing,
+                busy,
+                ty
+            )),
+            section(gpu_inventory(draft, host, editing, busy, ty)),
+            storage_view(draft, host, editing, busy, ty),
+        ]
+        .spacing(16),
+    )
+    .padding(iced_core::Padding::default().right(14))
+    .width(Length::Fill)
+    .into()
+}
+
+pub(crate) fn memory_view<'a>(
+    draft: &'a Draft,
+    host: &'a HostResources,
+    editing: bool,
+    busy: bool,
+    ty: Typography,
+) -> UiElement<'a> {
+    let send = move |c| Message::Machine(MachineMessage::Hardware(editing, c));
+    let max_ram = (host.memory_mib.min(1 << 20) as u32).max(draft.minimum.memory_mib);
+    let ram_step = draft.resources.guest_numa.alignment(draft.resources.pages);
+    let mut memory_presets = row![].spacing(6);
+    for mib in size_presets(
+        u64::from(draft.minimum.memory_mib),
+        host.memory_mib.min(1 << 20),
+        u64::from(ram_step),
+    ) {
+        memory_presets = memory_presets.push(action(
+            ty,
+            &format!("{} GiB", mib / 1024),
+            (!busy).then(|| send(Change::Memory(mib))),
+            draft.memory_mib == mib,
+        ));
+    }
     let mut memory = column![
         heading(
             ty,
             "Memory",
             format!("{:.2} GiB", f64::from(draft.memory_mib) / 1024.)
         ),
+        row![
+            ty.body("Allocation", 13., theme::TEXT),
+            text_input("8", &draft.memory_gib)
+                .on_input_maybe((!busy).then_some(move |s| send(Change::MemoryText(s))))
+                .font(ty.font())
+                .size(ty.size(14.))
+                .padding([7, 10])
+                .width(110)
+                .style(widgets::field),
+            ty.body("GiB", 13., theme::TEXT_MUTED),
+        ]
+        .spacing(10)
+        .align_y(alignment::Vertical::Center),
+        memory_presets.width(Length::Fill).wrap(),
         slider(
             draft.minimum.memory_mib..=max_ram,
-            draft.memory_mib,
+            draft.memory_mib.clamp(draft.minimum.memory_mib, max_ram),
             move |n| send(Change::Memory(n / ram_step * ram_step))
         )
         .step(ram_step)
@@ -516,7 +626,27 @@ pub fn view<'a>(
             send(Change::PinMemory)
         ),
     ]
-    .spacing(12);
+    .spacing(12)
+    .width(Length::Fill);
+    if draft.memory_mib < draft.minimum.memory_mib
+        || u64::from(draft.memory_mib) > host.memory_mib.min(1 << 20)
+    {
+        memory = memory.push(ty.body(
+            format!(
+                "Enter {:.2}–{:.2} GiB, within the image minimum and host RAM.",
+                f64::from(draft.minimum.memory_mib) / 1024.,
+                host.memory_mib.min(1 << 20) as f64 / 1024.
+            ),
+            12.,
+            theme::ERROR,
+        ));
+    } else if !draft.memory_mib.is_multiple_of(ram_step) {
+        memory = memory.push(ty.body(
+            format!("This page size and memory layout require multiples of {ram_step} MiB."),
+            12.,
+            theme::ERROR,
+        ));
+    }
     if draft.resources.pages == PageSize::System
         && u64::from(draft.memory_mib) > host.available_memory_mib
     {
@@ -621,41 +751,14 @@ pub fn view<'a>(
             theme::TEXT_MUTED,
         ));
     }
-    container(
-        column![
-            row![
-                action(
-                    ty,
-                    "Use recommended settings",
-                    (!busy).then(|| send(Change::Defaults)),
-                    false
-                ),
-                action(
-                    ty,
-                    "Refresh host",
-                    (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
-                    false
-                )
-            ]
-            .spacing(8)
-            .wrap(),
-            section(cpu),
-            section(memory),
-            section(npu_inventory(
-                &host.npus,
-                &draft.resources.passthrough,
-                editing,
-                busy,
-                ty
-            )),
-            section(gpu_inventory(draft, host, editing, busy, ty)),
-            storage_view(draft, host, editing, busy, ty),
-        ]
-        .spacing(16),
-    )
-    .padding(iced_core::Padding::default().right(14))
-    .width(Length::Fill)
-    .into()
+    container(memory)
+        .id("hardware-memory")
+        .padding(16)
+        .width(Length::Fill)
+        .style(|appearance| {
+            theme::panel(appearance, theme::PANEL_FILE, Some(theme::SEPARATOR), 10.)
+        })
+        .into()
 }
 
 pub(crate) fn storage_view<'a>(
@@ -686,8 +789,12 @@ pub(crate) fn storage_view<'a>(
         let low = (f64::from(minimum) / 1024.).log2();
         let high = (f64::from(max_disk) / 1024.).log2();
         let mut presets = row![].spacing(6);
-        for gib in [16, 32, 64, 128, 256, 512, 1024] {
-            let mib = gib * 1024;
+        for mib in size_presets(
+            u64::from(minimum).max(16 * 1024),
+            vkored::hardware::disk_limit(host, draft.resources.reserve_storage),
+            1,
+        ) {
+            let gib = mib / 1024;
             presets = presets.push(action(
                 ty,
                 &format!("{gib} GiB"),
@@ -1103,11 +1210,57 @@ mod tests {
         host
     }
     #[test]
+    fn presets_follow_host_limits_minimums_and_page_alignment() {
+        assert_eq!(size_presets(8192, 16 * 1024, 1), vec![8192, 12288, 16384]);
+        assert_eq!(
+            size_presets(16 * 1024, 65 * 1024, 1),
+            vec![16384, 24576, 32768, 49152, 65536]
+        );
+        assert_eq!(size_presets(2048, 8192, 2048), vec![2048, 4096, 6144, 8192]);
+        assert!(size_presets(16384, 8192, 1).is_empty());
+        let large = size_presets(16 * 1024, u64::MAX, 1);
+        assert_eq!(large.last(), Some(&(vkored::hardware::MAX_DISK_MIB as u32)));
+        assert!(large.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    #[test]
+    fn memory_inputs_preserve_precise_values_and_expose_invalid_drafts() {
+        let mut host = host();
+        host.memory_mib = 32 * 1024;
+        let mut draft = Draft::new(Some(&host), Requirements::default());
+        draft.resources.pages = PageSize::System;
+        draft.change(Change::Memory(12 * 1024), &host);
+        assert_eq!(draft.memory_gib, "12");
+        draft.change(Change::MemoryText("12.5".into()), &host);
+        assert_eq!(draft.memory_mib, 12800);
+        draft.change(Change::MemoryText("12.0009765625".into()), &host);
+        assert_eq!(draft.memory_mib, 12289);
+        let mut config = MachineConfig::new("draft", "/image.iso");
+        draft.apply(&mut config);
+        assert!(vkored::hardware::validate(&config).is_ok());
+        // Changing topology aligns RAM and keeps the editable text in sync.
+        draft.change(Change::GuestNuma(GuestNuma::Split), &host);
+        assert_eq!(draft.memory_mib, 12290);
+        assert_eq!(parse_size(&draft.memory_gib, 1 << 20), Some(12290));
+        draft.change(Change::MemoryText("12.0009765625".into()), &host);
+        draft.apply(&mut config);
+        assert!(vkored::hardware::validate(&config).is_err());
+        for invalid in ["", "1", "2..5", "1025"] {
+            draft.change(Change::MemoryText(invalid.into()), &host);
+            draft.apply(&mut config);
+            assert!(vkored::hardware::validate(&config).is_err(), "{invalid}");
+        }
+        draft.change(Change::MemoryText("64".into()), &host);
+        assert_eq!(draft.memory_mib, 65536); // No silent host-capacity clamp.
+        draft.apply(&mut config);
+        assert!(vkored::hardware::validate_host(&config, &host).is_err());
+    }
+
+    #[test]
     fn disk_controls_support_model_sized_and_sparse_allocations() {
         let mut host = host();
         host.storage_available_mib = 8 * 1024;
         let mut draft = Draft::new(Some(&host), Requirements::default());
-        assert_eq!(draft.disk_mib, 8 * 1024);
+        assert_eq!(draft.disk_mib, vkored::hardware::DEFAULT_DISK_MIB);
         draft.change(Change::Reserve, &host);
         assert_eq!(vkored::hardware::disk_limit(&host, false), 4 * 1024 * 1024);
         draft.change(Change::Disk(128 * 1024), &host);
@@ -1130,9 +1283,9 @@ mod tests {
         assert_eq!(draft.disk_mib, 1 << 22);
     }
     #[test]
-    fn disk_text_round_trips_exact_mib_and_rejects_invalid_numbers() {
+    fn size_text_round_trips_exact_mib_and_rejects_invalid_numbers() {
         for mib in [1024, 1537, 32768, 262145, 1 << 22] {
-            assert_eq!(parse_disk(&disk_text(mib)), Some(mib));
+            assert_eq!(parse_disk(&size_text(mib)), Some(mib));
         }
         for value in ["", "0", "-1", "NaN", "inf", "2.3.4", "4096.01"] {
             assert_eq!(parse_disk(value), None);

@@ -6,10 +6,12 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.6.0] - 2026-11-19
 
 ### Added
+- Host-aware RAM and disk capacity presets, including intermediate sizes, plus precise decimal GiB input for RAM.
 - Discover Linux GPUs and assign Intel xe SR-IOV virtual functions from hardware setup or the CLI. Done/Save can provision an absent VF pool through system authentication without detaching the host GPU or resizing existing pools.
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
 
 ### Fixed
+- Default new machines to 32 GiB disks in both desktop and CLI flows; report insufficient reservation space instead of silently shrinking the default.
 - Scale QEMU startup negotiation patience with guest RAM (10 seconds plus 2 seconds per GiB) so large memory configurations are not killed by the former fixed 10-second deadline.
 - Budget locked memory for every assigned accelerator, including GPU VFs, so combined NPU/GPU launches can map all guest RAM. Keep the physical-address check based on actual guest RAM.
 - Use device-neutral `pt` names for QEMU passthrough devices and ports.

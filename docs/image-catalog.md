@@ -4,26 +4,50 @@ This is the host-side release catalog and download contract, not a guest
 transport protocol. Kore owns image builds; vKore owns catalog admission and
 host downloads. No Kore or libkore wire types are introduced.
 
-## Trust and delivery
+## Live archive service
 
-The catalog is UTF-8 JSON embedded in the vKore binary from
-`crates/vkored/assets/official-images.json`. Updating it requires a vKore release
-through the same trusted distribution path as the executable. Users select an
-image ID; the runtime resolves the URL and digest from its own bundled catalog.
-The desktop does not accept arbitrary links, checksums, or replacement catalogs.
-A SHA-256 authenticates bytes against this trusted catalog; HTTPS alone does not
-make an arbitrary artifact official.
+The desktop loads `https://dev.microperceptron.com/api/v1/archives` in a
+background worker at startup and offers Refresh, loading, empty and error states.
+No API key or authorization header is sent. Metadata is trusted through this
+fixed first-party HTTPS origin; it is not independently signed and has no
+anti-rollback guarantee. The service must protect its metadata and publish new
+artifact IDs when bytes change. Arbitrary remote catalogs cannot replace it.
 
-No official artifacts have been supplied yet. The shipped catalog is valid and
-empty, and creation from the desktop is disabled. There are no example URLs,
-placeholder digests, or mock downloads in production. Existing machines remain
-usable; the CLI's explicit local/custom ISO workflow remains available to developers.
+The response has `archives: [...]` and `page: {next, nextUrl}`. Each record maps:
 
-A remotely updated catalog is outside v1. It requires a separately specified
-signature envelope, trusted keys, expiry, rollback protection and key rotation
-before a remote response can replace bundled release metadata.
+| Archive field | vKore meaning |
+| --- | --- |
+| `id`, `distro`, `version` | Stable ID and display label |
+| `isa`, `variant`, `fileName` | Public x86_64 ISOs with headless/inference or desktop profiles are selectable |
+| `requiresAuth` | Authenticated-only entries are omitted until authentication is supported |
+| `url` | Same-origin `/dl/{id}/{fileName}` HTTPS artifact URL |
+| `sha256`, `size` | Required full lowercase SHA-256 and exact nonzero byte count |
+| `minimum` (optional) | CPU/RAM/disk requirements described below |
+| `koreRevision`, `dagfsFormatVersion` (optional) | Validated provenance and supported volume format when supplied |
 
-## Schema
+Missing provenance stays unknown; it is never populated from vKore's own
+libkore pin. ISO inspection and launch preflight remain required. Extra service
+fields (timestamps, BLAKE3, checksum sidecar URLs) are ignored. The inline SHA-256
+is authoritative; no second checksum endpoint can substitute another identity.
+Metadata redirects are refused. Pagination follows only same-origin
+`/api/v1/archives` next URLs, at most eight pages, 64 unique archive IDs and
+256 KiB in total. A malformed compatible entry, duplicate ID or failed page
+rejects the complete refresh. An unsuccessful refresh preserves the displayed
+selection; creation still requires a successful fresh catalog lookup.
+
+The runtime resolves the selected ID again before download, and the desktop's
+selected digest must still match. The UI cannot substitute a URL or omit
+verification. Existing machines work without the service. The CLI also exposes
+`vkore machine images` and `vkore machine create NAME --image ID`; explicit
+`--iso PATH_OR_HTTPS_URL` imports remain available.
+
+## Bundled v1 schema
+
+The earlier bundled document parser remains available for release fixtures.
+`crates/vkored/assets/official-images.json` is empty and is no longer the desktop's
+source of images. Unlike the live service, this strict schema requires source
+and format provenance.
+
 
 The top-level object contains exactly `schema_version: 1` and `images: []`.
 The document is at most 256 KiB and contains at most 64 entries. Unknown fields,
@@ -52,8 +76,10 @@ host. SR-IOV readiness and inference throughput are not asserted by the catalog.
 
 ## Acquisition and publication
 
-1. Resolve the selected ID from the bundled, validated catalog. Unknown IDs
-   fail before a network request or machine creation.
+1. Resolve the selected ID from the freshly fetched, validated catalog. Invalid
+   ID syntax fails before network access; unknown or changed IDs fail before
+   downloading or creating a machine. Reuse a cached `images/SHA256.iso` only
+   after checking its regular-file type, exact length, ISO structure and digest.
 2. Fetch over HTTPS, including redirects (at most five). HTTP must return 200;
    a Content-Length, if present, must match the catalog's exact byte count.
    Compression is not negotiated or decoded.
@@ -66,6 +92,8 @@ host. SR-IOV readiness and inference throughput are not asserted by the catalog.
 5. Publish without replacement as `images/SHA256.iso`. An existing cache entry
    must be a regular file of the correct length and digest before reuse. Errors
    remove partial files; completed cache entries may outlive machine creation.
+   Cancel stops the import; retry starts a new temporary download. Partial-file
+   resume is not implemented. The UI reports download and verification progress.
 6. Create the machine atomically with the verified path and digest. Existing
    configurations and disks are not replaced. Boot preflight still re-inspects
    the ISO using its existing behavior; catalog admission is not a boot result.

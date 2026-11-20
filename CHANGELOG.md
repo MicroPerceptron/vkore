@@ -6,12 +6,14 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.6.0] - 2026-11-19
 
 ### Added
+- Load official images from the live archive service without API keys, with desktop refresh, verified downloads, progress, cancellation and cache reuse. The CLI adds `machine images` and `machine create --image ID`.
 - Allocate Linux hugepage backing at launch through the hardware helper, including empty pools and guests without accelerators; restore the temporary allocation allowance and release surplus memory after guest exit.
 - Host-aware RAM and disk capacity presets, including intermediate sizes, plus precise decimal GiB input for RAM.
 - Discover Linux GPUs and assign Intel xe SR-IOV virtual functions from hardware setup or the CLI. Done/Save can provision an absent VF pool through system authentication without detaching the host GPU or resizing existing pools.
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
 
 ### Fixed
+- Configure the native TLS connector explicitly for catalog and image HTTPS requests.
 - Compact host memory before hugepage preparation and keep full guest RAM when hugepages cover only part of it. Fall back to mixed transparent/base pages without changing NUMA layout, and report realized backing in boot activity.
 - Keep a guest line longer than the console grid as one line, in the screen and in scrollback, so the console pane reflows it instead of breaking it mid-word at column 120.
 - Default new machines to 32 GiB disks in both desktop and CLI flows; report insufficient reservation space instead of silently shrinking the default.

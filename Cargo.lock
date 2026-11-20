@@ -4419,6 +4419,7 @@ dependencies = [
  "ctrlc",
  "hyper",
  "hyper-util",
+ "native-tls",
  "rustix 1.1.4",
  "serde",
  "serde_json",

@@ -1,4 +1,5 @@
-//! The bundled official-image catalog. See docs/image-catalog.md for v1.
+//! Validated official-image metadata. Bundled v1 documents and the configured
+//! archive service share admission rules; see docs/image-catalog.md.
 //! Parsing validates the complete document before any entry can be selected.
 use std::collections::BTreeSet;
 
@@ -23,8 +24,8 @@ pub struct Image {
     pub(crate) url: String,
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
-    kore_revision: String,
-    dagfs_format_version: u32,
+    kore_revision: Option<String>,
+    dagfs_format_version: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -54,6 +55,12 @@ impl Catalog {
         if catalog.images.len() > MAX_IMAGES {
             return Err("image catalog exceeds 64 images".into());
         }
+        catalog.validate(true)?;
+        Ok(catalog)
+    }
+
+    fn validate(&self, require_provenance: bool) -> Result<(), String> {
+        let catalog = self;
         let mut ids = BTreeSet::new();
         for image in &catalog.images {
             image.minimum.validate()?;
@@ -91,7 +98,10 @@ impl Catalog {
                         .bytes()
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             };
-            if !hex(&image.sha256, 64) || !hex(&image.kore_revision, 40) {
+            if !hex(&image.sha256, 64)
+                || image.kore_revision.as_deref().is_some_and(|r| !hex(r, 40))
+                || (require_provenance && image.kore_revision.is_none())
+            {
                 return Err(
                     "image digest/revision must be full lowercase hexadecimal values".into(),
                 );
@@ -99,13 +109,15 @@ impl Catalog {
             if image.bytes == 0 || image.bytes > MAX_IMAGE_BYTES {
                 return Err("image size must be nonzero and at most 64 GiB".into());
             }
-            if u64::from(image.dagfs_format_version)
-                != u64::from(vkore_volume::bounds::FORMAT_VERSION)
+            if image
+                .dagfs_format_version
+                .is_some_and(|v| u64::from(v) != u64::from(vkore_volume::bounds::FORMAT_VERSION))
+                || (require_provenance && image.dagfs_format_version.is_none())
             {
                 return Err("image volume format is incompatible with this vKore release".into());
             }
         }
-        Ok(catalog)
+        Ok(())
     }
 
     pub fn images(&self) -> &[Image] {
@@ -116,9 +128,20 @@ impl Catalog {
     }
 }
 
-/// Release metadata has exactly one source: the catalog built into vKore.
+mod archives;
+pub use archives::{ARCHIVES_URL, fetch};
+
 pub fn official() -> Result<Catalog, String> {
-    Catalog::parse(include_bytes!("../assets/official-images.json"))
+    fetch(&std::sync::atomic::AtomicBool::new(false))
+}
+
+impl Image {
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 #[cfg(test)]
@@ -141,7 +164,12 @@ mod tests {
 
     #[test]
     fn bundled_catalog_is_valid_and_has_no_placeholder_releases() {
-        assert!(official().unwrap().images().is_empty());
+        assert!(
+            Catalog::parse(include_bytes!("../assets/official-images.json"))
+                .unwrap()
+                .images()
+                .is_empty()
+        );
         let catalog = parse(&fixture()).unwrap();
         assert_eq!(
             catalog.get("test-desktop-1").unwrap().profile,

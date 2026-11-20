@@ -18,8 +18,26 @@ pub const MAX_IMAGE_BYTES: u64 = 64 << 30;
 /// Import progress is throttled, so a fast download cannot flood the UI queue.
 #[derive(Clone, Copy, Debug)]
 pub struct Progress {
+    pub phase: Phase,
     pub bytes: u64,
     pub total: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Downloading,
+    Verifying,
+    Cached,
+}
+
+impl Phase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Downloading => "Downloading image",
+            Self::Verifying => "Verifying image",
+            Self::Cached => "Using verified cached image",
+        }
+    }
 }
 
 /// Shared desktop/CLI creation path. Existing configurations still use local
@@ -45,19 +63,28 @@ pub fn create(
     )
 }
 
-/// The desktop supplies only a catalog ID. Resolve trusted metadata again in
-/// the runtime, so a view cannot substitute a URL or omit verification.
+/// Resolve a catalog ID again in the runtime; the view cannot substitute a URL
+/// or omit verification. Its selected digest also detects a changed artifact.
 pub fn create_official(
     store: &MachineStore,
     mut config: MachineConfig,
     image_id: &str,
+    selected_sha256: Option<&str>,
     cancelled: &AtomicBool,
     progress: impl Fn(Progress),
 ) -> Result<MachineConfig, String> {
-    let catalog = crate::catalog::official()?;
+    if !config::valid_name(image_id) {
+        return Err("select an available official image".into());
+    }
+    let catalog = crate::catalog::fetch(cancelled)?;
     let image = catalog
         .get(image_id)
         .ok_or("select an available official image")?;
+    if selected_sha256.is_some_and(|digest| digest != image.sha256) {
+        return Err(
+            "The selected image changed. Refresh official images and select it again.".into(),
+        );
+    }
     config.requirements = image.minimum;
     crate::hardware::validate(&config)?;
     create_from_source(
@@ -162,7 +189,39 @@ fn download(
     let dir =
         std::path::absolute(store.state().root().join("images")).map_err(|e| e.to_string())?;
     private_dir(&dir).map_err(|e| e.to_string())?;
+    if let Some(digest) = expected {
+        let path = dir.join(format!("{}.iso", digest.to_ascii_lowercase()));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file()
+                    || metadata.len() > MAX_IMAGE_BYTES
+                    || expected_bytes.is_some_and(|bytes| bytes != metadata.len())
+                {
+                    return Err("cached image is not the expected regular file; remove the damaged cache entry and retry".into());
+                }
+                progress(Progress {
+                    bytes: metadata.len(),
+                    total: expected_bytes,
+                    phase: Phase::Verifying,
+                });
+                let medium = BootMedium::inspect(&path).map_err(|e| e.to_string())?;
+                verify(&medium, Some(digest))?;
+                check_cancelled(cancelled)?;
+                progress(Progress {
+                    bytes: medium.bytes,
+                    total: Some(medium.bytes),
+                    phase: Phase::Cached,
+                });
+                return Ok(medium);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cached image: {error}")),
+        }
+    }
+    let tls =
+        native_tls::TlsConnector::new().map_err(|e| format!("Cannot initialize HTTPS: {e}"))?;
     let agent = ureq::AgentBuilder::new()
+        .tls_connector(std::sync::Arc::new(tls))
         .https_only(true)
         .redirects(5)
         .timeout_connect(Duration::from_secs(15))
@@ -224,6 +283,15 @@ fn publish(
     )?;
     partial.as_file().sync_all().map_err(|e| e.to_string())?;
     check_cancelled(cancelled)?;
+    progress(Progress {
+        bytes: partial
+            .as_file()
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .len(),
+        total,
+        phase: Phase::Verifying,
+    });
     let mut medium = BootMedium::inspect(partial.path()).map_err(|e| e.to_string())?;
     verify(&medium, expected)?;
     check_cancelled(cancelled)?;
@@ -258,7 +326,11 @@ fn copy_bounded(
     let mut bytes = 0u64;
     let mut buffer = [0; 64 * 1024];
     let mut last = Instant::now();
-    progress(Progress { bytes, total });
+    progress(Progress {
+        bytes,
+        total,
+        phase: Phase::Downloading,
+    });
     loop {
         check_cancelled(cancelled)?;
         let n = reader
@@ -273,14 +345,22 @@ fn copy_bounded(
         }
         writer.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
         if last.elapsed() >= Duration::from_millis(250) {
-            progress(Progress { bytes, total });
+            progress(Progress {
+                bytes,
+                total,
+                phase: Phase::Downloading,
+            });
             last = Instant::now();
         }
     }
     if bytes == 0 || total.is_some_and(|total| bytes != total) {
         return Err("image download is incomplete".into());
     }
-    progress(Progress { bytes, total });
+    progress(Progress {
+        bytes,
+        total,
+        phase: Phase::Downloading,
+    });
     Ok(())
 }
 
@@ -296,6 +376,7 @@ mod tests {
                 &store,
                 MachineConfig::new("test", "/pending"),
                 "https://example.invalid/not-an-id",
+                None,
                 &AtomicBool::new(false),
                 |_| {}
             )
@@ -348,6 +429,52 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &first.path).unwrap();
         assert!(import(None).is_err());
         assert!(!dir.path().join("elsewhere").exists());
+    }
+
+    #[test]
+    fn cached_download_is_reverified_without_a_network_request() {
+        let root = tempfile::tempdir().unwrap();
+        let store = MachineStore::new(crate::State::open(root.path()).unwrap());
+        let dir = root.path().join("images");
+        fs::create_dir(&dir).unwrap();
+        let cancel = AtomicBool::new(false);
+        let bytes = image();
+        let first = publish(
+            &bytes[..],
+            &dir,
+            Some(bytes.len() as u64),
+            None,
+            &cancel,
+            &|_| {},
+        )
+        .unwrap();
+        let phases = std::cell::RefCell::new(Vec::new());
+        let cached = download(
+            &store,
+            "https://127.0.0.1:1/unreachable",
+            Some(&first.sha256),
+            Some(first.bytes),
+            &cancel,
+            &|p| phases.borrow_mut().push(p.phase),
+        )
+        .unwrap();
+        assert_eq!(cached.path, first.path);
+        assert_eq!(*phases.borrow(), [Phase::Verifying, Phase::Cached]);
+        let mut damaged = bytes;
+        damaged[0] = 1;
+        fs::write(&first.path, damaged).unwrap();
+        assert!(
+            download(
+                &store,
+                "https://127.0.0.1:1/unreachable",
+                Some(&first.sha256),
+                Some(first.bytes),
+                &cancel,
+                &|_| {}
+            )
+            .unwrap_err()
+            .contains("SHA-256")
+        );
     }
 
     #[test]

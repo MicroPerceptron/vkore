@@ -33,6 +33,7 @@ use crate::{Message, UiElement, UserEvent, fonts, theme, widgets};
 /// What a machine's worker reports.
 #[derive(Debug)]
 pub enum Update {
+    Catalog(Result<vkored::catalog::Catalog, String>),
     Line(String),
     Console(Result<vkored::console::Console, String>),
     Stage(Stage),
@@ -122,6 +123,9 @@ pub struct State {
     pub selected_image: Option<String>,
     pub image_menu_open: bool,
     pub catalog_error: Option<String>,
+    catalog_cancel: Option<Arc<AtomicBool>>,
+    catalog_worker: Option<thread::JoinHandle<()>>,
+    pub import_progress: Option<vkored::images::Progress>,
     importing: Option<Arc<AtomicBool>>,
     import_worker: Option<thread::JoinHandle<()>>,
     pub form_workspace: String,
@@ -146,6 +150,7 @@ pub enum MachineMessage {
     FormName(String),
     SelectImage(String),
     ToggleImageMenu,
+    RefreshImages,
     CancelImport,
     FormWorkspace(String),
     Create,
@@ -172,16 +177,15 @@ impl State {
             selected_image: None,
             image_menu_open: false,
             catalog_error: None,
+            catalog_cancel: None,
+            catalog_worker: None,
+            import_progress: None,
             importing: None,
             import_worker: None,
             form_workspace: String::new(),
             status: String::new(),
             closing: false,
         };
-        match vkored::catalog::official() {
-            Ok(catalog) => state.official_images = catalog.images().to_vec(),
-            Err(error) => state.catalog_error = Some(error),
-        }
         state.refresh();
         state
     }
@@ -344,9 +348,11 @@ impl State {
                 }
             }
             MachineMessage::Refresh => self.refresh(),
+            MachineMessage::RefreshImages => self.refresh_images(proxy.clone()),
             MachineMessage::FormName(value) => self.form_name = value,
             MachineMessage::SelectImage(id) => {
                 if self.importing.is_none()
+                    && self.catalog_cancel.is_none()
                     && self.official_images.iter().any(|image| image.id == id)
                 {
                     if let Some(image) = self.official_images.iter().find(|i| i.id == id) {
@@ -358,7 +364,10 @@ impl State {
                 }
             }
             MachineMessage::ToggleImageMenu => {
-                if self.importing.is_none() && !self.official_images.is_empty() {
+                if self.importing.is_none()
+                    && self.catalog_cancel.is_none()
+                    && !self.official_images.is_empty()
+                {
                     self.image_menu_open = !self.image_menu_open;
                 }
             }
@@ -380,6 +389,29 @@ impl State {
         }
     }
 
+    pub fn refresh_images(&mut self, proxy: EventLoopProxy<UserEvent>) {
+        if self.catalog_cancel.is_some() || self.importing.is_some() || self.closing {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        match thread::Builder::new()
+            .name("vkore-image-catalog".into())
+            .spawn(move || {
+                let result = vkored::catalog::fetch(&signal);
+                let _ =
+                    proxy.send_event(UserEvent::Machine(String::new(), Update::Catalog(result)));
+            }) {
+            Ok(worker) => {
+                self.catalog_worker = Some(worker);
+                self.catalog_cancel = Some(cancel);
+                self.catalog_error = None;
+                self.image_menu_open = false;
+            }
+            Err(error) => self.catalog_error = Some(error.to_string()),
+        }
+    }
+
     fn refresh_hardware(&mut self, proxy: EventLoopProxy<UserEvent>) {
         if self.hardware_busy {
             return;
@@ -394,7 +426,7 @@ impl State {
     }
 
     fn create(&mut self, proxy: EventLoopProxy<UserEvent>) {
-        if self.importing.is_some() {
+        if self.importing.is_some() || self.catalog_cancel.is_some() {
             return;
         }
         self.image_menu_open = false;
@@ -406,6 +438,13 @@ impl State {
             self.status = "Select an available official image first".into();
             return;
         };
+        let selected_sha256 = self
+            .official_images
+            .iter()
+            .find(|image| image.id == image_id)
+            .expect("selection checked")
+            .sha256()
+            .to_owned();
         let absolute = |text: &str| {
             std::fs::canonicalize(text.trim()).map_err(|error| format!("{}: {error}", text.trim()))
         };
@@ -459,6 +498,7 @@ impl State {
                                     &store,
                                     config,
                                     &image_id,
+                                    Some(&selected_sha256),
                                     &signal,
                                     |progress| send(Update::ImportProgress(progress)),
                                 )
@@ -468,6 +508,7 @@ impl State {
                     });
                 match result {
                     Ok(worker) => {
+                        self.import_progress = None;
                         self.import_worker = Some(worker);
                         self.importing = Some(cancelled);
                         self.status = "Importing and checking image…".into();
@@ -521,6 +562,33 @@ impl State {
                     }
                 }
             }
+            Update::Catalog(result) => {
+                self.catalog_cancel = None;
+                if let Some(worker) = self.catalog_worker.take() {
+                    let _ = worker.join();
+                }
+                match result {
+                    Ok(catalog) => {
+                        let previous = self
+                            .official_images
+                            .iter()
+                            .find(|image| Some(&image.id) == self.selected_image.as_ref())
+                            .cloned();
+                        let had_selection = self.selected_image.is_some();
+                        self.official_images = catalog.images().to_vec();
+                        self.catalog_error = None;
+                        if had_selection
+                            && !previous.as_ref().is_some_and(|old| {
+                                self.official_images.iter().any(|new| new == old)
+                            })
+                        {
+                            self.selected_image = None;
+                            self.catalog_error = Some("Your selected image changed or is no longer available. Select an image again.".into());
+                        }
+                    }
+                    Err(error) => self.catalog_error = Some(error),
+                }
+            }
             Update::Hardware(result) => {
                 self.hardware_busy = false;
                 match result {
@@ -554,8 +622,10 @@ impl State {
                 }
             }
             Update::ImportProgress(progress) => {
+                self.import_progress = Some(progress);
                 self.status = format!(
-                    "Downloading image: {} MiB{}",
+                    "{}: {} MiB{}",
+                    progress.phase.label(),
                     progress.bytes >> 20,
                     progress
                         .total
@@ -564,6 +634,7 @@ impl State {
                 );
             }
             Update::Created(result) => {
+                self.import_progress = None;
                 self.importing = None;
                 if let Some(worker) = self.import_worker.take() {
                     let _ = worker.join();
@@ -647,6 +718,9 @@ impl State {
     }
 
     pub fn stop_all(&mut self) {
+        if let Some(cancel) = &self.catalog_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
         if let Some(cancel) = &self.importing {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -658,6 +732,12 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.catalog_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(worker) = self.catalog_worker.take() {
+            let _ = worker.join();
+        }
         // Let the import's temporary file cleanup run before process exit.
         // Socket waits are bounded by the image client's read timeout.
         if let Some(cancel) = &self.importing {
@@ -837,8 +917,12 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         .find(|image| Some(&image.id) == state.selected_image.as_ref());
     let label = selected_image.map_or_else(
         || {
-            if state.official_images.is_empty() {
-                "No official images available".to_owned()
+            if state.catalog_cancel.is_some() {
+                "Loading official images…".to_owned()
+            } else if state.catalog_error.is_some() && state.official_images.is_empty() {
+                "Official images unavailable".to_owned()
+            } else if state.official_images.is_empty() {
+                "No compatible public images".to_owned()
             } else {
                 "Select an official image".to_owned()
             }
@@ -863,8 +947,10 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         .padding([7, 10])
         .style(widgets::button_style(widgets::Button::Secondary))
         .on_press_maybe(
-            (!state.official_images.is_empty() && state.importing.is_none())
-                .then(|| wrap(MachineMessage::ToggleImageMenu))
+            (!state.official_images.is_empty()
+                && state.importing.is_none()
+                && state.catalog_cancel.is_none())
+            .then(|| wrap(MachineMessage::ToggleImageMenu))
         )
     ]
     .spacing(theme::SPACE_1);
@@ -894,31 +980,90 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 }),
         );
     }
-    let create_action = if state.importing.is_some() {
-        Some(wrap(MachineMessage::CancelImport))
-    } else if selected_image.is_some() && vkored::config::valid_name(state.form_name.trim()) {
+    if let Some(image) = selected_image {
+        images = images.push(ty.data(
+            format!(
+                "{:.1} MiB download · {}",
+                image.bytes() as f64 / (1024. * 1024.),
+                match image.profile {
+                    vkored::catalog::Profile::Inference => "Headless inference",
+                    vkored::catalog::Profile::Desktop => "Desktop",
+                }
+            ),
+            theme::TEXT_SECONDARY,
+        ));
+    }
+    if state.importing.is_some() {
+        images = images.push(ty.data(state.status.as_str(), theme::TEXT_SECONDARY));
+        if let Some(progress) = state.import_progress
+            && let Some(total) = progress.total
+        {
+            images = images.push(
+                iced_widget::progress_bar(
+                    0.0..=1.0,
+                    (progress.bytes as f64 / total.max(1) as f64) as f32,
+                )
+                .girth(4)
+                .style(widgets::download_progress),
+            );
+        }
+    }
+    if state.importing.is_some() {
+        images = images.push(
+            button(ty.control("Cancel import"))
+                .height(ty.control_height())
+                .padding([7, 10])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(wrap(MachineMessage::CancelImport)),
+        );
+    }
+    let create_action = if state.catalog_cancel.is_none()
+        && selected_image.is_some()
+        && vkored::config::valid_name(state.form_name.trim())
+    {
         Some(wrap(MachineMessage::Create))
     } else {
         None
     };
-    let form = column![
+    let mut form = column![
         ty.body("Create a machine", 18., theme::TEXT),
         ty.body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
         ty.label("Machine name", theme::TEXT_MUTED),
         text_input("e.g. inference", &state.form_name)
-            .on_input(|value| wrap(MachineMessage::FormName(value)))
+            .on_input_maybe(
+                state
+                    .importing
+                    .is_none()
+                    .then_some(|value| wrap(MachineMessage::FormName(value)))
+            )
             .font(fonts::MONO)
             .padding([7, 10])
             .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        ty.label("Official image", theme::TEXT_MUTED),
+        row![
+            ty.label("Official image", theme::TEXT_MUTED),
+            space::horizontal(),
+            button(ty.control("Refresh"))
+                .height(ty.control_height())
+                .padding([4, 8])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    (state.catalog_cancel.is_none()
+                        && state.importing.is_none()
+                        && !state.hardware_busy)
+                        .then_some(wrap(MachineMessage::RefreshImages))
+                )
+        ]
+        .align_y(alignment::Vertical::Center),
         images,
         ty.data(
             state
                 .catalog_error
                 .as_deref()
-                .unwrap_or(if state.official_images.is_empty() {
-                    "Official downloads have not been published yet."
+                .unwrap_or(if state.catalog_cancel.is_some() {
+                    "Checking dev.microperceptron.com…"
+                } else if state.official_images.is_empty() {
+                    "No public x86_64 Kore ISOs are listed. Refresh to check again."
                 } else {
                     "The official image is verified before it is added."
                 }),
@@ -952,22 +1097,27 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             ),
         ty.label("Project folder · optional", theme::TEXT_MUTED),
         text_input("/path/to/project", &state.form_workspace)
-            .on_input(|value| wrap(MachineMessage::FormWorkspace(value)))
+            .on_input_maybe(
+                state
+                    .importing
+                    .is_none()
+                    .then_some(|value| wrap(MachineMessage::FormWorkspace(value)))
+            )
             .font(fonts::MONO)
             .padding([7, 10])
             .size(ty.size(theme::SIZE_SM))
             .style(widgets::field),
-        button(ty.control(if state.importing.is_some() {
-            "Cancel import"
-        } else {
-            "Create machine"
-        }))
-        .height(ty.control_height())
-        .padding([8, 14])
-        .style(widgets::button_style(widgets::Button::Primary))
-        .on_press_maybe(create_action),
     ]
     .spacing(12);
+    if state.importing.is_none() {
+        form = form.push(
+            button(ty.control("Create machine"))
+                .height(ty.control_height())
+                .padding([8, 14])
+                .style(widgets::button_style(widgets::Button::Primary))
+                .on_press_maybe(create_action),
+        );
+    }
     let left = widgets::scroll(
         column![
             container(list)
@@ -1008,7 +1158,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 "Choose a machine"
             },
             if state.configs.is_empty() {
-                "Official images will appear here when they are released. Your machines, boot status and controls will live in this workspace."
+                "Choose an official image to create your first machine. Its boot status and controls will appear here."
             } else {
                 "Select a machine to see its resources, manage its power and follow its boot."
             },
@@ -1418,5 +1568,81 @@ mod completion_tests {
         assert!(!state.hardware_busy);
         state.machine_update("demo".into(), Update::HardwareSaved(Ok(())));
         assert!(state.edit_hardware.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_loading_failure_and_progress_draw_at_compact_and_wide_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = State::new(root.path().to_owned());
+        for phase in ["loading", "error", "download", "verification"] {
+            state.catalog_cancel = None;
+            state.catalog_error = None;
+            state.importing = None;
+            state.import_progress = None;
+            match phase {
+                "loading" => state.catalog_cancel = Some(Arc::new(AtomicBool::new(false))),
+                "error" => {
+                    state.catalog_error = Some(
+                        "Cannot load official images. Check your connection and refresh.".into(),
+                    )
+                }
+                _ => {
+                    let doc = r#"{"schema_version":1,"images":[{
+                        "id":"release-1", "name":"spica headless", "version":"0.0.0a",
+                        "profile":"inference", "architecture":"x86_64", "format":"iso",
+                        "url":"https://dev.microperceptron.com/dl/release-1/spica.iso",
+                        "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "bytes":168382464,
+                        "kore_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "dagfs_format_version":FORMAT_VERSION
+                    }]}"#
+                        .replace(
+                            "FORMAT_VERSION",
+                            &vkore_volume::bounds::FORMAT_VERSION.to_string(),
+                        );
+                    state.official_images = vkored::catalog::Catalog::parse(doc.as_bytes())
+                        .unwrap()
+                        .images()
+                        .to_vec();
+                    state.selected_image = Some("release-1".into());
+                    state.form_name = "inference".into();
+                    state.importing = Some(Arc::new(AtomicBool::new(false)));
+                    state.machine_update(
+                        String::new(),
+                        Update::ImportProgress(vkored::images::Progress {
+                            bytes: 80 << 20,
+                            total: Some(161 << 20),
+                            phase: if phase == "download" {
+                                vkored::images::Phase::Downloading
+                            } else {
+                                vkored::images::Phase::Verifying
+                            },
+                        }),
+                    );
+                }
+            }
+            for appearance in [iced_core::Theme::Dark, iced_core::Theme::Light] {
+                for width in [760., 1280.] {
+                    let shot = format!("archives-{phase}-{width}");
+                    let (_, refused) = crate::tests::draw_at_scale(
+                        container(view(&state, Typography::default()))
+                            .style(|appearance| {
+                                theme::panel(appearance, theme::BACKGROUND, None, 0.)
+                            })
+                            .into(),
+                        iced_core::Size::new(width, 800.),
+                        &appearance,
+                        1.,
+                        Some(&shot),
+                    );
+                    assert!(refused.is_empty(), "{phase}: {refused:?}");
+                }
+            }
+        }
     }
 }

@@ -15,6 +15,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - A polkit-authorized device guardian that passes opened device handles to unprivileged QEMU, checks function-level reset, and restores host drivers after guest exit or failed launch.
 
 ### Fixed
+- Interpret console ANSI colors, cursor edits and erase commands incrementally instead of displaying escape codes; retain bounded terminal history and safe bundled-font rendering.
 - Wait for desktop-started guests to stop and collect changes before closing; cancel pending starts and block new work during shutdown. A second close explicitly leaves immediately.
 - Keep the machine status current, show assigned NPU addresses, and use image-neutral shell readiness wording.
 - Test API shutdown using owned connections and backend release, avoiding assertions against reusable ephemeral ports.

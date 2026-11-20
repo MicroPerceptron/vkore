@@ -21,6 +21,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+# MIT terminal screen model; no std feature keeps vte's OSC buffer bounded.
+vt100 = { version = "=0.18.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 vkore-volume = { path = "../vkore-volume" }

@@ -6,6 +6,7 @@
 #[path = "../build_support.rs"]
 mod build_support;
 
+mod console;
 mod fonts;
 mod hardware;
 mod logo;

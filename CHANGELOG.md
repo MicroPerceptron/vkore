@@ -12,6 +12,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
 
 ### Fixed
+- Compact host memory before hugepage preparation and keep full guest RAM when hugepages cover only part of it. Fall back to mixed transparent/base pages without changing NUMA layout, and report realized backing in boot activity.
 - Default new machines to 32 GiB disks in both desktop and CLI flows; report insufficient reservation space instead of silently shrinking the default.
 - Scale QEMU startup negotiation patience with guest RAM (10 seconds plus 2 seconds per GiB) so large memory configurations are not killed by the former fixed 10-second deadline.
 - Budget locked memory for every assigned accelerator, including GPU VFs, so combined NPU/GPU launches can map all guest RAM. Keep the physical-address check based on actual guest RAM.

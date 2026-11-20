@@ -48,7 +48,7 @@ struct Launch {
 #[derive(Serialize, Deserialize)]
 enum Reply {
     Checked,
-    Started(u32),
+    Started { pid: u32, memory: Option<String> },
     Error(String),
 }
 
@@ -58,6 +58,7 @@ pub(crate) struct Started {
     pub child: Child,
     pub control: ChildStdin,
     pub pid: u32,
+    pub memory: Option<String>,
 }
 fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, Reply), String> {
     let data = serde_json::to_vec(request).map_err(|e| e.to_string())?;
@@ -215,11 +216,12 @@ pub(crate) fn launch(
         }),
     };
     let (mut child, control, reply) = spawn(&request, Some(errors))?;
-    if let Reply::Started(pid) = reply {
+    if let Reply::Started { pid, memory } = reply {
         return Ok(Started {
             child,
             control,
             pid,
+            memory,
         });
     }
     drop(control);
@@ -862,12 +864,13 @@ fn serve() -> Result<i32, String> {
     } else {
         super::iommu::IntelProbe::plan(&launch.arguments)?
     };
-    let memory_files = memory::allocate(
+    let allocation = memory::allocate(
         request.parent,
         request.memory_mib,
         request.pages,
         request.numa,
     )?;
+    let memory_files = allocation.files;
     crate::hugepages::fd_arguments(
         &mut launch.arguments,
         request.memory_mib,
@@ -918,7 +921,10 @@ fn serve() -> Result<i32, String> {
         .spawn()
         .map_err(|e| format!("Cannot launch unprivileged QEMU: {e}"))?;
     drop(command); // Close guardian copies of device and guest-memory FDs.
-    if let Err(e) = reply(&Reply::Started(child.id())) {
+    if let Err(e) = reply(&Reply::Started {
+        pid: child.id(),
+        memory: allocation.summary,
+    }) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(e);

@@ -102,12 +102,17 @@ impl Allowance {
                 .map_err(|e| e.to_string())?;
             guard.journal.sync_all().map_err(|e| e.to_string())?;
             guard.change = Some(change);
-            write(
+            let raised_ok = write(
                 guard.path.join("nr_overcommit_hugepages"),
                 &raised.to_string(),
-            )?;
-            if guard.current()? != raised {
-                return Err("This kernel cannot provision the requested hugepage size dynamically. Reserve a pool at host boot, use 2 MiB pages, or choose Automatic.".into());
+            )
+            .is_ok();
+            if !raised_ok || guard.current()? != raised {
+                // The hugepage preference is optional, restoration is not.
+                guard.restore()?;
+                eprintln!(
+                    "vKore: runtime hugepage allowance unavailable; continuing with the existing pool and transparent hugepages."
+                );
             }
         }
         Ok(guard)
@@ -145,47 +150,60 @@ impl Drop for Allowance {
     }
 }
 
+pub(super) struct Allocation {
+    pub files: Vec<File>,
+    pub summary: Option<String>,
+}
+
 pub(super) fn allocate(
     parent: u32,
     memory_mib: u32,
     page: PageSize,
     numa: GuestNuma,
-) -> Result<Vec<File>, String> {
+) -> Result<Allocation, String> {
     check(memory_mib, page, numa)?;
     if page == PageSize::System {
-        return Ok(Vec::new());
+        return Ok(Allocation {
+            files: Vec::new(),
+            summary: None,
+        });
     }
     let identity = caller(parent)?;
+    if cancelled()? {
+        return Err("Memory preparation was cancelled.".into());
+    }
+    // One explicit compaction pass, before creating or pinning guest memory.
+    // No cache dropping or persistent compaction policy change.
+    let compacted = match write("/proc/sys/vm/compact_memory", "1") {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "vKore: memory compaction unavailable: {error}; continuing with best-effort hugepages."
+            );
+            false
+        }
+    };
+    let deadline = Instant::now() + crate::machine::startup_patience(memory_mib);
     let mut allowance = Allowance::new(page, u64::from(memory_mib / page.mib()))?;
     let result = (|| {
         let mut files = Vec::new();
-        let bytes = u64::from(memory_mib / numa.nodes()) << 20;
-        let chunk = (256_u64 << 20).max(u64::from(page.mib()) << 20);
+        let per_node = memory_mib / numa.nodes();
+        let mut explicit = 0;
+        let mut transparent = 0;
         for _ in 0..numa.nodes() {
-            let size = match page {
-                PageSize::Huge2M => MemfdFlags::HUGE_2MB,
-                PageSize::Huge1G => MemfdFlags::HUGE_1GB,
-                PageSize::System => unreachable!(),
-            };
-            let file = File::from(
-                rustix::fs::memfd_create(
-                    c"vkore-guest-ram",
-                    MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::HUGETLB | size,
-                )
-                .map_err(|e| e.to_string())?,
-            );
-            file.set_len(bytes).map_err(|e| e.to_string())?;
-            // Populate before driver handoff and before QEMU maps anything. A
-            // failed allocation is an errno, never a SIGBUS in the guardian.
-            let mut offset = 0;
-            while offset < bytes {
-                if cancelled()? {
-                    return Err("Hugepage allocation was cancelled.".into());
-                }
-                let len = chunk.min(bytes - offset);
-                rustix::fs::fallocate(&file, FallocateFlags::empty(), offset, len).map_err(|e| format!("Cannot allocate {} MiB using {}: {e}. Free RAM may be fragmented or this page size may require a pool reserved at host boot. Reduce guest RAM, use 2 MiB pages, or choose Automatic.", memory_mib, page.label()))?;
-                offset += len;
+            if cancelled()? {
+                return Err("Memory preparation was cancelled.".into());
             }
+            let file = if let Some(file) = explicit_file(per_node, page, deadline)? {
+                explicit += per_node;
+                file
+            } else {
+                // A QEMU NUMA node has one RAM backend. THP allows partial huge
+                // coverage within that backend without inventing guest nodes.
+                let (file, promoted) = transparent::file(per_node, deadline, cancelled)?;
+                transparent += promoted;
+                file
+            };
             rustix::fs::fchown(
                 &file,
                 Some(rustix::process::Uid::from_raw(identity.uid)),
@@ -200,12 +218,74 @@ pub(super) fn allocate(
             .map_err(|e| e.to_string())?;
             files.push(file);
         }
-        Ok(files)
+        let summary = format!(
+            "Memory preparation: {explicit} MiB using {}; {transparent} MiB confirmed 2 MiB transparent pages; {} MiB base/automatic. Total {memory_mib} MiB. Compaction {}. Transparent coverage may change under host pressure.",
+            page.label(),
+            memory_mib - explicit - transparent,
+            if compacted {
+                "completed"
+            } else {
+                "unavailable"
+            }
+        );
+        eprintln!("vKore: {summary}");
+        Ok(Allocation {
+            files,
+            summary: Some(summary),
+        })
     })();
-    // Do not leave a larger surplus allowance for unrelated future allocations.
-    // Lowering it does not evict the pages already owned by these files.
     allowance.restore()?;
     result
+}
+
+mod transparent;
+
+/// A fixed-size hugetlb backend must cover its whole NUMA node. Drop a partial
+/// attempt before the transparent fallback so it does not strand contiguous RAM.
+fn explicit_file(
+    memory_mib: u32,
+    page: PageSize,
+    deadline: Instant,
+) -> Result<Option<File>, String> {
+    let size = if page == PageSize::Huge2M {
+        MemfdFlags::HUGE_2MB
+    } else {
+        MemfdFlags::HUGE_1GB
+    };
+    let file = match rustix::fs::memfd_create(
+        c"vkore-guest-hugetlb",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::HUGETLB | size,
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(error) => {
+            eprintln!(
+                "vKore: explicit hugepage file unavailable: {error}; using transparent backing."
+            );
+            return Ok(None);
+        }
+    };
+    let bytes = u64::from(memory_mib) << 20;
+    file.set_len(bytes).map_err(|e| e.to_string())?;
+    let chunk = (256_u64 << 20).max(u64::from(page.mib()) << 20);
+    let mut offset = 0;
+    while offset < bytes {
+        if cancelled()? {
+            return Err("Memory preparation was cancelled.".into());
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let len = chunk.min(bytes - offset);
+        if let Err(error) = rustix::fs::fallocate(&file, FallocateFlags::empty(), offset, len) {
+            eprintln!(
+                "vKore: explicit {} could not cover this NUMA node ({error}); retaining its full RAM size with transparent/base pages.",
+                page.label()
+            );
+            return Ok(None);
+        }
+        offset += len;
+    }
+    Ok(Some(file))
 }
 
 #[cfg(test)]

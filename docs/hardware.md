@@ -63,18 +63,33 @@ machines retain two nodes until explicitly changed.
 
 ## Memory and authentication
 
-On Linux, memory pinning selects QEMU `-overcommit mem-lock=on`. For hugepages,
-the authorized hardware helper creates and fully populates a hugetlb memfd per
-guest NUMA node. Unprivileged QEMU receives these files as shared
-`memory-backend-file` mappings through inherited descriptors. This is physical residency, not host NUMA placement. macOS QEMU memory
-locking and hugetlb selection are unavailable. The memory panel instead shows
-**Automatic** with the probed native page size (16 KiB on the tested Apple
-Silicon host). The Linux-only hugepage buttons are omitted and the limitation
-is explained. This is host RAM backing, not the guest's page-table granularity.
-The native size comes from rustix's safe platform query, not an architecture
-constant. On Linux, kernel-supported sizes are selectable even with an empty
-pool. The UI shows existing capacity and explains that missing pages are
-requested at launch. Pinning ordinary memory does not convert it to hugepages.
+On Linux, memory pinning selects QEMU `-overcommit mem-lock=on`. Hugepage
+choices are preferences. The authorized helper requests one host compaction
+pass before preparing RAM or handing off devices. It first tries explicit
+hugetlb backing for each guest NUMA node. If a whole node cannot be backed that
+way, it releases that partial attempt and uses a normal shared memfd, promoting
+as many aligned 2 MiB ranges as possible with `MADV_COLLAPSE` before QEMU pins
+memory. Successful ranges are retained when other ranges fail. Unsupported
+promotion or an expired promotion budget leaves the remainder as base/automatic
+pages; failure to allocate the actual configured RAM still stops launch.
+
+QEMU receives populated, sealed-size files through inherited descriptors and
+uses aligned, shared `memory-backend-file` mappings. A NUMA node has one backend:
+transparent hugepages permit partial coverage without reducing guest RAM,
+creating extra guest nodes, or changing CPU placement. A 1 GiB preference falls
+back to 2 MiB transparent/base pages if a whole node cannot use 1 GiB hugetlb.
+
+Boot activity and the transcript report explicit backing, confirmed transparent
+coverage at preparation time, and the base/automatic remainder. Transparent
+coverage is an observation, not a lasting guarantee under host memory pressure.
+The saved preference stays unchanged. No caches are dropped and no persistent
+THP or compaction policy is changed.
+
+macOS QEMU memory locking and explicit hugepage selection remain unavailable.
+The panel shows **Automatic** with the probed native page size (16 KiB on the
+tested Apple Silicon host). This is host RAM backing, not guest page-table size.
+On Linux, kernel-supported sizes are selectable even with an empty pool.
+Pinning ordinary memory does not itself convert it to hugepages.
 
 A saved unsupported page choice remains visible as a warning until the user
 selects Automatic. Unsupported saved memory pinning can still be switched off;
@@ -95,8 +110,8 @@ the draft intact if validation or authentication fails; controls are frozen whil
 a request is pending. Saved machines hold their session lease through this step,
 so they cannot be launched or edited concurrently.
 
-For configurations without NPU passthrough, memory locking is the only setting
-requiring elevation. The shared
+For configurations using system pages without any accelerator passthrough,
+memory locking is the only setting requiring elevation. The shared
 completion/launch authorization path raises the current vKore process's
 memory-lock limit to guest RAM plus a bounded 1 GiB emulator allowance. No popup
 appears when pinning is off or the process already has enough permission. It
@@ -129,12 +144,13 @@ not coordinate external hugepage managers: avoid changing host pool policy while
 vKore is allocating. A forced helper kill can leave the temporary allowance until
 recovery or reboot, but does not retain anonymous memory without an owner.
 
-Runtime allocation still needs contiguous physical pages. Fragmentation, memory
-pressure, cgroup limits, or unsupported surplus allocation (especially 1 GiB
-pages) can make it fail. Failure closes partial allocations, restores the policy,
-and reports an error without falling back to ordinary pages. A boot-reserved
-pool may be necessary for 1 GiB pages or heavily fragmented hosts. The helper's
-launch wait includes the RAM-scaled startup budget as well as authentication time.
+Runtime hugepage allocation still needs contiguous physical pages. Fragmentation,
+memory pressure, cgroup limits, or unsupported surplus allocation can prevent
+full coverage. These failures trigger the reported transparent/base fallback;
+failed policy restoration and cancellation remain errors. The promotion work is
+bounded by the RAM-scaled startup budget. The helper's launch wait also includes
+authentication time. Linux CI exercises real shmem allocation and an unprivileged
+paused QEMU mapping, including a deliberately expired promotion budget.
 
 ## Linux authentication descriptions
 

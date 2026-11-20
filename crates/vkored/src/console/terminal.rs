@@ -2,8 +2,8 @@
 //! not change host titles, clipboard, window size, or send terminal replies.
 pub use vt100::Color;
 
-const ROWS: u16 = 24;
-const COLS: u16 = 120;
+pub const ROWS: u16 = 24;
+pub const COLS: u16 = 120;
 const HISTORY: usize = 104;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,6 +14,7 @@ pub struct Style {
     pub dim: bool,
     pub inverse: bool,
     pub underline: bool,
+    pub cursor: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,9 @@ pub struct Run {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Output {
     pub runs: Vec<Run>,
+    pub grid: Vec<Run>,
+    pub application_cursor: bool,
+    pub bracketed_paste: bool,
 }
 
 impl Output {
@@ -45,12 +49,15 @@ impl Output {
         }
     }
 
-    fn row(&mut self, screen: &vt100::Screen, row: u16) {
+    fn row(&mut self, screen: &vt100::Screen, row: u16, cursor: Option<(u16, u16)>) {
         let end = (0..COLS)
             .rev()
             .find(|col| {
                 let cell = screen.cell(row, *col).unwrap();
-                cell.has_contents() || cell.bgcolor() != Color::Default || cell.inverse()
+                cell.has_contents()
+                    || cell.bgcolor() != Color::Default
+                    || cell.inverse()
+                    || cursor == Some((row, *col))
             })
             .map_or(0, |col| col + 1);
         for col in 0..end {
@@ -71,6 +78,7 @@ impl Output {
                     dim: cell.dim(),
                     inverse: cell.inverse(),
                     underline: cell.underline(),
+                    cursor: cursor == Some((row, col)),
                 },
             );
         }
@@ -90,10 +98,12 @@ impl std::fmt::Debug for Terminal {
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self {
+        let mut terminal = Self {
             parser: vt100::Parser::new(ROWS.try_into().unwrap(), COLS.try_into().unwrap(), HISTORY),
             output: Output::default(),
-        }
+        };
+        terminal.process(&[]);
+        terminal
     }
 }
 
@@ -102,6 +112,10 @@ impl Terminal {
         self.parser.process(bytes);
         let screen = self.parser.screen_mut();
         let mut output = Output::default();
+        let mut grid = Output::default();
+        let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+        output.application_cursor = screen.application_cursor();
+        output.bracketed_paste = screen.bracketed_paste();
         // Walk retained rows without cloning the entire terminal grid. Restore
         // the viewport before the next parse so cursor semantics stay intact.
         // A row the guest's long line merely wrapped into continues the same
@@ -109,7 +123,9 @@ impl Terminal {
         // showing a hard break at column COLS (often mid-word).
         for offset in (1..=screen.scrollback_len()).rev() {
             screen.set_scrollback(offset);
-            output.row(screen, 0);
+            output.row(screen, 0, None);
+            grid.row(screen, 0, None);
+            grid.push("\n", Style::default());
             if !screen.row_wrapped(0) {
                 output.push("\n", Style::default());
             }
@@ -123,11 +139,18 @@ impl Terminal {
             })
             .unwrap_or(0);
         for row in 0..=end {
-            output.row(screen, row);
+            output.row(screen, row, None);
             if row < end && !screen.row_wrapped(row) {
                 output.push("\n", Style::default());
             }
         }
+        for row in 0..ROWS {
+            grid.row(screen, row, cursor);
+            if row + 1 < ROWS {
+                grid.push("\n", Style::default());
+            }
+        }
+        output.grid = grid.runs;
         self.output = output;
     }
 }
@@ -183,6 +206,36 @@ mod tests {
         assert_eq!(terminal.output.text(), "complete\nZbD");
         terminal.process(b"\x1b[2J\x1b[Hclear");
         assert_eq!(terminal.output.text(), "clear");
+    }
+
+    #[test]
+    fn grid_preserves_rows_cursor_visibility_and_alternate_screen() {
+        let mut terminal = Terminal::default();
+        terminal.process(b"abc\x1b[2G");
+        let cursor = terminal
+            .output
+            .grid
+            .iter()
+            .find(|run| run.style.cursor)
+            .unwrap();
+        assert_eq!(cursor.text, "b");
+        assert_eq!(terminal.output.text(), "abc");
+        terminal.process(b"\x1b[?25l");
+        assert!(!terminal.output.grid.iter().any(|run| run.style.cursor));
+        terminal.process(b"\x1b[?1049h\x1b[Halternate");
+        assert!(terminal.output.text().starts_with("alternate"));
+        terminal.process(b"\x1b[?1049l");
+        assert_eq!(terminal.output.text(), "abc");
+        let mut terminal = Terminal::default();
+        terminal.process("x".repeat(COLS as usize + 1).as_bytes());
+        let grid: String = terminal
+            .output
+            .grid
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(grid.lines().next().unwrap().len(), COLS as usize);
+        assert_eq!(terminal.output.text().len(), COLS as usize + 1);
     }
 
     #[test]

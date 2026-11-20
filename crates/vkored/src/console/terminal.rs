@@ -2,8 +2,11 @@
 //! not change host titles, clipboard, window size, or send terminal replies.
 pub use vt100::Color;
 
-const ROWS: u16 = 24;
-const COLS: u16 = 120;
+// Initial geometry until a desktop pane supplies its measured dimensions.
+pub const ROWS: u16 = 24;
+pub const COLS: u16 = 120;
+pub const MAX_ROWS: u16 = 256;
+pub const MAX_COLS: u16 = 512;
 const HISTORY: usize = 104;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,6 +17,7 @@ pub struct Style {
     pub dim: bool,
     pub inverse: bool,
     pub underline: bool,
+    pub cursor: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,9 +26,27 @@ pub struct Run {
     pub style: Style,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Output {
+    pub rows: u16,
+    pub cols: u16,
     pub runs: Vec<Run>,
+    pub grid: Vec<Run>,
+    pub application_cursor: bool,
+    pub bracketed_paste: bool,
+}
+
+impl Default for Output {
+    fn default() -> Self {
+        Self {
+            rows: ROWS,
+            cols: COLS,
+            runs: Vec::new(),
+            grid: Vec::new(),
+            application_cursor: false,
+            bracketed_paste: false,
+        }
+    }
 }
 
 impl Output {
@@ -45,16 +67,21 @@ impl Output {
         }
     }
 
-    fn row(&mut self, screen: &vt100::Screen, row: u16) {
-        let end = (0..COLS)
+    fn row(&mut self, screen: &vt100::Screen, row: u16, cursor: Option<(u16, u16)>) {
+        let end = (0..screen.size().1.get())
             .rev()
             .find(|col| {
-                let cell = screen.cell(row, *col).unwrap();
-                cell.has_contents() || cell.bgcolor() != Color::Default || cell.inverse()
+                screen.cell(row, *col).is_some_and(|cell| {
+                    cell.has_contents() || cell.bgcolor() != Color::Default || cell.inverse()
+                }) || cursor == Some((row, *col))
             })
             .map_or(0, |col| col + 1);
         for col in 0..end {
-            let cell = screen.cell(row, col).unwrap();
+            let Some(cell) = screen.cell(row, col) else {
+                // Scrollback rows can predate a wider viewport.
+                self.push(" ", Style::default());
+                continue;
+            };
             if cell.is_wide_continuation() {
                 continue;
             }
@@ -71,6 +98,7 @@ impl Output {
                     dim: cell.dim(),
                     inverse: cell.inverse(),
                     underline: cell.underline(),
+                    cursor: cursor == Some((row, col)),
                 },
             );
         }
@@ -90,44 +118,76 @@ impl std::fmt::Debug for Terminal {
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self {
+        let mut terminal = Self {
             parser: vt100::Parser::new(ROWS.try_into().unwrap(), COLS.try_into().unwrap(), HISTORY),
             output: Output::default(),
-        }
+        };
+        terminal.process(&[]);
+        terminal
     }
 }
 
 impl Terminal {
+    pub fn resize(&mut self, rows: u16, cols: u16) -> bool {
+        let rows = rows.clamp(1, MAX_ROWS);
+        let cols = cols.clamp(1, MAX_COLS);
+        if (rows, cols) == (self.output.rows, self.output.cols) {
+            return false;
+        }
+        self.parser
+            .set_size(rows.try_into().unwrap(), cols.try_into().unwrap());
+        self.process(&[]);
+        true
+    }
+
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         let screen = self.parser.screen_mut();
-        let mut output = Output::default();
+        let (rows, cols) = screen.size();
+        let (rows, cols) = (rows.get(), cols.get());
+        let mut output = Output {
+            rows,
+            cols,
+            ..Output::default()
+        };
+        let mut grid = Output::default();
+        let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+        output.application_cursor = screen.application_cursor();
+        output.bracketed_paste = screen.bracketed_paste();
         // Walk retained rows without cloning the entire terminal grid. Restore
         // the viewport before the next parse so cursor semantics stay intact.
-        // A row the guest's long line merely wrapped into continues the same
-        // line: no newline, so the pane reflows it at its own width instead of
-        // showing a hard break at column COLS (often mid-word).
+        // The plain transcript joins wrapped rows; the render grid preserves
+        // physical line breaks at the current terminal dimensions.
         for offset in (1..=screen.scrollback_len()).rev() {
             screen.set_scrollback(offset);
-            output.row(screen, 0);
+            output.row(screen, 0, None);
+            grid.row(screen, 0, None);
+            grid.push("\n", Style::default());
             if !screen.row_wrapped(0) {
                 output.push("\n", Style::default());
             }
         }
         screen.set_scrollback(0);
-        let end = (0..ROWS)
+        let end = (0..rows)
             .rev()
             .find(|row| {
                 *row <= screen.cursor_position().0
-                    || (0..COLS).any(|col| screen.cell(*row, col).unwrap().has_contents())
+                    || (0..cols).any(|col| screen.cell(*row, col).unwrap().has_contents())
             })
             .unwrap_or(0);
         for row in 0..=end {
-            output.row(screen, row);
+            output.row(screen, row, None);
             if row < end && !screen.row_wrapped(row) {
                 output.push("\n", Style::default());
             }
         }
+        for row in 0..rows {
+            grid.row(screen, row, cursor);
+            if row + 1 < rows {
+                grid.push("\n", Style::default());
+            }
+        }
+        output.grid = grid.runs;
         self.output = output;
     }
 }
@@ -135,6 +195,53 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resizing_preserves_modes_cursor_and_scrollback_and_bounds_the_grid() {
+        let mut terminal = Terminal::default();
+        assert!(terminal.resize(4, 8));
+        terminal.process(b"\x1b[32mabcdef\x1b[?1h\x1b[?2004h");
+        assert!(terminal.resize(6, 12));
+        assert!(!terminal.resize(6, 12));
+        terminal.process(b"g");
+        assert_eq!(terminal.output.text(), "abcdefg");
+        assert!(terminal.output.application_cursor);
+        assert!(terminal.output.bracketed_paste);
+        assert_eq!(terminal.parser.screen().cursor_position(), (0, 7));
+        assert!(
+            terminal
+                .output
+                .runs
+                .iter()
+                .any(|r| r.style.foreground == Color::Idx(2))
+        );
+
+        terminal.resize(3, 5);
+        terminal.process(b"\x1b[2J\x1b[Habcdefgh");
+        let grid: String = terminal
+            .output
+            .grid
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect();
+        assert!(grid.starts_with("abcde\nfgh"));
+        for _ in 0..20 {
+            terminal.process(b"\r\nrow");
+        }
+        // Old scrollback cells need not extend to the new right edge.
+        terminal.resize(4, 40);
+        assert!(terminal.output.text().contains("row"));
+        assert!(terminal.parser.screen().scrollback_len() <= HISTORY);
+        terminal.process(b"\x1b[?1049h\x1b[Halt");
+        terminal.resize(8, 50);
+        assert!(terminal.output.text().starts_with("alt"));
+        terminal.process(b"\x1b[?1049l");
+        assert!(terminal.output.text().contains("row"));
+        terminal.resize(0, u16::MAX);
+        assert_eq!((terminal.output.rows, terminal.output.cols), (1, MAX_COLS));
+        terminal.resize(u16::MAX, 0);
+        assert_eq!((terminal.output.rows, terminal.output.cols), (MAX_ROWS, 1));
+    }
 
     #[test]
     fn screenshot_sequences_and_utf8_work_at_every_read_boundary() {
@@ -183,6 +290,36 @@ mod tests {
         assert_eq!(terminal.output.text(), "complete\nZbD");
         terminal.process(b"\x1b[2J\x1b[Hclear");
         assert_eq!(terminal.output.text(), "clear");
+    }
+
+    #[test]
+    fn grid_preserves_rows_cursor_visibility_and_alternate_screen() {
+        let mut terminal = Terminal::default();
+        terminal.process(b"abc\x1b[2G");
+        let cursor = terminal
+            .output
+            .grid
+            .iter()
+            .find(|run| run.style.cursor)
+            .unwrap();
+        assert_eq!(cursor.text, "b");
+        assert_eq!(terminal.output.text(), "abc");
+        terminal.process(b"\x1b[?25l");
+        assert!(!terminal.output.grid.iter().any(|run| run.style.cursor));
+        terminal.process(b"\x1b[?1049h\x1b[Halternate");
+        assert!(terminal.output.text().starts_with("alternate"));
+        terminal.process(b"\x1b[?1049l");
+        assert_eq!(terminal.output.text(), "abc");
+        let mut terminal = Terminal::default();
+        terminal.process("x".repeat(COLS as usize + 1).as_bytes());
+        let grid: String = terminal
+            .output
+            .grid
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(grid.lines().next().unwrap().len(), COLS as usize);
+        assert_eq!(terminal.output.text().len(), COLS as usize + 1);
     }
 
     #[test]

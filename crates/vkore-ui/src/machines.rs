@@ -36,6 +36,10 @@ pub enum Update {
     Catalog(Result<vkored::catalog::Catalog, String>),
     Line(String),
     Console(Result<vkored::console::Console, String>),
+    Paste {
+        epoch: u64,
+        result: Result<String, String>,
+    },
     Stage(Stage),
     Finished(Result<String, String>),
     ImportProgress(vkored::images::Progress),
@@ -54,7 +58,6 @@ pub struct Running {
     lines: usize,
     pub started: Instant,
     pub console: Option<vkored::console::Console>,
-    console_input: String,
     console_error: String,
 }
 
@@ -70,7 +73,6 @@ impl Running {
             lines: 0,
             started: Instant::now(),
             console: None,
-            console_input: String::new(),
             console_error: String::new(),
         }
     }
@@ -115,6 +117,9 @@ pub struct State {
     pub configure_new: bool,
     pub configs: Vec<MachineConfig>,
     pub selected: Option<String>,
+    pub console_focus: Option<String>,
+    console_focus_epoch: u64,
+    paste_pending: bool,
     pub running: BTreeMap<String, Running>,
     /// How each machine's last run from this window ended, and its log.
     pub finished: BTreeMap<String, Finished>,
@@ -145,8 +150,10 @@ pub enum MachineMessage {
     FinishHardware,
     Start(String, bool),
     Stop(String),
-    ConsoleInput(String, String),
-    ConsoleSend(String),
+    ConsoleFocus(Option<String>),
+    ConsolePaste(String),
+    ConsoleInput(String, Vec<u8>),
+    ConsoleResize(String, u16, u16),
     FormName(String),
     SelectImage(String),
     ToggleImageMenu,
@@ -170,6 +177,9 @@ impl State {
             state_root,
             configs: Vec::new(),
             selected: None,
+            console_focus: None,
+            console_focus_epoch: 0,
+            paste_pending: false,
             running: BTreeMap::new(),
             finished: BTreeMap::new(),
             form_name: String::new(),
@@ -234,35 +244,59 @@ impl State {
             return;
         }
         match message {
-            MachineMessage::ConsoleInput(name, value) => {
-                if let Some(running) = self.running.get_mut(&name) {
-                    // The first console pane accepts printable ASCII commands;
-                    // the transcript still safely displays arbitrary guest bytes.
-                    if value.len() <= vkored::console::MAX_LINE_BYTES
-                        && value.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
-                    {
-                        running.console_input = value;
-                        running.console_error.clear();
-                    } else {
-                        running.console_error =
-                            "Enter one line of printable ASCII, up to 1024 bytes".into();
-                    }
+            MachineMessage::ConsoleFocus(name) => {
+                self.unfocus_console();
+                self.console_focus = name;
+            }
+            MachineMessage::ConsolePaste(name) => {
+                if !self.paste_pending && self.console_focus.as_ref() == Some(&name) {
+                    self.paste_pending = true;
+                    let epoch = self.console_focus_epoch;
+                    let proxy = proxy.clone();
+                    iced_winit::clipboard::Clipboard::new().read(
+                        iced_core::clipboard::Kind::Text,
+                        move |result| {
+                            let result = match result {
+                                Ok(iced_core::clipboard::Content::Text(text))
+                                    if text.len() <= vkored::console::MAX_PENDING_BYTES =>
+                                {
+                                    Ok(text)
+                                }
+                                Ok(_) => Err("Paste plain text of at most 16 KiB".into()),
+                                Err(_) => Err("Could not read the clipboard".into()),
+                            };
+                            let _ = proxy.send_event(UserEvent::Machine(
+                                name,
+                                Update::Paste { epoch, result },
+                            ));
+                        },
+                    );
                 }
             }
-            MachineMessage::ConsoleSend(name) => {
-                if let Some(running) = self.running.get_mut(&name)
+            MachineMessage::ConsoleResize(name, rows, cols) => {
+                if self.selected.as_ref() == Some(&name)
+                    && let Some(console) = self
+                        .running
+                        .get_mut(&name)
+                        .and_then(|run| run.console.as_mut())
+                {
+                    console.resize(rows, cols);
+                }
+            }
+            MachineMessage::ConsoleInput(name, bytes) => {
+                if self.console_focus.as_ref() == Some(&name)
+                    && self.selected.as_ref() == Some(&name)
+                    && let Some(running) = self.running.get_mut(&name)
                     && let Some(console) = &mut running.console
                 {
-                    match console.send_line(&running.console_input) {
-                        Ok(()) => {
-                            running.console_input.clear();
-                            running.console_error.clear();
-                        }
+                    match console.send_input(&bytes) {
+                        Ok(()) => running.console_error.clear(),
                         Err(error) => running.console_error = error.into(),
                     }
                 }
             }
             MachineMessage::Select(name) => {
+                self.unfocus_console();
                 self.configure_new = false;
                 self.selected = Some(name);
                 self.edit_hardware = None;
@@ -552,7 +586,25 @@ impl State {
 
     pub fn machine_update(&mut self, name: String, update: Update) {
         match update {
+            Update::Paste { epoch, result } => {
+                self.paste_pending = false;
+                if !self.closing
+                    && !self.hardware_busy
+                    && epoch == self.console_focus_epoch
+                    && self.console_focus.as_ref() == Some(&name)
+                    && self.selected.as_ref() == Some(&name)
+                    && let Some(running) = self.running.get_mut(&name)
+                    && let Some(console) = &mut running.console
+                {
+                    let result =
+                        result.and_then(|text| console.send_paste(&text).map_err(str::to_owned));
+                    running.console_error = result.err().unwrap_or_default();
+                }
+            }
             Update::Console(result) => {
+                if self.console_focus.as_ref() == Some(&name) {
+                    self.unfocus_console();
+                }
                 if let Some(running) = self.running.get_mut(&name) {
                     match result {
                         Ok(console) => running.console = Some(console),
@@ -663,6 +715,9 @@ impl State {
                 }
             }
             Update::Finished(outcome) => {
+                if self.console_focus.as_ref() == Some(&name) {
+                    self.unfocus_console();
+                }
                 // The log stays: how a run ended is the evidence.
                 let running = self.running.remove(&name);
                 let console = running
@@ -698,6 +753,12 @@ impl State {
         self.status =
             "Stopping machines and collecting changes; close again to leave immediately".into();
         leave
+    }
+
+    /// Invalidate pending clipboard reads whenever keyboard focus changes.
+    pub fn unfocus_console(&mut self) {
+        self.console_focus = None;
+        self.console_focus_epoch = self.console_focus_epoch.wrapping_add(1);
     }
 
     /// Poll existing nonblocking shell sockets; no per-byte worker messages.
@@ -881,7 +942,22 @@ fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
 }
 
 /// The machines page.
-pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
+pub fn view(state: &State, ty: Typography, appearance: iced_core::Theme) -> UiElement<'_> {
+    iced_widget::responsive(move |size| {
+        view_sized(
+            state,
+            ty,
+            crate::console::Presentation::new(ty, &appearance, size.height),
+        )
+    })
+    .into()
+}
+
+fn view_sized(
+    state: &State,
+    ty: Typography,
+    terminal: crate::console::Presentation,
+) -> UiElement<'_> {
     let mut list = column![ty.label("Your machines", theme::TEXT_MUTED)].spacing(10);
     if state.configs.is_empty() {
         list = list
@@ -1311,12 +1387,12 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             let finished = state.finished.get(&config.name);
             if let Some(running) = running {
                 if let Some(console) = &running.console {
-                    pane = pane.push(console_pane(&config.name, running, console, state.closing, ty));
+                    pane = pane.push(console_pane(&config.name, running, console, state.closing || state.hardware_busy, state.console_focus.as_deref() == Some(config.name.as_str()), terminal));
                 } else if !running.console_error.is_empty() {
                     pane = pane.push(ty.data(running.console_error.as_str(), theme::ERROR));
                 }
             } else if let Some(transcript) = finished.and_then(|run| run.console.as_ref()) {
-                pane = pane.push(crate::console::view(transcript, ty));
+                pane = pane.push(crate::console::view(transcript, terminal));
             }
             if let Some(finished) = finished {
                 pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
@@ -1387,11 +1463,11 @@ fn console_pane<'a>(
     running: &'a Running,
     console: &'a vkored::console::Console,
     closing: bool,
-    ty: Typography,
+    focused: bool,
+    terminal: crate::console::Presentation,
 ) -> UiElement<'a> {
-    let enabled = !closing && console.can_send();
-    let input_name = name.to_owned();
-    let send = wrap(MachineMessage::ConsoleSend(name.to_owned()));
+    let ty = terminal.ty;
+    let enabled = !closing && console.connected();
     let mut pane =
         column![
             row![
@@ -1410,26 +1486,9 @@ fn console_pane<'a>(
                     }
                 )
             ],
-            crate::console::view(console.output(), ty),
-            row![
-                text_input("Command, e.g. status devices", &running.console_input)
-                    .font(fonts::MONO)
-                    .size(ty.size(theme::SIZE_SM))
-                    .padding([8, 10])
-                    .style(widgets::field)
-                    .on_input_maybe(enabled.then_some(move |value| wrap(
-                        MachineMessage::ConsoleInput(input_name.clone(), value)
-                    )))
-                    .on_submit_maybe(enabled.then_some(send.clone())),
-                button(ty.control("Send"))
-                    .height(ty.control_height())
-                    .padding([8, 14])
-                    .style(widgets::button_style(widgets::Button::Primary))
-                    .on_press_maybe(enabled.then_some(send)),
-            ]
-            .spacing(8),
+            crate::console::interactive(console.output(), name, enabled, focused, terminal),
             ty.body(
-                "Recent output · Send submits one line.",
+                format!("Click to type · Ctrl+Shift+V / Cmd+V to paste · Ctrl+Shift+Esc releases the keyboard · {} × {}", console.output().cols, console.output().rows),
                 12.,
                 theme::TEXT_MUTED
             ),
@@ -1509,6 +1568,66 @@ mod completion_tests {
     }
 
     #[test]
+    fn a_late_clipboard_result_cannot_type_into_a_new_focus_session() {
+        use std::{io::Read, os::unix::net::UnixListener};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console");
+        let listener = UnixListener::bind(&path).unwrap();
+        let console = vkored::console::Console::connect(&path).unwrap();
+        let (mut guest, _) = listener.accept().unwrap();
+        guest.set_nonblocking(true).unwrap();
+        let (stop, _) = mpsc::channel();
+        let mut running = Running::new(stop);
+        running.console = Some(console);
+        let mut state = State::new(dir.path().to_owned());
+        state.running.insert("guest".into(), running);
+        state.console_focus = Some("guest".into());
+        state.selected = Some("guest".into());
+        let old_epoch = state.console_focus_epoch;
+        state.paste_pending = true;
+        state.unfocus_console();
+        state.console_focus = Some("guest".into());
+        state.machine_update(
+            "guest".into(),
+            Update::Paste {
+                epoch: old_epoch,
+                result: Ok("reboot\n".into()),
+            },
+        );
+        assert!(!state.paste_pending);
+        state
+            .running
+            .get_mut("guest")
+            .unwrap()
+            .console
+            .as_mut()
+            .unwrap()
+            .poll();
+        let mut bytes = [0; 32];
+        assert_eq!(
+            guest.read(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        state.machine_update(
+            "guest".into(),
+            Update::Paste {
+                epoch: state.console_focus_epoch,
+                result: Ok("help".into()),
+            },
+        );
+        state
+            .running
+            .get_mut("guest")
+            .unwrap()
+            .console
+            .as_mut()
+            .unwrap()
+            .poll();
+        let count = guest.read(&mut bytes).unwrap();
+        assert_eq!(&bytes[..count], b"help");
+    }
+
+    #[test]
     fn console_pane_renders_guest_text_in_both_themes() {
         use std::{io::Write, os::unix::net::UnixListener};
         let dir = tempfile::tempdir().unwrap();
@@ -1521,7 +1640,6 @@ mod completion_tests {
         let (stop, _) = mpsc::channel();
         let mut running = Running::new(stop);
         running.console = Some(console);
-        running.console_input = "lspci".into();
         for appearance in [iced_core::Theme::Light, iced_core::Theme::Dark] {
             let (runs, refused) = crate::tests::draw_at_scale(
                 widgets::page_frame(console_pane(
@@ -1529,7 +1647,8 @@ mod completion_tests {
                     &running,
                     running.console.as_ref().unwrap(),
                     false,
-                    Typography::default(),
+                    true,
+                    crate::console::Presentation::new(Typography::default(), &appearance, 600.),
                 )),
                 iced_core::Size::new(900., 560.),
                 &appearance,
@@ -1634,7 +1753,7 @@ mod tests {
                 for width in [760., 1280.] {
                     let shot = format!("archives-{phase}-{width}");
                     let (_, refused) = crate::tests::draw_at_scale(
-                        container(view(&state, Typography::default()))
+                        container(view(&state, Typography::default(), appearance.clone()))
                             .style(|appearance| {
                                 theme::panel(appearance, theme::BACKGROUND, None, 0.)
                             })

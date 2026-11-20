@@ -266,7 +266,7 @@ mod tests {
             runtime.firmware.code.display()
         );
         let plan = IntelProbe::plan(&args).unwrap().unwrap();
-        for width in [48, 39] {
+        for (width, supported) in [(48, true), (39, true), (38, false)] {
             let mut arguments = plan.arguments(width, &[]);
             // This tests the production probe transport/profile under TCG, not VFIO.
             for pair in arguments.chunks_mut(1) {
@@ -290,7 +290,11 @@ mod tests {
                 .stderr(std::process::Stdio::inherit());
             let child = command.spawn().unwrap();
             drop(command);
-            super::super::supervision::probe_paused(child, stream).unwrap();
+            assert_eq!(
+                super::super::supervision::probe_paused(child, stream).is_ok(),
+                supported,
+                "aw-bits={width}: a greeting alone must not count as realization"
+            );
         }
     }
 }

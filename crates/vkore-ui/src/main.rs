@@ -1058,6 +1058,11 @@ mod tests {
         host.storage_available_mib = 131072;
         host.cpu_pinning = true;
         host.cpu_power_management = Ok(());
+        host.acceleration = vkore_vm::HostCaps {
+            vendor: Some(vkore_vm::Vendor::Intel),
+            kvm: true,
+            hvf: false,
+        };
         host.memory_pinning = true;
         host.hugetlb_supported = true;
         host.system_page_bytes = 4096;

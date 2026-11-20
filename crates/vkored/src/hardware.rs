@@ -50,6 +50,26 @@ impl Requirements {
     }
 }
 
+/// Recommend native waits only when this configuration resolves to pinned KVM.
+/// Explicit saved choices are validated separately and never replaced here.
+pub fn recommended_cpu_waits(
+    host: &HostResources,
+    pin_cpus: bool,
+    accel: vkore_vm::AccelChoice,
+    vendor: Option<vkore_vm::Vendor>,
+) -> bool {
+    pin_cpus
+        && host.cpu_pinning
+        && host.cpu_power_management.is_ok()
+        && host
+            .acceleration
+            .choose(
+                accel,
+                vendor.unwrap_or_else(|| host.acceleration.native_vendor()),
+            )
+            .is_ok_and(|accel| accel == vkore_vm::Accel::Kvm)
+}
+
 pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, Resources) {
     let cpus = (host.physical_cores / 2).clamp(2, 128) as u16;
     let cpus = cpus.max(minimum.cpus);
@@ -72,7 +92,12 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
             guest_numa: vkore_vm::hardware::GuestNuma::Single,
             passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
-            cpu_power_management: false,
+            cpu_power_management: recommended_cpu_waits(
+                host,
+                host.cpu_pinning,
+                vkore_vm::AccelChoice::Auto,
+                None,
+            ),
             host_cpus: host.preferred_cpus(cpus),
             pin_memory: host.memory_pinning,
             pages,
@@ -130,10 +155,7 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
     validate(config)?;
     if config.resources.cpu_power_management {
         host.cpu_power_management.clone()?;
-        if !matches!(
-            config.accel,
-            vkore_vm::AccelChoice::Auto | vkore_vm::AccelChoice::Kvm
-        ) {
+        if !recommended_cpu_waits(host, config.resources.pin_cpus, config.accel, config.vendor) {
             return Err("Native CPU waits require KVM acceleration.".into());
         }
     }
@@ -454,6 +476,11 @@ mod tests {
             storage_path: "/".into(),
             storage_available_mib: 102400,
             cpu_pinning: true,
+            acceleration: vkore_vm::HostCaps {
+                vendor: Some(vkore_vm::Vendor::Intel),
+                kvm: true,
+                hvf: false,
+            },
             cpu_power_management: Ok(()),
             memory_pinning: true,
             system_page_bytes: 4096,
@@ -466,7 +493,49 @@ mod tests {
         }
     }
     #[test]
-    fn native_waits_are_opt_in_and_revalidated_against_the_host() {
+    fn automatic_native_waits_require_supported_pinned_kvm() {
+        use vkore_vm::{AccelChoice, Vendor};
+        let mut host = host();
+        for vendor in [Vendor::Intel, Vendor::Amd] {
+            host.acceleration.vendor = Some(vendor);
+            for choice in [AccelChoice::Auto, AccelChoice::Kvm] {
+                assert!(recommended_cpu_waits(&host, true, choice, Some(vendor)));
+                assert!(!recommended_cpu_waits(&host, false, choice, Some(vendor)));
+            }
+            for choice in [AccelChoice::Tcg, AccelChoice::Hvf] {
+                assert!(!recommended_cpu_waits(&host, true, choice, Some(vendor)));
+            }
+        }
+        assert!(!recommended_cpu_waits(
+            &host,
+            true,
+            AccelChoice::Auto,
+            Some(Vendor::Intel)
+        ));
+        host.cpu_power_management = Err("unsupported".into());
+        assert!(
+            !defaults(&host, Requirements::default())
+                .3
+                .cpu_power_management
+        );
+        host.cpu_power_management = Ok(());
+        host.acceleration.kvm = false;
+        assert!(
+            !defaults(&host, Requirements::default())
+                .3
+                .cpu_power_management
+        );
+        host.acceleration.kvm = true;
+        host.cpu_pinning = false;
+        assert!(
+            !defaults(&host, Requirements::default())
+                .3
+                .cpu_power_management
+        );
+    }
+
+    #[test]
+    fn native_waits_are_recommended_and_revalidated_against_the_host() {
         let mut host = host();
         let mut config = MachineConfig::new("waits", "/image.iso");
         (
@@ -475,8 +544,7 @@ mod tests {
             config.disk_mib,
             config.resources,
         ) = defaults(&host, Requirements::default());
-        assert!(!config.resources.cpu_power_management);
-        config.resources.cpu_power_management = true;
+        assert!(config.resources.cpu_power_management);
         assert!(validate_host(&config, &host).is_ok());
         host.cpu_power_management = Err("KVM does not allow native MONITOR/MWAIT".into());
         assert!(

@@ -125,6 +125,7 @@ pub struct HostResources {
     pub storage_path: PathBuf,
     pub storage_available_mib: u64,
     pub cpu_pinning: bool,
+    pub acceleration: crate::HostCaps,
     pub cpu_power_management: Result<(), String>,
     pub memory_pinning: bool,
     /// Native host page granularity; independent of Kore's guest page tables.
@@ -197,6 +198,7 @@ impl HostResources {
             storage_path: path,
             storage_available_mib: stat.f_bavail.saturating_mul(stat.f_frsize) >> 20,
             cpu_pinning: cfg!(target_os = "linux"),
+            acceleration: crate::HostCaps::probe(),
             cpu_power_management: crate::cpu_pm::available(),
             memory_pinning: cfg!(target_os = "linux"),
             system_page_bytes: rustix::param::page_size(),

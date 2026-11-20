@@ -3,6 +3,11 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.7.0] - 2026-11-20
+
+### Added
+- Turn the guest console into a directly focused terminal: type into the screen, use editing/control keys, and paste with Ctrl+Shift+V or Cmd+V. Remove the command field and Send button; render the VT grid and cursor without reflow, with bounded scrollback and typeahead. Release input focus on outside clicks, navigation, disconnect/reconnect and window deactivation; reject stale clipboard delivery.
+
 ## [0.6.1] - 2026-11-20
 
 ### Fixed

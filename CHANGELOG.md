@@ -13,6 +13,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ### Fixed
 - Compact host memory before hugepage preparation and keep full guest RAM when hugepages cover only part of it. Fall back to mixed transparent/base pages without changing NUMA layout, and report realized backing in boot activity.
+- Keep a guest line longer than the console grid as one line, in the screen and in scrollback, so the console pane reflows it instead of breaking it mid-word at column 120.
 - Default new machines to 32 GiB disks in both desktop and CLI flows; report insufficient reservation space instead of silently shrinking the default.
 - Scale QEMU startup negotiation patience with guest RAM (10 seconds plus 2 seconds per GiB) so large memory configurations are not killed by the former fixed 10-second deadline.
 - Budget locked memory for every assigned accelerator, including GPU VFs, so combined NPU/GPU launches can map all guest RAM. Keep the physical-address check based on actual guest RAM.

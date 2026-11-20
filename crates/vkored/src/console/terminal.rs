@@ -104,10 +104,15 @@ impl Terminal {
         let mut output = Output::default();
         // Walk retained rows without cloning the entire terminal grid. Restore
         // the viewport before the next parse so cursor semantics stay intact.
+        // A row the guest's long line merely wrapped into continues the same
+        // line: no newline, so the pane reflows it at its own width instead of
+        // showing a hard break at column COLS (often mid-word).
         for offset in (1..=screen.scrollback_len()).rev() {
             screen.set_scrollback(offset);
             output.row(screen, 0);
-            output.push("\n", Style::default());
+            if !screen.row_wrapped(0) {
+                output.push("\n", Style::default());
+            }
         }
         screen.set_scrollback(0);
         let end = (0..ROWS)
@@ -119,7 +124,7 @@ impl Terminal {
             .unwrap_or(0);
         for row in 0..=end {
             output.row(screen, row);
-            if row < end {
+            if row < end && !screen.row_wrapped(row) {
                 output.push("\n", Style::default());
             }
         }
@@ -151,6 +156,22 @@ mod tests {
             terminal.process(&bytes[split..]);
             assert_eq!(terminal.output, whole.output, "split {split}");
         }
+    }
+
+    #[test]
+    fn a_line_longer_than_the_grid_stays_one_line_in_the_screen_and_in_scrollback() {
+        let long: String = (0..COLS as usize * 2 + 7)
+            .map(|i| (b'a' + (i % 26) as u8) as char)
+            .collect();
+        let mut terminal = Terminal::default();
+        terminal.process(format!("{long}\r\nnext").as_bytes());
+        assert_eq!(terminal.output.text(), format!("{long}\nnext"));
+        // Pushed into scrollback, the wrapped rows still join.
+        for _ in 0..ROWS {
+            terminal.process(b"\r\nrow");
+        }
+        let text = terminal.output.text();
+        assert!(text.starts_with(&format!("{long}\nnext\n")), "{text:?}");
     }
 
     #[test]

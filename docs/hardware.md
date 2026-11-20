@@ -95,8 +95,10 @@ completion/launch authorization path raises the current vKore process's
 memory-lock limit to guest RAM plus a bounded 1 GiB emulator allowance. No popup
 appears when pinning is off or the process already has enough permission. It
 first uses the existing hard limit without prompting; if
-necessary it invokes `/usr/bin/pkexec --disable-internal-agent /usr/bin/prlimit`
-with only the current PID and numeric limit. The registered desktop polkit agent
+necessary it re-executes vKore through `/usr/bin/pkexec --disable-internal-agent`
+in its private `--vkore-memory-helper` mode with a bounded memory size. The helper
+checks the polkit identity against its parent and changes only that parent's
+memlock limit; it does not accept a target PID or a command to execute. The registered desktop polkit agent
 presents authentication. No password enters vKore, no shell is invoked, no
 privileged QEMU is launched, and no persistent system configuration is changed.
 QEMU inherits the limit. Limits last only for this app process; launch rechecks
@@ -108,12 +110,51 @@ Host hugepage pools are not globally reconfigured. Unusable page sizes remain
 disabled, with system pages available. This avoids silently consuming or
 reassigning a pool another workload relies on.
 
+## Linux authentication descriptions
+
+Polkit's default `pkexec` prompt includes the executable and arguments. To show
+short application descriptions instead, register the exact binaries you run:
+
+```sh
+python3 tools/install-linux-policy.py --executable target/release/vkore-ui
+```
+
+Repeat `--executable target/release/vkore` in the same command if you also use
+the CLI. The installer asks for administrator authentication once using the
+standard system prompt; the installed policies then say **Authentication is
+required to prepare hardware for a vKore machine** or **Authentication is
+required to lock memory for a vKore machine**. The authentication agent may
+still show the executable under its expandable technical details.
+
+The policy is root-owned in `/usr/share/polkit-1/actions/`, matches each exact
+canonical executable path **and** private helper argument, and uses
+`auth_admin` without retained authorization. Inactive/remote sessions are not
+granted access. It does not add passwordless rules or change prompts for other
+applications. Reinstall with every desired binary after moving a checkout or
+switching between debug and release paths. Rebuilding at the same path needs
+no reinstall. Without installation, the original generic system prompt remains.
+
+Packagers can use `--output org.microperceptron.vkore.policy` to generate the
+file without elevation and install it root-owned with mode 0644 alongside the
+application. Only use per-request authorization for policies pointing into a
+user-writable source checkout; never change these actions to `auth_admin_keep`
+or `yes`. See [polkit's executable/argument annotations](https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html).
+
 ## Storage and ownership
 
 The panel displays mounted storage devices, filesystem, SSD/HDD classification,
 capacity and free space. Machine disks remain in the vKore state filesystem;
 the displayed reservation capacity is queried for that path, including APFS
 mount aliases. Selecting an arbitrary physical disk is outside this UI.
+
+New desktop drafts target **32 GiB**, reduced to whole GiB of currently free
+space when necessary, while respecting the image minimum. The capacity field
+accepts GiB (fractional values round up to a whole MiB); presets cover 16, 32,
+64, 128, 256, 512 and 1024 GiB. The slider uses a logarithmic scale so smaller
+allocations remain practical on large hosts. Backend admission caps disks at
+4 TiB. Reserved disks must fit current free space. With reservation off, sparse
+disks can exceed currently free space, with a warning that future guest writes
+will need that space. Switching reservation on never silently shrinks a draft.
 
 At first launch, reservation allocates the entire disk in a temporary file,
 syncs it, and publishes without replacing another file. rustix uses Linux
@@ -140,7 +181,7 @@ volume ownership and engine locking remain intact.
   are reused on macOS. This release includes the upstream macOS memory-accounting correction;
   the earlier formula could subtract compressed storage and saturate at zero.
 - Existing `rustix = 1.1.4`: safe affinity, resource-limit and allocation APIs.
-  No new application unsafe code. fs4 was evaluated but its allocation path
+  The CPU/memory/storage APIs need no application unsafe code. fs4 was evaluated but its allocation path
   delegates to rustix, so another wrapper dependency adds no value here.
 - hwlocality was evaluated for topology/binding; its alpha API and additional
   libhwloc C runtime were unnecessary for this bounded CPU/memory/storage scope.
@@ -269,7 +310,7 @@ and [Linux VFIO](https://www.kernel.org/doc/html/latest/driver-api/vfio.html).
 **Done/Save hardware** batches the device checks and locked-memory budget in
 one polkit request. It may load `vfio-pci` and `iommufd`, but does not detach a
 device. With no passthrough selected, the existing memory-only authorization
-path is unchanged. Starting a machine obtains fresh authority and may ask again
+behavior is preserved through a named private helper. Starting a machine obtains fresh authority and may ask again
 according to the host's polkit policy. No passwords are collected by vKore.
 VFIO pins guest RAM for DMA even with the general memory-pinning option off;
 admission checks available RAM and the guardian sets its own bounded memlock

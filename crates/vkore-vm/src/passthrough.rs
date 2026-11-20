@@ -166,14 +166,25 @@ pub(crate) use linux::launch;
 
 /// Called before CLI/desktop initialization, only for the private helper mode.
 pub fn helper_entry() -> Option<i32> {
-    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--vkore-device-helper"))
-    {
+    let mode = std::env::args_os().nth(1)?;
+    if mode != "--vkore-device-helper" && mode != "--vkore-memory-helper" {
         return None;
     }
     #[cfg(target_os = "linux")]
-    return Some(linux::entry());
+    return Some(if mode == "--vkore-memory-helper" {
+        linux::memory_entry()
+    } else {
+        linux::entry()
+    });
     #[cfg(not(target_os = "linux"))]
     Some(1)
+}
+
+/// Private polkit mode with an application-specific prompt. The existing
+/// memory-only flow raises the calling vKore process's limit, not QEMU as root.
+#[cfg(target_os = "linux")]
+pub fn authorize_memory_limit(memory_mib: u32) -> Result<(), String> {
+    linux::authorize_memory_limit(memory_mib)
 }
 
 /// Batch the device checks and optional memory-limit request at Done/Save.

@@ -197,6 +197,79 @@ pub(crate) fn launch(
     let _ = child.wait();
     Err("NPU helper did not start QEMU.".into())
 }
+pub(super) fn authorize_memory_limit(memory_mib: u32) -> Result<(), String> {
+    if !(2048..=1 << 20).contains(&memory_mib) {
+        return Err("Invalid memory authorization size.".into());
+    }
+    let mut child = Command::new("/usr/bin/pkexec")
+        .arg("--disable-internal-agent")
+        .arg(std::env::current_exe().map_err(|e| e.to_string())?)
+        .arg("--vkore-memory-helper")
+        .arg(memory_mib.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            format!("Memory authorization needs polkit and a desktop authentication agent: {e}")
+        })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err("Memory authorization was cancelled or denied; retry or turn off memory pinning.".into())
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Memory authorization timed out.".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+pub(super) fn memory_entry() -> i32 {
+    fn run() -> Result<(), String> {
+        let args: Vec<_> = std::env::args_os().take(4).collect();
+        if args.len() != 3 {
+            return Err("Invalid memory helper request.".into());
+        }
+        let mib: u32 = args[2]
+            .to_str()
+            .and_then(|s| s.parse().ok())
+            .filter(|m| (2048..=1 << 20).contains(m))
+            .ok_or("Invalid memory authorization size.")?;
+        let parent = rustix::process::getppid().ok_or("Memory caller exited.")?;
+        caller(parent.as_raw_nonzero().get() as u32)?;
+        // The target is the authenticated parent, never a PID supplied in args.
+        // Recheck the parent after reading its credentials.
+        if rustix::process::getppid() != Some(parent) {
+            return Err("Memory caller changed.".into());
+        }
+        let budget = (u64::from(mib) + 1024) << 20;
+        rustix::process::prlimit(
+            Some(parent),
+            rustix::process::Resource::Memlock,
+            rustix::process::Rlimit {
+                current: Some(budget),
+                maximum: Some(budget),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("vKore memory: {e}");
+            1
+        }
+    }
+}
+
 fn reply(value: &Reply) -> Result<(), String> {
     let mut out = std::io::stdout().lock();
     serde_json::to_writer(&mut out, value).map_err(|e| e.to_string())?;

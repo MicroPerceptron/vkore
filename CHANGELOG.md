@@ -6,6 +6,8 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.5.0] - 2026-11-19
 
 ### Added
+- Expand desktop disk sizing with GiB input, model-sized presets, a logarithmic slider, 32 GiB recommendations, and sparse capacities independent of currently free space.
+- Add narrowly scoped Linux polkit descriptions for concise hardware/memory prompts, with an installer for exact source-build or packaged binary paths.
 - Linux whole-NPU passthrough controls with persisted PCI identity, exclusive IOMMU-group admission, and QEMU VFIO/IOMMUFD launch support.
 - A polkit-authorized device guardian that passes opened device handles to unprivileged QEMU, checks function-level reset, and restores host drivers after guest exit or failed launch.
 

@@ -533,6 +533,7 @@ impl State {
             Update::Stage(stage) => {
                 if let Some(running) = self.running.get_mut(&name) {
                     running.stage = Some(stage);
+                    self.status = format!("{name}: {}", format!("{stage:?}").to_lowercase());
                 }
             }
             Update::Finished(outcome) => {
@@ -1052,7 +1053,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                         "off"
                     },
                     config.resources.pages.label()
-                ),
+                ) + &passthrough_summary(&config.resources.passthrough),
                 theme::TEXT_MUTED,
             ));
             let finished = state.finished.get(&config.name);
@@ -1118,6 +1119,16 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         page = page.push(ty.data(state.status.as_str(), theme::TEXT_MUTED));
     }
     widgets::page_frame(page)
+}
+
+/// The overview's note of the host NPUs a machine holds while it runs, empty
+/// when it passes none through.
+fn passthrough_summary(selected: &[vkore_vm::passthrough::Selection]) -> String {
+    if selected.is_empty() {
+        return String::new();
+    }
+    let addresses: Vec<&str> = selected.iter().map(|s| s.address.as_str()).collect();
+    format!(" · NPU passthrough: {}", addresses.join(", "))
 }
 
 #[cfg(test)]

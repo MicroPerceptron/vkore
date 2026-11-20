@@ -11,6 +11,10 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ### Changed
 - The shell stage reads "Kore is usable", true of a console image as of a desktop.
+- The desktop's status line follows a running machine's boot stage, and a machine's overview names the NPUs it passes through.
+
+### Fixed
+- Closing the desktop window while machines run now waits for each to stop within its grace period instead of exiting at once, which ended QEMU under a guest still shutting down; a second close still leaves immediately.
 
 ## [0.5.0] - 2026-11-19
 

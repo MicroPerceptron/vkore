@@ -530,10 +530,16 @@ pub fn view<'a>(
             12.,
             theme::TEXT_MUTED,
         ));
-    } else if draft.resources.pin_memory
-        && host
-            .memlock_bytes
-            .is_some_and(|n| n < vkored::hardware::lock_budget(draft.memory_mib))
+    } else if (!draft.resources.passthrough.is_empty()
+        || !draft.resources.gpu_vfs.is_empty()
+        || draft.resources.pin_memory)
+        && host.memlock_bytes.is_some_and(|n| {
+            vkored::hardware::lock_budget(
+                draft.memory_mib,
+                draft.resources.passthrough.len() + draft.resources.gpu_vfs.len(),
+            )
+            .is_ok_and(|budget| n < budget)
+        })
     {
         memory = memory.push(ty.body(
             "Permissions are checked when you finish. System authorization appears only if needed.",

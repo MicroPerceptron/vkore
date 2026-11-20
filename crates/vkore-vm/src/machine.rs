@@ -145,7 +145,7 @@ impl Machine {
                     qemu,
                     arguments,
                     &spec.resources.passthrough,
-                    (u64::from(spec.memory_mib) + 1024) << 20,
+                    spec.memory_mib,
                     errors,
                 )
                 .map_err(|error| MachineError::Io(qemu.to_owned(), std::io::Error::other(error)))?;

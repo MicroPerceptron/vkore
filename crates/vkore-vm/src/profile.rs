@@ -636,9 +636,11 @@ mod tests {
             assert!(iommu.contains("intremap=on") && iommu.contains("dma-translation=on"));
             assert!(!iommu.contains("x-flts=on") && !iommu.contains("x-pasid-mode=on"));
             assert!(args.iter().any(|s| s == "iommufd,id=vkore_iommu"));
-            assert!(args.iter().any(
-                |s| s == "vfio-pci,host=0000:00:0b.0,id=npu0,bus=npu_port0,iommufd=vkore_iommu"
-            ));
+            assert!(
+                args.iter()
+                    .any(|s| s
+                        == "vfio-pci,host=0000:00:0b.0,id=pt0,bus=pt_port0,iommufd=vkore_iommu")
+            );
         } else {
             assert!(machine.arguments(&capabilities).is_err());
         }

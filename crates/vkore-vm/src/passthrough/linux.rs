@@ -31,7 +31,7 @@ struct Request {
     parent: u32,
     selected: Vec<Selection>,
     gpus: Vec<gpu::Assignment>,
-    memory_bytes: Option<u64>,
+    memory_mib: u32,
     launch: Option<Launch>,
 }
 #[derive(Serialize, Deserialize)]
@@ -145,13 +145,13 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
 pub(super) fn authorize(
     selected: &[Selection],
     gpus: &[gpu::Assignment],
-    memory_bytes: Option<u64>,
+    memory_mib: u32,
 ) -> Result<(), String> {
     let request = Request {
         parent: std::process::id(),
         selected: selected.to_vec(),
         gpus: gpus.to_vec(),
-        memory_bytes,
+        memory_mib,
         launch: None,
     };
     let (mut child, control, reply) = spawn(&request, None)?;
@@ -168,7 +168,7 @@ pub(crate) fn launch(
     qemu: &Path,
     arguments: Vec<String>,
     selected: &[Selection],
-    memory_bytes: u64,
+    memory_mib: u32,
     errors: File,
 ) -> Result<Started, String> {
     let environment = [
@@ -189,7 +189,7 @@ pub(crate) fn launch(
         parent: std::process::id(),
         selected: selected.to_vec(),
         gpus: Vec::new(),
-        memory_bytes: Some(memory_bytes),
+        memory_mib,
         launch: Some(Launch {
             qemu: fs::canonicalize(qemu).map_err(|e| e.to_string())?,
             arguments,
@@ -260,7 +260,7 @@ pub(super) fn memory_entry() -> i32 {
         if rustix::process::getppid() != Some(parent) {
             return Err("Memory caller changed.".into());
         }
-        let budget = (u64::from(mib) + 1024) << 20;
+        let budget = lock_budget(mib, 0)?;
         rustix::process::prlimit(
             Some(parent),
             rustix::process::Resource::Memlock,
@@ -767,12 +767,10 @@ fn serve() -> Result<i32, String> {
     if request.launch.is_some() && !request.gpus.is_empty() {
         return Err("Provision GPU VFs in hardware setup before launching.".into());
     }
-    if request
-        .memory_bytes
-        .is_some_and(|n| !(3 << 30..=(1024u64 * 1024 + 1024) << 20).contains(&n))
-    {
-        return Err("Invalid locked-memory request.".into());
-    }
+    let budget = lock_budget(
+        request.memory_mib,
+        request.selected.len() + request.gpus.len(),
+    )?;
     validate_inventory(
         &request.selected,
         &vkore_devices::discover(),
@@ -792,21 +790,17 @@ fn serve() -> Result<i32, String> {
     for selection in &selected {
         bound.push(Bound::inspect(selection)?);
     }
-    if let Some(budget) = request.memory_bytes {
-        if !(3 << 30..=(1024u64 * 1024 + 1024) << 20).contains(&budget) {
-            return Err("Invalid locked-memory request.".into());
-        }
-        // Apply the budget only to this guardian and its future unprivileged
-        // child. Never change a caller-supplied PID's resource limits.
-        rustix::process::setrlimit(
-            rustix::process::Resource::Memlock,
-            rustix::process::Rlimit {
-                current: Some(budget),
-                maximum: Some(budget),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    // Apply the derived per-device budget only to this guardian and its future
+    // unprivileged child, never to a caller-supplied PID. Guest RAM stays separate
+    // from the pin accounting used for this limit.
+    rustix::process::setrlimit(
+        rustix::process::Resource::Memlock,
+        rustix::process::Rlimit {
+            current: Some(budget),
+            maximum: Some(budget),
+        },
+    )
+    .map_err(|e| e.to_string())?;
     let Some(mut launch) = request.launch else {
         reply(&Reply::Checked)?;
         return Ok(0);
@@ -824,11 +818,7 @@ fn serve() -> Result<i32, String> {
         return Err("Device launch was cancelled.".into());
     }
     let plan = super::iommu::IntelProbe::plan(&launch.arguments)?;
-    let memory = request
-        .memory_bytes
-        .ok_or("Missing DMA memory budget.")?
-        .checked_sub(1 << 30)
-        .ok_or("Invalid DMA memory budget.")?;
+    let memory = u64::from(request.memory_mib) << 20;
     for device in &mut bound {
         device.bind()?;
     }

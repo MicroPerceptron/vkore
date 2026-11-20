@@ -137,6 +137,11 @@ struct CreateArgs {
     /// Use a sparse disk instead of reserving space at first launch
     #[arg(long)]
     sparse: bool,
+    /// Pass this host NPU through whole, by PCI address (repeat; see
+    /// `vkore hardware`). Its identity is recorded and rechecked at launch,
+    /// which asks for authorization to hand the device over.
+    #[arg(long, value_name = "PCI_ADDRESS")]
+    passthrough: Vec<String>,
     /// The IOMMU vendor [default: this host's, so it can accelerate]
     #[arg(long, value_enum)]
     vendor: Option<VendorArg>,
@@ -489,6 +494,20 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
         arguments.host_cpus
     };
     config.resources.reserve_storage = !arguments.sparse;
+    for address in &arguments.passthrough {
+        let selection = host
+            .npus
+            .devices
+            .iter()
+            .filter_map(vkore_vm::passthrough::Selection::from_device)
+            .find(|selection| selection.address == *address)
+            .ok_or_else(|| {
+                format!(
+                    "--passthrough {address}: no NPU at that PCI address (see `vkore hardware`)"
+                )
+            })?;
+        config.resources.passthrough.push(selection);
+    }
     if let Some(page) = arguments.pages {
         config.resources.pages = match page.as_str() {
             "2m" => vkore_vm::hardware::PageSize::Huge2M,
@@ -558,7 +577,7 @@ fn describe(stage: Stage) -> &'static str {
         Stage::Firmware => "firmware",
         Stage::Kernel => "kernel up",
         Stage::Services => "services founded",
-        Stage::Shell => "shell ready: the desktop is usable",
+        Stage::Shell => "shell ready: Kore is usable",
         Stage::Ready => "ready: applications seeded, homes created",
         Stage::Degraded => "DEGRADED",
         Stage::Failed => "FAILED",
@@ -596,6 +615,10 @@ fn print_event(event: &Event, json: bool, started: Instant) {
             count(*directories, "directory", "directories")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
+        Event::Console { socket } => format!(
+            "console: the shell is on COM2; attach with socat -,raw,echo=0 UNIX-CONNECT:{}",
+            socket.display()
+        ),
         Event::Stage { stage, .. } => format!("boot: {}", describe(*stage)),
         Event::Qemu { name, data } => format!("qemu: {name} {data}"),
         Event::Stopping => "stopping: pressed the power button".into(),

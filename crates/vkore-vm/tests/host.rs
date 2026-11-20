@@ -134,6 +134,7 @@ fn start_machine(qemu: &std::path::Path, iso: PathBuf) -> (tempfile::TempDir, Ma
         serial_log: dir.path().join("serial.log"),
         debugcon_log: dir.path().join("debugcon.log"),
         qmp_socket: dir.path().join("qmp.sock"),
+        console_socket: medium.console.then(|| dir.path().join("console.sock")),
     };
     let machine = Machine::start(qemu, &caps, &spec, &dir.path().join("qemu.log")).unwrap();
     (dir, machine)

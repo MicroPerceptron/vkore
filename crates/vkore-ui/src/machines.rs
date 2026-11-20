@@ -652,6 +652,9 @@ fn describe(event: &Event) -> String {
             widgets::count(*files, "file", "files")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
+        Event::Console { socket } => {
+            format!("console: the shell is on COM2 at {}", socket.display())
+        }
         Event::Qemu { name, .. } => format!("qemu: {name}"),
         Event::Stopping => "stopping".into(),
         Event::Stopped { forced } => {

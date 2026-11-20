@@ -21,7 +21,9 @@ Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
   `vkore machine run` probes the host's QEMU, firmware and acceleration, checks
   the ISO (SHA-256, the paging mode its bootloader asks for), boots it, and
   reports the boot's stages from Kore's own console markers: kernel, shell,
-  ready, degraded, failed. It stops the machine with the power button, and ends
+  ready, degraded, failed. A console image (Kore's headless image, whose shell
+  lives on COM2 rather than a screen) gets that line on a Unix socket, and the
+  run prints how to attach to it. It stops the machine with the power button, and ends
   QEMU after a grace period if the guest does not power off.
 - **Volumes.** A machine's disk, any raw Kore disk image, or a disk's block
   device (Linux) can be listed, previewed, copied out, and written into, from

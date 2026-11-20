@@ -3,6 +3,15 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [Unreleased]
+
+### Added
+- Console images: an ISO whose Limine configuration loads Kore's console row gets COM2 on a Unix socket in the runtime directory (`<name>.console`), reported by `machine run`; COM1 stays the kernel console vKore follows.
+- `vkore machine create --passthrough PCI_ADDRESS` records whole-NPU passthrough from the command line, with the desktop's identity checks.
+
+### Changed
+- The shell stage reads "Kore is usable", true of a console image as of a desktop.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added

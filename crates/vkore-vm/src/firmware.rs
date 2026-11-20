@@ -5,7 +5,8 @@
 //! Kore boots through Limine's unsigned EFI image, so the firmware must be
 //! UEFI for x86_64 `q35`, split into executable and variable-store flash
 //! (the machine keeps its own copy of the variables), and must not enforce
-//! Secure Boot, enroll keys, require SMM, or launch a confidential guest.
+//! Secure Boot, enroll keys, or require SMM. Confidential-computing capability
+//! tags do not activate a confidential guest; that requires machine options.
 
 use std::{
     fs,
@@ -43,15 +44,9 @@ pub fn descriptor_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Features a Kore machine cannot boot with.
-const REFUSED_FEATURES: &[&str] = &[
-    "secure-boot",
-    "enrolled-keys",
-    "requires-smm",
-    "amd-sev-es",
-    "amd-sev-snp",
-    "intel-tdx",
-];
+/// Firmware requirements excluded by the current Kore launch profile.
+/// SEV/TDX tags advertise supported modes, not mandatory launch requirements.
+const REFUSED_FEATURES: &[&str] = &["secure-boot", "enrolled-keys", "requires-smm"];
 
 /// The firmware a descriptor names, if a Kore machine can boot it.
 pub fn from_descriptor(path: &Path, descriptor: &Value) -> Option<Firmware> {
@@ -170,32 +165,64 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_split_uefi_firmware_is_taken_and_secure_or_confidential_ones_are_not() {
+    fn split_uefi_accepts_optional_confidential_capabilities_but_refuses_required_modes() {
         let path = Path::new("/d/60-edk2-x86_64.json");
         let firmware = from_descriptor(
             path,
-            &descriptor(&["acpi-s3", "amd-sev", "verbose-dynamic"], true),
+            &descriptor(
+                &["acpi-s3", "amd-sev", "amd-sev-es", "verbose-dynamic"],
+                true,
+            ),
         )
         .unwrap();
         assert_eq!(firmware.code, PathBuf::from("/fw/CODE.fd"));
         assert_eq!(firmware.vars_template, PathBuf::from("/fw/VARS.fd"));
         assert_eq!(firmware.format, "raw");
-        for refused in [
-            "secure-boot",
-            "requires-smm",
-            "enrolled-keys",
-            "amd-sev-snp",
-        ] {
+        for refused in ["secure-boot", "requires-smm", "enrolled-keys"] {
             assert!(
                 from_descriptor(path, &descriptor(&[refused], true)).is_none(),
                 "{refused}"
             );
+        }
+        for capability in ["amd-sev", "amd-sev-es", "amd-sev-snp", "intel-tdx"] {
+            assert!(from_descriptor(path, &descriptor(&[capability], true)).is_some());
+            for refused in REFUSED_FEATURES {
+                assert!(from_descriptor(path, &descriptor(&[capability, refused], true)).is_none());
+            }
         }
         // A stateless image has no variable store to give each machine.
         assert!(from_descriptor(path, &descriptor(&[], false)).is_none());
         let mut bios = descriptor(&[], true);
         bios["interface-types"] = serde_json::json!(["bios"]);
         assert!(from_descriptor(path, &bios).is_none());
+    }
+
+    #[test]
+    fn discovery_accepts_fedoras_split_qcow2_firmware_with_sev_es_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("OVMF_CODE_4M.qcow2");
+        let vars = root.path().join("OVMF_VARS_4M.qcow2");
+        fs::write(&code, b"fixture").unwrap();
+        fs::write(&vars, b"fixture").unwrap();
+        let path = root.path().join("50-edk2-ovmf-4m-qcow2-x64-nosb.json");
+        let mut value = descriptor(
+            &["acpi-s3", "amd-sev", "amd-sev-es", "verbose-dynamic"],
+            true,
+        );
+        value["mapping"] = serde_json::json!({
+            "device": "flash", "mode": "split",
+            "executable": {"filename": code, "format": "qcow2"},
+            "nvram-template": {"filename": vars, "format": "qcow2"},
+        });
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let found = discover_in(&[root.path().to_owned()]).unwrap();
+        assert_eq!(found.descriptor.as_ref(), Some(&path));
+        assert_eq!(found.code, code);
+        assert_eq!(found.vars_template, vars);
+        assert_eq!(found.format, "qcow2");
+        value["features"] = serde_json::json!(["amd-sev-es", "enrolled-keys"]);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(discover_in(&[root.path().to_owned()]).is_none());
     }
 
     #[test]

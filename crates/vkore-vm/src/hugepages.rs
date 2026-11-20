@@ -1,6 +1,29 @@
 //! Bounded hugepage backing contract shared by the launcher and its helper.
 use crate::hardware::{GuestNuma, PageSize};
 
+pub(crate) enum Promotion {
+    Huge,
+    Base,
+    Stop,
+}
+
+/// Keep successful ranges even when other ranges cannot be collapsed. Stop is
+/// an unavailable optimization/budget, while Err is cancellation or bad RAM.
+pub(crate) fn promote(
+    memory_mib: u32,
+    mut attempt: impl FnMut(u32) -> Result<Promotion, String>,
+) -> Result<u32, String> {
+    let mut confirmed = 0;
+    for offset in (0..memory_mib).step_by(2) {
+        match attempt(offset)? {
+            Promotion::Huge => confirmed += 2,
+            Promotion::Base => {}
+            Promotion::Stop => break,
+        }
+    }
+    Ok(confirmed)
+}
+
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AllowanceChange {
@@ -59,7 +82,8 @@ pub(crate) fn fd_arguments(
     }
     for (node, (position, fd)) in positions.into_iter().zip(fds).enumerate() {
         args[position] = format!(
-            "memory-backend-file,id=ram{node},size={per_node}M,mem-path=/proc/self/fd/{fd},share=on,prealloc=on"
+            "memory-backend-file,id=ram{node},size={per_node}M,mem-path=/proc/self/fd/{fd},share=on,prealloc=on,align={}",
+            u64::from(page.mib().max(2)) << 20
         );
     }
     Ok(())
@@ -89,6 +113,34 @@ pub(crate) fn allowance(
 mod tests {
     use super::*;
     #[test]
+    fn partial_promotion_retains_later_successes_and_respects_stop_and_cancel() {
+        let mut offsets = Vec::new();
+        assert_eq!(
+            promote(8, |offset| {
+                offsets.push(offset);
+                Ok(if offset == 2 {
+                    Promotion::Base
+                } else {
+                    Promotion::Huge
+                })
+            })
+            .unwrap(),
+            6
+        );
+        assert_eq!(offsets, [0, 2, 4, 6]);
+        assert_eq!(promote(8, |_| Ok(Promotion::Base)).unwrap(), 0);
+        assert_eq!(
+            promote(8, |offset| Ok(if offset < 4 {
+                Promotion::Huge
+            } else {
+                Promotion::Stop
+            }))
+            .unwrap(),
+            4
+        );
+        assert!(promote(8, |_| Err("cancelled".into())).is_err());
+    }
+    #[test]
     fn restore_only_our_policy_and_preserve_external_changes() {
         let change = AllowanceChange {
             before: 20,
@@ -107,7 +159,7 @@ mod tests {
                 let fds: Vec<_> = (7..7 + numa.nodes() as i32).collect();
                 fd_arguments(&mut args, 8192, page, numa, &fds).unwrap();
                 for (node, fd) in fds.iter().enumerate() {
-                    assert!(args.contains(&format!("memory-backend-file,id=ram{node},size={}M,mem-path=/proc/self/fd/{fd},share=on,prealloc=on", 8192 / numa.nodes())));
+                    assert!(args.contains(&format!("memory-backend-file,id=ram{node},size={}M,mem-path=/proc/self/fd/{fd},share=on,prealloc=on,align={}", 8192 / numa.nodes(), u64::from(page.mib().max(2)) << 20)));
                 }
                 assert!(!args.iter().any(|a| a.contains("hugetlb=on")));
             }

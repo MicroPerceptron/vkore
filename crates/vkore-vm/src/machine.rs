@@ -96,6 +96,7 @@ pub struct Machine {
     child: Child,
     qemu_pid: u32,
     qemu_log: PathBuf,
+    memory_report: Option<String>,
     managed: bool,
     /// The guardian owns QEMU and restores host drivers after reaping it.
     device_control: Option<std::process::ChildStdin>,
@@ -136,7 +137,10 @@ impl Machine {
         File::create(&spec.serial_log).map_err(io(&spec.serial_log))?;
         let log = File::create(qemu_log).map_err(io(qemu_log))?;
         let errors = log.try_clone().map_err(io(qemu_log))?;
-        let (child, qemu_pid, device_control) = if spec.resources.passthrough.is_empty()
+        let (child, qemu_pid, device_control, memory_report) = if spec
+            .resources
+            .passthrough
+            .is_empty()
             && spec.resources.pages == crate::hardware::PageSize::System
         {
             let child = Command::new(qemu)
@@ -147,7 +151,7 @@ impl Machine {
                 .spawn()
                 .map_err(io(qemu))?;
             let pid = child.id();
-            (child, pid, None)
+            (child, pid, None, None)
         } else {
             #[cfg(target_os = "linux")]
             {
@@ -161,7 +165,12 @@ impl Machine {
                     errors,
                 )
                 .map_err(|error| MachineError::Io(qemu.to_owned(), std::io::Error::other(error)))?;
-                (started.child, started.pid, Some(started.control))
+                (
+                    started.child,
+                    started.pid,
+                    Some(started.control),
+                    started.memory,
+                )
             }
             #[cfg(not(target_os = "linux"))]
             return Err(ProfileError::Unsupported(
@@ -173,6 +182,7 @@ impl Machine {
             child,
             qemu_pid,
             qemu_log: qemu_log.to_owned(),
+            memory_report,
             managed: device_control.is_some(),
             device_control,
             qmp: None,
@@ -239,6 +249,10 @@ impl Machine {
         }
         self.exited = self.child.wait().ok();
         self.qmp = None;
+    }
+
+    pub fn memory_report(&self) -> Option<&str> {
+        self.memory_report.as_deref()
     }
 
     pub fn id(&self) -> u32 {

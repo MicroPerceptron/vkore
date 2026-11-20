@@ -644,6 +644,7 @@ fn print_event(event: &Event, json: bool, started: Instant) {
             count(*directories, "directory", "directories")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
+        Event::MemoryBacking { summary } => summary.clone(),
         Event::Console { socket } => format!(
             "console: the shell is on COM2; attach with socat -,raw,echo=0 UNIX-CONNECT:{}",
             socket.display()

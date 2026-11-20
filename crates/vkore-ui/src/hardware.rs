@@ -683,7 +683,7 @@ pub(crate) fn memory_view<'a>(
             action(ty, "Two nodes", (!busy).then(|| send(Change::GuestNuma(GuestNuma::Split))), draft.resources.guest_numa == GuestNuma::Split),
         ].spacing(6).wrap())
         .push(ty.body("Single node keeps all guest RAM together for inference. Two nodes preserves the Kore gate topology and divides RAM equally.", 12., theme::TEXT_MUTED));
-    memory = memory.push(ty.label("Host memory pages", theme::TEXT_MUTED));
+    memory = memory.push(ty.label("Preferred host pages", theme::TEXT_MUTED));
     let mut pages = row![action(
         ty,
         &format!("Automatic · {} KiB", host.system_page_bytes / 1024),
@@ -701,14 +701,14 @@ pub(crate) fn memory_view<'a>(
             ));
         }
         memory = memory.push(pages.wrap()).push(ty.body(
-            "Hugepages are allocated at launch with system authorization. Pinning alone does not create them. Allocation can fail if RAM is fragmented; 1 GiB pages may need a pool reserved at host boot. Added pages are released when the guest stops.",
+            "At launch, vKore compacts memory and tries this page size. If full coverage is unavailable, it uses 2 MiB transparent hugepages where possible and system pages for the rest. Your RAM size and guest layout stay unchanged; boot activity reports the result.",
             12., theme::TEXT_MUTED,
         ));
         for page in [PageSize::Huge2M, PageSize::Huge1G] {
             if !host.huge_available(page, draft.memory_mib) {
                 let reason = match host.hugepages.iter().find(|pool| pool.page == page) {
                     Some(pool) => format!(
-                        "{}: {:.1} GiB available in the pool; {:.1} GiB needed. Missing pages can be requested at launch.",
+                        "{}: {:.1} GiB available in the pool; {:.1} GiB needed. Partial coverage is allowed at launch.",
                         page.label(),
                         pool.free_mib as f64 / 1024.,
                         f64::from(draft.memory_mib) / 1024.

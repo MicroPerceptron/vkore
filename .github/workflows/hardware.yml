@@ -27,7 +27,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libxkbcommon-dev libwayland-dev libudev-dev
+          sudo apt-get install -y pkg-config libssl-dev libxkbcommon-dev libwayland-dev libudev-dev qemu-system-x86
       - name: Install pinned Rust
         run: rustup toolchain install nightly-2026-07-13 --profile minimal --component clippy --component rustfmt
       - name: Authentication policy tests
@@ -40,4 +40,6 @@ jobs:
       - name: Backend Clippy
         run: python3 tools/check-hardware-backend.py clippy
       - name: Backend tests, including native affinity
+        env:
+          VKORE_TEST_MEMORY_QEMU: ${{ runner.os == 'Linux' && '/usr/bin/qemu-system-x86_64' || '' }}
         run: python3 tools/check-hardware-backend.py test

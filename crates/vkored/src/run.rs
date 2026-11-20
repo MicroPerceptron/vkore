@@ -108,6 +108,9 @@ pub enum Event {
     Started {
         pid: u32,
     },
+    MemoryBacking {
+        summary: String,
+    },
     /// A console image's shell is on COM2, reachable at `socket` while the
     /// machine runs.
     Console {
@@ -383,6 +386,11 @@ impl Session {
         let machine = Machine::start(qemu, &checked.qemu_caps, &spec, &paths.qemu_log)
             .map_err(|error| RunError::Machine(error.to_string()))?;
         record.emit(&Event::Started { pid: machine.id() });
+        if let Some(summary) = machine.memory_report() {
+            record.emit(&Event::MemoryBacking {
+                summary: summary.to_owned(),
+            });
+        }
         if let Some(socket) = &spec.console_socket {
             record.emit(&Event::Console {
                 socket: socket.clone(),

@@ -4383,6 +4383,7 @@ name = "vkore-vm"
 version = "0.6.0"
 dependencies = [
  "ctrlc",
+ "libc",
  "qapi-qmp",
  "qapi-spec",
  "rustix 1.1.4",

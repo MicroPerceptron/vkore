@@ -114,6 +114,11 @@ struct Model {
 
 impl Model {
     fn update(&mut self, message: Message) {
+        // Closing is a drain: no new run, import, authorization or API start
+        // may be queued while the existing sessions finish collecting work.
+        if self.machines.closing {
+            return;
+        }
         match message {
             Message::Settings(message) => self.settings.update(message),
             Message::Appearance(appearance) => {
@@ -348,10 +353,6 @@ struct App {
     redraw: bool,
     redraw_requested: bool,
     last_frame: Option<Instant>,
-    /// The window asked to close while machines ran: they are stopping (each
-    /// within its own grace period), and the app exits once the last one has
-    /// finished, so a guest powers off rather than losing its QEMU.
-    closing: bool,
 }
 
 impl App {
@@ -528,7 +529,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         self.model.user_event(event);
         self.redraw = true;
-        if self.closing && self.model.machines.running.is_empty() {
+        if self.model.machines.closing && self.model.machines.running.is_empty() {
             event_loop.exit();
         }
     }
@@ -566,16 +567,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // still shutting down. Wait for them to finish; a second
                 // close leaves at once.
                 self.model.settings.stop();
-                self.model.machines.stop_all();
-                if self.closing || self.model.machines.running.is_empty() {
+                self.model.pending_start = None;
+                self.model.reopen = None;
+                if self.model.machines.request_close() {
                     event_loop.exit();
                 } else {
-                    self.closing = true;
-                    let count = self.model.machines.running.len();
-                    self.model.machines.status = format!(
-                        "Stopping {count} machine{} before closing; close again to leave now",
-                        if count == 1 { "" } else { "s" }
-                    );
                     self.redraw = true;
                     window.request_redraw();
                 }
@@ -618,7 +614,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Wait);
+        self.redraw |= self.model.machines.poll_consoles();
+        // Shell sockets are nonblocking and only sampled while connected.
+        let console_due = self
+            .model
+            .machines
+            .has_live_console()
+            .then(|| Instant::now() + Duration::from_millis(100));
+        event_loop.set_control_flow(console_due.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if !self.redraw || self.redraw_requested {
             return;
         }
@@ -633,7 +636,9 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                console_due.map_or(due, |poll| due.min(poll)),
+            ));
         }
     }
 }
@@ -769,7 +774,6 @@ fn main() {
         redraw: true,
         redraw_requested: false,
         last_frame: None,
-        closing: false,
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).expect("run vKore UI");
@@ -884,7 +888,7 @@ mod tests {
         }
     }
 
-    fn draw_at_scale(
+    pub(super) fn draw_at_scale(
         element: UiElement<'_>,
         size: Size,
         appearance: &Theme,

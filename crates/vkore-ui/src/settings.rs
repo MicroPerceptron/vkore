@@ -436,7 +436,22 @@ fn typography_controls(state: &State) -> UiElement<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{TcpListener, TcpStream};
+    use std::{
+        io::ErrorKind,
+        net::{TcpListener, TcpStream},
+        time::Duration,
+    };
+
+    fn assert_disconnected(mut connection: TcpStream) {
+        connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        match connection.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+            other => panic!("the stopped server retained its connection: {other:?}"),
+        }
+    }
 
     #[test]
     fn typography_applies_saves_and_resets_without_changing_api_preferences() {
@@ -498,7 +513,7 @@ mod tests {
         drop(reservation);
         state.update(SettingsMessage::ToggleApi);
         assert_eq!(state.api.as_ref().unwrap().address, first);
-        assert!(TcpStream::connect(first).is_ok());
+        let first_connection = TcpStream::connect(first).unwrap();
         let next = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let next_address = next.local_addr().unwrap();
         state.update(SettingsMessage::Port(next_address.port().to_string()));
@@ -506,14 +521,18 @@ mod tests {
         assert_eq!(state.api.as_ref().unwrap().address, first);
         assert_eq!(load_port(root.path()).unwrap(), next_address.port());
         state.update(SettingsMessage::ToggleApi);
-        assert!(TcpStream::connect(first).is_err());
+        assert!(state.api.is_none());
+        assert_disconnected(first_connection);
         drop(next);
         state.update(SettingsMessage::ToggleApi);
         assert_eq!(state.api.as_ref().unwrap().address, next_address);
+        let next_connection = TcpStream::connect(next_address).unwrap();
         let reopened = State::new(root.path().to_owned());
         assert_eq!(reopened.port, next_address.port());
         assert!(reopened.api.is_none());
         drop(state);
-        assert!(TcpStream::connect(next_address).is_err());
+        // Check this server's connection. A new connection after Drop could
+        // reach another parallel test that has reused the ephemeral port.
+        assert_disconnected(next_connection);
     }
 }

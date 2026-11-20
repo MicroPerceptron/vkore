@@ -31,6 +31,7 @@ pub enum Change {
     Disk(u32),
     DiskText(String),
     PinCpus,
+    CpuPowerManagement,
     PinMemory,
     Reserve,
     Page(PageSize),
@@ -161,11 +162,17 @@ impl Draft {
                     self.disk_gib = value;
                 }
             }
-            Change::PinCpus if host.cpu_pinning => {
+            Change::PinCpus if host.cpu_pinning && !self.resources.cpu_power_management => {
                 self.resources.pin_cpus = !self.resources.pin_cpus;
                 if self.resources.pin_cpus {
                     self.resources.host_cpus = host.preferred_cpus(self.cpus);
                 }
+            }
+            Change::CpuPowerManagement
+                if self.resources.cpu_power_management
+                    || (host.cpu_power_management.is_ok() && self.resources.pin_cpus) =>
+            {
+                self.resources.cpu_power_management = !self.resources.cpu_power_management;
             }
             Change::PinMemory if host.memory_pinning || self.resources.pin_memory => {
                 self.resources.pin_memory = !self.resources.pin_memory
@@ -379,9 +386,18 @@ pub fn view<'a>(
             ty,
             "Pin guest CPUs",
             draft.resources.pin_cpus,
-            host.cpu_pinning && !busy,
+            host.cpu_pinning && !draft.resources.cpu_power_management && !busy,
             send(Change::PinCpus),
         ));
+    cpu = cpu.push(switch(
+        ty, "Native CPU waits (MONITOR/MWAIT)", draft.resources.cpu_power_management,
+        !busy && (draft.resources.cpu_power_management
+            || (host.cpu_power_management.is_ok() && draft.resources.pin_cpus)),
+        send(Change::CpuPowerManagement),
+    )).push(ty.body("Requires CPU pinning. Also lets the guest manage supported idle states; other work sharing these cores may see higher latency. Turn off native waits before unpinning.", 12., theme::TEXT_MUTED));
+    if let Err(reason) = &host.cpu_power_management {
+        cpu = cpu.push(ty.data(reason, theme::TEXT_MUTED));
+    }
     if host.cpu_pinning {
         cpu = cpu.push(ty.body("Keep each guest CPU on a chosen host thread. Pinning does not reserve the core exclusively.", 12., theme::TEXT_MUTED));
         if draft.resources.pin_cpus {
@@ -1208,6 +1224,27 @@ mod tests {
             .collect();
         host
     }
+    #[test]
+    fn native_waits_require_pinning_and_can_be_disabled_on_an_unsupported_host() {
+        let mut host = host();
+        host.cpu_power_management = Ok(());
+        let mut draft = Draft::new(Some(&host), Requirements::default());
+        assert!(!draft.resources.cpu_power_management);
+        draft.change(Change::CpuPowerManagement, &host);
+        assert!(draft.resources.cpu_power_management);
+        draft.change(Change::PinCpus, &host);
+        assert!(draft.resources.pin_cpus);
+        host.cpu_power_management = Err("unavailable".into());
+        draft.change(Change::CpuPowerManagement, &host);
+        assert!(!draft.resources.cpu_power_management);
+        draft.change(Change::CpuPowerManagement, &host);
+        assert!(!draft.resources.cpu_power_management);
+        draft.change(Change::PinCpus, &host);
+        host.cpu_power_management = Ok(());
+        draft.change(Change::CpuPowerManagement, &host);
+        assert!(!draft.resources.cpu_power_management);
+    }
+
     #[test]
     fn presets_follow_host_limits_minimums_and_page_alignment() {
         assert_eq!(size_presets(8192, 16 * 1024, 1), vec![8192, 12288, 16384]);

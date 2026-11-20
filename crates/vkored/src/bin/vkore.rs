@@ -132,6 +132,9 @@ struct CreateArgs {
     memory_mib: Option<u32>,
     #[arg(long)]
     no_cpu_pinning: bool,
+    /// Allow native MONITOR/MWAIT and guest idle management (Linux KVM, pinned CPUs)
+    #[arg(long = "cpu-pm", conflicts_with = "no_cpu_pinning")]
+    cpu_power_management: bool,
     #[arg(long)]
     no_memory_pinning: bool,
     /// Host logical CPU IDs, in guest CPU order
@@ -519,6 +522,13 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
     config.memory_mib = arguments.memory_mib.unwrap_or(memory);
     config.resources = resources;
     config.resources.pin_cpus &= !arguments.no_cpu_pinning;
+    config.resources.cpu_power_management = arguments.cpu_power_management;
+    config.accel = match arguments.accel {
+        AccelArg::Auto => AccelChoice::Auto,
+        AccelArg::Kvm => AccelChoice::Kvm,
+        AccelArg::Hvf => AccelChoice::Hvf,
+        AccelArg::Tcg => AccelChoice::Tcg,
+    };
     config.resources.pin_memory &= !arguments.no_memory_pinning;
     config.resources.host_cpus = if arguments.host_cpus.is_empty() {
         host.preferred_cpus(config.cpus)
@@ -573,12 +583,6 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
         VendorArg::Intel => Vendor::Intel,
         VendorArg::Amd => Vendor::Amd,
     });
-    config.accel = match arguments.accel {
-        AccelArg::Auto => AccelChoice::Auto,
-        AccelArg::Kvm => AccelChoice::Kvm,
-        AccelArg::Hvf => AccelChoice::Hvf,
-        AccelArg::Tcg => AccelChoice::Tcg,
-    };
     config.framebuffer = arguments
         .framebuffer
         .split_once('x')
@@ -668,6 +672,9 @@ fn print_event(event: &Event, json: bool, started: Instant) {
             count(*directories, "directory", "directories")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
+        Event::CpuPowerManagement => {
+            "CPU power management: native MONITOR/MWAIT enabled on pinned CPUs".into()
+        }
         Event::MemoryBacking { summary } => summary.clone(),
         Event::Console { socket } => format!(
             "console: the shell is on COM2; attach with socat -,raw,echo=0 UNIX-CONNECT:{}",
@@ -1055,6 +1062,24 @@ fn shots(disk: &Disk, face: u8, get: Option<PathBuf>, json: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_waits_are_explicit_and_conflict_with_unpinned_cpus() {
+        let base = ["vkore", "machine", "create", "test", "--iso", "/image.iso"];
+        for enabled in [false, true] {
+            let Command::Machine(MachineCommand::Create(create)) =
+                Cli::try_parse_from(base.into_iter().chain(enabled.then_some("--cpu-pm")))
+                    .unwrap()
+                    .command
+            else {
+                panic!("expected machine create")
+            };
+            assert_eq!(create.cpu_power_management, enabled);
+        }
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--cpu-pm", "--no-cpu-pinning"])).is_err()
+        );
+    }
 
     #[test]
     fn official_and_custom_sources_are_mutually_exclusive() {

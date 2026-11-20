@@ -830,6 +830,9 @@ fn describe(event: &Event) -> String {
             widgets::count(*files, "file", "files")
         ),
         Event::Started { pid } => format!("QEMU started (pid {pid})"),
+        Event::CpuPowerManagement => {
+            "CPU power management: native MONITOR/MWAIT enabled on pinned CPUs".into()
+        }
         Event::MemoryBacking { summary } => summary.clone(),
         Event::Console { socket } => {
             format!("console: the shell is on COM2 at {}", socket.display())
@@ -1289,12 +1292,13 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             }
             pane = pane.push(ty.data(
                 format!(
-                    "CPU pinning: {} · memory pinning: {} · preferred pages: {}",
+                    "CPU pinning: {} · native waits: {} · memory pinning: {} · preferred pages: {}",
                     if config.resources.pin_cpus {
                         "on"
                     } else {
                         "off"
                     },
+                    if config.resources.cpu_power_management { "on" } else { "off" },
                     if config.resources.pin_memory {
                         "on"
                     } else {

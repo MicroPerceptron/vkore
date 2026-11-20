@@ -222,6 +222,10 @@ impl Machine {
                         .collect::<Result<_, _>>()?;
                     crate::hardware::bind_vcpus(machine.qemu_pid, &threads, &spec.resources)
                         .map_err(QmpError::Protocol)?;
+                    if spec.resources.cpu_power_management {
+                        crate::cpu_pm::available().map_err(QmpError::Protocol)?;
+                        crate::cpu_pm::verify(&mut qmp, &cpus)?;
+                    }
                     qmp.resume()
                 })();
                 if let Err(error) = ready {

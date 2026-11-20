@@ -313,7 +313,7 @@ impl MachineSpec {
                     .into(),
             ));
         }
-        let (machine, accel, cpu) = match self.accel {
+        let (machine, accel, mut cpu) = match self.accel {
             Accel::Kvm => (
                 "q35,kernel_irqchip=split,hmat=on",
                 "kvm".to_owned(),
@@ -337,6 +337,17 @@ impl MachineSpec {
                 ),
             ),
         };
+        if self.resources.cpu_power_management {
+            if self.accel != Accel::Kvm {
+                return Err(ProfileError::Unsupported(
+                    "Native CPU waits require KVM acceleration.".into(),
+                ));
+            }
+            cpu.push_str(",monitor=on,kvm-pv-unhalt=off");
+            if self.paging == Paging::FourLevel {
+                cpu.push_str(",enforce");
+            }
+        }
         // Managed VFIO uses second-level translation. PASID/first-level and
         // snoop control are not supported by this assignment profile. The
         // guardian realizes 48/39-bit candidates before starting guest CPUs.
@@ -399,13 +410,20 @@ impl MachineSpec {
                 "hugepages require Linux and page-aligned memory on each guest node".into(),
             ));
         }
+        let mut overcommit = Vec::new();
+        if self.resources.cpu_power_management {
+            overcommit.push("cpu-pm=on");
+        }
         if self.resources.pin_memory {
             if !cfg!(target_os = "linux") {
                 return Err(ProfileError::Unsupported(
                     "memory locking is unavailable on this host".into(),
                 ));
             }
-            arguments.extend(["-overcommit".into(), "mem-lock=on".into()]);
+            overcommit.push("mem-lock=on");
+        }
+        if !overcommit.is_empty() {
+            arguments.extend(["-overcommit".into(), overcommit.join(",")]);
         }
         arguments.extend(numa(
             self.cpus,
@@ -644,6 +662,39 @@ mod tests {
         } else {
             assert!(machine.arguments(&capabilities).is_err());
         }
+    }
+
+    #[test]
+    fn native_waits_require_pinning_and_kvm_and_preserve_cpu_features() {
+        let mut machine = spec();
+        assert!(!joined(&machine.arguments(&caps()).unwrap()).contains("cpu-pm="));
+        machine.resources.cpu_power_management = true;
+        assert!(machine.arguments(&caps()).is_err());
+        machine.resources.pin_cpus = true;
+        machine.resources.host_cpus = (0..u32::from(machine.cpus)).collect();
+        assert!(machine.arguments(&caps()).is_err()); // TCG
+        machine.accel = Accel::Hvf;
+        assert!(machine.arguments(&caps()).is_err());
+        machine.accel = Accel::Kvm;
+        for paging in [Paging::FourLevel, Paging::FiveLevel] {
+            machine.paging = paging;
+            let args = machine.arguments(&caps()).unwrap();
+            let cpu = &args[args.iter().position(|s| s == "-cpu").unwrap() + 1];
+            assert!(cpu.starts_with("host,"));
+            assert!(cpu.contains("monitor=on,kvm-pv-unhalt=off"));
+            assert_eq!(cpu.matches("enforce").count(), 1);
+            assert_eq!(cpu.contains("+la57"), paging == Paging::FiveLevel);
+            assert!(joined(&args).contains("-overcommit cpu-pm=on"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            machine.resources.pin_memory = true;
+            let args = machine.arguments(&caps()).unwrap();
+            assert_eq!(args.iter().filter(|s| *s == "-overcommit").count(), 1);
+            assert!(args.contains(&"cpu-pm=on,mem-lock=on".into()));
+        }
+        machine.resources.pin_cpus = false;
+        assert!(machine.arguments(&caps()).is_err());
     }
 
     #[test]

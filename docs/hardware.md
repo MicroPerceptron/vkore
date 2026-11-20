@@ -37,7 +37,7 @@ Existing schema-2 configurations without resource fields retain their prior
 unpinned/system-page/sparse behavior and two-node guest layout; new CLI and desktop creation use host
 recommendations. All configurations are subject to the baseline minimums.
 `vkore hardware` reports the snapshot as JSON. CLI creation also offers
-`--cpus`, `--memory-mib`, `--host-cpus`, `--no-cpu-pinning`,
+`--cpus`, `--memory-mib`, `--host-cpus`, `--no-cpu-pinning`, `--cpu-pm`,
 `--no-memory-pinning`, `--pages system|2m|1g`, `--numa single|split`, `--sparse`,
 `--passthrough PCI_ADDRESS` and `--gpu-vf PF_ADDRESS/VF_NUMBER`.
 
@@ -60,6 +60,34 @@ does not reserve host cores exclusively or bind QEMU's I/O threads. The guest's
 guest topology remains separate from host NUMA topology. New recommendations
 use one node, including its PCI expander and generic initiators. Existing saved
 machines retain two nodes until explicitly changed.
+
+## Native CPU waits
+
+**Native CPU waits (MONITOR/MWAIT)** is an opt-in processor setting, also exposed
+as `vkore machine create --cpu-pm`. Existing machines and new defaults leave it
+off. It requires CPU pinning, an x86-64 Linux KVM host, host MONITOR/MWAIT support,
+and KVM's `KVM_CAP_X86_DISABLE_EXITS` MWAIT capability. Discovery uses rust-vmm's
+MIT/Apache-2.0 `kvm-ioctls` and `kvm-bindings` for a read-only capability query,
+and the already-used MIT `raw-cpuid` for host instruction support. No VM is
+created and no kernel setting is changed by discovery.
+
+Launch adds `-overcommit cpu-pm=on` alongside memory locking, and explicitly
+requires `monitor=on,enforce` on the host CPU model. `kvm-pv-unhalt` is disabled,
+as required when HLT exits are disabled. QEMU enables the supported native idle
+capabilities; failure aborts initialization. Before resuming, vKore verifies the
+realized MONITOR feature on every guest CPU over QMP. Launch activity reports
+when the requested setting passed these checks. Unsupported requests fail;
+they do not fall back to emulated waits. macOS/HVF and TCG cannot use this option.
+
+This QEMU switch also disables supported HLT, PAUSE and C-state exits. It can
+reduce idle/wakeup overhead, but other host work sharing the pinned CPUs can see
+higher latency, and host CPU accounting no longer reflects guest idle time.
+Pinning alone does not exclusively reserve CPUs. The guest must actually use
+MONITOR/MWAIT to benefit; inference throughput improvements need measurement
+on the target hardware. Turn off native waits before disabling CPU pinning.
+The opt-in boot test `a_real_kore_iso_boots_with_native_cpu_waits` takes
+`VKORE_TEST_CPU_PM=1`, `VKORE_TEST_QEMU` and `VKORE_TEST_ISO` on a supported Linux
+host. It checks native-wait launch, readiness and shutdown, not throughput.
 
 ## Memory and authentication
 

@@ -65,6 +65,9 @@ pub struct Resources {
     pub passthrough: Vec<crate::passthrough::Selection>,
     #[serde(default)]
     pub pin_cpus: bool,
+    /// QEMU cpu-pm: native waits and supported idle exits; requires CPU affinity.
+    #[serde(default)]
+    pub cpu_power_management: bool,
     /// One distinct host logical CPU per vCPU, in guest CPU-index order.
     #[serde(default)]
     pub host_cpus: Vec<u32>,
@@ -122,6 +125,7 @@ pub struct HostResources {
     pub storage_path: PathBuf,
     pub storage_available_mib: u64,
     pub cpu_pinning: bool,
+    pub cpu_power_management: Result<(), String>,
     pub memory_pinning: bool,
     /// Native host page granularity; independent of Kore's guest page tables.
     pub system_page_bytes: usize,
@@ -193,6 +197,7 @@ impl HostResources {
             storage_path: path,
             storage_available_mib: stat.f_bavail.saturating_mul(stat.f_frsize) >> 20,
             cpu_pinning: cfg!(target_os = "linux"),
+            cpu_power_management: crate::cpu_pm::available(),
             memory_pinning: cfg!(target_os = "linux"),
             system_page_bytes: rustix::param::page_size(),
             hugetlb_supported: cfg!(target_os = "linux"),
@@ -234,6 +239,11 @@ impl HostResources {
 }
 
 pub fn validate_binding(resources: &Resources, cpus: u16) -> Result<(), String> {
+    if resources.cpu_power_management && !resources.pin_cpus {
+        return Err(
+            "Native CPU waits require CPU pinning. Enable pinning or turn off native waits.".into(),
+        );
+    }
     crate::passthrough::validate_selections(&resources.passthrough)?;
     crate::passthrough::gpu::validate(&resources.gpu_vfs, resources.passthrough.len())?;
     if resources.host_cpus.len() > 128 {

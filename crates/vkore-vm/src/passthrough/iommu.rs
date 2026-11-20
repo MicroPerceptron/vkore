@@ -9,6 +9,7 @@ pub(super) struct IntelProbe {
     firmware: String,
     cpu: String,
     cpu_position: usize,
+    cpu_power_management: bool,
 }
 impl IntelProbe {
     pub(super) fn plan(args: &[String]) -> Result<Option<Self>, String> {
@@ -89,6 +90,9 @@ impl IntelProbe {
             })?,
             cpu,
             cpu_position,
+            cpu_power_management: args.windows(2).any(|pair| {
+                pair[0] == "-overcommit" && pair[1].split(',').any(|option| option == "cpu-pm=on")
+            }),
         }))
     }
     fn device(&self, width: u8) -> String {
@@ -131,6 +135,11 @@ impl IntelProbe {
         .into_iter()
         .map(str::to_owned)
         .collect();
+        // MONITOR is only realizable under KVM when cpu-pm is enabled. Carry
+        // the policy into the paused DMA probe, without locking probe memory.
+        if self.cpu_power_management {
+            args.extend(["-overcommit".into(), "cpu-pm=on".into()]);
+        }
         args.extend(super::arguments(selected));
         args
     }
@@ -281,6 +290,20 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn dma_probe_preserves_native_waits_without_inheriting_memory_locking() {
+        let mut args = original();
+        args[1] = "host,monitor=on,kvm-pv-unhalt=off,enforce".into();
+        args.extend(["-overcommit".into(), "cpu-pm=on,mem-lock=on".into()]);
+        let plan = IntelProbe::plan(&args).unwrap().unwrap();
+        let probe = plan.arguments(39, &[]);
+        assert!(probe.contains(&"cpu-pm=on".into()));
+        assert!(!probe.iter().any(|arg| arg.contains("mem-lock")));
+        plan.choose(&mut args, 4 << 30, |_| Ok(())).unwrap();
+        assert!(args[1].starts_with("host,monitor=on,kvm-pv-unhalt=off,enforce,"));
+        assert!(args.contains(&"cpu-pm=on,mem-lock=on".into()));
+    }
+
     #[test]
     fn negotiated_physical_width_preserves_features_and_rejects_conflicting_caps() {
         let mut args = original();

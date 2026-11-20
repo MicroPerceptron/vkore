@@ -1,11 +1,12 @@
-//! A bounded client for the existing COM2 shell socket. No terminal escape
-//! interpretation or guest protocol: callers display the transcript as data.
+//! A bounded client and terminal screen for the existing COM2 shell socket.
+mod terminal;
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     path::Path,
 };
+pub use terminal::{Color, Output, Run, Style};
 
 pub const MAX_LINE_BYTES: usize = 1024;
 const TRANSCRIPT_BYTES: usize = 16 << 10;
@@ -18,6 +19,7 @@ pub struct Console {
     pending: Vec<u8>,
     sent: usize,
     error: Option<String>,
+    terminal: Box<terminal::Terminal>,
 }
 
 impl Console {
@@ -34,6 +36,7 @@ impl Console {
             pending: Vec::new(),
             sent: 0,
             error: None,
+            terminal: Box::default(),
         })
     }
 
@@ -50,8 +53,11 @@ impl Console {
     }
 
     pub fn transcript(&self) -> String {
-        let bytes: Vec<_> = self.transcript.iter().copied().collect();
-        String::from_utf8_lossy(&bytes).into_owned()
+        self.terminal.output.text()
+    }
+
+    pub fn output(&self) -> &Output {
+        &self.terminal.output
     }
 
     /// Queue one explicit line; no multiline paste, hidden control keys or
@@ -97,6 +103,7 @@ impl Console {
                 let remove = (self.transcript.len() + n).saturating_sub(TRANSCRIPT_BYTES);
                 self.transcript.drain(..remove);
                 self.transcript.extend(&bytes[..n]);
+                self.terminal.process(&bytes[..n]);
                 true
             }
             Err(error) if transient(&error) => changed,
@@ -147,7 +154,7 @@ mod tests {
         assert!(console.can_send());
         guest.write_all(b"NPU bound\r\n> ").unwrap();
         assert!(console.poll());
-        assert_eq!(console.transcript(), "NPU bound\r\n> ");
+        assert_eq!(console.transcript(), "NPU bound\n> ");
         drop(guest);
         assert!(console.poll());
         assert!(!console.connected());

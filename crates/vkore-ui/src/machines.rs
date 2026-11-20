@@ -101,7 +101,7 @@ impl Running {
 pub struct Finished {
     pub summary: String,
     pub log: String,
-    pub console: Option<String>,
+    pub console: Option<vkored::console::Output>,
 }
 
 /// Machines, and the form that creates one.
@@ -597,7 +597,7 @@ impl State {
                 let console = running
                     .as_ref()
                     .and_then(|run| run.console.as_ref())
-                    .map(vkored::console::Console::transcript);
+                    .map(|console| console.output().clone());
                 let log = running.map(|run| run.log).unwrap_or_default();
                 let summary = match outcome {
                     Ok(summary) => summary,
@@ -1160,8 +1160,8 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 } else if !running.console_error.is_empty() {
                     pane = pane.push(ty.data(running.console_error.as_str(), theme::ERROR));
                 }
-            } else if let Some(transcript) = finished.and_then(|run| run.console.as_deref()) {
-                pane = pane.push(console_transcript(transcript, ty));
+            } else if let Some(transcript) = finished.and_then(|run| run.console.as_ref()) {
+                pane = pane.push(crate::console::view(transcript, ty));
             }
             if let Some(finished) = finished {
                 pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
@@ -1227,87 +1227,59 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     widgets::page_frame(page)
 }
 
-fn console_transcript(transcript: &str, ty: Typography) -> UiElement<'_> {
-    container(
-        widgets::scroll(ty.mono(
-            fonts::shown(fonts::MONO, transcript, fonts::Breaks::Keep),
-            theme::TEXT_SECONDARY,
-        ))
-        .height(240)
-        .anchor_bottom(),
-    )
-    .padding(14)
-    .width(Length::Fill)
-    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.))
-    .into()
-}
-
 fn console_pane<'a>(
     name: &'a str,
     running: &'a Running,
-    console: &vkored::console::Console,
+    console: &'a vkored::console::Console,
     closing: bool,
     ty: Typography,
 ) -> UiElement<'a> {
     let enabled = !closing && console.can_send();
     let input_name = name.to_owned();
     let send = wrap(MachineMessage::ConsoleSend(name.to_owned()));
-    let mut pane = column![
-        row![
-            ty.body("Console", 18., theme::TEXT),
-            space::horizontal(),
-            ty.badge(
-                if console.connected() {
-                    "Connected"
-                } else {
-                    "Disconnected"
-                },
-                if console.connected() {
-                    theme::SUCCESS
-                } else {
-                    theme::TEXT_MUTED
-                }
-            )
-        ],
-        // Own the snapshot so the view never borrows a temporary or socket.
-        container(
-            widgets::scroll(ty.mono(
-                fonts::shown(fonts::MONO, console.transcript(), fonts::Breaks::Keep),
-                theme::TEXT_SECONDARY,
-            ))
-            .height(240)
-            .anchor_bottom()
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
-        row![
-            text_input("Command, e.g. status devices", &running.console_input)
-                .font(fonts::MONO)
-                .size(ty.size(theme::SIZE_SM))
-                .padding([8, 10])
-                .style(widgets::field)
-                .on_input_maybe(
-                    enabled.then_some(move |value| wrap(MachineMessage::ConsoleInput(
-                        input_name.clone(),
-                        value
-                    )))
+    let mut pane =
+        column![
+            row![
+                ty.body("Console", 18., theme::TEXT),
+                space::horizontal(),
+                ty.badge(
+                    if console.connected() {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    if console.connected() {
+                        theme::SUCCESS
+                    } else {
+                        theme::TEXT_MUTED
+                    }
                 )
-                .on_submit_maybe(enabled.then_some(send.clone())),
-            button(ty.control("Send"))
-                .height(ty.control_height())
-                .padding([8, 14])
-                .style(widgets::button_style(widgets::Button::Primary))
-                .on_press_maybe(enabled.then_some(send)),
+            ],
+            crate::console::view(console.output(), ty),
+            row![
+                text_input("Command, e.g. status devices", &running.console_input)
+                    .font(fonts::MONO)
+                    .size(ty.size(theme::SIZE_SM))
+                    .padding([8, 10])
+                    .style(widgets::field)
+                    .on_input_maybe(enabled.then_some(move |value| wrap(
+                        MachineMessage::ConsoleInput(input_name.clone(), value)
+                    )))
+                    .on_submit_maybe(enabled.then_some(send.clone())),
+                button(ty.control("Send"))
+                    .height(ty.control_height())
+                    .padding([8, 14])
+                    .style(widgets::button_style(widgets::Button::Primary))
+                    .on_press_maybe(enabled.then_some(send)),
+            ]
+            .spacing(8),
+            ty.body(
+                "Recent output · Send submits one line.",
+                12.,
+                theme::TEXT_MUTED
+            ),
         ]
-        .spacing(8),
-        ty.body(
-            "Recent output · Send submits one line. Terminal control codes are shown literally.",
-            12.,
-            theme::TEXT_MUTED
-        ),
-    ]
-    .spacing(12);
+        .spacing(12);
     if let Some(error) = console
         .error()
         .or_else(|| (!running.console_error.is_empty()).then_some(running.console_error.as_str()))
@@ -1374,7 +1346,7 @@ mod completion_tests {
         let listener = UnixListener::bind(&path).unwrap();
         let mut console = vkored::console::Console::connect(&path).unwrap();
         let (mut guest, _) = listener.accept().unwrap();
-        guest.write_all("Kore shell\r\n> status devices\r\nNPU bound · accelerator up\r\n日本語 \u{202e} \u{1b}[31m\r\n> ".as_bytes()).unwrap();
+        guest.write_all("Kore shell\r\n> status devices\r\n\u{1b}[1;36mDEVICES\u{1b}[0m\r\nNPU bound · accelerator up\r\nfs: \u{1b}[1;34mpictures/\u{1b}[m\r\n日本語 \u{202e}\r\n\u{1b}[?25h> ".as_bytes()).unwrap();
         assert!(console.poll());
         let (stop, _) = mpsc::channel();
         let mut running = Running::new(stop);

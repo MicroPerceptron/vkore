@@ -407,9 +407,13 @@ An ISO that loads `kore-svc-console` gets a separate COM2 socket, selected from
 the medium rather than the catalog or the display-window option. The desktop
 connects automatically and shows a Console pane on the running machine. Enter
 a printable ASCII command and press Enter or Send; each submission sends exactly
-one line. The pane retains the most recent 16 KiB of output and shows terminal
-control codes literally, with unsupported characters escaped in the bundled
-font. It is a transcript and line input, not a full terminal emulator.
+one line. ANSI colors, cursor movement, carriage returns, backspace and erase
+commands update a bounded terminal screen instead of appearing as escape text.
+The screen has 24 rows of 120 columns and retains 104 history rows. Unsupported
+characters and invisible text are still escaped in the bundled mono face.
+The terminal area stays dark in both app themes; ANSI bold uses bright colors
+without loading another font. Input remains line-based, not a full interactive
+terminal keyboard.
 
 Input is bounded to 1024 bytes with only one pending line; a disconnected or
 partially sent command is never automatically replayed. Socket reads and writes
@@ -421,3 +425,12 @@ Closing the desktop requests normal shutdown and waits for every session to
 finish stopping and collecting its workspace changes. New work and pending
 starts are cancelled during this drain. Closing again explicitly exits without
 waiting and can lose unpublished guest work.
+
+The terminal model reuses MIT-licensed `vt100` 0.18.1 with default features
+disabled, which keeps `vte`'s OSC parser buffer fixed at 1024 bytes. Its cell
+contents, CSI parameters, screen dimensions and scrollback are bounded; no
+`vte/std` feature is enabled in the dependency graph. The reviewed `vt100` source
+contains no unsafe blocks and adds only vte/unicode-width to existing helpers.
+Default callbacks ignore clipboard, title, resize and reply requests: guest
+escapes cannot invoke host actions. Parsing persists across socket reads; the
+UI receives styled text, never executable escapes.

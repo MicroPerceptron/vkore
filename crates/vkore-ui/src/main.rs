@@ -208,7 +208,9 @@ impl Model {
         let ty = self.settings.typography;
         let page = match self.page {
             Page::Volumes => volumes::view(&self.volumes, &self.machines.names(), ty),
-            Page::Machines => machines::view(&self.machines, ty),
+            Page::Machines => {
+                machines::view(&self.machines, ty, self.appearance.iced(self.system_dark))
+            }
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
         };
         let base: UiElement<'_> = row![
@@ -1036,7 +1038,9 @@ mod tests {
             for page in [Page::Volumes, Page::Machines, Page::Settings] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
-                    Page::Machines => machines::view(&machines, Typography::default()),
+                    Page::Machines => {
+                        machines::view(&machines, Typography::default(), appearance.clone())
+                    }
                     Page::Settings => settings::view(choice, system_dark, &settings),
                 };
                 let shell = container(row![sidebar(page, 0, "", Typography::default()), content])
@@ -1111,7 +1115,7 @@ mod tests {
                     for appearance in [Theme::Light, Theme::Dark] {
                         let shell = container(row![
                             sidebar(Page::Machines, 0, "", ty),
-                            machines::view(&state, ty)
+                            machines::view(&state, ty, appearance.clone())
                         ])
                         .width(Length::Fill)
                         .height(Length::Fill)
@@ -1479,7 +1483,7 @@ mod tests {
                     let ty = Typography::default();
                     let shell = container(row![
                         sidebar(Page::Machines, 0, "", ty),
-                        machines::view(&state, ty)
+                        machines::view(&state, ty, appearance.clone())
                     ])
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -1519,7 +1523,7 @@ mod tests {
                     for appearance in [Theme::Light, Theme::Dark] {
                         for page in [Page::Machines, Page::Volumes, Page::Settings] {
                             let content = match page {
-                                Page::Machines => machines::view(&machines, ty),
+                                Page::Machines => machines::view(&machines, ty, appearance.clone()),
                                 Page::Volumes => volumes::view(&volumes, &[], ty),
                                 Page::Settings => {
                                     settings::view(theme::Appearance::System, None, &settings)
@@ -1571,7 +1575,9 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes, Page::Settings] {
                     let content = match page {
-                        Page::Machines => machines::view(&machines, Typography::default()),
+                        Page::Machines => {
+                            machines::view(&machines, Typography::default(), appearance.clone())
+                        }
                         Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                         Page::Settings => settings::view(
                             theme::Appearance::System,
@@ -1621,7 +1627,9 @@ mod tests {
             for page in [Page::Volumes, Page::Machines, Page::Settings] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
-                    Page::Machines => machines::view(&machines, Typography::default()),
+                    Page::Machines => {
+                        machines::view(&machines, Typography::default(), appearance.clone())
+                    }
                     Page::Settings => settings::view(
                         theme::Appearance::System,
                         Some(appearance == Theme::Dark),
@@ -1648,7 +1656,9 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes] {
                     let content = match page {
-                        Page::Machines => machines::view(&machines, Typography::default()),
+                        Page::Machines => {
+                            machines::view(&machines, Typography::default(), appearance.clone())
+                        }
                         _ => volumes::view(&volumes, &[], Typography::default()),
                     };
                     let shell =
@@ -1946,7 +1956,7 @@ mod tests {
         for appearance in [Theme::Dark, Theme::Light] {
             let shell = container(row![
                 sidebar(Page::Machines, 0, "", Typography::default()),
-                machines::view(&machines, Typography::default())
+                machines::view(&machines, Typography::default(), appearance.clone())
             ])
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1972,7 +1982,7 @@ mod tests {
         for appearance in [Theme::Dark, Theme::Light] {
             let shell = container(row![
                 sidebar(Page::Machines, 0, "", Typography::default()),
-                machines::view(&machines, Typography::default())
+                machines::view(&machines, Typography::default(), appearance.clone())
             ])
             .width(Length::Fill)
             .height(Length::Fill)

@@ -153,6 +153,7 @@ pub enum MachineMessage {
     ConsoleFocus(Option<String>),
     ConsolePaste(String),
     ConsoleInput(String, Vec<u8>),
+    ConsoleResize(String, u16, u16),
     FormName(String),
     SelectImage(String),
     ToggleImageMenu,
@@ -270,6 +271,16 @@ impl State {
                             ));
                         },
                     );
+                }
+            }
+            MachineMessage::ConsoleResize(name, rows, cols) => {
+                if self.selected.as_ref() == Some(&name)
+                    && let Some(console) = self
+                        .running
+                        .get_mut(&name)
+                        .and_then(|run| run.console.as_mut())
+                {
+                    console.resize(rows, cols);
                 }
             }
             MachineMessage::ConsoleInput(name, bytes) => {
@@ -931,7 +942,22 @@ fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
 }
 
 /// The machines page.
-pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
+pub fn view(state: &State, ty: Typography, appearance: iced_core::Theme) -> UiElement<'_> {
+    iced_widget::responsive(move |size| {
+        view_sized(
+            state,
+            ty,
+            crate::console::Presentation::new(ty, &appearance, size.height),
+        )
+    })
+    .into()
+}
+
+fn view_sized(
+    state: &State,
+    ty: Typography,
+    terminal: crate::console::Presentation,
+) -> UiElement<'_> {
     let mut list = column![ty.label("Your machines", theme::TEXT_MUTED)].spacing(10);
     if state.configs.is_empty() {
         list = list
@@ -1361,12 +1387,12 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             let finished = state.finished.get(&config.name);
             if let Some(running) = running {
                 if let Some(console) = &running.console {
-                    pane = pane.push(console_pane(&config.name, running, console, state.closing || state.hardware_busy, state.console_focus.as_deref() == Some(config.name.as_str()), ty));
+                    pane = pane.push(console_pane(&config.name, running, console, state.closing || state.hardware_busy, state.console_focus.as_deref() == Some(config.name.as_str()), terminal));
                 } else if !running.console_error.is_empty() {
                     pane = pane.push(ty.data(running.console_error.as_str(), theme::ERROR));
                 }
             } else if let Some(transcript) = finished.and_then(|run| run.console.as_ref()) {
-                pane = pane.push(crate::console::view(transcript, ty));
+                pane = pane.push(crate::console::view(transcript, terminal));
             }
             if let Some(finished) = finished {
                 pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
@@ -1438,8 +1464,9 @@ fn console_pane<'a>(
     console: &'a vkored::console::Console,
     closing: bool,
     focused: bool,
-    ty: Typography,
+    terminal: crate::console::Presentation,
 ) -> UiElement<'a> {
+    let ty = terminal.ty;
     let enabled = !closing && console.connected();
     let mut pane =
         column![
@@ -1459,9 +1486,9 @@ fn console_pane<'a>(
                     }
                 )
             ],
-            crate::console::interactive(console.output(), name, enabled, focused, ty),
+            crate::console::interactive(console.output(), name, enabled, focused, terminal),
             ty.body(
-                format!("Click to type · Ctrl+Shift+V / Cmd+V to paste · Ctrl+Shift+Esc releases the keyboard · {} × {}", vkored::console::COLS, vkored::console::ROWS),
+                format!("Click to type · Ctrl+Shift+V / Cmd+V to paste · Ctrl+Shift+Esc releases the keyboard · {} × {}", console.output().cols, console.output().rows),
                 12.,
                 theme::TEXT_MUTED
             ),
@@ -1621,7 +1648,7 @@ mod completion_tests {
                     running.console.as_ref().unwrap(),
                     false,
                     true,
-                    Typography::default(),
+                    crate::console::Presentation::new(Typography::default(), &appearance, 600.),
                 )),
                 iced_core::Size::new(900., 560.),
                 &appearance,
@@ -1726,7 +1753,7 @@ mod tests {
                 for width in [760., 1280.] {
                     let shot = format!("archives-{phase}-{width}");
                     let (_, refused) = crate::tests::draw_at_scale(
-                        container(view(&state, Typography::default()))
+                        container(view(&state, Typography::default(), appearance.clone()))
                             .style(|appearance| {
                                 theme::panel(appearance, theme::BACKGROUND, None, 0.)
                             })

@@ -685,7 +685,7 @@ fn run_machine(
     send(Update::Line(
         "Checking hardware settings and permissions…".into(),
     ));
-    if config.resources.passthrough.is_empty() {
+    if !vkored::hardware::has_devices(&config) {
         vkored::hardware::authorize_configuration(&config, &host)?;
     } else {
         // The device guardian batches launch permissions and locked DMA memory.
@@ -1150,7 +1150,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                         "off"
                     },
                     config.resources.pages.label()
-                ) + &passthrough_summary(&config.resources.passthrough),
+                ) + &passthrough_summary(&config.resources),
                 theme::TEXT_MUTED,
             ));
             let finished = state.finished.get(&config.name);
@@ -1296,12 +1296,27 @@ fn console_pane<'a>(
 
 /// The overview's note of the host NPUs a machine holds while it runs, empty
 /// when it passes none through.
-fn passthrough_summary(selected: &[vkore_vm::passthrough::Selection]) -> String {
-    if selected.is_empty() {
-        return String::new();
+fn passthrough_summary(resources: &vkore_vm::hardware::Resources) -> String {
+    let mut devices: Vec<_> = resources
+        .passthrough
+        .iter()
+        .map(|s| format!("NPU {}", s.address))
+        .collect();
+    devices.extend(
+        resources
+            .gpu_vfs
+            .iter()
+            .map(|s| format!("GPU {} VF {}", s.physical_function, s.index + 1)),
+    );
+    let layout = match resources.guest_numa {
+        vkore_vm::hardware::GuestNuma::Single => "1 NUMA node",
+        vkore_vm::hardware::GuestNuma::Split => "2 NUMA nodes",
+    };
+    if devices.is_empty() {
+        format!(" · {layout}")
+    } else {
+        format!(" · {layout} · {}", devices.join(", "))
     }
-    let addresses: Vec<&str> = selected.iter().map(|s| s.address.as_str()).collect();
-    format!(" · NPU passthrough: {}", addresses.join(", "))
 }
 
 #[cfg(test)]

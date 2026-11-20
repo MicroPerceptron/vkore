@@ -32,10 +32,34 @@ impl PageSize {
     }
 }
 
+/// Guest topology, distinct from host placement. Old configurations keep the gate split.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestNuma {
+    Single,
+    #[default]
+    Split,
+}
+impl GuestNuma {
+    pub fn nodes(self) -> u32 {
+        match self {
+            Self::Single => 1,
+            Self::Split => 2,
+        }
+    }
+    pub fn alignment(self, pages: PageSize) -> u32 {
+        self.nodes() * pages.mib().max(1)
+    }
+}
+
 /// Legacy configurations deserialize without changing their scheduling policy.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
+    #[serde(default)]
+    pub gpu_vfs: Vec<crate::passthrough::gpu::Assignment>,
+    #[serde(default)]
+    pub guest_numa: GuestNuma,
     /// Explicit whole-device assignments; identity is checked again before use.
     #[serde(default)]
     pub passthrough: Vec<crate::passthrough::Selection>,
@@ -84,6 +108,7 @@ pub struct HugePool {
 pub struct HostResources {
     /// Discovery failure is reported inside the inventory, never as missing RAM/CPU.
     pub npus: vkore_devices::Inventory,
+    pub gpus: vkore_devices::GpuInventory,
     pub cpu_name: String,
     pub physical_cores: usize,
     pub logical_cpus: usize,
@@ -149,6 +174,7 @@ impl HostResources {
         }
         Ok(Self {
             npus: vkore_devices::discover(),
+            gpus: vkore_devices::discover_gpus(),
             cpu_name: system
                 .cpus()
                 .first()
@@ -204,6 +230,7 @@ impl HostResources {
 
 pub fn validate_binding(resources: &Resources, cpus: u16) -> Result<(), String> {
     crate::passthrough::validate_selections(&resources.passthrough)?;
+    crate::passthrough::gpu::validate(&resources.gpu_vfs, resources.passthrough.len())?;
     if resources.host_cpus.len() > 128 {
         return Err("at most 128 host CPU selections".into());
     }
@@ -435,6 +462,14 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_configs_keep_split_topology_and_no_gpu_intent() {
+        let old: Resources = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.guest_numa, GuestNuma::Split);
+        assert!(old.gpu_vfs.is_empty());
+        assert_eq!(GuestNuma::Single.alignment(PageSize::Huge1G), 1024);
+        assert_eq!(GuestNuma::Split.alignment(PageSize::Huge1G), 2048);
+    }
     #[test]
     fn hybrid_lists_handle_sparse_ids_and_ranges_without_expansion() {
         for cpu in [0, 2, 3, 4, 18] {

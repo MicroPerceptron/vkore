@@ -51,10 +51,17 @@ fn a_real_kore_iso_names_its_paging_mode() {
 /// shell and the seeded store, then stops the machine.
 #[test]
 fn a_real_kore_iso_boots_to_ready() {
+    boot_to_ready(vkore_vm::hardware::GuestNuma::Split);
+}
+#[test]
+fn a_real_kore_iso_boots_with_one_memory_node() {
+    boot_to_ready(vkore_vm::hardware::GuestNuma::Single);
+}
+fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma) {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso);
+    let (dir, mut machine) = start_machine(&qemu, iso, topology);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
         machine.poll(std::time::Duration::from_millis(500)).unwrap();
@@ -91,7 +98,11 @@ fn a_real_kore_iso_boots_to_ready() {
     assert!(!machine.running());
 }
 
-fn start_machine(qemu: &std::path::Path, iso: PathBuf) -> (tempfile::TempDir, Machine) {
+fn start_machine(
+    qemu: &std::path::Path,
+    iso: PathBuf,
+    topology: vkore_vm::hardware::GuestNuma,
+) -> (tempfile::TempDir, Machine) {
     let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .expect("valid QEMU runtime")
         .map(|runtime| runtime.firmware)
@@ -128,7 +139,10 @@ fn start_machine(qemu: &std::path::Path, iso: PathBuf) -> (tempfile::TempDir, Ma
         paging: medium.paging.unwrap_or(Paging::FourLevel),
         cpus: 2,
         memory_mib: 2048,
-        resources: Default::default(),
+        resources: vkore_vm::hardware::Resources {
+            guest_numa: topology,
+            ..Default::default()
+        },
         display: Display::Headless,
         framebuffer: (1280, 800),
         serial_log: dir.path().join("serial.log"),
@@ -148,7 +162,7 @@ fn a_kernel_self_test_iso_passes_and_powers_off() {
     else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso);
+    let (dir, mut machine) = start_machine(&qemu, iso, vkore_vm::hardware::GuestNuma::Split);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let mut captured = false;
     while std::time::Instant::now() < deadline {

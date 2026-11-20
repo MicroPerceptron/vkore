@@ -168,7 +168,8 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         vkore_vm::hardware::HostResources::probe(config.iso.parent().unwrap_or(Path::new("/")))
             .map_err(RunError::Host)?;
     crate::hardware::validate_host(config, &host_resources).map_err(RunError::Host)?;
-    if config.resources.passthrough.is_empty()
+    crate::hardware::assigned_devices(config, &host_resources).map_err(RunError::Host)?;
+    if !crate::hardware::has_devices(config)
         && crate::hardware::needs_authorization(config, &host_resources)
     {
         return Err(RunError::Host("memory pinning needs authorization: finish hardware setup with Done/Save hardware, or turn off memory pinning".into()));
@@ -182,11 +183,11 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         .map_err(|error| RunError::Host(error.to_string()))?;
     let qemu_caps =
         QemuCaps::probe(qemu, vendor, accel).map_err(|error| RunError::Host(error.to_string()))?;
-    if !config.resources.passthrough.is_empty()
+    if crate::hardware::has_devices(config)
         && (accel != vkore_vm::Accel::Kvm || !qemu_caps.vfio_iommufd)
     {
         return Err(RunError::Host(
-            "NPU passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support."
+            "Accelerator passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support."
                 .into(),
         ));
     }
@@ -352,6 +353,12 @@ impl Session {
             });
         }
 
+        let mut resources = config.resources.clone();
+        let host_resources =
+            vkore_vm::hardware::HostResources::probe(&paths.dir).map_err(RunError::Host)?;
+        resources.passthrough =
+            crate::hardware::assigned_devices(&config, &host_resources).map_err(RunError::Host)?;
+        resources.gpu_vfs.clear(); // MachineSpec contains resolved VF identities only.
         let spec = MachineSpec {
             name: config.name.clone(),
             iso: config.iso.clone(),
@@ -365,7 +372,7 @@ impl Session {
             paging,
             cpus: config.cpus,
             memory_mib: config.memory_mib,
-            resources: config.resources.clone(),
+            resources,
             display,
             framebuffer: config.framebuffer,
             serial_log: paths.serial.clone(),

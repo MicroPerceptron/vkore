@@ -4,7 +4,7 @@ use crate::typography::Typography;
 use crate::{Message, UiElement, machines::MachineMessage, theme, widgets};
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, slider, space, text_input, toggler};
-use vkore_vm::hardware::{HostResources, PageSize, Resources};
+use vkore_vm::hardware::{GuestNuma, HostResources, PageSize, Resources};
 use vkored::{MachineConfig, hardware::Requirements};
 
 #[derive(Clone, Debug)]
@@ -23,6 +23,8 @@ pub struct Draft {
 pub enum Change {
     Passthrough(vkore_vm::passthrough::Selection),
     Cpus(u16),
+    GuestNuma(GuestNuma),
+    Gpu(vkore_vm::passthrough::gpu::Assignment, bool),
     Memory(u32),
     Disk(u32),
     DiskText(String),
@@ -88,7 +90,8 @@ impl Draft {
                     .position(|s| *s == selection)
                 {
                     self.resources.passthrough.remove(index);
-                } else if self.resources.passthrough.len() < vkore_vm::passthrough::MAX_DEVICES
+                } else if self.resources.passthrough.len() + self.resources.gpu_vfs.len()
+                    < vkore_vm::passthrough::MAX_DEVICES
                     && host.npus.devices.iter().any(|device| {
                         vkore_vm::passthrough::Selection::from_device(device).as_ref()
                             == Some(&selection)
@@ -96,6 +99,22 @@ impl Draft {
                     })
                 {
                     self.resources.passthrough.push(selection);
+                }
+            }
+            Change::Gpu(selection, enabled) => {
+                if !enabled {
+                    self.resources
+                        .gpu_vfs
+                        .retain(|s| s.physical_function != selection.physical_function);
+                } else if selection.parent(&host.gpus).is_ok() {
+                    let mut next = self.resources.gpu_vfs.clone();
+                    next.retain(|s| s.physical_function != selection.physical_function);
+                    next.push(selection);
+                    if vkore_vm::passthrough::gpu::validate(&next, self.resources.passthrough.len())
+                        .is_ok()
+                    {
+                        self.resources.gpu_vfs = next;
+                    }
                 }
             }
             Change::Cpus(n) => {
@@ -111,6 +130,11 @@ impl Draft {
                         self.resources.host_cpus.push(id);
                     }
                 }
+            }
+            Change::GuestNuma(topology) => {
+                self.resources.guest_numa = topology;
+                let step = topology.alignment(self.resources.pages);
+                self.memory_mib = self.memory_mib.div_ceil(step) * step;
             }
             Change::Memory(n) => self.memory_mib = n,
             Change::Disk(n) if !self.storage_fixed => {
@@ -137,8 +161,10 @@ impl Draft {
             }
             Change::Page(page) if host.huge_available(page, self.memory_mib) => {
                 self.resources.pages = page;
-                self.memory_mib =
-                    self.memory_mib.div_ceil((page.mib() * 2).max(2)) * (page.mib() * 2).max(2);
+                self.memory_mib = self
+                    .memory_mib
+                    .div_ceil(self.resources.guest_numa.alignment(page))
+                    * self.resources.guest_numa.alignment(page);
             }
             Change::Core(id) if self.resources.pin_cpus && host.cpu_pinning => {
                 if let Some(index) = self.resources.host_cpus.iter().position(|c| *c == id) {
@@ -258,7 +284,7 @@ pub fn view<'a>(
     };
     let max_cpu = (host.logical_cpus.min(128) as u16).max(draft.minimum.cpus);
     let max_ram = (host.memory_mib.min(1 << 20) as u32).max(draft.minimum.memory_mib);
-    let ram_step = (draft.resources.pages.mib() * 2).max(2);
+    let ram_step = draft.resources.guest_numa.alignment(draft.resources.pages);
     let mut cpu = column![
         heading(ty, "Processors", format!("{} guest CPUs", draft.cpus)),
         ty.data(&host.cpu_name, theme::TEXT_SECONDARY),
@@ -515,6 +541,12 @@ pub fn view<'a>(
             theme::TEXT_MUTED,
         ));
     }
+    memory = memory.push(ty.label("Guest memory layout", theme::TEXT_MUTED))
+        .push(row![
+            action(ty, "Single node", (!busy).then(|| send(Change::GuestNuma(GuestNuma::Single))), draft.resources.guest_numa == GuestNuma::Single),
+            action(ty, "Two nodes", (!busy).then(|| send(Change::GuestNuma(GuestNuma::Split))), draft.resources.guest_numa == GuestNuma::Split),
+        ].spacing(6).wrap())
+        .push(ty.body("Single node keeps all guest RAM together for inference. Two nodes preserves the Kore gate topology and divides RAM equally.", 12., theme::TEXT_MUTED));
     memory = memory.push(ty.label("Host memory pages", theme::TEXT_MUTED));
     let mut pages = row![action(
         ty,
@@ -610,6 +642,7 @@ pub fn view<'a>(
                 busy,
                 ty
             )),
+            section(gpu_inventory(draft, host, editing, busy, ty)),
             storage_view(draft, host, editing, busy, ty),
         ]
         .spacing(16),
@@ -743,6 +776,157 @@ pub(crate) fn storage_view<'a>(
         }
     }
     section(storage)
+}
+
+pub(crate) fn gpu_inventory<'a>(
+    draft: &'a Draft,
+    host: &'a HostResources,
+    editing: bool,
+    busy: bool,
+    ty: Typography,
+) -> iced_widget::Column<'a, Message, iced_core::Theme, crate::AxUi> {
+    use vkore_vm::passthrough::gpu::{Assignment, eligible_parent};
+    let send = move |selection, enabled| {
+        Message::Machine(MachineMessage::Hardware(
+            editing,
+            Change::Gpu(selection, enabled),
+        ))
+    };
+    let mut content = column![ty.body("Graphics processors", 18., theme::TEXT),
+        ty.body("Give this guest a GPU virtual function while the host keeps its display. Managed SR-IOV currently supports Linux Intel xe GPUs.", 12., theme::TEXT_MUTED)].spacing(12);
+    for warning in &host.gpus.warnings {
+        content = content.push(ty.data(warning, theme::WARNING));
+    }
+    let parents: Vec<_> = host
+        .gpus
+        .devices
+        .iter()
+        .filter(|g| g.pci.physical_function.is_none())
+        .collect();
+    if parents.is_empty() {
+        content = content.push(ty.body(
+            if cfg!(target_os = "linux") {
+                "No PCI GPUs were reported. Refresh the host after configuring its GPU driver."
+            } else {
+                "GPU SR-IOV assignment is available on Linux."
+            },
+            12.,
+            theme::TEXT_MUTED,
+        ));
+    }
+    for gpu in parents {
+        let saved = draft
+            .resources
+            .gpu_vfs
+            .iter()
+            .find(|s| s.physical_function == gpu.pci.address);
+        let selection = saved.cloned().unwrap_or_else(|| Assignment::new(gpu, 0));
+        let eligible = eligible_parent(gpu);
+        let enabled = saved.is_some();
+        let capacity = gpu.pci.total_vfs.unwrap_or(0).min(64);
+        let count = gpu.pci.enabled_vfs.unwrap_or(0);
+        let limit = if count == 0 { capacity } else { count.min(64) };
+        let mut card = column![
+            ty.data(&gpu.name, theme::TEXT).size(ty.size(15.)),
+            ty.data(
+                format!(
+                    "{} · {} · {count} VFs enabled / {capacity} available",
+                    gpu.pci.address,
+                    gpu.driver.as_deref().unwrap_or("No driver bound")
+                ),
+                theme::TEXT_MUTED
+            ),
+            switch(
+                ty,
+                "Use a GPU virtual function",
+                enabled,
+                !busy && (enabled || eligible.is_ok()),
+                send(selection.clone(), !enabled)
+            )
+        ]
+        .spacing(8);
+        if enabled {
+            let mut previous = selection.clone();
+            previous.index = previous.index.saturating_sub(1);
+            let mut next = selection.clone();
+            next.index += 1;
+            card = card.push(
+                row![
+                    action(
+                        ty,
+                        "−",
+                        (!busy && selection.index > 0).then(|| send(previous, true)),
+                        false
+                    ),
+                    ty.body(
+                        format!("Virtual function {}", selection.index + 1),
+                        13.,
+                        theme::TEXT
+                    ),
+                    action(
+                        ty,
+                        "+",
+                        (!busy && selection.index + 1 < limit).then(|| send(next, true)),
+                        false
+                    )
+                ]
+                .spacing(10)
+                .align_y(alignment::Vertical::Center),
+            );
+            if count == 0 {
+                card = card.push(ty.body(format!("Done will create {} virtual function(s) and use VF {}. The GPU driver allocates their resources. The host GPU stays attached.", selection.index + 1, selection.index + 1), 12., theme::TEXT_SECONDARY));
+            } else {
+                match selection.resolve(&host.gpus) {
+                    Ok(vf) => {
+                        card = card.push(ty.data(
+                            format!(
+                                "Assign {} · dedicated to this guest while running",
+                                vf.address
+                            ),
+                            theme::TEXT_SECONDARY,
+                        ))
+                    }
+                    Err(reason) => card = card.push(ty.data(reason, theme::WARNING)),
+                }
+            }
+            card = card.push(ty.body("Permissions are requested on Done/Save and launch. Created VFs remain on the host until reboot; finish setup again to recreate them. Existing pools are never resized or removed.", 12., theme::TEXT_MUTED));
+        }
+        if let Err(reason) = eligible {
+            card = card.push(ty.data(reason, theme::TEXT_MUTED));
+        }
+        content = content.push(
+            container(card)
+                .padding(14)
+                .width(Length::Fill)
+                .style(widgets::card),
+        );
+    }
+    for saved in &draft.resources.gpu_vfs {
+        if !host
+            .gpus
+            .devices
+            .iter()
+            .any(|g| g.pci.address == saved.physical_function)
+        {
+            content = content.push(
+                column![
+                    ty.data(
+                        format!("Saved GPU {} is missing.", saved.physical_function),
+                        theme::WARNING
+                    ),
+                    switch(
+                        ty,
+                        "Use a GPU virtual function",
+                        true,
+                        !busy,
+                        send(saved.clone(), false)
+                    )
+                ]
+                .spacing(8),
+            );
+        }
+    }
+    content
 }
 
 pub(crate) fn npu_inventory<'a>(
@@ -956,6 +1140,7 @@ mod tests {
             address: "0000:00:0b.0".into(),
             vendor_id: 0x8086,
             device_id: 0x643e,
+            physical_function: None,
         };
         let mut config = MachineConfig::new("demo", "/image.iso");
         config.resources.passthrough.push(selected.clone());

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Read-only host NPU discovery, independently portable across Linux, Windows and macOS."
+description = "Read-only cross-platform NPU discovery and Linux GPU SR-IOV inventory."
 
 [dependencies]
 serde.workspace = true

@@ -170,15 +170,20 @@ fn option_path(path: &Path) -> Result<&str, ProfileError> {
 /// The NUMA split Kore's gate topology uses: node 0 takes two thirds of
 /// the CPUs (at least one), node 1 the rest; memory splits evenly; HMAT
 /// latencies and bandwidths as the Makefile states them.
-fn numa(cpus: u16, memory_mib: u32, pages: crate::hardware::PageSize) -> Vec<String> {
-    let nodes = 2u16;
+fn numa(
+    cpus: u16,
+    memory_mib: u32,
+    pages: crate::hardware::PageSize,
+    topology: crate::hardware::GuestNuma,
+) -> Vec<String> {
+    let nodes = topology.nodes() as u16;
     let per_node = memory_mib / u32::from(nodes);
     let mut arguments = Vec::new();
     let mut first = 0u16;
     for node in 0..nodes {
         let remaining = nodes - node;
         let left = cpus - first;
-        let count = if node == 0 && cpus >= 3 {
+        let count = if nodes == 2 && node == 0 && cpus >= 3 {
             (cpus * 2).div_ceil(3)
         } else {
             left.div_ceil(remaining)
@@ -253,7 +258,9 @@ impl MachineSpec {
             return Err(ProfileError::Cpus(self.cpus));
         }
         if !(MIN_MEMORY_MIB..=MAX_MEMORY_MIB).contains(&self.memory_mib)
-            || !self.memory_mib.is_multiple_of(2)
+            || !self
+                .memory_mib
+                .is_multiple_of(self.resources.guest_numa.nodes())
         {
             return Err(ProfileError::Memory(self.memory_mib));
         }
@@ -333,6 +340,11 @@ impl MachineSpec {
         // Managed VFIO uses second-level translation. PASID/first-level and
         // snoop control are not supported by this assignment profile. The
         // guardian realizes 48/39-bit candidates before starting guest CPUs.
+        if !self.resources.gpu_vfs.is_empty() {
+            return Err(ProfileError::Unsupported(
+                "Resolve GPU VF selections before composing the launch profile.".into(),
+            ));
+        }
         let assigned = !self.resources.passthrough.is_empty();
         let iommu = match self.vendor {
             Vendor::Intel => format!(
@@ -374,14 +386,17 @@ impl MachineSpec {
         if !self.resources.passthrough.is_empty()
             && (!cfg!(target_os = "linux") || self.accel != Accel::Kvm || !qemu.vfio_iommufd)
         {
-            return Err(ProfileError::Unsupported("NPU passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support.".into()));
+            return Err(ProfileError::Unsupported("Accelerator passthrough requires Linux KVM and QEMU with VFIO device-FD and IOMMUFD support.".into()));
         }
         let page_mib = self.resources.pages.mib();
         if page_mib != 0
-            && (!cfg!(target_os = "linux") || !self.memory_mib.is_multiple_of(2 * page_mib))
+            && (!cfg!(target_os = "linux")
+                || !self
+                    .memory_mib
+                    .is_multiple_of(self.resources.guest_numa.alignment(self.resources.pages)))
         {
             return Err(ProfileError::Unsupported(
-                "hugepages require Linux and page-aligned memory on both guest nodes".into(),
+                "hugepages require Linux and page-aligned memory on each guest node".into(),
             ));
         }
         if self.resources.pin_memory {
@@ -392,7 +407,12 @@ impl MachineSpec {
             }
             arguments.extend(["-overcommit".into(), "mem-lock=on".into()]);
         }
-        arguments.extend(numa(self.cpus, self.memory_mib, self.resources.pages));
+        arguments.extend(numa(
+            self.cpus,
+            self.memory_mib,
+            self.resources.pages,
+            self.resources.guest_numa,
+        ));
         arguments.extend(
             [
                 "-no-user-config",
@@ -428,7 +448,10 @@ impl MachineSpec {
             "-global".into(),
             "isa-debugcon.iobase=0xe9".into(),
             "-device".into(),
-            "pxb-pcie,id=pxb1,numa_node=1,bus_nr=128,bus=pcie.0".into(),
+            format!(
+                "pxb-pcie,id=pxb1,numa_node={},bus_nr=128,bus=pcie.0",
+                self.resources.guest_numa.nodes() - 1
+            ),
             "-device".into(),
             "pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1".into(),
             "-device".into(),
@@ -482,6 +505,7 @@ impl MachineSpec {
                 ("gi_nvme0", "nvme_dev0", 1),
                 ("gi_xhci", "xhci", 1),
             ] {
+                let node = node.min(self.resources.guest_numa.nodes() - 1);
                 arguments.push("-object".into());
                 arguments.push(format!(
                     "acpi-generic-initiator,id={id},pci-dev={device},node={node}"
@@ -597,6 +621,7 @@ mod tests {
                 address: "0000:00:0b.0".into(),
                 vendor_id: 0x8086,
                 device_id: 0x643e,
+                physical_function: None,
             });
         let mut capabilities = caps();
         assert!(machine.arguments(&capabilities).is_err());
@@ -726,10 +751,37 @@ mod tests {
     }
 
     #[test]
+    fn single_node_keeps_all_ram_and_devices_in_one_domain() {
+        let mut machine = spec();
+        machine.resources.guest_numa = crate::hardware::GuestNuma::Single;
+        machine.memory_mib = 3073;
+        let mut caps = caps();
+        caps.generic_initiators = true;
+        let args = machine.arguments(&caps).unwrap();
+        let line = joined(&args);
+        assert!(line.contains("node,nodeid=0,cpus=0-3,memdev=ram0"));
+        assert!(line.contains("memory-backend-ram,id=ram0,size=3073M"));
+        assert!(line.contains("pxb-pcie,id=pxb1,numa_node=0,"));
+        assert!(line.contains("pci-dev=nvme_dev0,node=0"));
+        assert!(!line.contains("nodeid=1") && !line.contains("target=1") && !line.contains("ram1"));
+        assert!(!line.contains("dist,src="));
+    }
+
+    #[test]
     fn the_numa_split_and_vram_match_the_gate() {
-        let two = joined(&numa(2, 2048, crate::hardware::PageSize::System));
+        let two = joined(&numa(
+            2,
+            2048,
+            crate::hardware::PageSize::System,
+            crate::hardware::GuestNuma::Split,
+        ));
         assert!(two.contains("cpus=0-0") && two.contains("cpus=1-1") && two.contains("size=1024M"));
-        let eight = joined(&numa(8, 8192, crate::hardware::PageSize::System));
+        let eight = joined(&numa(
+            8,
+            8192,
+            crate::hardware::PageSize::System,
+            crate::hardware::GuestNuma::Split,
+        ));
         assert!(eight.contains("cpus=0-5") && eight.contains("cpus=6-7"));
         assert_eq!(vgamem_mib(1280, 800), 16);
         assert_eq!(vgamem_mib(1920, 1200), 16);

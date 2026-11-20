@@ -455,6 +455,7 @@ mod tests {
             address: "0000:00:0b.0".into(),
             vendor_id: 0x8086,
             device_id: 0x643e,
+            physical_function: None,
         }];
         store.save(&c).unwrap();
         assert_eq!(store.get("demo").unwrap(), c);

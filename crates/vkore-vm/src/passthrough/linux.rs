@@ -30,6 +30,7 @@ static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 struct Request {
     parent: u32,
     selected: Vec<Selection>,
+    gpus: Vec<gpu::Assignment>,
     memory_bytes: Option<u64>,
     launch: Option<Launch>,
 }
@@ -71,7 +72,7 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
         .stdout(Stdio::piped())
         .stderr(errors.map_or(Stdio::null(), Stdio::from));
     let mut child = command.spawn().map_err(|e| {
-        format!("NPU authorization needs polkit and a desktop authentication agent: {e}")
+        format!("Device authorization needs polkit and a desktop authentication agent: {e}")
     })?;
     let mut input = child.stdin.take().unwrap();
     let mut output = child.stdout.take().unwrap();
@@ -84,22 +85,23 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
         let mut offset = 0;
         while offset < data.len() {
             if Instant::now() >= deadline {
-                return Err("NPU authorization timed out.".into());
+                return Err("Device authorization timed out.".into());
             }
             match input.write(&data[offset..]) {
-                Ok(0) => return Err("NPU authorization pipe closed.".into()),
+                Ok(0) => return Err("Device authorization pipe closed.".into()),
                 Ok(n) => offset += n,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
-                Err(e) => return Err(format!("NPU authorization was cancelled or failed: {e}")),
+                Err(e) => return Err(format!("Device authorization was cancelled or failed: {e}")),
             }
         }
         let mut bytes = Vec::new();
         loop {
             if Instant::now() >= deadline {
                 return Err(
-                    "NPU authorization timed out; pending preparation will be rolled back.".into(),
+                    "Device authorization timed out; pending preparation will be rolled back."
+                        .into(),
                 );
             }
             let mut fds = [PollFd::new(&output, PollFlags::IN)];
@@ -116,7 +118,7 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
             }
             let mut b = [0];
             if output.read(&mut b).map_err(|e| e.to_string())? == 0 {
-                return Err("NPU authorization was cancelled, denied, or the helper failed. Check the QEMU log for launch details.".into());
+                return Err("Device authorization was cancelled, denied, or the helper failed. Check the QEMU log for launch details.".into());
             }
             if b[0] == b'\n' {
                 break;
@@ -140,10 +142,15 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
     }
 }
 
-pub(super) fn authorize(selected: &[Selection], memory_bytes: Option<u64>) -> Result<(), String> {
+pub(super) fn authorize(
+    selected: &[Selection],
+    gpus: &[gpu::Assignment],
+    memory_bytes: Option<u64>,
+) -> Result<(), String> {
     let request = Request {
         parent: std::process::id(),
         selected: selected.to_vec(),
+        gpus: gpus.to_vec(),
         memory_bytes,
         launch: None,
     };
@@ -153,7 +160,7 @@ pub(super) fn authorize(selected: &[Selection], memory_bytes: Option<u64>) -> Re
     if matches!(reply, Reply::Checked) && status.success() {
         Ok(())
     } else {
-        Err("NPU setup authorization did not finish.".into())
+        Err("Device setup authorization did not finish.".into())
     }
 }
 
@@ -181,6 +188,7 @@ pub(crate) fn launch(
     let request = Request {
         parent: std::process::id(),
         selected: selected.to_vec(),
+        gpus: Vec::new(),
         memory_bytes: Some(memory_bytes),
         launch: Some(Launch {
             qemu: fs::canonicalize(qemu).map_err(|e| e.to_string())?,
@@ -198,7 +206,7 @@ pub(crate) fn launch(
     }
     drop(control);
     let _ = child.wait();
-    Err("NPU helper did not start QEMU.".into())
+    Err("Device helper did not start QEMU.".into())
 }
 pub(super) fn authorize_memory_limit(memory_mib: u32) -> Result<(), String> {
     if !(2048..=1 << 20).contains(&memory_mib) {
@@ -293,7 +301,7 @@ pub(super) fn entry() -> i32 {
         Ok(code) => code,
         Err(error) => {
             let error: String = error.chars().take(512).collect();
-            eprintln!("NPU passthrough: {error}");
+            eprintln!("Device passthrough: {error}");
             let _ = reply(&Reply::Error(error));
             125
         }
@@ -432,7 +440,7 @@ fn lease(address: &str) -> Result<File, String> {
         return Err("Invalid device lease file.".into());
     }
     file.try_lock().map_err(|_| {
-        format!("NPU {address} is already assigned or being prepared by another vKore session.")
+        format!("Device {address} is already assigned or being prepared by another vKore session.")
     })?;
     Ok(file)
 }
@@ -445,7 +453,7 @@ fn reset_method(path: &Path) -> Result<(String, &'static str), String> {
         .into_iter()
         .find(|m| original.split_whitespace().any(|s| s == *m))
         .ok_or(
-            "This NPU has no reported function-level reset. Bus-wide resets are not supported.",
+            "This device has no reported function-level reset. Bus-wide resets are not supported.",
         )?;
     Ok((original, method))
 }
@@ -453,7 +461,7 @@ pub(super) fn check_host(selected: &[Selection]) -> Result<(), String> {
     validate_selections(selected)?;
     for selection in selected {
         reset_method(&device_path(selection))
-            .map_err(|e| format!("NPU {}: {e}", selection.address))?;
+            .map_err(|e| format!("Device {}: {e}", selection.address))?;
     }
     Ok(())
 }
@@ -461,21 +469,24 @@ fn idle(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::FileTypeExt;
     let target = fs::canonicalize(path).map_err(|e| e.to_string())?;
     let mut devices = Vec::new();
-    match fs::read_dir("/sys/class/accel") {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-        Err(e) => return Err(e.to_string()),
-        Ok(entries) => {
-            for entry in entries.take(256) {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if fs::canonicalize(entry.path().join("device")).ok().as_ref() == Some(&target) {
-                    let dev = read(entry.path().join("dev"))?;
-                    let (major, minor) = dev
-                        .split_once(':')
-                        .ok_or("Invalid accelerator device number.")?;
-                    devices.push(rustix::fs::makedev(
-                        major.parse().map_err(|_| "Invalid major number.")?,
-                        minor.parse().map_err(|_| "Invalid minor number.")?,
-                    ));
+    for class in ["/sys/class/accel", "/sys/class/drm"] {
+        match fs::read_dir(class) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.to_string()),
+            Ok(entries) => {
+                for entry in entries.take(256) {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if fs::canonicalize(entry.path().join("device")).ok().as_ref() == Some(&target)
+                    {
+                        let dev = read(entry.path().join("dev"))?;
+                        let (major, minor) = dev
+                            .split_once(':')
+                            .ok_or("Invalid accelerator device number.")?;
+                        devices.push(rustix::fs::makedev(
+                            major.parse().map_err(|_| "Invalid major number.")?,
+                            minor.parse().map_err(|_| "Invalid minor number.")?,
+                        ));
+                    }
                 }
             }
         }
@@ -520,12 +531,12 @@ fn idle(path: &Path) -> Result<(), String> {
         let entries = match fs::read_dir(process.path().join("fd")) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Cannot check NPU users: {e}")),
+            Err(e) => return Err(format!("Cannot check accelerator users: {e}")),
         };
         for fd in entries {
             count += 1;
             if count > 262144 {
-                return Err("Host file-descriptor scan exceeded its limit; cannot establish that the NPU is idle.".into());
+                return Err("Host file-descriptor scan exceeded its limit; cannot establish that the device is idle.".into());
             }
             let fd = fd.map_err(|e| e.to_string())?;
             let meta = match fs::metadata(fd.path()) {
@@ -538,7 +549,7 @@ fn idle(path: &Path) -> Result<(), String> {
                 }
             };
             if meta.file_type().is_char_device() && devices.contains(&meta.rdev()) {
-                return Err("The NPU is open in a host process. Close host NPU workloads before starting this guest.".into());
+                return Err("The device is open in a host process. Close host accelerator workloads before starting this guest.".into());
             }
         }
     }
@@ -591,7 +602,11 @@ impl Bound {
     fn inspect(selection: &Selection) -> Result<Self, String> {
         use super::handoff::Driver;
         let lease = lease(&selection.address)?;
-        validate_inventory(std::slice::from_ref(selection), &vkore_devices::discover())?;
+        validate_inventory(
+            std::slice::from_ref(selection),
+            &vkore_devices::discover(),
+            &vkore_devices::discover_gpus(),
+        )?;
         let path = device_path(selection);
         let (reset, _) = reset_method(&path)?;
         let driver = SysfsDriver {
@@ -636,7 +651,7 @@ impl Bound {
             .write(true)
             .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(Path::new("/dev/vfio/devices").join(name))
-            .map_err(|e| format!("Cannot open assigned NPU: {e}"))
+            .map_err(|e| format!("Cannot open assigned Device: {e}"))
     }
     fn restore(&mut self) -> Result<(), String> {
         self.handoff.restore()
@@ -646,7 +661,7 @@ impl Drop for Bound {
     fn drop(&mut self) {
         if let Err(e) = self.restore() {
             eprintln!(
-                "NPU HOST DRIVER RESTORATION FAILED for {}: {e}",
+                "Device HOST DRIVER RESTORATION FAILED for {}: {e}",
                 self.address
             );
         }
@@ -672,7 +687,7 @@ fn qemu_command(
         let device = bound
             .iter()
             .find(|b| b.address == selection.address)
-            .ok_or("Missing leased NPU.")?;
+            .ok_or("Missing leased Device.")?;
         fds.push(device.open()?);
     }
     fd_arguments(
@@ -741,13 +756,35 @@ fn serve() -> Result<i32, String> {
             return Err("Device request is too large.".into());
         }
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     caller(request.parent)?;
     validate_selections(&request.selected)?;
-    if request.selected.is_empty() {
-        return Err("No NPU was selected.".into());
+    gpu::validate(&request.gpus, request.selected.len())?;
+    if request.selected.is_empty() && request.gpus.is_empty() {
+        return Err("No accelerator was selected.".into());
     }
+    // Validate every request before provisioning any physical function.
+    if request.launch.is_some() && !request.gpus.is_empty() {
+        return Err("Provision GPU VFs in hardware setup before launching.".into());
+    }
+    if request
+        .memory_bytes
+        .is_some_and(|n| !(3 << 30..=(1024u64 * 1024 + 1024) << 20).contains(&n))
+    {
+        return Err("Invalid locked-memory request.".into());
+    }
+    validate_inventory(
+        &request.selected,
+        &vkore_devices::discover(),
+        &vkore_devices::discover_gpus(),
+    )?;
     host_setup()?;
+    let _gpu_leases = provision_gpus(&request.gpus)?;
+    let inventory = vkore_devices::discover_gpus();
+    for gpu in &request.gpus {
+        request.selected.push(gpu.resolve(&inventory)?);
+    }
+    validate_selections(&request.selected)?;
     let mut bound = Vec::new();
     // Lock all devices before any handoff, in a deterministic order.
     let mut selected = request.selected.clone();
@@ -784,7 +821,7 @@ fn serve() -> Result<i32, String> {
         &(3..3 + request.selected.len() as i32 + 1).collect::<Vec<_>>(),
     )?;
     if cancelled()? {
-        return Err("NPU launch was cancelled.".into());
+        return Err("Device launch was cancelled.".into());
     }
     let plan = super::iommu::IntelProbe::plan(&launch.arguments)?;
     let memory = request
@@ -800,7 +837,7 @@ fn serve() -> Result<i32, String> {
         // Reopen cdev/IOMMUFD handles for each attempt and for the real guest:
         // retaining a parent's copy would keep a failed probe's binding alive.
         let width = plan.choose(&mut launch.arguments, memory, |width| {
-            if cancelled()? { return Err("NPU launch was cancelled.".into()); }
+            if cancelled()? { return Err("Device launch was cancelled.".into()); }
             eprintln!("vKore: probing assigned devices with Intel VT-d {width}-bit DMA translation (CPUs stopped).");
             let arguments = plan.arguments(width, &request.selected);
             let (stream, emulator) = std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
@@ -816,7 +853,7 @@ fn serve() -> Result<i32, String> {
         );
     }
     if cancelled()? {
-        return Err("NPU launch was cancelled.".into());
+        return Err("Device launch was cancelled.".into());
     }
     let mut command = qemu_command(
         request.parent,
@@ -851,4 +888,57 @@ fn serve() -> Result<i32, String> {
         ));
     }
     Ok(status.code().unwrap_or(1))
+}
+
+/// Never remove/resize an existing pool or unbind/reset the display-owning PF.
+/// Successfully created VFs remain available until host reboot or explicit host management.
+fn provision_gpus(requests: &[gpu::Assignment]) -> Result<Vec<File>, String> {
+    let mut requests: Vec<_> = requests.iter().collect();
+    requests.sort_by(|a, b| a.physical_function.cmp(&b.physical_function));
+    let leases = requests
+        .iter()
+        .map(|r| lease(&r.physical_function))
+        .collect::<Result<Vec<_>, _>>()?;
+    let inventory = vkore_devices::discover_gpus();
+    for request in &requests {
+        request.parent(&inventory)?;
+    }
+    for request in requests {
+        if cancelled()? {
+            return Err("GPU provisioning was cancelled.".into());
+        }
+        let fresh = vkore_devices::discover_gpus();
+        request.parent(&fresh)?;
+        let mut host = VfPool {
+            path: Path::new("/sys/bus/pci/devices").join(&request.physical_function),
+        };
+        gpu::provision(&mut host, request.index + 1)?;
+    }
+    Ok(leases)
+}
+struct VfPool {
+    path: PathBuf,
+}
+impl gpu::Pool for VfPool {
+    fn count(&self) -> Result<u32, String> {
+        read(self.path.join("sriov_numvfs"))?
+            .parse()
+            .map_err(|_| "Invalid VF count.".into())
+    }
+    fn autoprobe(&self) -> Result<bool, String> {
+        match read(self.path.join("sriov_drivers_autoprobe"))?.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err("Invalid VF autoprobe setting.".into()),
+        }
+    }
+    fn set_autoprobe(&mut self, enabled: bool) -> Result<(), String> {
+        write(
+            self.path.join("sriov_drivers_autoprobe"),
+            if enabled { "1" } else { "0" },
+        )
+    }
+    fn create(&mut self, count: u32) -> Result<(), String> {
+        write(self.path.join("sriov_numvfs"), &count.to_string())
+    }
 }

@@ -28,8 +28,8 @@ selected page size. This does not change host NUMA placement.
 Recommended allocations use half the available physical cores (not SMT thread
 count) and half physical RAM, rounded up only as needed to satisfy image
 minimums and page alignment. Pinning and disk reservation default on where
-supported. 2 MiB hugepages are selected only when the current user can create a
-hugetlb memfd and the reserved pool has sufficient uncommitted pages; otherwise
+supported. 2 MiB hugepages are recommended when the existing pool has sufficient
+uncommitted pages; otherwise
 the form explicitly selects system pages. Refreshing never silently replaces
 an existing selection. A changed or depleted resource causes a preflight error.
 
@@ -63,16 +63,18 @@ machines retain two nodes until explicitly changed.
 
 ## Memory and authentication
 
-On Linux, memory pinning selects QEMU `-overcommit mem-lock=on`; hugepages use
-`memory-backend-memfd,hugetlb=on,hugetlbsize=...,prealloc=on` on each guest NUMA
-node. This is physical residency, not host NUMA placement. macOS QEMU memory
+On Linux, memory pinning selects QEMU `-overcommit mem-lock=on`. For hugepages,
+the authorized hardware helper creates and fully populates a hugetlb memfd per
+guest NUMA node. Unprivileged QEMU receives these files as shared
+`memory-backend-file` mappings through inherited descriptors. This is physical residency, not host NUMA placement. macOS QEMU memory
 locking and hugetlb selection are unavailable. The memory panel instead shows
 **Automatic** with the probed native page size (16 KiB on the tested Apple
 Silicon host). The Linux-only hugepage buttons are omitted and the limitation
 is explained. This is host RAM backing, not the guest's page-table granularity.
 The native size comes from rustix's safe platform query, not an architecture
-constant. On Linux, unavailable choices explain whether there is no accessible
-pool or not enough pool capacity.
+constant. On Linux, kernel-supported sizes are selectable even with an empty
+pool. The UI shows existing capacity and explains that missing pages are
+requested at launch. Pinning ordinary memory does not convert it to hugepages.
 
 A saved unsupported page choice remains visible as a warning until the user
 selects Automatic. Unsupported saved memory pinning can still be switched off;
@@ -110,9 +112,29 @@ and may request authorization after restarting vKore. Cancellation, denial, miss
 timeout return visible errors. QEMU's actual locking failure remains fatal.
 The CLI reports a needed authorization rather than prompting on a hidden worker.
 
-Host hugepage pools are not globally reconfigured. Unusable page sizes remain
-disabled, with system pages available. This avoids silently consuming or
-reassigning a pool another workload relies on.
+Hugepage allocation uses the same hardware authorization flow as accelerators,
+including guests without assigned devices. Done/Save validates the request;
+launch obtains fresh authorization and allocates before any device handoff.
+The helper temporarily raises the selected size's `nr_overcommit_hugepages`
+allowance, only as needed after accounting for existing reservations and surplus
+usage. It restores the previous allowance before starting QEMU. It does not
+resize persistent pools, change `hugetlb_shm_group`, or give QEMU capabilities.
+Added surplus pages return to ordinary RAM after the guest's mappings and files
+close; pages borrowed from an existing pool return to that pool.
+
+A per-size root-only lease serializes vKore allocations. A synced recovery
+journal restores interrupted allowance changes on the next request for that size;
+if another administrator changed the value, vKore preserves it. The lease does
+not coordinate external hugepage managers: avoid changing host pool policy while
+vKore is allocating. A forced helper kill can leave the temporary allowance until
+recovery or reboot, but does not retain anonymous memory without an owner.
+
+Runtime allocation still needs contiguous physical pages. Fragmentation, memory
+pressure, cgroup limits, or unsupported surplus allocation (especially 1 GiB
+pages) can make it fail. Failure closes partial allocations, restores the policy,
+and reports an error without falling back to ordinary pages. A boot-reserved
+pool may be necessary for 1 GiB pages or heavily fragmented hosts. The helper's
+launch wait includes the RAM-scaled startup budget as well as authentication time.
 
 ## Linux authentication descriptions
 

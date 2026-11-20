@@ -6,6 +6,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.6.0] - 2026-11-19
 
 ### Added
+- Allocate Linux hugepage backing at launch through the hardware helper, including empty pools and guests without accelerators; restore the temporary allocation allowance and release surplus memory after guest exit.
 - Host-aware RAM and disk capacity presets, including intermediate sizes, plus precise decimal GiB input for RAM.
 - Discover Linux GPUs and assign Intel xe SR-IOV virtual functions from hardware setup or the CLI. Done/Save can provision an absent VF pool through system authentication without detaching the host GPU or resizing existing pools.
 - Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.

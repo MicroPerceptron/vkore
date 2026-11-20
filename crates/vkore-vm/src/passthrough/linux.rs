@@ -1,7 +1,9 @@
 //! Privileged device guardian. The only privileged operations are module loading,
-//! bounded sysfs handoff, device opens and resource limits. QEMU drops to the
+//! bounded sysfs handoff, hugepage allocation, device opens and resource limits. QEMU drops to the
 //! authenticated caller before exec; no caller-supplied program runs as root.
 use super::*;
+use crate::hardware::{GuestNuma, PageSize};
+mod memory;
 use rustix::{
     event::{PollFd, PollFlags, poll},
     fs::OFlags,
@@ -32,6 +34,8 @@ struct Request {
     selected: Vec<Selection>,
     gpus: Vec<gpu::Assignment>,
     memory_mib: u32,
+    pages: PageSize,
+    numa: GuestNuma,
     launch: Option<Launch>,
 }
 #[derive(Serialize, Deserialize)]
@@ -76,7 +80,13 @@ fn spawn(request: &Request, errors: Option<File>) -> Result<(Child, ChildStdin, 
     })?;
     let mut input = child.stdin.take().unwrap();
     let mut output = child.stdout.take().unwrap();
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now()
+        + TIMEOUT
+        + if request.launch.is_some() {
+            crate::machine::startup_patience(request.memory_mib)
+        } else {
+            Duration::ZERO
+        };
     let result = (|| {
         // Nonblocking pipe writes keep the authentication timeout effective even
         // when pkexec is waiting and the request is larger than a pipe buffer.
@@ -146,12 +156,16 @@ pub(super) fn authorize(
     selected: &[Selection],
     gpus: &[gpu::Assignment],
     memory_mib: u32,
+    pages: PageSize,
+    numa: GuestNuma,
 ) -> Result<(), String> {
     let request = Request {
         parent: std::process::id(),
         selected: selected.to_vec(),
         gpus: gpus.to_vec(),
         memory_mib,
+        pages,
+        numa,
         launch: None,
     };
     let (mut child, control, reply) = spawn(&request, None)?;
@@ -169,6 +183,8 @@ pub(crate) fn launch(
     arguments: Vec<String>,
     selected: &[Selection],
     memory_mib: u32,
+    pages: PageSize,
+    numa: GuestNuma,
     errors: File,
 ) -> Result<Started, String> {
     let environment = [
@@ -190,6 +206,8 @@ pub(crate) fn launch(
         selected: selected.to_vec(),
         gpus: Vec::new(),
         memory_mib,
+        pages,
+        numa,
         launch: Some(Launch {
             qemu: fs::canonicalize(qemu).map_err(|e| e.to_string())?,
             arguments,
@@ -674,27 +692,32 @@ fn qemu_command(
     environment: &[(String, String)],
     bound: &[Bound],
     selected: &[Selection],
+    memory: Vec<File>,
 ) -> Result<Command, String> {
     // Recheck identity immediately before every unprivileged child.
     let caller = caller(parent)?;
-    let iommu = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/iommu")
-        .map_err(|e| e.to_string())?;
-    let mut fds = vec![iommu];
-    for selection in selected {
-        let device = bound
-            .iter()
-            .find(|b| b.address == selection.address)
-            .ok_or("Missing leased Device.")?;
-        fds.push(device.open()?);
+    let mut fds = Vec::new();
+    if !selected.is_empty() {
+        let iommu = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/iommu")
+            .map_err(|e| e.to_string())?;
+        fds.push(iommu);
+        for selection in selected {
+            let device = bound
+                .iter()
+                .find(|b| b.address == selection.address)
+                .ok_or("Missing leased Device.")?;
+            fds.push(device.open()?);
+        }
+        fd_arguments(
+            &mut arguments,
+            selected,
+            &fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
+        )?;
     }
-    fd_arguments(
-        &mut arguments,
-        selected,
-        &fds.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
-    )?;
+    fds.extend(memory);
     let mut command = Command::new(qemu);
     command
         .args(arguments)
@@ -760,8 +783,8 @@ fn serve() -> Result<i32, String> {
     caller(request.parent)?;
     validate_selections(&request.selected)?;
     gpu::validate(&request.gpus, request.selected.len())?;
-    if request.selected.is_empty() && request.gpus.is_empty() {
-        return Err("No accelerator was selected.".into());
+    if request.selected.is_empty() && request.gpus.is_empty() && request.pages == PageSize::System {
+        return Err("No accelerator or hugepage backing was selected.".into());
     }
     // Validate every request before provisioning any physical function.
     if request.launch.is_some() && !request.gpus.is_empty() {
@@ -776,7 +799,10 @@ fn serve() -> Result<i32, String> {
         &vkore_devices::discover(),
         &vkore_devices::discover_gpus(),
     )?;
-    host_setup()?;
+    memory::check(request.memory_mib, request.pages, request.numa)?;
+    if !request.selected.is_empty() || !request.gpus.is_empty() {
+        host_setup()?;
+    }
     let _gpu_leases = provision_gpus(&request.gpus)?;
     let inventory = vkore_devices::discover_gpus();
     for gpu in &request.gpus {
@@ -808,16 +834,50 @@ fn serve() -> Result<i32, String> {
     if !launch.qemu.is_absolute() || launch.arguments.len() > 512 || launch.environment.len() > 32 {
         return Err("Invalid QEMU launch request.".into());
     }
-    // Validate the complete mapping before touching any host driver.
-    fd_arguments(
+    // Validate all expected backends before allocating RAM or touching drivers.
+    if !request.selected.is_empty() {
+        fd_arguments(
+            &mut launch.arguments.clone(),
+            &request.selected,
+            &(3..3 + request.selected.len() as i32 + 1).collect::<Vec<_>>(),
+        )?;
+    }
+    let fake_fds: Vec<_> = if request.pages == PageSize::System {
+        Vec::new()
+    } else {
+        (3..3 + request.numa.nodes() as i32).collect()
+    };
+    crate::hugepages::fd_arguments(
         &mut launch.arguments.clone(),
-        &request.selected,
-        &(3..3 + request.selected.len() as i32 + 1).collect::<Vec<_>>(),
+        request.memory_mib,
+        request.pages,
+        request.numa,
+        &fake_fds,
     )?;
     if cancelled()? {
-        return Err("Device launch was cancelled.".into());
+        return Err("Hardware launch was cancelled.".into());
     }
-    let plan = super::iommu::IntelProbe::plan(&launch.arguments)?;
+    let plan = if request.selected.is_empty() {
+        None
+    } else {
+        super::iommu::IntelProbe::plan(&launch.arguments)?
+    };
+    let memory_files = memory::allocate(
+        request.parent,
+        request.memory_mib,
+        request.pages,
+        request.numa,
+    )?;
+    crate::hugepages::fd_arguments(
+        &mut launch.arguments,
+        request.memory_mib,
+        request.pages,
+        request.numa,
+        &memory_files
+            .iter()
+            .map(AsRawFd::as_raw_fd)
+            .collect::<Vec<_>>(),
+    )?;
     let memory = u64::from(request.memory_mib) << 20;
     for device in &mut bound {
         device.bind()?;
@@ -831,7 +891,7 @@ fn serve() -> Result<i32, String> {
             eprintln!("vKore: probing assigned devices with Intel VT-d {width}-bit DMA translation (CPUs stopped).");
             let arguments = plan.arguments(width, &request.selected);
             let (stream, emulator) = std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
-            let mut probe = qemu_command(request.parent, &launch.qemu, arguments, &launch.environment, &bound, &request.selected)?;
+            let mut probe = qemu_command(request.parent, &launch.qemu, arguments, &launch.environment, &bound, &request.selected, Vec::new())?;
             probe.stdin(Stdio::from(std::os::fd::OwnedFd::from(emulator.try_clone().map_err(|e| e.to_string())?)))
                 .stdout(Stdio::from(std::os::fd::OwnedFd::from(emulator)));
             let child = probe.spawn().map_err(|e| e.to_string())?;
@@ -852,11 +912,12 @@ fn serve() -> Result<i32, String> {
         &launch.environment,
         &bound,
         &request.selected,
+        memory_files,
     )?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot launch unprivileged QEMU: {e}"))?;
-    drop(command); // Closes guardian copies of every VFIO FD captured above.
+    drop(command); // Close guardian copies of device and guest-memory FDs.
     if let Err(e) = reply(&Reply::Started(child.id())) {
         let _ = child.kill();
         let _ = child.wait();

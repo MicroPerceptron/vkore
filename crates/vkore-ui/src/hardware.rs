@@ -173,7 +173,7 @@ impl Draft {
             Change::Reserve if !self.storage_fixed => {
                 self.resources.reserve_storage = !self.resources.reserve_storage
             }
-            Change::Page(page) if host.huge_available(page, self.memory_mib) => {
+            Change::Page(page) if host.huge_supported(page) => {
                 self.resources.pages = page;
                 self.memory_mib = self
                     .memory_mib
@@ -696,25 +696,24 @@ pub(crate) fn memory_view<'a>(
             pages = pages.push(action(
                 ty,
                 page.label(),
-                (!busy && host.huge_available(page, draft.memory_mib))
-                    .then(|| send(Change::Page(page))),
+                (!busy && host.huge_supported(page)).then(|| send(Change::Page(page))),
                 draft.resources.pages == page,
             ));
         }
-        memory = memory.push(pages.wrap());
+        memory = memory.push(pages.wrap()).push(ty.body(
+            "Hugepages are allocated at launch with system authorization. Pinning alone does not create them. Allocation can fail if RAM is fragmented; 1 GiB pages may need a pool reserved at host boot. Added pages are released when the guest stops.",
+            12., theme::TEXT_MUTED,
+        ));
         for page in [PageSize::Huge2M, PageSize::Huge1G] {
             if !host.huge_available(page, draft.memory_mib) {
                 let reason = match host.hugepages.iter().find(|pool| pool.page == page) {
                     Some(pool) => format!(
-                        "{}: {:.1} GiB available in the pool; {:.1} GiB needed.",
+                        "{}: {:.1} GiB available in the pool; {:.1} GiB needed. Missing pages can be requested at launch.",
                         page.label(),
                         pool.free_mib as f64 / 1024.,
                         f64::from(draft.memory_mib) / 1024.
                     ),
-                    None => format!(
-                        "{}: no accessible reserved pool on this host.",
-                        page.label()
-                    ),
+                    None => format!("{}: not supported by this host kernel.", page.label()),
                 };
                 memory = memory.push(ty.body(reason, 12., theme::TEXT_MUTED));
             }
@@ -1314,6 +1313,24 @@ mod tests {
         assert!(draft.resources.passthrough.is_empty());
         draft.apply(&mut config);
         assert!(config.resources.passthrough.is_empty());
+    }
+    #[test]
+    fn supported_hugepages_can_be_selected_with_an_empty_pool() {
+        let mut host = host();
+        host.hugetlb_supported = true;
+        host.hugepages = vec![vkore_vm::hardware::HugePool {
+            page: PageSize::Huge2M,
+            free_mib: 0,
+        }];
+        let mut draft = Draft::new(Some(&host), Requirements::default());
+        assert_eq!(draft.resources.pages, PageSize::System);
+        draft.change(Change::Page(PageSize::Huge2M), &host);
+        assert_eq!(draft.resources.pages, PageSize::Huge2M);
+        draft.change(Change::Page(PageSize::Huge1G), &host);
+        assert_eq!(draft.resources.pages, PageSize::Huge2M); // Unsupported size.
+        let mut config = MachineConfig::new("pages", "/image.iso");
+        draft.apply(&mut config);
+        assert_eq!(config.resources.pages, PageSize::Huge2M);
     }
     #[test]
     fn unsupported_saved_memory_choices_can_be_disabled_without_enabling_them() {

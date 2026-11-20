@@ -126,7 +126,8 @@ pub struct HostResources {
     /// Native host page granularity; independent of Kore's guest page tables.
     pub system_page_bytes: usize,
     /// Whether this platform supports vKore's explicit Linux hugetlb backend.
-    /// Pool accessibility and capacity are reported separately in `hugepages`.
+    /// Kernel-supported sizes and unreserved capacity are in `hugepages`;
+    /// allocation permissions are obtained by the privileged launcher.
     pub hugetlb_supported: bool,
     pub hugepages: Vec<HugePool>,
     pub memlock_bytes: Option<u64>,
@@ -217,6 +218,10 @@ impl HostResources {
         }
         ids.truncate(usize::from(count));
         ids
+    }
+    pub fn huge_supported(&self, page: PageSize) -> bool {
+        page == PageSize::System
+            || (self.hugetlb_supported && self.hugepages.iter().any(|pool| pool.page == page))
     }
     pub fn huge_available(&self, page: PageSize, memory_mib: u32) -> bool {
         page == PageSize::System
@@ -366,18 +371,8 @@ mod platform {
             .into_iter()
             .filter_map(|page| {
                 let base = format!("/sys/kernel/mm/hugepages/hugepages-{}kB", page.mib() * 1024);
-                use rustix::fs::{MemfdFlags, memfd_create};
-                let size = if page == PageSize::Huge2M {
-                    MemfdFlags::HUGE_2MB
-                } else {
-                    MemfdFlags::HUGE_1GB
-                };
-                // Tests privilege and kernel page-size support without consuming pages.
-                let _fd = memfd_create(
-                    c"vkore-page-probe",
-                    MemfdFlags::CLOEXEC | MemfdFlags::HUGETLB | size,
-                )
-                .ok()?;
+                // The privileged launcher creates backing files; an unprivileged
+                // memfd permission check must not hide kernel-supported sizes.
                 let free = number(format!("{base}/free_hugepages"))?;
                 let reserved = number(format!("{base}/resv_hugepages"))?;
                 Some(HugePool {

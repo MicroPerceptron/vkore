@@ -18,6 +18,8 @@
 
 pub mod firmware;
 pub mod hardware;
+#[cfg(any(target_os = "linux", test))]
+mod hugepages;
 pub mod machine;
 pub mod media;
 pub mod passthrough;

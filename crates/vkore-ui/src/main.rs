@@ -1108,9 +1108,23 @@ mod tests {
         let mut host = vkore_vm::hardware::HostResources::probe(root.path()).unwrap();
         host.memory_mib = 128 * 1024;
         host.available_memory_mib = 80 * 1024;
+        host.hugetlb_supported = true;
+        host.memory_pinning = true;
+        host.system_page_bytes = 4096;
+        host.hugepages = [
+            vkore_vm::hardware::PageSize::Huge2M,
+            vkore_vm::hardware::PageSize::Huge1G,
+        ]
+        .into_iter()
+        .map(|page| vkore_vm::hardware::HugePool { page, free_mib: 0 })
+        .collect();
         host.memory_nodes.clear();
         let mut draft = hardware::Draft::new(Some(&host), Default::default());
         draft.change(hardware::Change::MemoryText("12.5".into()), &host);
+        draft.change(
+            hardware::Change::Page(vkore_vm::hardware::PageSize::Huge2M),
+            &host,
+        );
         for (width, height) in [(900., 560.), (1280., 900.)] {
             let ty = if width < 1000. {
                 Typography {

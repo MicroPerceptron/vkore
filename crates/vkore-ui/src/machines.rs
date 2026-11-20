@@ -685,10 +685,10 @@ fn run_machine(
     send(Update::Line(
         "Checking hardware settings and permissions…".into(),
     ));
-    if !vkored::hardware::has_devices(&config) {
+    if !vkored::hardware::uses_guardian(&config) {
         vkored::hardware::authorize_configuration(&config, &host)?;
     } else {
-        // The device guardian batches launch permissions and locked DMA memory.
+        // The hardware guardian batches device, hugepage and memlock permissions.
         vkored::hardware::validate_host(&config, &host)?;
     }
     let mut sink = |event: &Event| match event {

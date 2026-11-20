@@ -169,7 +169,7 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
             .map_err(RunError::Host)?;
     crate::hardware::validate_host(config, &host_resources).map_err(RunError::Host)?;
     crate::hardware::assigned_devices(config, &host_resources).map_err(RunError::Host)?;
-    if !crate::hardware::has_devices(config)
+    if !crate::hardware::uses_guardian(config)
         && crate::hardware::needs_authorization(config, &host_resources)
     {
         return Err(RunError::Host("memory pinning needs authorization: finish hardware setup with Done/Save hardware, or turn off memory pinning".into()));

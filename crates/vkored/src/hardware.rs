@@ -177,13 +177,23 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
     if r.pages != PageSize::System && !host.hugetlb_supported {
         return Err("explicit hugepage backing requires Linux; choose Automatic (system pages) on this host".into());
     }
-    if !host.huge_available(r.pages, config.memory_mib) {
+    if !host.huge_supported(r.pages) {
         return Err(format!(
-            "not enough reserved {} on this host; choose system pages or provision the host hugepage pool",
+            "{} is not supported by this host kernel; choose Automatic",
             r.pages.label()
         ));
     }
+    if r.pages != PageSize::System {
+        let pool = host.hugepages.iter().find(|p| p.page == r.pages).unwrap();
+        if u64::from(config.memory_mib) > pool.free_mib.saturating_add(host.available_memory_mib) {
+            return Err("not enough available RAM and unreserved hugepages; reduce the allocation or close other workloads".into());
+        }
+    }
     Ok(())
+}
+
+pub fn uses_guardian(config: &MachineConfig) -> bool {
+    has_devices(config) || config.resources.pages != PageSize::System
 }
 
 pub fn has_devices(config: &MachineConfig) -> bool {
@@ -220,12 +230,14 @@ pub fn needs_authorization(config: &MachineConfig, host: &HostResources) -> bool
 /// Desktop completion and launch share this entry point; noninteractive callers
 /// continue to use validation without invoking an authentication agent.
 pub fn authorize_configuration(config: &MachineConfig, host: &HostResources) -> Result<(), String> {
-    if has_devices(config) {
+    if uses_guardian(config) {
         validate_host(config, host)?;
         return vkore_vm::passthrough::authorize(
             &config.resources.passthrough,
             &config.resources.gpu_vfs,
             config.memory_mib,
+            config.resources.pages,
+            config.resources.guest_numa,
         );
     }
     authorize_with(config, host, authorize_memory)
@@ -538,6 +550,28 @@ mod tests {
     }
 
     #[test]
+    fn empty_hugepage_pool_can_be_provisioned_without_devices_or_memory_pinning() {
+        let mut h = host();
+        h.hugepages[0].free_mib = 0;
+        let mut c = MachineConfig::new("pages", "/fixture.iso");
+        c.resources.pages = PageSize::Huge2M;
+        c.resources.pin_memory = false;
+        c.memory_mib = 8192;
+        assert!(uses_guardian(&c));
+        assert!(!has_devices(&c));
+        validate_host(&c, &h).unwrap();
+        h.available_memory_mib = 4096;
+        assert!(
+            validate_host(&c, &h)
+                .unwrap_err()
+                .contains("not enough available")
+        );
+        h.hugepages[0].free_mib = 4096;
+        validate_host(&c, &h).unwrap();
+        c.resources.pages = PageSize::System;
+        assert!(!uses_guardian(&c));
+    }
+    #[test]
     fn unsupported_page_backing_is_distinct_from_an_exhausted_pool() {
         let mut h = host();
         let mut c = MachineConfig::new("pages", "/fixture.iso");
@@ -553,7 +587,7 @@ mod tests {
         h.hugetlb_supported = true;
         h.hugepages.clear();
         c.resources.pages = PageSize::Huge2M;
-        assert!(validate_host(&c, &h).unwrap_err().contains("pool"));
+        assert!(validate_host(&c, &h).unwrap_err().contains("not supported"));
     }
     #[test]
     fn recommendations_use_physical_cores_and_half_physical_ram() {

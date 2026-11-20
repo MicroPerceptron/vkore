@@ -170,7 +170,7 @@ fn option_path(path: &Path) -> Result<&str, ProfileError> {
 /// The NUMA split Kore's gate topology uses: node 0 takes two thirds of
 /// the CPUs (at least one), node 1 the rest; memory splits evenly; HMAT
 /// latencies and bandwidths as the Makefile states them.
-fn numa(
+pub(crate) fn numa(
     cpus: u16,
     memory_mib: u32,
     pages: crate::hardware::PageSize,

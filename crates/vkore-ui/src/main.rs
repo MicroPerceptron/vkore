@@ -1177,6 +1177,26 @@ mod tests {
             &host,
         );
         assert_eq!(draft.resources.gpu_vfs.len(), 1);
+        // Exercise the desktop draft through the actual on-disk format, then
+        // edit an unrelated setting. A GPU choice must survive both saves.
+        let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+        let mut config = vkored::MachineConfig::new("gpu", "/image.iso");
+        store.create(&config).unwrap();
+        draft.apply(&mut config);
+        store.save(&config).unwrap();
+        let saved = store.get("gpu").unwrap();
+        assert_eq!(saved.resources.gpu_vfs, draft.resources.gpu_vfs);
+        let mut reopened = hardware::Draft::from_config(&saved, false);
+        reopened.change(
+            hardware::Change::GuestNuma(vkore_vm::hardware::GuestNuma::Single),
+            &host,
+        );
+        reopened.apply(&mut config);
+        store.save(&config).unwrap();
+        assert_eq!(
+            store.get("gpu").unwrap().resources.gpu_vfs,
+            draft.resources.gpu_vfs
+        );
         for (width, height) in [(900., 560.), (1280., 900.)] {
             let ty = if width < 1000. {
                 Typography {

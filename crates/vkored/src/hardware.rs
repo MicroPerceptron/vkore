@@ -203,17 +203,17 @@ pub fn assigned_devices(
     Ok(selected)
 }
 
-/// QEMU locks more than guest RAM (firmware, devices, emulator mappings).
-/// Allow a bounded 1 GiB margin, and still surface any QEMU lock failure.
-pub fn lock_budget(memory_mib: u32) -> u64 {
-    (u64::from(memory_mib) + 1024) << 20
-}
+pub use vkore_vm::passthrough::lock_budget;
 pub fn needs_authorization(config: &MachineConfig, host: &HostResources) -> bool {
-    config.resources.pin_memory
+    (config.resources.pin_memory || has_devices(config))
         && host.memory_pinning
-        && host
-            .memlock_bytes
-            .is_some_and(|n| n < lock_budget(config.memory_mib))
+        && host.memlock_bytes.is_some_and(|n| {
+            lock_budget(
+                config.memory_mib,
+                config.resources.passthrough.len() + config.resources.gpu_vfs.len(),
+            )
+            .is_ok_and(|budget| n < budget)
+        })
 }
 
 /// Validate the complete selection before requesting its permissions once.
@@ -225,7 +225,7 @@ pub fn authorize_configuration(config: &MachineConfig, host: &HostResources) -> 
         return vkore_vm::passthrough::authorize(
             &config.resources.passthrough,
             &config.resources.gpu_vfs,
-            Some(lock_budget(config.memory_mib)),
+            config.memory_mib,
         );
     }
     authorize_with(config, host, authorize_memory)
@@ -270,7 +270,7 @@ pub fn authorize_memory(memory_mib: u32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-        let budget = lock_budget(memory_mib);
+        let budget = lock_budget(memory_mib, 0)?;
         let limit = getrlimit(Resource::Memlock);
         if limit.current.is_none_or(|n| n >= budget) {
             return Ok(());
@@ -443,6 +443,35 @@ mod tests {
         }
     }
     #[test]
+    fn permission_check_counts_gpu_vfs_as_well_as_dedicated_devices() {
+        let mut h = host();
+        h.memlock_bytes = Some(9 << 30);
+        let mut c = MachineConfig::new("demo", "/image.iso");
+        c.memory_mib = 8192;
+        c.resources.pin_memory = false;
+        c.resources
+            .passthrough
+            .push(vkore_vm::passthrough::Selection {
+                address: "0000:00:0b.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0xb03e,
+                physical_function: None,
+            });
+        assert!(!needs_authorization(&c, &h));
+        c.resources
+            .gpu_vfs
+            .push(vkore_vm::passthrough::gpu::Assignment {
+                physical_function: "0000:00:02.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0xb080,
+                index: 0,
+            });
+        assert!(needs_authorization(&c, &h));
+        h.memlock_bytes = Some(17 << 30);
+        assert!(!needs_authorization(&c, &h));
+    }
+
+    #[test]
     fn storage_defaults_and_limits_match_reservation_policy() {
         let mut h = host();
         let min = Requirements::default();
@@ -476,7 +505,7 @@ mod tests {
         c.cpus = 1;
         assert!(authorize_with(&c, &h, |_| panic!("invalid draft prompted")).is_err());
         c.cpus = 4;
-        h.memlock_bytes = Some(lock_budget(c.memory_mib));
+        h.memlock_bytes = Some(lock_budget(c.memory_mib, 0).unwrap());
         authorize_with(&c, &h, |_| panic!("sufficient limit prompted")).unwrap();
         h.memlock_bytes = None;
         authorize_with(&c, &h, |_| panic!("unlimited lock budget prompted")).unwrap();

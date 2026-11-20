@@ -7,6 +7,16 @@ pub mod gpu;
 
 pub const MAX_DEVICES: usize = 4;
 
+/// Each VFIO address space accounts for a full guest-RAM pin. Keep the
+/// emulator's 1 GiB margin separate; this is a limit, not extra physical RAM.
+/// Without devices, ordinary memory locking still needs one copy of RAM.
+pub fn lock_budget(memory_mib: u32, devices: usize) -> Result<u64, String> {
+    if !(2048..=1 << 20).contains(&memory_mib) || devices > MAX_DEVICES {
+        return Err("Invalid locked-memory request.".into());
+    }
+    Ok((u64::from(memory_mib) * devices.max(1) as u64 + 1024) << 20)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
@@ -122,13 +132,13 @@ pub(crate) fn arguments(selected: &[Selection]) -> Vec<String> {
         args.extend([
             "-device".into(),
             format!(
-                "pcie-root-port,id=npu_port{i},bus=pcie.0,chassis={},slot={}",
+                "pcie-root-port,id=pt_port{i},bus=pcie.0,chassis={},slot={}",
                 10 + i,
                 10 + i
             ),
             "-device".into(),
             format!(
-                "vfio-pci,host={},id=npu{i},bus=npu_port{i},iommufd=vkore_iommu",
+                "vfio-pci,host={},id=pt{i},bus=pt_port{i},iommufd=vkore_iommu",
                 device.address
             ),
         ]);
@@ -162,11 +172,11 @@ fn fd_arguments(args: &mut [String], selected: &[Selection], fds: &[i32]) -> Res
         replace(
             args,
             &format!(
-                "vfio-pci,host={},id=npu{i},bus=npu_port{i},iommufd=vkore_iommu",
+                "vfio-pci,host={},id=pt{i},bus=pt_port{i},iommufd=vkore_iommu",
                 selection.address
             ),
             format!(
-                "vfio-pci,fd={},id=npu{i},bus=npu_port{i},iommufd=vkore_iommu",
+                "vfio-pci,fd={},id=pt{i},bus=pt_port{i},iommufd=vkore_iommu",
                 fds[i + 1]
             ),
         )?;
@@ -208,20 +218,21 @@ pub fn authorize_memory_limit(memory_mib: u32) -> Result<(), String> {
     linux::authorize_memory_limit(memory_mib)
 }
 
-/// Batch the device checks and optional memory-limit request at Done/Save.
+/// Batch device checks and the guest memory-limit request at Done/Save.
 /// No device is detached by this operation. Launch rechecks with fresh authority.
 pub fn authorize(
     selected: &[Selection],
     gpus: &[gpu::Assignment],
-    memory_bytes: Option<u64>,
+    memory_mib: u32,
 ) -> Result<(), String> {
     validate_selections(selected)?;
     gpu::validate(gpus, selected.len())?;
+    lock_budget(memory_mib, selected.len() + gpus.len())?;
     #[cfg(target_os = "linux")]
-    return linux::authorize(selected, gpus, memory_bytes);
+    return linux::authorize(selected, gpus, memory_mib);
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (memory_bytes, gpus);
+        let _ = (memory_mib, gpus);
         Err("Accelerator passthrough requires Linux.".into())
     }
 }
@@ -240,6 +251,26 @@ pub fn check_host(selected: &[Selection]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memlock_accounts_for_each_device_but_bounds_guest_ram_separately() {
+        assert_eq!(lock_budget(8192, 0).unwrap(), 9 << 30);
+        assert_eq!(lock_budget(8192, 1).unwrap(), 9 << 30);
+        // Biggertron: one NPU and one GPU VF, each mapping the same 8 GiB.
+        assert_eq!(lock_budget(8192, 2).unwrap(), 17 << 30);
+        assert_eq!(lock_budget(8192, 4).unwrap(), 33 << 30);
+        assert_eq!(lock_budget(1 << 20, MAX_DEVICES).unwrap(), (4096 + 1) << 30);
+        for (ram, count) in [
+            (0, 1),
+            (2047, 1),
+            ((1 << 20) + 1, 1),
+            (u32::MAX, 1),
+            (8192, 5),
+            (8192, usize::MAX),
+        ] {
+            assert!(lock_budget(ram, count).is_err());
+        }
+    }
+
     pub(crate) fn fixture() -> Npu {
         Npu {
             id: "pci:0000:00:0b.0".into(),
@@ -310,8 +341,8 @@ mod tests {
             args.iter().filter(|a| a.starts_with("iommufd,id=")).count(),
             1
         );
-        assert!(args.iter().any(|a| a.contains("bus=npu_port0")));
-        assert!(args.iter().any(|a| a.contains("bus=npu_port1")));
+        assert!(args.iter().any(|a| a.contains("bus=pt_port0")));
+        assert!(args.iter().any(|a| a.contains("bus=pt_port1")));
     }
     #[test]
     fn descriptor_substitution_requires_every_selected_device_exactly_once() {

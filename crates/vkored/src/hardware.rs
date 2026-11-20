@@ -72,6 +72,7 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
             guest_numa: vkore_vm::hardware::GuestNuma::Single,
             passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
+            cpu_power_management: false,
             host_cpus: host.preferred_cpus(cpus),
             pin_memory: host.memory_pinning,
             pages,
@@ -127,6 +128,15 @@ pub fn validate(config: &MachineConfig) -> Result<(), String> {
 /// Recheck snapshots at use, including changes to allowed CPUs and memory pressure.
 pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(), String> {
     validate(config)?;
+    if config.resources.cpu_power_management {
+        host.cpu_power_management.clone()?;
+        if !matches!(
+            config.accel,
+            vkore_vm::AccelChoice::Auto | vkore_vm::AccelChoice::Kvm
+        ) {
+            return Err("Native CPU waits require KVM acceleration.".into());
+        }
+    }
     if usize::from(config.cpus) > host.logical_cpus {
         return Err("guest CPU count exceeds the host's available logical CPUs".into());
     }
@@ -444,6 +454,7 @@ mod tests {
             storage_path: "/".into(),
             storage_available_mib: 102400,
             cpu_pinning: true,
+            cpu_power_management: Ok(()),
             memory_pinning: true,
             system_page_bytes: 4096,
             hugetlb_supported: true,
@@ -454,6 +465,47 @@ mod tests {
             memlock_bytes: Some(65536),
         }
     }
+    #[test]
+    fn native_waits_are_opt_in_and_revalidated_against_the_host() {
+        let mut host = host();
+        let mut config = MachineConfig::new("waits", "/image.iso");
+        (
+            config.cpus,
+            config.memory_mib,
+            config.disk_mib,
+            config.resources,
+        ) = defaults(&host, Requirements::default());
+        assert!(!config.resources.cpu_power_management);
+        config.resources.cpu_power_management = true;
+        assert!(validate_host(&config, &host).is_ok());
+        host.cpu_power_management = Err("KVM does not allow native MONITOR/MWAIT".into());
+        assert!(
+            validate_host(&config, &host)
+                .unwrap_err()
+                .contains("MONITOR/MWAIT")
+        );
+        host.cpu_power_management = Ok(());
+        config.accel = vkore_vm::AccelChoice::Tcg;
+        assert!(validate_host(&config, &host).unwrap_err().contains("KVM"));
+        config.accel = vkore_vm::AccelChoice::Kvm;
+        config.resources.pin_cpus = false;
+        assert!(
+            validate_host(&config, &host)
+                .unwrap_err()
+                .contains("pinning")
+        );
+        let mut legacy = serde_json::to_value(&config.resources).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("cpu_power_management");
+        assert!(
+            !serde_json::from_value::<Resources>(legacy)
+                .unwrap()
+                .cpu_power_management
+        );
+    }
+
     #[test]
     fn permission_check_counts_gpu_vfs_as_well_as_dedicated_devices() {
         let mut h = host();

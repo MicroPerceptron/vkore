@@ -108,6 +108,7 @@ pub enum Event {
     Started {
         pid: u32,
     },
+    CpuPowerManagement,
     MemoryBacking {
         summary: String,
     },
@@ -386,6 +387,9 @@ impl Session {
         let machine = Machine::start(qemu, &checked.qemu_caps, &spec, &paths.qemu_log)
             .map_err(|error| RunError::Machine(error.to_string()))?;
         record.emit(&Event::Started { pid: machine.id() });
+        if config.resources.cpu_power_management {
+            record.emit(&Event::CpuPowerManagement);
+        }
         if let Some(summary) = machine.memory_report() {
             record.emit(&Event::MemoryBacking {
                 summary: summary.to_owned(),

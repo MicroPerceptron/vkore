@@ -51,17 +51,28 @@ fn a_real_kore_iso_names_its_paging_mode() {
 /// shell and the seeded store, then stops the machine.
 #[test]
 fn a_real_kore_iso_boots_to_ready() {
-    boot_to_ready(vkore_vm::hardware::GuestNuma::Split);
+    boot_to_ready(vkore_vm::hardware::GuestNuma::Split, false);
 }
 #[test]
 fn a_real_kore_iso_boots_with_one_memory_node() {
-    boot_to_ready(vkore_vm::hardware::GuestNuma::Single);
+    boot_to_ready(vkore_vm::hardware::GuestNuma::Single, false);
 }
-fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma) {
+/// Opt in separately: this changes host idle behavior and requires native KVM.
+#[test]
+fn a_real_kore_iso_boots_with_native_cpu_waits() {
+    if std::env::var("VKORE_TEST_CPU_PM").as_deref() != Ok("1") {
+        eprintln!("skipped: set VKORE_TEST_CPU_PM=1 on a supported Linux KVM host");
+        return;
+    }
+    vkore_vm::cpu_pm::available()
+        .expect("native CPU waits must be supported when explicitly requested");
+    boot_to_ready(vkore_vm::hardware::GuestNuma::Single, true);
+}
+fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma, cpu_pm: bool) {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso, topology);
+    let (dir, mut machine) = start_machine(&qemu, iso, topology, cpu_pm);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
         machine.poll(std::time::Duration::from_millis(500)).unwrap();
@@ -102,6 +113,7 @@ fn start_machine(
     qemu: &std::path::Path,
     iso: PathBuf,
     topology: vkore_vm::hardware::GuestNuma,
+    cpu_pm: bool,
 ) -> (tempfile::TempDir, Machine) {
     let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .expect("valid QEMU runtime")
@@ -122,10 +134,23 @@ fn start_machine(
     let vars = dir.path().join("vars.fd");
     private_vars(&firmware.vars_template, &vars).unwrap();
     let medium = BootMedium::inspect(&iso).unwrap();
-    let accel = HostCaps::probe()
-        .choose(vkore_vm::AccelChoice::Auto, Vendor::Intel)
+    let host = HostCaps::probe();
+    let vendor = if cpu_pm {
+        host.vendor.expect("host vendor")
+    } else {
+        Vendor::Intel
+    };
+    let accel = host
+        .choose(
+            if cpu_pm {
+                vkore_vm::AccelChoice::Kvm
+            } else {
+                vkore_vm::AccelChoice::Auto
+            },
+            vendor,
+        )
         .unwrap();
-    let caps = QemuCaps::probe(qemu, Vendor::Intel, accel).unwrap();
+    let caps = QemuCaps::probe(qemu, vendor, accel).unwrap();
     let spec = MachineSpec {
         name: "test".into(),
         iso,
@@ -134,13 +159,22 @@ fn start_machine(
         firmware_code: firmware.code.clone(),
         firmware_vars: vars,
         firmware_format: firmware.format.clone(),
-        vendor: Vendor::Intel,
+        vendor,
         accel,
         paging: medium.paging.unwrap_or(Paging::FourLevel),
         cpus: 2,
         memory_mib: 2048,
         resources: vkore_vm::hardware::Resources {
             guest_numa: topology,
+            cpu_power_management: cpu_pm,
+            pin_cpus: cpu_pm,
+            host_cpus: if cpu_pm {
+                vkore_vm::hardware::HostResources::probe(dir.path())
+                    .unwrap()
+                    .preferred_cpus(2)
+            } else {
+                Vec::new()
+            },
             ..Default::default()
         },
         display: Display::Headless,
@@ -162,7 +196,7 @@ fn a_kernel_self_test_iso_passes_and_powers_off() {
     else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso, vkore_vm::hardware::GuestNuma::Split);
+    let (dir, mut machine) = start_machine(&qemu, iso, vkore_vm::hardware::GuestNuma::Split, false);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let mut captured = false;
     while std::time::Instant::now() < deadline {

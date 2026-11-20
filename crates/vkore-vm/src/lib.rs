@@ -16,6 +16,7 @@
 
 #![cfg_attr(target_os = "linux", feature(setgroups))]
 
+pub mod cpu_pm;
 pub mod firmware;
 pub mod hardware;
 #[cfg(any(target_os = "linux", test))]

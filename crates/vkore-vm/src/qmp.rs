@@ -422,6 +422,41 @@ mod tests {
     }
 
     #[test]
+    fn native_waits_check_each_realized_cpu_and_refuse_missing_features() {
+        for last in [
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(null),
+        ] {
+            let supported = last == serde_json::json!(true);
+            let (_dir, socket, server) = qemu(move |reader, stream| {
+                for (index, value) in [serde_json::json!(true), last].into_iter().enumerate() {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["execute"], "qom-get");
+                    assert_eq!(request["arguments"]["property"], "monitor");
+                    assert_eq!(request["arguments"]["path"], format!("/machine/cpu{index}"));
+                    writeln!(
+                        stream,
+                        "{}",
+                        serde_json::json!({"return": value, "id": request["id"]})
+                    )
+                    .unwrap();
+                }
+            });
+            let cpus: Vec<api::CpuInfoFast> = serde_json::from_value(serde_json::json!([
+                {"target":"x86_64","cpu-index":0,"qom-path":"/machine/cpu0","thread-id":42},
+                {"target":"x86_64","cpu-index":1,"qom-path":"/machine/cpu1","thread-id":43}
+            ]))
+            .unwrap();
+            let mut qmp = Qmp::connect(&socket, Duration::from_secs(5)).unwrap();
+            assert_eq!(crate::cpu_pm::verify(&mut qmp, &cpus).is_ok(), supported);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     fn negotiation_commands_and_events_in_order() {
         let (_dir, socket, server) = qemu(|reader, stream| {
             let (id, name) = command(reader);

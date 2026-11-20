@@ -51,11 +51,11 @@ impl Requirements {
 pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, Resources) {
     let cpus = (host.physical_cores / 2).clamp(2, 128) as u16;
     let cpus = cpus.max(minimum.cpus);
-    // Both guest NUMA nodes must be aligned to the selected physical page size.
+    // New machines keep one memory node; align it for the preferred 2 MiB pages.
     let memory = ((host.memory_mib / 2).clamp(2048, 1 << 20) as u32)
         .max(minimum.memory_mib)
-        .div_ceil(4)
-        * 4;
+        .div_ceil(2)
+        * 2;
     let pages = if host.huge_available(PageSize::Huge2M, memory) {
         PageSize::Huge2M
     } else {
@@ -68,6 +68,8 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
             .disk_mib
             .max((32 * 1024).min(host.storage_available_mib / 1024 * 1024)),
         Resources {
+            gpu_vfs: Vec::new(),
+            guest_numa: vkore_vm::hardware::GuestNuma::Single,
             passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
             host_cpus: host.preferred_cpus(cpus),
@@ -85,10 +87,12 @@ pub fn validate(config: &MachineConfig) -> Result<(), String> {
         return Err(format!("this image needs {}–128 CPUs", min.cpus));
     }
     if !(min.memory_mib..=1 << 20).contains(&config.memory_mib)
-        || !config.memory_mib.is_multiple_of(2)
+        || !config
+            .memory_mib
+            .is_multiple_of(config.resources.guest_numa.nodes())
     {
         return Err(format!(
-            "this image needs at least {} MiB RAM, split evenly between two guest nodes",
+            "this image needs at least {} MiB RAM, aligned to the selected guest topology",
             min.memory_mib
         ));
     }
@@ -100,11 +104,21 @@ pub fn validate(config: &MachineConfig) -> Result<(), String> {
     }
     vkore_vm::hardware::validate_binding(&config.resources, config.cpus)?;
     let pages = config.resources.pages.mib();
-    if pages != 0 && !config.memory_mib.is_multiple_of(pages * 2) {
+    if pages != 0
+        && !config.memory_mib.is_multiple_of(
+            config
+                .resources
+                .guest_numa
+                .alignment(config.resources.pages),
+        )
+    {
         return Err(format!(
-            "{} requires RAM in multiples of {} MiB for two guest nodes",
+            "{} requires RAM in multiples of {} MiB for the selected guest topology",
             config.resources.pages.label(),
-            pages * 2
+            config
+                .resources
+                .guest_numa
+                .alignment(config.resources.pages)
         ));
     }
     Ok(())
@@ -119,7 +133,7 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
     if u64::from(config.memory_mib) > host.memory_mib {
         return Err("guest RAM exceeds physical host memory".into());
     }
-    if (config.resources.pin_memory || !config.resources.passthrough.is_empty())
+    if (config.resources.pin_memory || has_devices(config))
         && config.resources.pages == PageSize::System
         && u64::from(config.memory_mib) > host.available_memory_mib
     {
@@ -128,11 +142,18 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
         );
     }
     let r = &config.resources;
-    vkore_vm::passthrough::validate_inventory(&r.passthrough, &host.npus)?;
+    vkore_vm::passthrough::validate_inventory(&r.passthrough, &host.npus, &host.gpus)?;
+    for gpu in &r.gpu_vfs {
+        let parent = gpu.parent(&host.gpus)?;
+        if parent.pci.enabled_vfs.is_some_and(|n| n > 0) {
+            let selection = gpu.resolve(&host.gpus)?;
+            vkore_vm::passthrough::check_host(&[selection])?;
+        }
+    }
     vkore_vm::passthrough::check_host(&r.passthrough)?;
-    if !r.passthrough.is_empty() && !cfg!(target_os = "linux") {
+    if has_devices(config) && !cfg!(target_os = "linux") {
         return Err(
-            "NPU passthrough requires Linux; remove the saved device selections on this host."
+            "Accelerator passthrough requires Linux; remove the saved device selections on this host."
                 .into(),
         );
     }
@@ -165,6 +186,23 @@ pub fn validate_host(config: &MachineConfig, host: &HostResources) -> Result<(),
     Ok(())
 }
 
+pub fn has_devices(config: &MachineConfig) -> bool {
+    !config.resources.passthrough.is_empty() || !config.resources.gpu_vfs.is_empty()
+}
+/// Resolve persisted GPU intent immediately before launch; setup can provision absent VFs.
+pub fn assigned_devices(
+    config: &MachineConfig,
+    host: &HostResources,
+) -> Result<Vec<vkore_vm::passthrough::Selection>, String> {
+    let mut selected = config.resources.passthrough.clone();
+    for gpu in &config.resources.gpu_vfs {
+        selected.push(gpu.resolve(&host.gpus)?);
+    }
+    vkore_vm::passthrough::validate_inventory(&selected, &host.npus, &host.gpus)?;
+    vkore_vm::passthrough::check_host(&selected)?;
+    Ok(selected)
+}
+
 /// QEMU locks more than guest RAM (firmware, devices, emulator mappings).
 /// Allow a bounded 1 GiB margin, and still surface any QEMU lock failure.
 pub fn lock_budget(memory_mib: u32) -> u64 {
@@ -182,10 +220,11 @@ pub fn needs_authorization(config: &MachineConfig, host: &HostResources) -> bool
 /// Desktop completion and launch share this entry point; noninteractive callers
 /// continue to use validation without invoking an authentication agent.
 pub fn authorize_configuration(config: &MachineConfig, host: &HostResources) -> Result<(), String> {
-    if !config.resources.passthrough.is_empty() {
+    if has_devices(config) {
         validate_host(config, host)?;
         return vkore_vm::passthrough::authorize(
             &config.resources.passthrough,
+            &config.resources.gpu_vfs,
             Some(lock_budget(config.memory_mib)),
         );
     }
@@ -371,6 +410,7 @@ mod tests {
     fn host() -> HostResources {
         HostResources {
             npus: vkore_vm::devices::Inventory::empty(vkore_vm::devices::Platform::Linux),
+            gpus: Default::default(),
             cpu_name: "fixture".into(),
             physical_cores: 8,
             logical_cpus: 16,

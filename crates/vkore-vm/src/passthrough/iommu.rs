@@ -8,6 +8,7 @@ pub(super) struct IntelProbe {
     base: String,
     firmware: String,
     cpu: String,
+    cpu_position: usize,
 }
 impl IntelProbe {
     pub(super) fn plan(args: &[String]) -> Result<Option<Self>, String> {
@@ -70,17 +71,36 @@ impl IntelProbe {
             }
             Ok(values[0][1].clone())
         };
+        let cpu = option("-cpu", |_| true)?;
+        if cpu.split(',').skip(1).any(|p| {
+            matches!(
+                p.split('=').next(),
+                Some("phys-bits" | "host-phys-bits" | "host-phys-bits-limit")
+            )
+        }) {
+            return Err("Guest physical address width is owned by DMA negotiation.".into());
+        }
+        let cpu_position = args.iter().position(|a| a == "-cpu").unwrap() + 1;
         Ok(Some(Self {
             position: position + 1,
             base: base.clone(),
             firmware: option("-drive", |s| {
                 s.starts_with("if=pflash,") && s.split(',').any(|p| p == "readonly=on")
             })?,
-            cpu: option("-cpu", |_| true)?,
+            cpu,
+            cpu_position,
         }))
     }
     fn device(&self, width: u8) -> String {
         self.base.replace("aw-bits=48", &format!("aw-bits={width}"))
+    }
+    fn cpu(&self, width: u8) -> String {
+        // Firmware places RAM-backed 64-bit BARs using CPUID physical bits.
+        // Keep those mappings inside the same aperture as guest DMA.
+        format!(
+            "{},host-phys-bits=on,host-phys-bits-limit={width}",
+            self.cpu
+        )
     }
     pub(super) fn arguments(&self, width: u8, selected: &[Selection]) -> Vec<String> {
         let mut args: Vec<String> = [
@@ -89,7 +109,7 @@ impl IntelProbe {
             "-accel",
             "kvm",
             "-cpu",
-            &self.cpu,
+            &self.cpu(width),
             "-m",
             "128",
             "-smp",
@@ -138,6 +158,7 @@ impl IntelProbe {
             match realize(width) {
                 Ok(()) => {
                     args[self.position] = self.device(width);
+                    args[self.cpu_position] = self.cpu(width);
                     return Ok(width);
                 }
                 Err(error) => failures.push(format!("{width} bits: {error}")),
@@ -178,6 +199,14 @@ mod tests {
                 expected
             );
             assert_eq!(tried, attempts);
+            assert_eq!(
+                args[plan.cpu_position],
+                format!("host,host-phys-bits=on,host-phys-bits-limit={expected}")
+            );
+            assert!(
+                plan.arguments(expected, &[])
+                    .contains(&args[plan.cpu_position])
+            );
             let device = &args[plan.position];
             assert!(device.ends_with(&format!("aw-bits={expected}")));
             for flag in [
@@ -215,9 +244,11 @@ mod tests {
             address: "0000:00:0b.0".into(),
             vendor_id: 0x8086,
             device_id: 0x643e,
+            physical_function: None,
         }];
         let args = plan.arguments(39, &selected);
         assert!(args.iter().any(|a| a == "-S"));
+        assert!(args.contains(&"host,host-phys-bits=on,host-phys-bits-limit=39".into()));
         assert!(args.windows(2).any(|a| a == ["-m", "128"]));
         assert!(args.windows(2).any(|a| a == ["-qmp", "stdio"]));
         assert_eq!(args.iter().filter(|a| *a == "-drive").count(), 1);
@@ -251,6 +282,27 @@ mod tests {
         );
     }
     #[test]
+    fn negotiated_physical_width_preserves_features_and_rejects_conflicting_caps() {
+        let mut args = original();
+        args[1] = "host,+la57,enforce".into();
+        let plan = IntelProbe::plan(&args).unwrap().unwrap();
+        plan.choose(&mut args, 4 << 30, |_| Ok(())).unwrap();
+        assert_eq!(
+            args[1],
+            "host,+la57,enforce,host-phys-bits=on,host-phys-bits-limit=48"
+        );
+        for option in [
+            "phys-bits=46",
+            "host-phys-bits=off",
+            "host-phys-bits-limit=39",
+        ] {
+            let mut args = original();
+            args[1] = format!("host,{option}");
+            assert!(IntelProbe::plan(&args).is_err());
+        }
+    }
+
+    #[test]
     fn real_qemu_realizes_paused_candidates_without_guest_execution() {
         let Some(qemu) = std::env::var_os("VKORE_TEST_QEMU") else {
             return;
@@ -273,8 +325,9 @@ mod tests {
                 if pair[0] == "kvm" {
                     pair[0] = "tcg".into();
                 }
-                if pair[0] == "host" {
-                    pair[0] = "max".into();
+                if pair[0].starts_with("host,") {
+                    // TCG has no host CPUID; exercise an explicit equivalent cap.
+                    pair[0] = format!("max,phys-bits={width}");
                 }
             }
             let (stream, emulator) = std::os::unix::net::UnixStream::pair().unwrap();

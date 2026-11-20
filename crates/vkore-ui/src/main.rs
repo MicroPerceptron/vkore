@@ -1149,6 +1149,75 @@ mod tests {
     }
 
     #[test]
+    fn gpu_provisioning_controls_render_in_both_themes_and_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut host = vkore_vm::hardware::HostResources::probe(root.path()).unwrap();
+        host.gpus.devices = vec![vkore_vm::devices::Gpu {
+            name: "Intel GPU · b080".into(),
+            driver: Some("xe".into()),
+            pci: vkore_vm::devices::Pci {
+                address: "0000:00:02.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0xb080,
+                revision: None,
+                iommu_group: Some(1),
+                group_members: vec!["0000:00:02.0".into()],
+                physical_function: None,
+                total_vfs: Some(7),
+                enabled_vfs: Some(0),
+            },
+            virtual_functions: vec![],
+        }];
+        let mut draft = hardware::Draft::new(Some(&host), Default::default());
+        draft.change(
+            hardware::Change::Gpu(
+                vkore_vm::passthrough::gpu::Assignment::new(&host.gpus.devices[0], 0),
+                true,
+            ),
+            &host,
+        );
+        assert_eq!(draft.resources.gpu_vfs.len(), 1);
+        for (width, height) in [(900., 560.), (1280., 900.)] {
+            let ty = if width < 1000. {
+                Typography {
+                    text_size: typography::TextSize::ExtraLarge,
+                    preset: typography::FontPreset::Mono,
+                }
+            } else {
+                Typography::default()
+            };
+            for appearance in [Theme::Light, Theme::Dark] {
+                let content = widgets::page_frame(
+                    iced_widget::column![
+                        ty.page_header("Machine hardware", "GPU sharing and provisioning"),
+                        widgets::scroll(hardware::gpu_inventory(&draft, &host, false, false, ty))
+                            .height(Length::Fill),
+                    ]
+                    .spacing(18),
+                );
+                let shell = container(row![sidebar(Page::Machines, 0, "", ty), content])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|t| theme::panel(t, theme::BACKGROUND, None, 0.));
+                let (_, refused) = draw_at_scale(
+                    shell.into(),
+                    Size::new(width, height),
+                    &appearance,
+                    1.,
+                    Some("gpu"),
+                );
+                assert!(refused.is_empty(), "{refused:?}");
+            }
+        }
+        let selection = draft.resources.gpu_vfs[0].clone();
+        host.gpus.devices.clear();
+        draft.change(hardware::Change::Gpu(selection.clone(), false), &host);
+        assert!(draft.resources.gpu_vfs.is_empty());
+        draft.change(hardware::Change::Gpu(selection, true), &host);
+        assert!(draft.resources.gpu_vfs.is_empty());
+    }
+
+    #[test]
     fn npu_inventory_renders_devices_routes_and_failure_states() {
         use vkore_vm::devices::{DiscoveryStatus, Inventory, Npu, Pci, Platform, Source, Vendor};
         let device = Npu {

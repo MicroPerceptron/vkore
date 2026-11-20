@@ -1,7 +1,9 @@
-//! Whole-device NPU assignment. Saved intent is not authority: the helper
+//! Whole-device NPU and GPU virtual-function assignment. Saved intent is not authority: the helper
 //! independently rediscovers the device before touching the host driver.
 use serde::{Deserialize, Serialize};
 use vkore_devices::{Inventory, Npu, Source, Vendor};
+
+pub mod gpu;
 
 pub const MAX_DEVICES: usize = 4;
 
@@ -11,6 +13,8 @@ pub struct Selection {
     pub address: String,
     pub vendor_id: u16,
     pub device_id: u16,
+    #[serde(default)]
+    pub physical_function: Option<String>,
 }
 impl Selection {
     pub fn from_device(device: &Npu) -> Option<Self> {
@@ -19,6 +23,7 @@ impl Selection {
             address: pci.address.clone(),
             vendor_id: pci.vendor_id,
             device_id: pci.device_id,
+            physical_function: None,
         })
     }
 }
@@ -35,12 +40,18 @@ pub fn valid_address(s: &str) -> bool {
 }
 pub fn validate_selections(selected: &[Selection]) -> Result<(), String> {
     if selected.len() > MAX_DEVICES {
-        return Err("At most four NPUs can be assigned to one guest.".into());
+        return Err("At most four accelerators can be assigned to one guest.".into());
     }
     let mut seen = std::collections::BTreeSet::new();
     for device in selected {
-        if !valid_address(&device.address) || !seen.insert(&device.address) {
-            return Err("Invalid or duplicate NPU PCI address.".into());
+        if !valid_address(&device.address)
+            || device
+                .physical_function
+                .as_ref()
+                .is_some_and(|p| !valid_address(p) || *p == device.address)
+            || !seen.insert(&device.address)
+        {
+            return Err("Invalid or duplicate accelerator PCI address.".into());
         }
     }
     Ok(())
@@ -82,9 +93,17 @@ pub fn eligible(device: &Npu) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_inventory(selected: &[Selection], inventory: &Inventory) -> Result<(), String> {
+pub fn validate_inventory(
+    selected: &[Selection],
+    inventory: &Inventory,
+    gpus: &vkore_devices::GpuInventory,
+) -> Result<(), String> {
     validate_selections(selected)?;
     for selection in selected {
+        if selection.physical_function.is_some() {
+            gpu::validate_selection(selection, gpus)?;
+            continue;
+        }
         let device = inventory.devices.iter().find(|n| Selection::from_device(n).as_ref() == Some(selection))
             .ok_or_else(|| format!("Selected NPU {} is missing or its identity changed. Turn off its passthrough selection or refresh the host.", selection.address))?;
         eligible(device)?;
@@ -191,14 +210,19 @@ pub fn authorize_memory_limit(memory_mib: u32) -> Result<(), String> {
 
 /// Batch the device checks and optional memory-limit request at Done/Save.
 /// No device is detached by this operation. Launch rechecks with fresh authority.
-pub fn authorize(selected: &[Selection], memory_bytes: Option<u64>) -> Result<(), String> {
+pub fn authorize(
+    selected: &[Selection],
+    gpus: &[gpu::Assignment],
+    memory_bytes: Option<u64>,
+) -> Result<(), String> {
     validate_selections(selected)?;
+    gpu::validate(gpus, selected.len())?;
     #[cfg(target_os = "linux")]
-    return linux::authorize(selected, memory_bytes);
+    return linux::authorize(selected, gpus, memory_bytes);
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = memory_bytes;
-        Err("NPU passthrough requires Linux.".into())
+        let _ = (memory_bytes, gpus);
+        Err("Accelerator passthrough requires Linux.".into())
     }
 }
 
@@ -210,7 +234,7 @@ pub fn check_host(selected: &[Selection]) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     return linux::check_host(selected);
     #[cfg(not(target_os = "linux"))]
-    Err("NPU passthrough requires Linux.".into())
+    Err("Accelerator passthrough requires Linux.".into())
 }
 
 #[cfg(test)]
@@ -243,9 +267,21 @@ mod tests {
         let selection = Selection::from_device(&device).unwrap();
         let mut inventory = Inventory::empty(vkore_devices::Platform::Linux);
         inventory.devices.push(device);
-        validate_inventory(std::slice::from_ref(&selection), &inventory).unwrap();
+        validate_inventory(
+            std::slice::from_ref(&selection),
+            &inventory,
+            &Default::default(),
+        )
+        .unwrap();
         inventory.devices[0].pci.as_mut().unwrap().device_id += 1;
-        assert!(validate_inventory(std::slice::from_ref(&selection), &inventory).is_err());
+        assert!(
+            validate_inventory(
+                std::slice::from_ref(&selection),
+                &inventory,
+                &Default::default()
+            )
+            .is_err()
+        );
         for change in 0..7 {
             let mut device = fixture();
             let pci = device.pci.as_mut().unwrap();
@@ -261,7 +297,7 @@ mod tests {
             assert!(eligible(&device).is_err());
         }
         inventory.devices.clear();
-        assert!(validate_inventory(&[selection], &inventory).is_err());
+        assert!(validate_inventory(&[selection], &inventory, &Default::default()).is_err());
     }
     #[test]
     fn guest_ports_are_distinct_and_no_device_is_implicitly_assigned() {
@@ -311,6 +347,7 @@ mod tests {
             address: "0000:00:0b.0".into(),
             vendor_id: 0x8086,
             device_id: 0x643e,
+            physical_function: None,
         };
         assert!(validate_selections(&[s.clone(), s]).is_err());
     }

@@ -142,6 +142,13 @@ struct CreateArgs {
     /// which asks for authorization to hand the device over.
     #[arg(long, value_name = "PCI_ADDRESS")]
     passthrough: Vec<String>,
+    /// Guest RAM layout; single keeps all RAM together for inference
+    #[arg(long, value_parser = ["single", "split"], default_value = "single")]
+    numa: String,
+    /// GPU physical-function PCI address and one-based VF number, e.g. 0000:00:02.0/1
+    /// Provision absent VFs using Done/Save hardware in the desktop before launch.
+    #[arg(long, value_name = "PF_ADDRESS/VF_NUMBER")]
+    gpu_vf: Vec<String>,
     /// The IOMMU vendor [default: this host's, so it can accelerate]
     #[arg(long, value_enum)]
     vendor: Option<VendorArg>,
@@ -494,6 +501,27 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
         arguments.host_cpus
     };
     config.resources.reserve_storage = !arguments.sparse;
+    config.resources.guest_numa = if arguments.numa == "single" {
+        vkore_vm::hardware::GuestNuma::Single
+    } else {
+        vkore_vm::hardware::GuestNuma::Split
+    };
+    for value in &arguments.gpu_vf {
+        let (address, index) = value
+            .split_once('/')
+            .and_then(|(address, n)| Some((address, n.parse::<u32>().ok()?.checked_sub(1)?)))
+            .ok_or("--gpu-vf requires PF_ADDRESS/VF_NUMBER, numbered from 1")?;
+        let gpu = host
+            .gpus
+            .devices
+            .iter()
+            .find(|g| g.pci.address == address)
+            .ok_or("Selected GPU was not found (see vkore hardware)")?;
+        config
+            .resources
+            .gpu_vfs
+            .push(vkore_vm::passthrough::gpu::Assignment::new(gpu, index));
+    }
     for address in &arguments.passthrough {
         let selection = host
             .npus

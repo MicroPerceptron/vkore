@@ -3,6 +3,15 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.6.0] - 2026-11-19
+
+### Added
+- Discover Linux GPUs and assign Intel xe SR-IOV virtual functions from hardware setup or the CLI. Done/Save can provision an absent VF pool through system authentication without detaching the host GPU or resizing existing pools.
+- Choose a single guest NUMA node for inference or the two-node gate layout. New hardware recommendations use one node; existing configurations keep their layout.
+
+### Fixed
+- Cap guest physical address bits at the negotiated Intel VFIO DMA width so firmware places RAM-backed PCI BARs within that address space.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added

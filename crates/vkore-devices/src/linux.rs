@@ -127,6 +127,21 @@ fn probe(path: &Path, inventory: &mut Inventory) -> io::Result<Option<Npu>> {
     let Some((family, name)) = identify(vendor, device, driver.as_deref()) else {
         return Ok(None);
     };
+    let pci = pci(path, inventory)?;
+    Ok(Some(Npu {
+        id: format!("pci:{}", pci.address),
+        name: name.into(),
+        vendor: family,
+        source: Source::LinuxPci,
+        driver,
+        core_count: None,
+        pci: Some(pci),
+    }))
+}
+
+fn pci(path: &Path, inventory: &mut Inventory) -> io::Result<Pci> {
+    let vendor = hex(&path.join("vendor"))?;
+    let device = hex(&path.join("device"))?;
     let bdf = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -139,11 +154,11 @@ fn probe(path: &Path, inventory: &mut Inventory) -> io::Result<Option<Npu>> {
                 .transpose()
         }),
         inventory,
-        "NPU IOMMU group",
+        "PCI IOMMU group",
     )
     .flatten();
     let members = if group.is_some() {
-        observed(group_members(path), inventory, "NPU IOMMU group members").unwrap_or_default()
+        observed(group_members(path), inventory, "PCI IOMMU group members").unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -156,18 +171,18 @@ fn probe(path: &Path, inventory: &mut Inventory) -> io::Result<Option<Npu>> {
             }
         }),
         inventory,
-        "NPU physical function",
+        "PCI physical function",
     )
     .flatten();
     let total_vfs = observed(
         number(&path.join("sriov_totalvfs")).map(|v| v.unwrap_or(0)),
         inventory,
-        "NPU SR-IOV capacity",
+        "PCI SR-IOV capacity",
     );
     let enabled_vfs = observed(
         number(&path.join("sriov_numvfs")),
         inventory,
-        "NPU enabled VFs",
+        "PCI enabled VFs",
     )
     .flatten();
     let revision = observed(
@@ -176,28 +191,20 @@ fn probe(path: &Path, inventory: &mut Inventory) -> io::Result<Option<Npu>> {
                 .transpose()
         }),
         inventory,
-        "NPU revision",
+        "PCI revision",
     )
     .flatten();
-    Ok(Some(Npu {
-        id: format!("pci:{bdf}"),
-        name: name.into(),
-        vendor: family,
-        source: Source::LinuxPci,
-        driver,
-        core_count: None,
-        pci: Some(Pci {
-            address: bdf,
-            vendor_id: vendor,
-            device_id: device,
-            revision,
-            iommu_group: group,
-            group_members: members,
-            physical_function: pf,
-            total_vfs,
-            enabled_vfs,
-        }),
-    }))
+    Ok(Pci {
+        address: bdf,
+        vendor_id: vendor,
+        device_id: device,
+        revision,
+        iommu_group: group,
+        group_members: members,
+        physical_function: pf,
+        total_vfs,
+        enabled_vfs,
+    })
 }
 
 fn group_members(path: &Path) -> io::Result<Vec<String>> {
@@ -268,4 +275,105 @@ mod tests {
         assert_eq!(partial.status, DiscoveryStatus::Partial);
         assert!(!partial.warnings.is_empty());
     }
+}
+
+/// Linux GPU discovery shares the same bounded PCI snapshot as NPU discovery.
+#[cfg(target_os = "linux")]
+pub(super) fn discover_gpus() -> GpuInventory {
+    let mut diagnostics = Inventory::empty(Platform::Linux);
+    let mut devices = Vec::new();
+    let result = (|| -> io::Result<()> {
+        let mut enumerator = udev::Enumerator::new()?;
+        enumerator.match_subsystem("pci")?;
+        for (index, device) in enumerator.scan_devices()?.enumerate() {
+            if index == 4096 {
+                return Err(io::Error::other("PCI scan exceeds 4096 devices"));
+            }
+            match gpu(device.syspath(), &mut diagnostics) {
+                Ok(Some(gpu)) if devices.len() < MAX_DEVICES => devices.push(gpu),
+                Ok(Some(_)) => diagnostics.warn("GPU inventory exceeds 64 devices"),
+                Ok(None) => (),
+                Err(e) => diagnostics.warn(&format!("GPU discovery: {e}")),
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        diagnostics.warn(&format!("GPU discovery: {e}"));
+    }
+    devices.sort_by(|a, b| a.pci.address.cmp(&b.pci.address));
+    GpuInventory {
+        devices,
+        warnings: diagnostics.warnings,
+    }
+}
+fn gpu(path: &Path, inventory: &mut Inventory) -> io::Result<Option<Gpu>> {
+    let class = u32::from_str_radix(text(&path.join("class"))?.trim_start_matches("0x"), 16)
+        .map_err(io::Error::other)?;
+    if class >> 16 != 0x03 {
+        return Ok(None);
+    }
+    let pci = pci(path, inventory)?;
+    let driver = link_name(&path.join("driver"))?;
+    let mut virtual_functions = Vec::new();
+    for index in 0..pci.enabled_vfs.unwrap_or(0).min(MAX_DEVICES as u32) {
+        let address = link_name(&path.join(format!("virtfn{index}")))?
+            .filter(|s| address(s))
+            .ok_or_else(|| io::Error::other("missing or invalid VF link"))?;
+        virtual_functions.push(VirtualFunction { index, address });
+    }
+    Ok(Some(Gpu {
+        name: format!(
+            "{} GPU · {:04x}",
+            match pci.vendor_id {
+                0x8086 => "Intel",
+                0x1002 => "AMD",
+                0x10de => "NVIDIA",
+                _ => "PCI",
+            },
+            pci.device_id
+        ),
+        pci,
+        driver,
+        virtual_functions,
+    }))
+}
+
+#[cfg(test)]
+#[test]
+fn display_class_discovery_preserves_pf_vf_links_without_assuming_bdfs() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let pf = root.path().join("0000:00:02.0");
+    let vf = root.path().join("0000:03:00.1");
+    for path in [&pf, &vf] {
+        fs::create_dir(path).unwrap();
+        for (key, value) in [
+            ("vendor", "0x8086"),
+            ("device", "0xb080"),
+            ("class", "0x038000"),
+        ] {
+            fs::write(path.join(key), value).unwrap();
+        }
+    }
+    fs::write(pf.join("sriov_totalvfs"), "7").unwrap();
+    fs::write(pf.join("sriov_numvfs"), "1").unwrap();
+    symlink(&vf, pf.join("virtfn0")).unwrap();
+    symlink(&pf, vf.join("physfn")).unwrap();
+    let mut inventory = Inventory::empty(Platform::Linux);
+    let parent = gpu(&pf, &mut inventory).unwrap().unwrap();
+    assert_eq!(parent.virtual_functions[0].address, "0000:03:00.1");
+    assert_eq!(
+        gpu(&vf, &mut inventory)
+            .unwrap()
+            .unwrap()
+            .pci
+            .physical_function
+            .as_deref(),
+        Some("0000:00:02.0")
+    );
+    fs::write(vf.join("class"), "0x120000").unwrap();
+    assert!(gpu(&vf, &mut inventory).unwrap().is_none());
+    fs::remove_file(pf.join("virtfn0")).unwrap();
+    assert!(gpu(&pf, &mut inventory).is_err());
 }

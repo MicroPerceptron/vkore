@@ -1,4 +1,4 @@
-//! Read-only NPU inventory. A detected device is not permission to assign it.
+//! Read-only NPU and Linux GPU inventory. A detected device is not permission to assign it.
 //! Platform handles stay inside a probe; snapshots own only bounded values.
 //! There are no runtime downloads, model loads, driver changes or guest ABI here.
 use serde::Serialize;
@@ -205,5 +205,34 @@ mod tests {
                 .all(|w| w.chars().count() <= MAX_TEXT)
         );
         assert_eq!(result.status, DiscoveryStatus::Partial);
+    }
+}
+
+/// Linux display-class PCI devices, including independently enumerated VFs.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct GpuInventory {
+    pub devices: Vec<Gpu>,
+    pub warnings: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct Gpu {
+    pub name: String,
+    pub pci: Pci,
+    pub driver: Option<String>,
+    pub virtual_functions: Vec<VirtualFunction>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct VirtualFunction {
+    pub index: u32,
+    pub address: String,
+}
+pub fn discover_gpus() -> GpuInventory {
+    #[cfg(target_os = "linux")]
+    {
+        platform::discover_gpus()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        GpuInventory::default()
     }
 }

@@ -21,8 +21,9 @@ minimums with `minimum: { cpus, memory_mib, disk_mib }`; import persists the
 requirements alongside the image identity. CPU count is bounded by 128 and
 available host logical CPUs. RAM is bounded by physical host memory, available
 memory at launch when pinned, and the guest's 1 TiB limit. Unpinned
-allocations above currently available RAM show a memory-pressure warning. The two guest NUMA nodes require
-an even split; hugepages additionally require both halves to be page-aligned.
+allocations above currently available RAM show a memory-pressure warning. Guest memory layout offers a single node (recommended for inference) or the
+two-node gate topology with equal RAM halves. Every node must align to the
+selected page size. This does not change host NUMA placement.
 
 Recommended allocations use half the available physical cores (not SMT thread
 count) and half physical RAM, rounded up only as needed to satisfy image
@@ -33,11 +34,12 @@ the form explicitly selects system pages. Refreshing never silently replaces
 an existing selection. A changed or depleted resource causes a preflight error.
 
 Existing schema-2 configurations without resource fields retain their prior
-unpinned/system-page/sparse behavior; new CLI and desktop creation use host
+unpinned/system-page/sparse behavior and two-node guest layout; new CLI and desktop creation use host
 recommendations. All configurations are subject to the baseline minimums.
 `vkore hardware` reports the snapshot as JSON. CLI creation also offers
 `--cpus`, `--memory-mib`, `--host-cpus`, `--no-cpu-pinning`,
-`--no-memory-pinning`, `--pages system|2m|1g`, `--sparse` and `--passthrough PCI_ADDRESS`.
+`--no-memory-pinning`, `--pages system|2m|1g`, `--numa single|split`, `--sparse`,
+`--passthrough PCI_ADDRESS` and `--gpu-vf PF_ADDRESS/VF_NUMBER`.
 
 ## Host discovery and CPU placement
 
@@ -55,7 +57,9 @@ Linux launcher queries typed QMP CPU records while QEMU is paused, checks every
 TID belongs to its own child, applies affinity, reads it back, then resumes.
 Any failure kills and reaps the child. Pinning constrains guest vCPU threads; it
 does not reserve host cores exclusively or bind QEMU's I/O threads. The guest's
-synthetic two-node topology remains separate from host NUMA topology.
+guest topology remains separate from host NUMA topology. New recommendations
+use one node, including its PCI expander and generic initiators. Existing saved
+machines retain two nodes until explicitly changed.
 
 ## Memory and authentication
 
@@ -209,8 +213,8 @@ allocation without memory pressure. See
 Hardware setup includes a **Neural processors** section. It reports host devices
 and three separate routes: dedicated assignment, SR-IOV virtual functions, and
 shared execution through virtio-accel. Linux Intel/AMD physical NPUs now have a
-**Full passthrough** switch. SR-IOV provisioning and shared guest connections
-remain unavailable. Discovery itself stays read-only; editing the switch never
+**Full passthrough** switch. NPU SR-IOV and shared guest connections
+remain unavailable. GPU SR-IOV is described below. Discovery itself stays read-only; editing the switch never
 changes a host driver.
 
 `vkore-devices` is an independently portable inventory crate; `vkore-vm` includes
@@ -325,6 +329,14 @@ that check. A 41-bit host therefore selects 39 bits if that candidate realizes.
 Configurations whose RAM plus the below-4-GiB address-hole allowance cannot fit
 are rejected. If neither candidate works, launch fails with diagnostics.
 
+Both the probe and final guest CPU use `host-phys-bits=on` and
+`host-phys-bits-limit=<negotiated width>`. Firmware therefore places high PCI
+BARs within that physical address space, including RAM-backed shared-memory
+BARs. The CPU cap and vIOMMU width are committed together only after successful
+realization; unrelated CPU features remain intact. This does not add a shared
+host channel. [QEMU's host physical-width handling](https://github.com/qemu/qemu/blob/v10.2.0/target/i386/host-cpu.c)
+clamps to the smaller of the host width and the requested limit.
+
 Each probe uses 128 MiB of RAM, read-only firmware code, and no guest disk,
 writable firmware variables, networking or running guest CPUs. Probes and the
 actual launch run unprivileged with the same leased NPUs. Each attempt owns
@@ -434,3 +446,47 @@ contains no unsafe blocks and adds only vte/unicode-width to existing helpers.
 Default callbacks ignore clipboard, title, resize and reply requests: guest
 escapes cannot invoke host actions. Parsing persists across socket reads; the
 UI receives styled text, never executable escapes.
+
+
+## Linux GPU SR-IOV
+
+The **Graphics processors** cards discover display-class PCI devices and their
+physical/virtual-function relationships. Managed assignment currently admits
+Intel physical functions bound to `xe` with nonzero reported SR-IOV capacity.
+It does not infer support from the GPU generation, detach the physical GPU,
+change boot arguments, reload the display driver, or enable its PF mode by
+reprobing it. Configure the host driver for SR-IOV first if capacity is zero.
+
+Enable **Use a GPU virtual function**, then select a one-based VF number. Saved
+intent contains the PF PCI address, vendor/device identity and VF index. Linux
+`virtfnN` and reciprocal `physfn` links resolve the actual address; no adjacent
+BDF arithmetic is used. A VF must be the sole device in its IOMMU group and have
+function-level reset. It uses the existing VFIO/IOMMUFD guardian, idle-handle
+checks (including DRM nodes), unprivileged QEMU, memlock budget and post-exit
+host-driver restoration. The physical GPU remains bound to the host throughout.
+
+**Done/Save hardware** batches provisioning with device/memory authorization.
+If the PF has no enabled VFs, it creates enough to include the selected index,
+using the driver's default allocation policy. It temporarily disables VF driver
+autoprobe and restores the previous policy even after a failed creation. An
+existing pool can be used but never resized or disabled. Root-owned PF leases
+serialize vKore provisioning; VF leases serialize assignment. External host
+managers are not coordinated by those leases, so identities/counts are rechecked
+and changed state is refused.
+
+Created VFs persist on the host after save, cancellation after creation, or a
+later setup failure; vKore never removes a pool that another process might have
+opened. Errors require refreshing discovery and retrying. A failed save leaves
+the machine configuration unchanged, but host provisioning may already have
+completed. After host reboot, finish hardware setup again to recreate the pool.
+Deselecting a VF releases guest intent, not the host pool. No BIOS, boot-loader,
+module-parameter, custom GPU quota or persistent host configuration is changed.
+
+For a preprovisioned VF, CLI creation accepts e.g.
+`--gpu-vf 0000:00:02.0/1 --numa single`. If VFs are absent, complete setup in the
+desktop before launch. The hardware JSON includes `gpus` independently of NPUs.
+
+References: [Linux PCI SR-IOV control](https://docs.kernel.org/PCI/pci-iov-howto.html),
+[Intel xe VF provisioning](https://dgpu-docs.intel.com/configuration-and-optimization/virtualization/enabling-sriov-virtual-functions.html).
+GPU assignment/inference still needs validation on a real SR-IOV host; synthetic
+inventory and transaction tests do not establish physical GPU behavior.

@@ -31,7 +31,7 @@ impl<D: Driver> Handoff<D> {
     }
     pub fn bind(&mut self, reset: &str) -> Result<(), String> {
         if self.driver.current()? != self.original_driver {
-            return Err("NPU host driver changed during preparation.".into());
+            return Err("accelerator host driver changed during preparation.".into());
         }
         self.changed = true;
         self.driver.set_reset(reset)?;
@@ -43,7 +43,7 @@ impl<D: Driver> Handoff<D> {
             self.driver.probe()?;
         }
         if self.driver.current()?.as_deref() != Some("vfio-pci") {
-            return Err("NPU did not bind to VFIO.".into());
+            return Err("accelerator did not bind to VFIO.".into());
         }
         Ok(())
     }
@@ -57,7 +57,8 @@ impl<D: Driver> Handoff<D> {
             && current.is_some()
         {
             return Err(
-                "NPU driver was changed externally; refusing to detach the new driver.".into(),
+                "accelerator driver was changed externally; refusing to detach the new driver."
+                    .into(),
             );
         }
         let driver_result: Result<(), String> = (|| {
@@ -71,7 +72,7 @@ impl<D: Driver> Handoff<D> {
                 }
             }
             if self.driver.current()? != self.original_driver {
-                return Err("The original NPU host driver could not be restored.".into());
+                return Err("The original accelerator host driver could not be restored.".into());
             }
             Ok(())
         })();
@@ -152,7 +153,13 @@ mod tests {
     }
     #[test]
     fn restores_native_unbound_and_prebound_devices_and_is_idempotent() {
-        for driver in [Some("intel_vpu"), Some("amdxdna"), Some("vfio-pci"), None] {
+        for driver in [
+            Some("intel_vpu"),
+            Some("amdxdna"),
+            Some("xe"),
+            Some("vfio-pci"),
+            None,
+        ] {
             let mut t = transaction(driver, None);
             t.bind("flr").unwrap();
             assert_eq!(t.driver.current.as_deref(), Some("vfio-pci"));

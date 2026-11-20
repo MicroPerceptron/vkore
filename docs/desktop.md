@@ -163,3 +163,26 @@ draws the same on every host whatever fonts the host has installed.
   bitmaps yet. **Open** shows them in the host's viewer.
 - The desktop needs Axiom, which is not public yet.
 - Only x86_64 Linux has been run (under Xvfb, with QEMU's TCG).
+
+## Guest terminal
+
+The connected COM2 console is a VT terminal. Click its screen to focus it; the
+accent border shows where keyboard input goes. Characters, Enter, Backspace,
+Tab, arrows, Home/End, Delete, function keys and Ctrl shortcuts go directly to
+the guest. There is no host command editor or local echo: Kore handles editing,
+history, completion and Ctrl-C. Application cursor mode follows the guest.
+
+Ctrl+Shift+V (or Cmd+V) pastes plain text, honoring guest bracketed-paste mode.
+Multiline paste can execute commands when the guest has not enabled that mode.
+Embedded control sequences and oversized pastes are refused. Input is bounded
+to 16 KiB, preserves typeahead and partial writes, and is never replayed after a
+disconnection. Clipboard reads that finish after focus changes are discarded.
+
+Click elsewhere, change pages, deactivate the window, or press Ctrl+Shift+Esc to
+release the keyboard. Stopped sessions show a read-only screen. The serial
+terminal has a fixed 120-column, 24-row viewport plus bounded scrollback; both
+axes can scroll in a smaller pane. Window resizing does not invent a guest
+terminal-size protocol. Cursor positioning, colors and alternate screens use
+the existing VT parser. Guest control strings cannot change the host clipboard
+or window. All visible guest text still uses the bundled mono face and the
+usual control/unsupported-glyph escaping.

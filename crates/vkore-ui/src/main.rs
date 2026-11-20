@@ -130,6 +130,7 @@ impl Model {
                 }
             }
             Message::Show(page) => {
+                self.machines.unfocus_console();
                 self.page = page;
                 if page == Page::Machines {
                     self.machines.refresh();
@@ -360,6 +361,15 @@ impl App {
     fn process_events(&mut self, window: &Rc<Window>) {
         if self.events.is_empty() {
             return;
+        }
+        if self.events.iter().any(|event| {
+            matches!(
+                event,
+                iced_core::Event::Mouse(mouse::Event::ButtonPressed(_))
+                    | iced_core::Event::Window(iced_core::window::Event::Unfocused)
+            )
+        }) {
+            self.model.machines.unfocus_console();
         }
         let size = logical_size(window);
         let mut interface = UserInterface::build(
@@ -621,7 +631,7 @@ impl ApplicationHandler<UserEvent> for App {
             .model
             .machines
             .has_live_console()
-            .then(|| Instant::now() + Duration::from_millis(100));
+            .then(|| Instant::now() + FRAME_INTERVAL);
         event_loop.set_control_flow(console_due.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if !self.redraw || self.redraw_requested {
             return;

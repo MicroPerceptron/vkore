@@ -15,6 +15,8 @@ pub struct Draft {
     pub disk_mib: u64,
     disk_gib: String,
     pub resources: Resources,
+    accel: vkore_vm::AccelChoice,
+    vendor: Option<vkore_vm::Vendor>,
     pub minimum: Requirements,
     pub storage_fixed: bool,
     pub show_cores: bool,
@@ -58,6 +60,8 @@ impl Draft {
             disk_mib,
             disk_gib: size_text(disk_mib),
             resources,
+            accel: vkore_vm::AccelChoice::Auto,
+            vendor: None,
             minimum,
             storage_fixed: false,
             show_cores: false,
@@ -72,6 +76,8 @@ impl Draft {
             disk_mib: c.disk_mib,
             disk_gib: size_text(c.disk_mib),
             resources: c.resources.clone(),
+            accel: c.accel,
+            vendor: c.vendor,
             minimum: c.requirements,
             storage_fixed,
             show_cores: false,
@@ -84,6 +90,14 @@ impl Draft {
         config.disk_mib = self.disk_mib;
         config.resources = self.resources.clone();
         config.requirements = self.minimum;
+    }
+    fn recommended_cpu_waits(&self, host: &HostResources) -> bool {
+        vkored::hardware::recommended_cpu_waits(
+            host,
+            self.resources.pin_cpus,
+            self.accel,
+            self.vendor,
+        )
     }
     pub fn change(&mut self, change: Change, host: &HostResources) {
         match change {
@@ -162,15 +176,15 @@ impl Draft {
                     self.disk_gib = value;
                 }
             }
-            Change::PinCpus if host.cpu_pinning && !self.resources.cpu_power_management => {
+            Change::PinCpus if host.cpu_pinning => {
                 self.resources.pin_cpus = !self.resources.pin_cpus;
+                self.resources.cpu_power_management = self.recommended_cpu_waits(host);
                 if self.resources.pin_cpus {
                     self.resources.host_cpus = host.preferred_cpus(self.cpus);
                 }
             }
             Change::CpuPowerManagement
-                if self.resources.cpu_power_management
-                    || (host.cpu_power_management.is_ok() && self.resources.pin_cpus) =>
+                if self.resources.cpu_power_management || self.recommended_cpu_waits(host) =>
             {
                 self.resources.cpu_power_management = !self.resources.cpu_power_management;
             }
@@ -211,6 +225,9 @@ impl Draft {
             Change::ShowStorage => self.show_storage = !self.show_storage,
             Change::Defaults => {
                 let mut fresh = Self::new(Some(host), self.minimum);
+                fresh.accel = self.accel;
+                fresh.vendor = self.vendor;
+                fresh.resources.cpu_power_management = fresh.recommended_cpu_waits(host);
                 if self.storage_fixed {
                     fresh.disk_mib = self.disk_mib;
                     fresh.disk_gib = self.disk_gib.clone();
@@ -386,15 +403,15 @@ pub fn view<'a>(
             ty,
             "Pin guest CPUs",
             draft.resources.pin_cpus,
-            host.cpu_pinning && !draft.resources.cpu_power_management && !busy,
+            host.cpu_pinning && !busy,
             send(Change::PinCpus),
         ));
     cpu = cpu.push(switch(
         ty, "Native CPU waits (MONITOR/MWAIT)", draft.resources.cpu_power_management,
         !busy && (draft.resources.cpu_power_management
-            || (host.cpu_power_management.is_ok() && draft.resources.pin_cpus)),
+            || draft.recommended_cpu_waits(host)),
         send(Change::CpuPowerManagement),
-    )).push(ty.body("Requires CPU pinning. Also lets the guest manage supported idle states; other work sharing these cores may see higher latency. Turn off native waits before unpinning.", 12., theme::TEXT_MUTED));
+    )).push(ty.body("Enabled automatically with KVM and CPU pinning when supported. Also lets the guest manage idle states; other work sharing these cores may see higher latency.", 12., theme::TEXT_MUTED));
     if let Err(reason) = &host.cpu_power_management {
         cpu = cpu.push(ty.data(reason, theme::TEXT_MUTED));
     }
@@ -1211,6 +1228,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut host = HostResources::probe(root.path()).unwrap();
         host.cpu_pinning = true;
+        host.acceleration = vkore_vm::HostCaps {
+            vendor: Some(vkore_vm::Vendor::Intel),
+            kvm: true,
+            hvf: false,
+        };
         host.logical_cpus = 12;
         host.physical_cores = 8;
         host.cores = (0..8)
@@ -1225,24 +1247,63 @@ mod tests {
         host
     }
     #[test]
-    fn native_waits_require_pinning_and_can_be_disabled_on_an_unsupported_host() {
+    fn native_waits_follow_pinning_and_preserve_manual_choices() {
         let mut host = host();
         host.cpu_power_management = Ok(());
         let mut draft = Draft::new(Some(&host), Requirements::default());
-        assert!(!draft.resources.cpu_power_management);
-        draft.change(Change::CpuPowerManagement, &host);
         assert!(draft.resources.cpu_power_management);
         draft.change(Change::PinCpus, &host);
+        assert!(!draft.resources.pin_cpus);
+        assert!(!draft.resources.cpu_power_management);
+        draft.change(Change::PinCpus, &host);
         assert!(draft.resources.pin_cpus);
+        assert!(draft.resources.cpu_power_management);
+        draft.change(Change::CpuPowerManagement, &host);
+        assert!(!draft.resources.cpu_power_management);
+        draft.change(Change::Cpus(2), &host);
+        let mut config = MachineConfig::new("waits", "/image.iso");
+        draft.apply(&mut config);
+        assert!(
+            !Draft::from_config(&config, false)
+                .resources
+                .cpu_power_management
+        );
+        draft.change(Change::Defaults, &host);
+        assert!(draft.resources.cpu_power_management);
+        // A saved selection can still be turned off after moving to another host.
         host.cpu_power_management = Err("unavailable".into());
         draft.change(Change::CpuPowerManagement, &host);
         assert!(!draft.resources.cpu_power_management);
         draft.change(Change::CpuPowerManagement, &host);
         assert!(!draft.resources.cpu_power_management);
         draft.change(Change::PinCpus, &host);
-        host.cpu_power_management = Ok(());
-        draft.change(Change::CpuPowerManagement, &host);
+        draft.change(Change::PinCpus, &host);
         assert!(!draft.resources.cpu_power_management);
+    }
+
+    #[test]
+    fn defaults_and_pinning_respect_the_saved_accelerator_and_vendor() {
+        let mut host = host();
+        host.cpu_power_management = Ok(());
+        for (accel, vendor) in [
+            (vkore_vm::AccelChoice::Tcg, None),
+            (vkore_vm::AccelChoice::Hvf, None),
+            (vkore_vm::AccelChoice::Auto, Some(vkore_vm::Vendor::Amd)),
+        ] {
+            let mut config = MachineConfig::new("waits", "/image.iso");
+            config.accel = accel;
+            config.vendor = vendor;
+            let mut draft = Draft::from_config(&config, false);
+            draft.change(Change::PinCpus, &host);
+            assert!(!draft.resources.cpu_power_management);
+            draft.change(Change::Defaults, &host);
+            assert!(!draft.resources.cpu_power_management);
+            draft.change(Change::CpuPowerManagement, &host);
+            assert!(!draft.resources.cpu_power_management);
+            draft.apply(&mut config);
+            assert_eq!(config.accel, accel);
+            assert_eq!(config.vendor, vendor);
+        }
     }
 
     #[test]

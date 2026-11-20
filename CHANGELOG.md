@@ -6,7 +6,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.6.0] - 2026-11-19
 
 ### Added
-- Optional native CPU waits (MONITOR/MWAIT) on pinned Linux KVM CPUs, with host capability checks and verification before the guest runs; available in hardware setup and CLI `--cpu-pm`.
+- Native CPU waits (MONITOR/MWAIT) default on for supported pinned Linux KVM configurations, with host capability checks and verification before the guest runs; hardware setup follows CPU pinning, and CLI creation offers `--cpu-pm` / `--no-cpu-pm` overrides.
 - Load official images from the live archive service without API keys, with desktop refresh, verified downloads, progress, cancellation and cache reuse. The CLI adds `machine images` and `machine create --image ID`.
 - Allocate Linux hugepage backing at launch through the hardware helper, including empty pools and guests without accelerators; restore the temporary allocation allowance and release surplus memory after guest exit.
 - Host-aware RAM and disk capacity presets, including intermediate sizes, plus precise decimal GiB input for RAM.

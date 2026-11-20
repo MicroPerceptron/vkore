@@ -132,9 +132,12 @@ struct CreateArgs {
     memory_mib: Option<u32>,
     #[arg(long)]
     no_cpu_pinning: bool,
-    /// Allow native MONITOR/MWAIT and guest idle management (Linux KVM, pinned CPUs)
-    #[arg(long = "cpu-pm", conflicts_with = "no_cpu_pinning")]
+    /// Require native MONITOR/MWAIT (enabled automatically for supported pinned KVM guests)
+    #[arg(long = "cpu-pm", conflicts_with_all = ["no_cpu_pinning", "no_cpu_power_management"])]
     cpu_power_management: bool,
+    /// Disable automatic native CPU waits
+    #[arg(long = "no-cpu-pm")]
+    no_cpu_power_management: bool,
     #[arg(long)]
     no_memory_pinning: bool,
     /// Host logical CPU IDs, in guest CPU order
@@ -522,7 +525,6 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
     config.memory_mib = arguments.memory_mib.unwrap_or(memory);
     config.resources = resources;
     config.resources.pin_cpus &= !arguments.no_cpu_pinning;
-    config.resources.cpu_power_management = arguments.cpu_power_management;
     config.accel = match arguments.accel {
         AccelArg::Auto => AccelChoice::Auto,
         AccelArg::Kvm => AccelChoice::Kvm,
@@ -578,11 +580,19 @@ fn create_config(arguments: CreateArgs, state_root: &Path) -> Result<MachineConf
             _ => vkore_vm::hardware::PageSize::System,
         };
     }
-    vkored::hardware::validate_host(&config, &host)?;
     config.vendor = arguments.vendor.map(|vendor| match vendor {
         VendorArg::Intel => Vendor::Intel,
         VendorArg::Amd => Vendor::Amd,
     });
+    config.resources.cpu_power_management = arguments.cpu_power_management
+        || (!arguments.no_cpu_power_management
+            && vkored::hardware::recommended_cpu_waits(
+                &host,
+                config.resources.pin_cpus,
+                config.accel,
+                config.vendor,
+            ));
+    vkored::hardware::validate_host(&config, &host)?;
     config.framebuffer = arguments
         .framebuffer
         .split_once('x')
@@ -1064,7 +1074,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_waits_are_explicit_and_conflict_with_unpinned_cpus() {
+    fn native_wait_overrides_are_optional_and_reject_conflicts() {
         let base = ["vkore", "machine", "create", "test", "--iso", "/image.iso"];
         for enabled in [false, true] {
             let Command::Machine(MachineCommand::Create(create)) =
@@ -1079,6 +1089,16 @@ mod tests {
         assert!(
             Cli::try_parse_from(base.into_iter().chain(["--cpu-pm", "--no-cpu-pinning"])).is_err()
         );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--cpu-pm", "--no-cpu-pm"])).is_err());
+        let Command::Machine(MachineCommand::Create(create)) =
+            Cli::try_parse_from(base.into_iter().chain(["--no-cpu-pm"]))
+                .unwrap()
+                .command
+        else {
+            panic!("expected machine create")
+        };
+        assert!(create.no_cpu_power_management);
+        assert!(!create.cpu_power_management);
     }
 
     #[test]

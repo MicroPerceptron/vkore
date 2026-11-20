@@ -7,12 +7,12 @@ license = "MPL-2.0"
 description = "vKore's native desktop: Kore machines and their DagFS volumes, rendered with Iced over Axiom."
 
 [dependencies]
-axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
-axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
-axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
-axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
-axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
-axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "5460bab4fbf16b11535ac09eb57f60bc1cb6ea3b" }
+axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
+axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
+axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
+axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
+axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
+axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "adbd939acacdf0759c026fafbae5e0cd9dee1fd4" }
 cosmic-text = "0.19"
 # Parses the mark's SVG path data; already reached through the geometry lane.
 zeno = "0.3.3"

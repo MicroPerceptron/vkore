@@ -3,6 +3,15 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.6.1] - 2026-11-20
+
+### Fixed
+- Record text whose line opens with glyphs that draw nothing (a space, a zero-width character) and then falls back to another face, instead of panicking in Axiom's recorder; the panic poisoned the shared font system and failed every later frame. Axiom is pinned at `adbd939`.
+
+### Changed
+- Leave font confinement to Axiom, which from first use keeps the shared font system to its DM Sans and the registered faces; the desktop no longer removes host faces itself. A host copy of a bundled family, such as Ubuntu's `fonts-jetbrains-mono`, still cannot stand in for it.
+- Serve the RGBA images a frame publishes from the desktop backend, beside its geometry masks, and refuse a frame with image errors as text and geometry errors are. Screenshots are still previewed by their record.
+
 ## [0.6.0] - 2026-11-19
 
 ### Added

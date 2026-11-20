@@ -443,9 +443,6 @@ mod tests {
     };
 
     fn assert_disconnected(mut connection: TcpStream) {
-        connection
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
         match connection.read(&mut [0]) {
             Ok(0) => {}
             Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
@@ -514,6 +511,10 @@ mod tests {
         state.update(SettingsMessage::ToggleApi);
         assert_eq!(state.api.as_ref().unwrap().address, first);
         let first_connection = TcpStream::connect(first).unwrap();
+        // Configure the socket while it is live: macOS can reject this after reset.
+        first_connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let next = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let next_address = next.local_addr().unwrap();
         state.update(SettingsMessage::Port(next_address.port().to_string()));
@@ -527,6 +528,10 @@ mod tests {
         state.update(SettingsMessage::ToggleApi);
         assert_eq!(state.api.as_ref().unwrap().address, next_address);
         let next_connection = TcpStream::connect(next_address).unwrap();
+        // Configure the socket while it is live: macOS can reject this after reset.
+        next_connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let reopened = State::new(root.path().to_owned());
         assert_eq!(reopened.port, next_address.port());
         assert!(reopened.api.is_none());

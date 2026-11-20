@@ -309,7 +309,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ax"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "axnn",
 ]
@@ -317,7 +317,7 @@ dependencies = [
 [[package]]
 name = "axcomp"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "ax",
  "axgfx",
@@ -330,7 +330,7 @@ dependencies = [
 [[package]]
 name = "axgfx"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "axinput",
  "axui-core",
@@ -339,12 +339,12 @@ dependencies = [
 [[package]]
 name = "axinput"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 
 [[package]]
 name = "axmath"
 version = "0.1.7"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "libm",
 ]
@@ -352,12 +352,12 @@ dependencies = [
 [[package]]
 name = "axnn"
 version = "0.3.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 
 [[package]]
 name = "axnn-cpu"
 version = "0.2.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "axmath",
  "axnn",
@@ -367,17 +367,17 @@ dependencies = [
 [[package]]
 name = "axui-core"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 
 [[package]]
 name = "axui-fonts"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 
 [[package]]
 name = "axui-iced"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "axinput",
  "axui-core",
@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "axui-raster"
 version = "0.1.0"
-source = "git+https://github.com/MicroPerceptron/axiom.git?rev=adbd939acacdf0759c026fafbae5e0cd9dee1fd4#adbd939acacdf0759c026fafbae5e0cd9dee1fd4"
+source = "git+https://github.com/MicroPerceptron/axiom.git?rev=17377806442dcad9eb7d9296438eb7a592d6a25b#17377806442dcad9eb7d9296438eb7a592d6a25b"
 dependencies = [
  "axgfx",
  "axnn",

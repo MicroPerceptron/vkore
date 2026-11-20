@@ -290,6 +290,15 @@ pub fn resource_toggle(
     style
 }
 
+/// A small accent mark for the bounded official-image transfer.
+pub fn download_progress(appearance: &Theme) -> iced_widget::progress_bar::Style {
+    iced_widget::progress_bar::Style {
+        background: theme::color(appearance, theme::SEPARATOR).into(),
+        bar: theme::color(appearance, theme::MAGENTA).into(),
+        border: iced_core::border::rounded(2),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

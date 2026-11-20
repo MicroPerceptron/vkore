@@ -753,6 +753,7 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
+    model.machines.refresh_images(model.proxy.clone());
     if let Some(disk) = options.disk {
         let machines = &model.machines;
         model.volumes.open(&disk, |name| machines.disk_of(name));

@@ -78,7 +78,9 @@ and stop:
 ```sh
 target/release/vkore machine create demo --iso /path/to/kore-x86-release.iso
 # Or use your image publisher's HTTPS link:
-# target/release/vkore machine create inference --iso "$IMAGE_URL" --sha256 "$IMAGE_SHA256"
+# target/release/vkore machine images
+# target/release/vkore machine create inference --image ARCHIVE_ID
+# target/release/vkore machine create custom --iso "$IMAGE_URL" --sha256 "$IMAGE_SHA256"
 ```
 
 ```sh
@@ -123,9 +125,9 @@ Machines, their disks and run transcripts live under `$XDG_STATE_HOME/vkore`
   hands a file to the host's own viewer, **Save** copies it out (never over an
   existing file), **Import** installs a host file or folder into the open
   directory, and **Remove** asks twice.
-- **Machines** selects an official image from a bundled release catalog
-  (currently empty until official downloads are supplied), starts machines in a window or
-  headless, follows their boot, and stops them. Starting a machine whose disk
+- **Machines** loads official images from `dev.microperceptron.com`, with refresh,
+  download progress, cancellation and verified cache reuse. It starts machines in
+  a window or headless, follows their boot, and stops them. Starting a machine whose disk
   the Volumes page holds closes the browser first and reopens it when the
   machine stops, so what you captured is what you see next.
 - **Settings** holds desktop preferences. **Appearance** offers System, Light

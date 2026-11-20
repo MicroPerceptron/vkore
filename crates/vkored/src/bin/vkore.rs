@@ -65,6 +65,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum MachineCommand {
+    /// List public official images available to download
+    Images,
     /// Create a machine that boots ISO
     Create(Box<CreateArgs>),
     /// List machines
@@ -111,10 +113,13 @@ enum WritebackArg {
 struct CreateArgs {
     name: String,
     /// A local Kore x86_64 ISO or an HTTPS download link
-    #[arg(long)]
-    iso: String,
+    #[arg(long, required_unless_present = "image", conflicts_with = "image")]
+    iso: Option<String>,
+    /// Official image ID from `vkore machine images`
+    #[arg(long, conflicts_with_all = ["iso", "sha256"])]
+    image: Option<String>,
     /// Expected SHA-256 of the image, checked before creating the machine
-    #[arg(long)]
+    #[arg(long, requires = "iso")]
     sha256: Option<String>,
     /// Virtual disk capacity in MiB (defaults to 32 GiB)
     #[arg(long, default_value_t = vkored::hardware::DEFAULT_DISK_MIB)]
@@ -387,31 +392,50 @@ fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
 
 fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Failure> {
     match command {
+        MachineCommand::Images => {
+            for image in vkored::catalog::official()?.images() {
+                println!(
+                    "{}  {} ({})  {:.1} MiB",
+                    image.id,
+                    image.name,
+                    image.version,
+                    image.bytes() as f64 / (1024. * 1024.)
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         MachineCommand::Create(arguments) => {
             let source = arguments.iso.clone();
+            let image = arguments.image.clone();
             let digest = arguments.sha256.clone();
             let config = create_config(*arguments, store.state().root())?;
             let cancelled = Arc::new(AtomicBool::new(false));
             let signal = cancelled.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
                 .map_err(|e| e.to_string())?;
-            let config = vkored::images::create(
-                &store,
-                config,
-                &source,
-                digest.as_deref(),
-                &cancelled,
-                |progress| {
-                    eprintln!(
-                        "downloaded {} MiB{}",
-                        progress.bytes >> 20,
-                        progress
-                            .total
-                            .map(|n| format!(" / {} MiB", n >> 20))
-                            .unwrap_or_default()
-                    );
-                },
-            )?;
+            let progress = |progress: vkored::images::Progress| {
+                eprintln!(
+                    "{}: {} MiB{}",
+                    progress.phase.label(),
+                    progress.bytes >> 20,
+                    progress
+                        .total
+                        .map(|n| format!(" / {} MiB", n >> 20))
+                        .unwrap_or_default()
+                );
+            };
+            let config = if let Some(id) = image {
+                vkored::images::create_official(&store, config, &id, None, &cancelled, progress)?
+            } else {
+                vkored::images::create(
+                    &store,
+                    config,
+                    source.as_deref().expect("clap requires an image source"),
+                    digest.as_deref(),
+                    &cancelled,
+                    progress,
+                )?
+            };
             println!(
                 "created machine {} (disk is created at its first boot)",
                 config.name
@@ -1031,6 +1055,19 @@ fn shots(disk: &Disk, face: u8, get: Option<PathBuf>, json: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_and_custom_sources_are_mutually_exclusive() {
+        let base = ["vkore", "machine", "create", "test"];
+        assert!(Cli::try_parse_from(base).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--image", "release-1"])).is_ok());
+        for extra in [
+            vec!["--image", "release-1", "--iso", "/image.iso"],
+            vec!["--image", "release-1", "--sha256", "digest"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+        }
+    }
 
     #[test]
     fn disk_default_matches_new_configs_and_allows_explicit_capacity() {

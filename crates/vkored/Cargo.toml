@@ -13,6 +13,8 @@ serde_json.workspace = true
 vkore-vm = { path = "../vkore-vm" }
 # Reuse the workspace's TLS client; decode no compressed response bodies.
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+# The ureq native-tls feature requires an explicitly configured connector.
+native-tls = "0.2"
 tempfile = "3.23.0"
 url = "2"
 rustix = { version = "1.1.4", features = ["process", "fs"] }

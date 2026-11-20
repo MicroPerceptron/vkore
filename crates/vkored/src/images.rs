@@ -435,7 +435,7 @@ mod tests {
     fn cached_download_is_reverified_without_a_network_request() {
         let root = tempfile::tempdir().unwrap();
         let store = MachineStore::new(crate::State::open(root.path()).unwrap());
-        let dir = root.path().join("images");
+        let dir = store.state().root().join("images");
         fs::create_dir(&dir).unwrap();
         let cancel = AtomicBool::new(false);
         let bytes = image();

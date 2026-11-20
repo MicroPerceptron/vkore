@@ -31,9 +31,15 @@ pub struct State {
 
 impl State {
     /// The state directory at `root`, created private (0700) if absent.
+    /// Relative paths resolve from the caller's working directory. Retain the
+    /// canonical absolute path so workers and privileged launches can use it
+    /// from another working directory without changing which state they open.
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
         private_dir(&root)?;
+        // Create first: a new state directory need not exist yet. Resolve `..`
+        // through the filesystem, preserving symlink traversal semantics.
+        let root = fs::canonicalize(root)?;
         private_dir(&root.join("machines"))?;
         Ok(Self { root })
     }
@@ -124,6 +130,54 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_new_state_and_machine_paths_are_absolute() {
+        // Do not change the process cwd: other tests and workers use it too.
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        fs::create_dir(dir.path().join("child")).unwrap();
+        let relative = dir
+            .path()
+            .strip_prefix(&cwd)
+            .unwrap()
+            .join("child/../state with spaces");
+        assert!(!relative.is_absolute());
+        let state = State::open(&relative).unwrap();
+        assert_eq!(
+            state.root(),
+            fs::canonicalize(dir.path().join("state with spaces")).unwrap()
+        );
+        let paths = state.machine("demo");
+        for path in [
+            &paths.config,
+            &paths.disk,
+            &paths.usb_stick,
+            &paths.vars,
+            &paths.serial,
+            &paths.debugcon,
+            &paths.qemu_log,
+            &paths.runs,
+            &paths.scratch,
+        ] {
+            assert!(path.is_absolute(), "{}", path.display());
+        }
+        assert_eq!(State::open(relative.join(".")).unwrap(), state);
+    }
+
+    #[test]
+    fn parent_components_follow_symlinks_before_canonicalizing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("actual/child")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("actual/child"), dir.path().join("link"))
+            .unwrap();
+        let state = State::open(dir.path().join("link/../state")).unwrap();
+        assert_eq!(
+            state.root(),
+            fs::canonicalize(dir.path().join("actual/state")).unwrap()
+        );
+        assert!(!dir.path().join("state").exists());
+    }
 
     #[test]
     fn a_machine_s_files_live_in_its_own_private_directory() {

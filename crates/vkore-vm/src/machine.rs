@@ -122,6 +122,9 @@ impl Machine {
         };
         // A fresh console: readiness reads from its first byte.
         prepare_socket(&spec.qmp_socket).map_err(io(&spec.qmp_socket))?;
+        if let Some(socket) = &spec.console_socket {
+            prepare_socket(socket).map_err(io(socket))?;
+        }
         File::create(&spec.serial_log).map_err(io(&spec.serial_log))?;
         let log = File::create(qemu_log).map_err(io(qemu_log))?;
         let errors = log.try_clone().map_err(io(qemu_log))?;
@@ -437,7 +440,7 @@ fn log_tail(path: &Path) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Never unlink a live monitor or an unexpected file at the monitor path.
+/// Never unlink a live QMP/console endpoint or an unexpected file at its path.
 fn prepare_socket(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -447,13 +450,13 @@ fn prepare_socket(path: &Path) -> io::Result<()> {
     if !metadata.file_type().is_socket() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "QMP path is not a stale socket",
+            "machine socket path is not a stale socket",
         ));
     }
     match UnixStream::connect(path) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AddrInUse,
-            "a machine already owns this QMP socket",
+            "a machine already owns this socket",
         )),
         Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => fs::remove_file(path),
         Err(error) => Err(error),

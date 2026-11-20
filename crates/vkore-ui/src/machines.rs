@@ -34,6 +34,7 @@ use crate::{Message, UiElement, UserEvent, fonts, theme, widgets};
 #[derive(Debug)]
 pub enum Update {
     Line(String),
+    Console(Result<vkored::console::Console, String>),
     Stage(Stage),
     Finished(Result<String, String>),
     ImportProgress(vkored::images::Progress),
@@ -51,6 +52,9 @@ pub struct Running {
     pub log: String,
     lines: usize,
     pub started: Instant,
+    pub console: Option<vkored::console::Console>,
+    console_input: String,
+    console_error: String,
 }
 
 impl Running {
@@ -64,6 +68,9 @@ impl Running {
             log: String::new(),
             lines: 0,
             started: Instant::now(),
+            console: None,
+            console_input: String::new(),
+            console_error: String::new(),
         }
     }
 
@@ -94,6 +101,7 @@ impl Running {
 pub struct Finished {
     pub summary: String,
     pub log: String,
+    pub console: Option<String>,
 }
 
 /// Machines, and the form that creates one.
@@ -118,6 +126,7 @@ pub struct State {
     import_worker: Option<thread::JoinHandle<()>>,
     pub form_workspace: String,
     pub status: String,
+    pub closing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +141,8 @@ pub enum MachineMessage {
     FinishHardware,
     Start(String, bool),
     Stop(String),
+    ConsoleInput(String, String),
+    ConsoleSend(String),
     FormName(String),
     SelectImage(String),
     ToggleImageMenu,
@@ -165,6 +176,7 @@ impl State {
             import_worker: None,
             form_workspace: String::new(),
             status: String::new(),
+            closing: false,
         };
         match vkored::catalog::official() {
             Ok(catalog) => state.official_images = catalog.images().to_vec(),
@@ -205,6 +217,9 @@ impl State {
     }
 
     pub fn update(&mut self, message: MachineMessage, proxy: &EventLoopProxy<UserEvent>) {
+        if self.closing {
+            return;
+        }
         // Freeze the draft and its target until completion. Stop remains usable.
         if self.hardware_busy
             && !matches!(
@@ -215,6 +230,34 @@ impl State {
             return;
         }
         match message {
+            MachineMessage::ConsoleInput(name, value) => {
+                if let Some(running) = self.running.get_mut(&name) {
+                    // The first console pane accepts printable ASCII commands;
+                    // the transcript still safely displays arbitrary guest bytes.
+                    if value.len() <= vkored::console::MAX_LINE_BYTES
+                        && value.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+                    {
+                        running.console_input = value;
+                        running.console_error.clear();
+                    } else {
+                        running.console_error =
+                            "Enter one line of printable ASCII, up to 1024 bytes".into();
+                    }
+                }
+            }
+            MachineMessage::ConsoleSend(name) => {
+                if let Some(running) = self.running.get_mut(&name)
+                    && let Some(console) = &mut running.console
+                {
+                    match console.send_line(&running.console_input) {
+                        Ok(()) => {
+                            running.console_input.clear();
+                            running.console_error.clear();
+                        }
+                        Err(error) => running.console_error = error.into(),
+                    }
+                }
+            }
             MachineMessage::Select(name) => {
                 self.configure_new = false;
                 self.selected = Some(name);
@@ -437,7 +480,7 @@ impl State {
     }
 
     fn start(&mut self, name: String, window: bool, proxy: EventLoopProxy<UserEvent>) {
-        if self.running.contains_key(&name) {
+        if self.closing || self.running.contains_key(&name) {
             return;
         }
         let Some(qemu) = vkored::run::default_qemu() else {
@@ -468,6 +511,16 @@ impl State {
 
     pub fn machine_update(&mut self, name: String, update: Update) {
         match update {
+            Update::Console(result) => {
+                if let Some(running) = self.running.get_mut(&name) {
+                    match result {
+                        Ok(console) => running.console = Some(console),
+                        Err(error) => {
+                            running.console_error = format!("Console connection failed: {error}")
+                        }
+                    }
+                }
+            }
             Update::Hardware(result) => {
                 self.hardware_busy = false;
                 match result {
@@ -533,28 +586,66 @@ impl State {
             Update::Stage(stage) => {
                 if let Some(running) = self.running.get_mut(&name) {
                     running.stage = Some(stage);
-                    self.status = format!("{name}: {}", format!("{stage:?}").to_lowercase());
+                    if !self.closing {
+                        self.status = format!("{name}: {}", stage_label(Some(stage)).0);
+                    }
                 }
             }
             Update::Finished(outcome) => {
                 // The log stays: how a run ended is the evidence.
-                let log = self
-                    .running
-                    .remove(&name)
-                    .map(|running| running.log)
-                    .unwrap_or_default();
+                let running = self.running.remove(&name);
+                let console = running
+                    .as_ref()
+                    .and_then(|run| run.console.as_ref())
+                    .map(vkored::console::Console::transcript);
+                let log = running.map(|run| run.log).unwrap_or_default();
                 let summary = match outcome {
                     Ok(summary) => summary,
                     Err(error) => format!("failed: {error}"),
                 };
                 self.status = format!("{name}: {summary}");
-                self.finished.insert(name, Finished { summary, log });
+                self.finished.insert(
+                    name,
+                    Finished {
+                        summary,
+                        log,
+                        console,
+                    },
+                );
                 self.refresh();
             }
         }
     }
 
     /// Ask every running machine to stop (the window is closing).
+    /// Return true only when there is nothing to drain, or the user explicitly
+    /// closes again. A Finished update means stop *and collection* have ended.
+    pub fn request_close(&mut self) -> bool {
+        let leave = self.closing || self.running.is_empty();
+        self.closing = true;
+        self.stop_all();
+        self.status =
+            "Stopping machines and collecting changes; close again to leave immediately".into();
+        leave
+    }
+
+    /// Poll existing nonblocking shell sockets; no per-byte worker messages.
+    pub fn poll_consoles(&mut self) -> bool {
+        let mut changed = false;
+        for running in self.running.values_mut() {
+            if let Some(console) = &mut running.console {
+                changed |= console.poll();
+            }
+        }
+        changed
+    }
+
+    pub fn has_live_console(&self) -> bool {
+        self.running
+            .values()
+            .any(|run| run.console.as_ref().is_some_and(|c| c.connected()))
+    }
+
     pub fn stop_all(&mut self) {
         if let Some(cancel) = &self.importing {
             cancel.store(true, Ordering::Relaxed);
@@ -601,6 +692,12 @@ fn run_machine(
         vkored::hardware::validate_host(&config, &host)?;
     }
     let mut sink = |event: &Event| match event {
+        Event::Console { socket } => {
+            send(Update::Line(describe(event)));
+            send(Update::Console(
+                vkored::console::Console::connect(socket).map_err(|e| e.to_string()),
+            ));
+        }
         Event::Stage { stage, .. } => {
             send(Update::Stage(*stage));
             send(Update::Line(format!("boot: {stage:?}")));
@@ -1057,6 +1154,15 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 theme::TEXT_MUTED,
             ));
             let finished = state.finished.get(&config.name);
+            if let Some(running) = running {
+                if let Some(console) = &running.console {
+                    pane = pane.push(console_pane(&config.name, running, console, state.closing, ty));
+                } else if !running.console_error.is_empty() {
+                    pane = pane.push(ty.data(running.console_error.as_str(), theme::ERROR));
+                }
+            } else if let Some(transcript) = finished.and_then(|run| run.console.as_deref()) {
+                pane = pane.push(console_transcript(transcript, ty));
+            }
             if let Some(finished) = finished {
                 pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
             }
@@ -1121,6 +1227,101 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     widgets::page_frame(page)
 }
 
+fn console_transcript(transcript: &str, ty: Typography) -> UiElement<'_> {
+    container(
+        widgets::scroll(ty.mono(
+            fonts::shown(fonts::MONO, transcript, fonts::Breaks::Keep),
+            theme::TEXT_SECONDARY,
+        ))
+        .height(240)
+        .anchor_bottom(),
+    )
+    .padding(14)
+    .width(Length::Fill)
+    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.))
+    .into()
+}
+
+fn console_pane<'a>(
+    name: &'a str,
+    running: &'a Running,
+    console: &vkored::console::Console,
+    closing: bool,
+    ty: Typography,
+) -> UiElement<'a> {
+    let enabled = !closing && console.can_send();
+    let input_name = name.to_owned();
+    let send = wrap(MachineMessage::ConsoleSend(name.to_owned()));
+    let mut pane = column![
+        row![
+            ty.body("Console", 18., theme::TEXT),
+            space::horizontal(),
+            ty.badge(
+                if console.connected() {
+                    "Connected"
+                } else {
+                    "Disconnected"
+                },
+                if console.connected() {
+                    theme::SUCCESS
+                } else {
+                    theme::TEXT_MUTED
+                }
+            )
+        ],
+        // Own the snapshot so the view never borrows a temporary or socket.
+        container(
+            widgets::scroll(ty.mono(
+                fonts::shown(fonts::MONO, console.transcript(), fonts::Breaks::Keep),
+                theme::TEXT_SECONDARY,
+            ))
+            .height(240)
+            .anchor_bottom()
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
+        row![
+            text_input("Command, e.g. status devices", &running.console_input)
+                .font(fonts::MONO)
+                .size(ty.size(theme::SIZE_SM))
+                .padding([8, 10])
+                .style(widgets::field)
+                .on_input_maybe(
+                    enabled.then_some(move |value| wrap(MachineMessage::ConsoleInput(
+                        input_name.clone(),
+                        value
+                    )))
+                )
+                .on_submit_maybe(enabled.then_some(send.clone())),
+            button(ty.control("Send"))
+                .height(ty.control_height())
+                .padding([8, 14])
+                .style(widgets::button_style(widgets::Button::Primary))
+                .on_press_maybe(enabled.then_some(send)),
+        ]
+        .spacing(8),
+        ty.body(
+            "Recent output · Send submits one line. Terminal control codes are shown literally.",
+            12.,
+            theme::TEXT_MUTED
+        ),
+    ]
+    .spacing(12);
+    if let Some(error) = console
+        .error()
+        .or_else(|| (!running.console_error.is_empty()).then_some(running.console_error.as_str()))
+    {
+        pane = pane.push(ty.data(error.to_owned(), theme::ERROR));
+    }
+    container(pane)
+        .id("machine-console")
+        .padding(16)
+        .width(Length::Fill)
+        .style(widgets::card)
+        .into()
+}
+
 /// The overview's note of the host NPUs a machine holds while it runs, empty
 /// when it passes none through.
 fn passthrough_summary(selected: &[vkore_vm::passthrough::Selection]) -> String {
@@ -1134,6 +1335,69 @@ fn passthrough_summary(selected: &[vkore_vm::passthrough::Selection]) -> String 
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    #[test]
+    fn closing_waits_for_every_session_to_finish_and_stage_updates_stay_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = State::new(dir.path().to_owned());
+        let (first, first_stop) = mpsc::channel();
+        let (second, second_stop) = mpsc::channel();
+        state.running.insert("first".into(), Running::new(first));
+        state.running.insert("second".into(), Running::new(second));
+        state.machine_update("first".into(), Update::Stage(Stage::Ready));
+        assert_eq!(state.status, "first: ready");
+        assert!(!state.request_close());
+        assert!(state.closing);
+        assert_eq!(first_stop.try_recv(), Ok(()));
+        assert_eq!(second_stop.try_recv(), Ok(()));
+        state.machine_update("first".into(), Update::Finished(Ok("collected".into())));
+        assert_eq!(state.running.len(), 1);
+        state.machine_update("second".into(), Update::Finished(Err("stop failed".into())));
+        assert!(state.running.is_empty());
+        assert!(state.finished["second"].summary.contains("stop failed"));
+        assert!(state.request_close());
+        let (stop, _) = mpsc::channel();
+        let mut other = State::new(dir.path().to_owned());
+        other.running.insert("other".into(), Running::new(stop));
+        assert!(!other.request_close());
+        assert!(
+            other.request_close(),
+            "second close explicitly leaves immediately"
+        );
+    }
+
+    #[test]
+    fn console_pane_renders_guest_text_in_both_themes() {
+        use std::{io::Write, os::unix::net::UnixListener};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut console = vkored::console::Console::connect(&path).unwrap();
+        let (mut guest, _) = listener.accept().unwrap();
+        guest.write_all("Kore shell\r\n> status devices\r\nNPU bound · accelerator up\r\n日本語 \u{202e} \u{1b}[31m\r\n> ".as_bytes()).unwrap();
+        assert!(console.poll());
+        let (stop, _) = mpsc::channel();
+        let mut running = Running::new(stop);
+        running.console = Some(console);
+        running.console_input = "lspci".into();
+        for appearance in [iced_core::Theme::Light, iced_core::Theme::Dark] {
+            let (runs, refused) = crate::tests::draw_at_scale(
+                widgets::page_frame(console_pane(
+                    "headless",
+                    &running,
+                    running.console.as_ref().unwrap(),
+                    false,
+                    Typography::default(),
+                )),
+                iced_core::Size::new(900., 560.),
+                &appearance,
+                1.,
+                Some("console"),
+            );
+            assert!(runs > 5);
+            assert!(refused.is_empty(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn completion_closes_only_after_success_and_preserves_denied_drafts() {

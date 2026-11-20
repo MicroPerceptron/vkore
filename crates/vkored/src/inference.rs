@@ -485,14 +485,27 @@ mod tests {
 
     #[test]
     fn listener_is_local_and_stops_on_drop() {
+        use std::io::{ErrorKind, Read};
         assert!(Server::start("0.0.0.0:0".parse().unwrap(), Arc::new(Unavailable)).is_err());
-        let server = Server::start("127.0.0.1:0".parse().unwrap(), Arc::new(Unavailable)).unwrap();
+        let backend = Arc::new(Unavailable);
+        let server = Server::start("127.0.0.1:0".parse().unwrap(), backend.clone()).unwrap();
         let address = server.address;
         let response = ureq::get(&format!("http://{address}/v1/models"))
             .call()
             .unwrap();
         assert_eq!(response.status(), 200);
+        let mut connection = std::net::TcpStream::connect(address).unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         drop(server);
-        assert!(std::net::TcpStream::connect(address).is_err());
+        // Drop joins the worker and releases its router before returning.
+        assert_eq!(Arc::strong_count(&backend), 1);
+        // Check an existing connection rather than a port another test may reuse.
+        match connection.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+            other => panic!("the stopped server retained its connection: {other:?}"),
+        }
     }
 }

@@ -3,32 +3,26 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
-## [Unreleased]
-
-### Added
-- Console images: an ISO whose Limine configuration loads Kore's console row gets COM2 on a Unix socket in the runtime directory (`<name>.console`), reported by `machine run`; COM1 stays the kernel console vKore follows.
-- `vkore machine create --passthrough PCI_ADDRESS` records whole-NPU passthrough from the command line, with the desktop's identity checks.
-
-### Changed
-- The shell stage reads "Kore is usable", true of a console image as of a desktop.
-- The desktop's status line follows a running machine's boot stage, and a machine's overview names the NPUs it passes through.
-
-### Fixed
-- Closing the desktop window while machines run now waits for each to stop within its grace period instead of exiting at once, which ended QEMU under a guest still shutting down; a second close still leaves immediately.
-
 ## [0.5.0] - 2026-11-19
 
 ### Added
+- Desktop console pane for headless images, with bounded recent output and explicit one-line command submission.
+- Detect the console service in the ISO and attach its COM2 shell socket; COM1 remains the boot log.
+- Repeatable `machine create --passthrough PCI_ADDRESS` for CLI device selection.
 - Expand desktop disk sizing with GiB input, model-sized presets, a logarithmic slider, 32 GiB recommendations, and sparse capacities independent of currently free space.
 - Add narrowly scoped Linux polkit descriptions for concise hardware/memory prompts, with an installer for exact source-build or packaged binary paths.
 - Linux whole-NPU passthrough controls with persisted PCI identity, exclusive IOMMU-group admission, and QEMU VFIO/IOMMUFD launch support.
 - A polkit-authorized device guardian that passes opened device handles to unprivileged QEMU, checks function-level reset, and restores host drivers after guest exit or failed launch.
 
 ### Fixed
+- Wait for desktop-started guests to stop and collect changes before closing; cancel pending starts and block new work during shutdown. A second close explicitly leaves immediately.
+- Keep the machine status current, show assigned NPU addresses, and use image-neutral shell readiness wording.
+- Test API shutdown using owned connections and backend release, avoiding assertions against reusable ephemeral ports.
 - Negotiate Intel passthrough address width using paused, unprivileged QEMU probes with the selected devices; disable incompatible snoop control while retaining DMA translation and interrupt remapping.
 - Isolate the device guardian from terminal Ctrl-C so the CLI owns graceful shutdown; explicit guardian signals and parent disconnect still restore host drivers.
 
 ### Breaking
+- `BootMedium`, `MachineSpec`, `MachinePaths` and session events gain console information.
 - `Resources` adds passthrough selections and `QemuCaps` adds probed VFIO/IOMMUFD support. Older saved configurations still default to no passthrough.
 
 ## [0.4.0] - 2026-11-19

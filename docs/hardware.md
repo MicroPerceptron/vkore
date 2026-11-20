@@ -389,8 +389,35 @@ normal-stop run exited zero and restored the original driver, override and
 reset method. Interrupted wrapper runs restored the driver but exited 143;
 they do not establish clean interrupted shutdown.
 
-Those manual findings motivate the managed negotiation above; they do not
-validate the newly integrated probes or signal isolation on physical hardware.
+The subsequent [Biggertron report](https://github.com/MicroPerceptron/vkore/pull/58#issuecomment-7028057059)
+validated the unmodified `c911e95` negotiation on Panther Lake NPU `8086:b03e`:
+48 bits was refused on its 41-bit host and 39 bits selected. The headless guest
+reported the NPU bound and accelerator service up. CLI Ctrl-C completed graceful
+QMP shutdown and restored `intel_vpu`; desktop parent disconnect also restored
+the driver. Those runs validate bring-up and restoration, not an inference
+workload. The desktop/headless-console fixes pushed afterwards and the new
+console pane have separate host tests; they still need a fresh hardware run.
 `IOMMU_IOAS_MAP failed: Bad address, PCI BAR?` and PCI BAR peer-to-peer warnings
 remain visible. Successful lighting does not establish P2P support, inference
 numerical parity, throughput, other NPUs, or other image/QEMU combinations.
+
+## Headless shell in the desktop
+
+An ISO that loads `kore-svc-console` gets a separate COM2 socket, selected from
+the medium rather than the catalog or the display-window option. The desktop
+connects automatically and shows a Console pane on the running machine. Enter
+a printable ASCII command and press Enter or Send; each submission sends exactly
+one line. The pane retains the most recent 16 KiB of output and shows terminal
+control codes literally, with unsupported characters escaped in the bundled
+font. It is a transcript and line input, not a full terminal emulator.
+
+Input is bounded to 1024 bytes with only one pending line; a disconnected or
+partially sent command is never automatically replayed. Socket reads and writes
+are nonblocking and bounded per UI tick. The transcript remains visible after
+the run ends. CLI runs leave the socket free for an external client such as
+`socat`; the desktop occupies the connection while its pane is connected.
+
+Closing the desktop requests normal shutdown and waits for every session to
+finish stopping and collecting its workspace changes. New work and pending
+starts are cancelled during this drain. Closing again explicitly exits without
+waiting and can lose unpublished guest work.

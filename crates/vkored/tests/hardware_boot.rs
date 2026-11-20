@@ -26,12 +26,17 @@ fn minimum_hardware_reserves_a_disk_and_boots_through_the_session() {
     // disk through its own engine; no host-format dependency or workspace.
     config.screenshots_folder = false;
     store.create(&config).unwrap();
+    let mut console = None;
     let mut session = Session::start(
         &store,
         "hardware",
         &PathBuf::from(qemu),
         vkore_vm::Display::Headless,
-        &mut |_| {},
+        &mut |event| {
+            if let vkored::Event::Console { socket } = event {
+                console = Some(vkored::console::Console::connect(socket).unwrap());
+            }
+        },
     )
     .unwrap();
     assert!(
@@ -45,6 +50,9 @@ fn minimum_hardware_reserves_a_disk_and_boots_through_the_session() {
     assert!(metadata.blocks() * 512 >= metadata.len());
     let deadline = Instant::now() + Duration::from_secs(900);
     while session.stage() < vkore_vm::Stage::Ready && Instant::now() < deadline {
+        if let Some(console) = &mut console {
+            console.poll();
+        }
         assert!(
             session
                 .poll(Duration::from_millis(250), &mut |_| {})
@@ -58,6 +66,37 @@ fn minimum_hardware_reserves_a_disk_and_boots_through_the_session() {
         "{:?}",
         session.machine().readiness()
     );
+    if let Some(console) = &mut console {
+        // Match the existing Kore console gate: help's answer and the next
+        // prompt prove input, execution and output, rather than just a socket.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !console.transcript().contains("terminal:0> ") && Instant::now() < deadline {
+            console.poll();
+            assert!(
+                session
+                    .poll(Duration::from_millis(100), &mut |_| {})
+                    .unwrap()
+            );
+        }
+        assert!(console.transcript().contains("terminal:0> "));
+        console.send_line("help").unwrap();
+        loop {
+            console.poll();
+            let output = console.transcript();
+            if output
+                .split_once("available commands for this task:")
+                .is_some_and(|(_, tail)| tail.contains("terminal:0> "))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no console round trip: {output}");
+            assert!(
+                session
+                    .poll(Duration::from_millis(100), &mut |_| {})
+                    .unwrap()
+            );
+        }
+    }
     session
         .machine()
         .screendump(&root.path().join("screen.ppm"))

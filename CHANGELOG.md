@@ -12,6 +12,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ### Fixed
 - Hide the Machines download sign-in prompt while an authorized account session is active.
+- Copy the sign-in code to the system clipboard directly from the Account page.
 - Open volumes at their root instead of assuming a screenshots folder exists. Clear stale contents and disk ownership after failed opens, and prevent overlapping open requests.
 
 ## [0.8.0] - 2026-11-23

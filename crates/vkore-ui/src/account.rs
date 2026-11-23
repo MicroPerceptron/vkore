@@ -1,6 +1,6 @@
 //! Account controls are a view over vkored's optional download authorization.
 use crate::{Message, Page, UiElement, UserEvent, theme, typography::Typography, widgets};
-use iced_core::Length;
+use iced_core::{Length, alignment, clipboard};
 use iced_widget::{button, column, container, row};
 use iced_winit::winit::event_loop::EventLoopProxy;
 use std::sync::{
@@ -15,11 +15,13 @@ pub enum Action {
     Cancel,
     SignOut,
     OpenBrowser,
+    CopyCode,
     Review,
 }
 #[derive(Debug)]
 pub enum Reply {
     Challenge(u64, SignIn),
+    CodeCopied(u64, Result<(), clipboard::Error>),
     Finished(u64, Result<(), String>),
 }
 #[derive(Default)]
@@ -28,6 +30,8 @@ pub struct State {
     generation: u64,
     cancel: Option<Arc<AtomicBool>>,
     challenge: Option<SignIn>,
+    clipboard: Option<iced_winit::Clipboard>,
+    copy_result: Option<Result<(), clipboard::Error>>,
     busy: bool,
     error: String,
 }
@@ -48,6 +52,24 @@ impl State {
         });
     }
     pub fn update(&mut self, action: Action, proxy: &EventLoopProxy<UserEvent>) {
+        if matches!(action, Action::CopyCode) {
+            if let Some(challenge) = &self.challenge {
+                let generation = self.generation;
+                let proxy = proxy.clone();
+                self.copy_result = None;
+                self.clipboard
+                    .get_or_insert_with(iced_winit::Clipboard::new)
+                    .write(
+                        clipboard::Content::Text(challenge.code.clone()),
+                        move |result| {
+                            let _ = proxy.send_event(UserEvent::Account(Reply::CodeCopied(
+                                generation, result,
+                            )));
+                        },
+                    );
+            }
+            return;
+        }
         if matches!(action, Action::OpenBrowser) {
             let url = "https://dev.microperceptron.com/download-account?device=1";
             if let Err(error) = open_browser(url) {
@@ -59,6 +81,8 @@ impl State {
             if let Some(cancel) = &self.cancel {
                 cancel.store(true, Ordering::Release);
             }
+            self.challenge = None;
+            self.copy_result = None;
             self.error = "Cancelling sign-in…".into();
             return;
         }
@@ -68,6 +92,7 @@ impl State {
         self.generation += 1;
         self.error.clear();
         self.challenge = None;
+        self.copy_result = None;
         self.busy = true;
         let generation = self.generation;
         let account = self.account.clone();
@@ -97,7 +122,13 @@ impl State {
     }
     pub fn reply(&mut self, reply: Reply) -> bool {
         match reply {
-            Reply::Challenge(generation, challenge) if generation == self.generation => {
+            Reply::Challenge(generation, challenge)
+                if generation == self.generation
+                    && self
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|cancel| !cancel.load(Ordering::Acquire)) =>
+            {
                 self.challenge = Some(challenge);
                 if let Err(error) =
                     open_browser("https://dev.microperceptron.com/download-account?device=1")
@@ -105,10 +136,16 @@ impl State {
                     self.error = error;
                 }
             }
+            Reply::CodeCopied(generation, result)
+                if generation == self.generation && self.challenge.is_some() =>
+            {
+                self.copy_result = Some(result);
+            }
             Reply::Finished(generation, result) if generation == self.generation => {
                 self.busy = false;
                 self.cancel = None;
                 self.challenge = None;
+                self.copy_result = None;
                 self.error = result.err().unwrap_or_default();
                 return true;
             }
@@ -201,14 +238,27 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     if let Some(challenge) = &state.challenge {
         content = content
             .push(ty.body(
-                "Enter this code in the browser, then review and accept the agreement.",
+                "Copy the code into the browser, then review and accept the agreement.",
                 14.,
                 theme::TEXT,
             ))
             .push(
-                container(ty.data(&challenge.code, theme::MAGENTA).size(ty.size(22.)))
-                    .padding(16)
-                    .style(widgets::card),
+                row![
+                    container(ty.data(&challenge.code, theme::MAGENTA).size(ty.size(22.)))
+                        .padding(16)
+                        .style(widgets::card),
+                    control(
+                        if matches!(state.copy_result, Some(Ok(()))) {
+                            "Copied"
+                        } else {
+                            "Copy code"
+                        },
+                        Action::CopyCode,
+                    ),
+                ]
+                .align_y(alignment::Vertical::Center)
+                .spacing(8)
+                .wrap(),
             )
             .push(
                 row![
@@ -218,6 +268,13 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 .spacing(8)
                 .wrap(),
             );
+        if matches!(state.copy_result, Some(Err(_))) {
+            content = content.push(ty.body(
+                "Could not copy the code. Try again or enter it in the browser.",
+                12.,
+                theme::ERROR,
+            ));
+        }
     } else if state.busy {
         content = content.push(ty.body("Contacting the account service…", 14., theme::TEXT_MUTED));
     }
@@ -238,4 +295,24 @@ pub fn download_hint(ty: Typography) -> UiElement<'static> {
         .style(widgets::button_style(widgets::Button::Secondary))
         .on_press(Message::Show(Page::Account))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_feedback_belongs_to_the_active_sign_in() {
+        let mut state = State::default();
+        state.preview_sign_in();
+        state.generation = 2;
+        assert!(!state.reply(Reply::CodeCopied(1, Ok(()))));
+        assert!(state.copy_result.is_none());
+        assert!(!state.reply(Reply::CodeCopied(2, Ok(()))));
+        assert!(matches!(state.copy_result, Some(Ok(()))));
+
+        assert!(state.reply(Reply::Finished(2, Ok(()))));
+        assert!(!state.reply(Reply::CodeCopied(2, Ok(()))));
+        assert!(state.copy_result.is_none());
+    }
 }

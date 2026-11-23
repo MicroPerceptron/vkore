@@ -186,7 +186,9 @@ pub fn scroll<'a>(
             scrollable::Scrollbar::default()
                 .width(6)
                 .scroller_width(4)
-                .margin(2),
+                .margin(2)
+                // Reserve space instead of painting over card borders and fields.
+                .spacing(6),
         ))
         .style(scrollbar)
 }

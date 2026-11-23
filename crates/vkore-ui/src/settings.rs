@@ -383,11 +383,7 @@ fn panels(
     } else {
         column![appearance, api].spacing(theme::SPACE_6).into()
     };
-    widgets::scroll(
-        column![crate::account::view(&state.account, ty), content].spacing(theme::SPACE_6),
-    )
-    .height(Length::Fill)
-    .into()
+    widgets::scroll(content).height(Length::Fill).into()
 }
 
 fn typography_controls(state: &State) -> UiElement<'_> {

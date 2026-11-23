@@ -1,13 +1,31 @@
 //! Against this host's real QEMU and a real Kore ISO. Opt in with
-//! `VKORE_TEST_QEMU` (a `qemu-system-x86_64`) and `VKORE_TEST_ISO` (a Kore
-//! x86_64 ISO); without them each test says what it skipped.
+//! `VKORE_TEST_QEMU` (the `qemu-system-x86_64` or `qemu-system-aarch64`
+//! for the ISO) and `VKORE_TEST_ISO` (a Kore ISO of either architecture,
+//! read from the medium); without them each test says what it skipped.
 
 use std::path::PathBuf;
 
 use vkore_vm::{
-    Accel, BootMedium, Display, HostCaps, Machine, MachineSpec, Paging, QemuCaps, Stage, Vendor,
-    firmware, machine::private_vars,
+    Accel, BootMedium, Display, GuestArch, HostCaps, Machine, MachineSpec, Paging, Platform,
+    QemuCaps, Stage, Vendor, firmware, machine::private_vars,
 };
+
+/// The machine a medium of `arch` boots, with Intel's IOMMU on x86.
+fn platform(arch: GuestArch, vendor: Vendor) -> Platform {
+    match arch {
+        GuestArch::X86_64 => Platform::X86_64(vendor),
+        GuestArch::Aarch64 => Platform::Aarch64,
+    }
+}
+
+/// The framebuffer the platform's display presents: the profile's mode on
+/// x86, the firmware's `ramfb` mode on aarch64.
+fn framebuffer(arch: GuestArch) -> (u32, u32) {
+    match arch {
+        GuestArch::X86_64 => (1280, 800),
+        GuestArch::Aarch64 => (800, 600),
+    }
+}
 
 fn env_path(name: &str) -> Option<PathBuf> {
     let value = std::env::var_os(name).map(PathBuf::from);
@@ -22,16 +40,37 @@ fn this_host_s_qemu_is_probed_not_guessed() {
     let Some(qemu) = env_path("VKORE_TEST_QEMU") else {
         return;
     };
-    let caps = QemuCaps::probe(&qemu, Vendor::Intel, Accel::Tcg).unwrap();
+    // The emulator is for exactly one of the architectures: the other's
+    // probe refuses it in words.
+    let probed: Vec<_> = GuestArch::ALL
+        .into_iter()
+        .filter_map(|arch| {
+            QemuCaps::probe(&qemu, platform(arch, Vendor::Intel), Accel::Tcg)
+                .ok()
+                .map(|caps| (arch, caps))
+        })
+        .collect();
+    let [(arch, caps)] = probed.as_slice() else {
+        panic!(
+            "{} is an emulator for {} architectures",
+            qemu.display(),
+            probed.len()
+        );
+    };
     assert!(caps.version.0 >= 8, "{caps:?}");
-    assert_eq!(caps.generic_initiators, caps.version.0 >= 9);
-    assert!(matches!(
-        caps.vtd_scalable_property,
-        "scalable-mode" | "x-scalable-mode"
-    ));
+    match arch {
+        GuestArch::X86_64 => {
+            assert_eq!(caps.generic_initiators, caps.version.0 >= 9);
+            assert!(matches!(
+                caps.vtd_scalable_property,
+                "scalable-mode" | "x-scalable-mode"
+            ));
+        }
+        GuestArch::Aarch64 => assert!(caps.aarch64_virt, "{caps:?}"),
+    }
     let host = HostCaps::probe();
     assert_eq!(
-        host.choose(vkore_vm::AccelChoice::Tcg, Vendor::Intel)
+        host.choose(vkore_vm::AccelChoice::Tcg, platform(*arch, Vendor::Intel))
             .unwrap(),
         Accel::Tcg
     );
@@ -44,6 +83,7 @@ fn a_real_kore_iso_names_its_paging_mode() {
     };
     let medium = BootMedium::inspect(&iso).unwrap();
     assert!(medium.paging.is_some(), "{medium:?}");
+    assert!(medium.arch.is_some(), "{medium:?}");
     assert_eq!(medium.sha256.len(), 64);
 }
 
@@ -72,6 +112,14 @@ fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma, cpu_pm: bool) {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
+    let arch = BootMedium::inspect(&iso)
+        .unwrap()
+        .arch
+        .expect("a UEFI Kore ISO");
+    if arch == GuestArch::Aarch64 && topology != vkore_vm::hardware::GuestNuma::Single {
+        eprintln!("skipped: an aarch64 machine is one NUMA node");
+        return;
+    }
     let (dir, mut machine) = start_machine(&qemu, iso, topology, cpu_pm);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
@@ -104,7 +152,8 @@ fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma, cpu_pm: bool) {
     );
     let shot = dir.path().join("screen.ppm");
     machine.screendump(&shot).unwrap();
-    assert!(std::fs::metadata(&shot).unwrap().len() > 1280 * 800 * 3);
+    let (width, height) = framebuffer(arch);
+    assert!(std::fs::metadata(&shot).unwrap().len() > u64::from(width * height * 3));
     machine.stop(std::time::Duration::from_secs(5)).unwrap();
     assert!(!machine.running());
 }
@@ -115,10 +164,12 @@ fn start_machine(
     topology: vkore_vm::hardware::GuestNuma,
     cpu_pm: bool,
 ) -> (tempfile::TempDir, Machine) {
-    let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu)
+    let medium = BootMedium::inspect(&iso).unwrap();
+    let arch = medium.arch.expect("a UEFI Kore ISO");
+    let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu, arch)
         .expect("valid QEMU runtime")
         .map(|runtime| runtime.firmware)
-        .or_else(firmware::discover)
+        .or_else(|| firmware::discover(arch))
         .expect("bundled firmware or an installed UEFI firmware descriptor");
     let dir = tempfile::tempdir().unwrap();
     let disk = dir.path().join("disk.raw");
@@ -133,7 +184,6 @@ fn start_machine(
         .unwrap();
     let vars = dir.path().join("vars.fd");
     private_vars(&firmware.vars_template, &vars).unwrap();
-    let medium = BootMedium::inspect(&iso).unwrap();
     let host = HostCaps::probe();
     let vendor = if cpu_pm {
         host.vendor.expect("host vendor")
@@ -147,10 +197,10 @@ fn start_machine(
             } else {
                 vkore_vm::AccelChoice::Auto
             },
-            vendor,
+            platform(arch, vendor),
         )
         .unwrap();
-    let caps = QemuCaps::probe(qemu, vendor, accel).unwrap();
+    let caps = QemuCaps::probe(qemu, platform(arch, vendor), accel).unwrap();
     let spec = MachineSpec {
         name: "test".into(),
         iso,
@@ -159,7 +209,7 @@ fn start_machine(
         firmware_code: firmware.code.clone(),
         firmware_vars: vars,
         firmware_format: firmware.format.clone(),
-        vendor,
+        platform: platform(arch, vendor),
         accel,
         paging: medium.paging.unwrap_or(Paging::FourLevel),
         cpus: 2,
@@ -178,7 +228,7 @@ fn start_machine(
             ..Default::default()
         },
         display: Display::Headless,
-        framebuffer: (1280, 800),
+        framebuffer: framebuffer(arch),
         serial_log: dir.path().join("serial.log"),
         debugcon_log: dir.path().join("debugcon.log"),
         qmp_socket: dir.path().join("qmp.sock"),
@@ -196,7 +246,11 @@ fn a_kernel_self_test_iso_passes_and_powers_off() {
     else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso, vkore_vm::hardware::GuestNuma::Split, false);
+    let topology = match BootMedium::inspect(&iso).unwrap().arch {
+        Some(GuestArch::Aarch64) => vkore_vm::hardware::GuestNuma::Single,
+        _ => vkore_vm::hardware::GuestNuma::Split,
+    };
+    let (dir, mut machine) = start_machine(&qemu, iso, topology, false);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let mut captured = false;
     while std::time::Instant::now() < deadline {

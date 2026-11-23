@@ -120,7 +120,7 @@ impl Machine {
         let mut arguments = spec.arguments(caps)?;
         // Keep guest CPUs stopped until QMP negotiation and launch checks finish.
         arguments.push("-S".into());
-        if let Some(runtime) = crate::runtime::Runtime::for_qemu(qemu)
+        if let Some(runtime) = crate::runtime::Runtime::for_qemu(qemu, spec.platform.arch())
             .map_err(|error| MachineError::Io(qemu.to_path_buf(), error))?
         {
             arguments.extend(["-L".into(), runtime.data.display().to_string()]);
@@ -210,14 +210,23 @@ impl Machine {
                             spec.cpus
                         )));
                     }
+                    // Every CPU is the composed machine's: an emulator for
+                    // another architecture never gets as far as running.
+                    let arch = spec.platform.arch();
                     let threads: Vec<_> = cpus
                         .iter()
-                        .map(|cpu| match cpu {
-                            qapi_qmp::CpuInfoFast::x86_64(base)
-                            | qapi_qmp::CpuInfoFast::i386(base) => {
+                        .map(|cpu| match (arch, cpu) {
+                            (
+                                crate::GuestArch::X86_64,
+                                qapi_qmp::CpuInfoFast::x86_64(base)
+                                | qapi_qmp::CpuInfoFast::i386(base),
+                            )
+                            | (crate::GuestArch::Aarch64, qapi_qmp::CpuInfoFast::aarch64(base)) => {
                                 Ok((base.cpu_index, base.thread_id))
                             }
-                            _ => Err(QmpError::Protocol("QEMU reported a non-x86 CPU".into())),
+                            _ => Err(QmpError::Protocol(format!(
+                                "QEMU reported a CPU that is not {arch}"
+                            ))),
                         })
                         .collect::<Result<_, _>>()?;
                     crate::hardware::bind_vcpus(machine.qemu_pid, &threads, &spec.resources)

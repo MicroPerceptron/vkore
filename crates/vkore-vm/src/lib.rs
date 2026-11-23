@@ -16,6 +16,7 @@
 
 #![cfg_attr(target_os = "linux", feature(setgroups))]
 
+pub mod arch;
 pub mod cpu_pm;
 pub mod firmware;
 pub mod hardware;
@@ -30,11 +31,12 @@ pub mod qmp;
 pub mod readiness;
 pub mod runtime;
 
+pub use arch::GuestArch;
 pub use firmware::Firmware;
 pub use machine::{Machine, MachineError, MachineEvent, StopOutcome};
 pub use media::BootMedium;
 pub use probe::{Accel, AccelChoice, HostCaps, QemuCaps};
-pub use profile::{Display, MachineSpec, Paging, ProfileError, Vendor};
+pub use profile::{Display, MachineSpec, Paging, Platform, ProfileError, Vendor};
 pub use readiness::{Readiness, Stage};
 
 /// Portable read-only host inventory; independent of QEMU and guest support.

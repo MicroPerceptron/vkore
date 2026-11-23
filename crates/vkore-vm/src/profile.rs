@@ -20,13 +20,36 @@
 //! The guest's networks are QEMU user-mode and isolated (`restrict=on`):
 //! Kore has no IP stack, and nothing it does needs a packet to leave the
 //! host.
+//!
+//! An **aarch64** guest boots the topology of Kore's aarch64 gate instead
+//! (`QEMU_AARCH64_CMD`, devicetree form): a `virt` machine with a GICv3 and
+//! its ITS, an **SMMUv3** (Kore's DMA confinement, as VT-d is on x86), the
+//! same NVMe, xHCI and e1000e behind PCIe root ports, the ISO on
+//! virtio-SCSI (the machine has no IDE), and a `ramfb` framebuffer, which
+//! is the one display whose aperture the firmware hands Kore under HVF and
+//! KVM. It has no IOMMU vendor to cross-check, no NUMA split, no ISA debug
+//! port and one serial line; see [`MachineSpec::arguments`] for what it
+//! refuses.
 
 use std::{
     fmt,
     path::{Path, PathBuf},
 };
 
-use crate::probe::{Accel, QemuCaps};
+use crate::{
+    arch::GuestArch,
+    hardware::{GuestNuma, PageSize},
+    probe::{Accel, QemuCaps},
+};
+
+/// The aarch64 machine, as Kore's devicetree gate boots it. `acpi=off`:
+/// the firmware then hands Kore a devicetree, the description its aarch64
+/// gate passes on; Kore's ACPI boot on aarch64 prints nothing past the
+/// firmware today (MicroPerceptron/kore#1581). The SMMU must translate the
+/// root bus (`default-bus-bypass-iommu=off`), or Kore refuses the NVMe
+/// grant: it never grants DMA a device it cannot confine.
+pub(crate) const AARCH64_MACHINE: &str =
+    "virt,gic-version=3,its=on,acpi=off,iommu=smmuv3,default-bus-bypass-iommu=off";
 
 /// The IOMMU (and so the CPU vendor) a machine presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,6 +67,35 @@ impl Vendor {
         match self {
             Self::Intel => "GenuineIntel",
             Self::Amd => "AuthenticAMD",
+        }
+    }
+}
+
+/// What a machine is: its instruction set and, where it has one, the IOMMU
+/// vendor Kore cross-checks against the CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    /// An x86-64 PC whose IOMMU, and so CPU, is this vendor's.
+    X86_64(Vendor),
+    /// An AArch64 `virt` machine: an SMMUv3 and a GICv3, neither of which
+    /// Kore matches against the CPU.
+    Aarch64,
+}
+
+impl Platform {
+    pub fn arch(self) -> GuestArch {
+        match self {
+            Self::X86_64(_) => GuestArch::X86_64,
+            Self::Aarch64 => GuestArch::Aarch64,
+        }
+    }
+
+    /// The IOMMU vendor, on the architecture that has one.
+    pub fn vendor(self) -> Option<Vendor> {
+        match self {
+            Self::X86_64(vendor) => Some(vendor),
+            Self::Aarch64 => None,
         }
     }
 }
@@ -85,16 +137,19 @@ pub struct MachineSpec {
     pub firmware_vars: PathBuf,
     /// `raw` or `qcow2`, as the firmware descriptor names it.
     pub firmware_format: String,
-    pub vendor: Vendor,
+    pub platform: Platform,
     pub accel: Accel,
     pub paging: Paging,
     pub cpus: u16,
     pub memory_mib: u32,
     pub resources: crate::hardware::Resources,
     pub display: Display,
-    /// The framebuffer mode the compositor founds over.
+    /// The framebuffer mode the compositor founds over. An aarch64 machine's
+    /// `ramfb` takes its mode from the firmware instead, so there it is not
+    /// applied.
     pub framebuffer: (u32, u32),
     pub serial_log: PathBuf,
+    /// Kore's ISA debug port (`0xe9`); an aarch64 machine has none.
     pub debugcon_log: PathBuf,
     pub qmp_socket: PathBuf,
     /// A console image's shell line: COM2, attached to a listening Unix
@@ -147,6 +202,19 @@ impl fmt::Display for ProfileError {
 }
 
 impl std::error::Error for ProfileError {}
+
+/// A specification's paths, each checked for QEMU's option syntax.
+struct Paths<'a> {
+    iso: &'a str,
+    disk: &'a str,
+    stick: &'a str,
+    code: &'a str,
+    vars: &'a str,
+    serial: &'a str,
+    debugcon: &'a str,
+    qmp: &'a str,
+    console: Option<&'a str>,
+}
 
 const MIN_MEMORY_MIB: u32 = 2048;
 const MAX_MEMORY_MIB: u32 = 1 << 20;
@@ -301,7 +369,42 @@ impl MachineSpec {
             }
             None => None,
         };
+        let paths = Paths {
+            iso,
+            disk,
+            stick,
+            code,
+            vars,
+            serial,
+            debugcon,
+            qmp,
+            console,
+        };
+        match self.platform {
+            Platform::X86_64(vendor) => self.x86_64_arguments(qemu, vendor, paths),
+            Platform::Aarch64 => self.aarch64_arguments(qemu, paths),
+        }
+    }
 
+    /// The x86-64 gate topology (`QEMU_X86_CMD`).
+    fn x86_64_arguments(
+        &self,
+        qemu: &QemuCaps,
+        vendor: Vendor,
+        paths: Paths<'_>,
+    ) -> Result<Vec<String>, ProfileError> {
+        let Paths {
+            iso,
+            disk,
+            stick,
+            code,
+            vars,
+            serial,
+            debugcon,
+            qmp,
+            console,
+        } = paths;
+        let (width, height) = self.framebuffer;
         let paging_cpu = match self.paging {
             Paging::FourLevel => "",
             Paging::FiveLevel => ",+la57,enforce",
@@ -325,7 +428,7 @@ impl MachineSpec {
                 "tcg,thread=multi".to_owned(),
                 format!(
                     "{}{paging_cpu}",
-                    match self.vendor {
+                    match vendor {
                         // TCG's `max` reports AuthenticAMD; Kore cross-checks
                         // the vendor against the remapping table.
                         Vendor::Intel => "max,+x2apic,+arat,vendor=GenuineIntel",
@@ -357,7 +460,7 @@ impl MachineSpec {
             ));
         }
         let assigned = !self.resources.passthrough.is_empty();
-        let iommu = match self.vendor {
+        let iommu = match vendor {
             Vendor::Intel => format!(
                 "intel-iommu,intremap=on,caching-mode=on,device-iotlb=on,{}=on,{}snoop-control={},dma-translation=on,aw-bits=48",
                 qemu.vtd_scalable_property,
@@ -410,56 +513,15 @@ impl MachineSpec {
                 "hugepages require Linux and page-aligned memory on each guest node".into(),
             ));
         }
-        let mut overcommit = Vec::new();
-        if self.resources.cpu_power_management {
-            overcommit.push("cpu-pm=on");
-        }
-        if self.resources.pin_memory {
-            if !cfg!(target_os = "linux") {
-                return Err(ProfileError::Unsupported(
-                    "memory locking is unavailable on this host".into(),
-                ));
-            }
-            overcommit.push("mem-lock=on");
-        }
-        if !overcommit.is_empty() {
-            arguments.extend(["-overcommit".into(), overcommit.join(",")]);
-        }
+        arguments.extend(self.overcommit()?);
         arguments.extend(numa(
             self.cpus,
             self.memory_mib,
             self.resources.pages,
             self.resources.guest_numa,
         ));
-        arguments.extend(
-            [
-                "-no-user-config",
-                "-nodefaults",
-                "-no-reboot",
-                "-rtc",
-                "base=utc,clock=host",
-                "-boot",
-                "menu=off,strict=on",
-                "-monitor",
-                "none",
-            ]
-            .map(String::from),
-        );
-        match &self.display {
-            Display::Headless => arguments.extend(["-display".into(), "none".into()]),
-            // QEMU's default UI backend on this host.
-            Display::Window => {}
-            Display::Vnc(socket) => {
-                let socket = option_path(socket)?;
-                if socket.len() > SUN_PATH_MAX {
-                    return Err(ProfileError::Path(
-                        PathBuf::from(socket),
-                        "longer than a Unix socket path can be",
-                    ));
-                }
-                arguments.extend(["-display".into(), format!("vnc=unix:{socket}")]);
-            }
-        }
+        arguments.extend(SUPERVISED.map(String::from));
+        arguments.extend(self.display_arguments()?);
         arguments.extend([
             "-debugcon".into(),
             format!("file:{debugcon}"),
@@ -538,20 +600,9 @@ impl MachineSpec {
                 "bochs-display,bus=rp_fb,xres={width},yres={height},vgamem={}M",
                 vgamem_mib(width, height)
             ),
-            "-drive".into(),
-            format!(
-                "if=pflash,format={},readonly=on,file={code}",
-                self.firmware_format
-            ),
-            "-drive".into(),
-            format!("if=pflash,format={},file={vars}", self.firmware_format),
-            "-serial".into(),
-            format!("file:{serial}"),
-            "-qmp".into(),
-            format!("unix:{qmp},server=on,wait=off"),
-            "-cdrom".into(),
-            iso.into(),
         ]);
+        arguments.extend(self.firmware_serial_qmp(code, vars, serial, qmp));
+        arguments.extend(["-cdrom".into(), iso.into()]);
         if let Some(console) = console {
             // The PC's COM2 address and line, which QEMU's DSDT describes
             // as a PNP0501 with that _CRS; Kore withholds only the port its
@@ -566,7 +617,206 @@ impl MachineSpec {
         arguments.extend(crate::passthrough::arguments(&self.resources.passthrough));
         Ok(arguments)
     }
+
+    /// Kore's aarch64 gate topology (`QEMU_AARCH64_CMD`, devicetree form),
+    /// with the x86 machine's USB layout: the keyboard and mouse at the
+    /// guest-visible ports Kore binds terminal 0 to, and the stick.
+    ///
+    /// Refused here, in words, rather than composed differently: a console
+    /// image (its shell needs a second serial line, and `virt` has one
+    /// PL011), five-level paging, a NUMA split, hugepages, native CPU waits
+    /// and device passthrough, none of which this topology carries yet.
+    fn aarch64_arguments(
+        &self,
+        qemu: &QemuCaps,
+        paths: Paths<'_>,
+    ) -> Result<Vec<String>, ProfileError> {
+        let refuse = |why: &str| Err(ProfileError::Unsupported(why.into()));
+        if paths.console.is_some() {
+            return refuse(
+                "this is a console image, whose shell needs a second serial line, and QEMU's \
+                 aarch64 virt machine has one: boot Kore's display image instead",
+            );
+        }
+        if self.paging == Paging::FiveLevel {
+            return refuse(
+                "the ISO boots five-level paging, which vKore composes for x86-64 guests only",
+            );
+        }
+        if self.resources.guest_numa != GuestNuma::Single {
+            return refuse(
+                "Kore's aarch64 machine is one NUMA node: set the guest to a single node",
+            );
+        }
+        if self.resources.pages != PageSize::System {
+            return refuse("hugepage-backed memory is composed for x86-64 guests only");
+        }
+        if self.resources.cpu_power_management {
+            return refuse("native CPU waits are composed for x86-64 KVM guests only");
+        }
+        if !self.resources.passthrough.is_empty() || !self.resources.gpu_vfs.is_empty() {
+            return refuse("device passthrough is composed for x86-64 KVM guests only");
+        }
+        if !qemu.aarch64_virt {
+            return refuse(
+                "this QEMU cannot realize the virt machine with a GICv3, its ITS and an SMMUv3 \
+                 on this accelerator",
+            );
+        }
+        crate::hardware::validate_binding(&self.resources, self.cpus)
+            .map_err(ProfileError::Unsupported)?;
+        let Paths {
+            iso,
+            disk,
+            stick,
+            code,
+            vars,
+            serial,
+            qmp,
+            ..
+        } = paths;
+        let (accel, cpu) = match self.accel {
+            Accel::Kvm => ("kvm", "host"),
+            Accel::Hvf => ("hvf", "host"),
+            Accel::Tcg => ("tcg,thread=multi", "max"),
+        };
+        let mut arguments: Vec<String> = vec![
+            "-name".into(),
+            format!("kore-{}", self.name),
+            "-machine".into(),
+            AARCH64_MACHINE.into(),
+            "-accel".into(),
+            accel.into(),
+            "-cpu".into(),
+            cpu.into(),
+            "-m".into(),
+            self.memory_mib.to_string(),
+            "-smp".into(),
+            format!("{0},cores={0},threads=1,sockets=1", self.cpus),
+        ];
+        arguments.extend(self.overcommit()?);
+        arguments.extend(SUPERVISED.map(String::from));
+        arguments.extend(self.display_arguments()?);
+        arguments.extend([
+            "-device".into(),
+            "ramfb".into(),
+            "-device".into(),
+            "pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1".into(),
+            "-device".into(),
+            "pcie-root-port,id=rp1,bus=pcie.0,chassis=2,slot=2".into(),
+            "-device".into(),
+            "pcie-root-port,id=rp2,bus=pcie.0,chassis=3,slot=3".into(),
+            "-device".into(),
+            "pcie-root-port,id=rp3,bus=pcie.0,chassis=4,slot=4".into(),
+            "-netdev".into(),
+            "user,id=net0,ipv6=off,restrict=on".into(),
+            "-device".into(),
+            "e1000e,id=nic0,netdev=net0,bus=rp0".into(),
+            "-drive".into(),
+            format!(
+                "file={disk},if=none,id=nvme0,format=raw,cache=none,discard={},detect-zeroes=off",
+                if self.resources.reserve_storage {
+                    "ignore"
+                } else {
+                    "unmap"
+                }
+            ),
+            "-device".into(),
+            format!(
+                "nvme,id=nvme_dev0,serial=nvme0,drive=nvme0,bus=rp1,max_ioqpairs={},msix_qsize=65",
+                self.cpus
+            ),
+            "-device".into(),
+            "qemu-xhci,id=xhci,bus=rp2,p3=0".into(),
+            "-device".into(),
+            "usb-kbd,id=primary-kbd,bus=xhci.0,port=1".into(),
+            "-device".into(),
+            "usb-mouse,id=primary-mouse,bus=xhci.0,port=3".into(),
+            "-drive".into(),
+            format!("if=none,id=usbstick,file={stick},format=raw"),
+            "-device".into(),
+            "usb-storage,bus=xhci.0,drive=usbstick,removable=on".into(),
+            "-device".into(),
+            "virtio-scsi-pci,id=scsi0,bus=rp3".into(),
+            "-drive".into(),
+            format!("file={iso},if=none,id=cd0,format=raw,media=cdrom,readonly=on"),
+            "-device".into(),
+            "scsi-cd,drive=cd0,bus=scsi0.0,bootindex=1".into(),
+        ]);
+        arguments.extend(self.firmware_serial_qmp(code, vars, serial, qmp));
+        Ok(arguments)
+    }
+
+    /// `-overcommit`, when the resources ask for native waits or locked memory.
+    fn overcommit(&self) -> Result<Vec<String>, ProfileError> {
+        let mut overcommit = Vec::new();
+        if self.resources.cpu_power_management {
+            overcommit.push("cpu-pm=on");
+        }
+        if self.resources.pin_memory {
+            if !cfg!(target_os = "linux") {
+                return Err(ProfileError::Unsupported(
+                    "memory locking is unavailable on this host".into(),
+                ));
+            }
+            overcommit.push("mem-lock=on");
+        }
+        Ok(if overcommit.is_empty() {
+            Vec::new()
+        } else {
+            vec!["-overcommit".into(), overcommit.join(",")]
+        })
+    }
+
+    fn display_arguments(&self) -> Result<Vec<String>, ProfileError> {
+        Ok(match &self.display {
+            Display::Headless => vec!["-display".into(), "none".into()],
+            // QEMU's default UI backend on this host.
+            Display::Window => Vec::new(),
+            Display::Vnc(socket) => {
+                let socket = option_path(socket)?;
+                if socket.len() > SUN_PATH_MAX {
+                    return Err(ProfileError::Path(
+                        PathBuf::from(socket),
+                        "longer than a Unix socket path can be",
+                    ));
+                }
+                vec!["-display".into(), format!("vnc=unix:{socket}")]
+            }
+        })
+    }
+
+    /// The split firmware flash, the kernel's console and QMP.
+    fn firmware_serial_qmp(&self, code: &str, vars: &str, serial: &str, qmp: &str) -> [String; 8] {
+        [
+            "-drive".into(),
+            format!(
+                "if=pflash,format={},readonly=on,file={code}",
+                self.firmware_format
+            ),
+            "-drive".into(),
+            format!("if=pflash,format={},file={vars}", self.firmware_format),
+            "-serial".into(),
+            format!("file:{serial}"),
+            "-qmp".into(),
+            format!("unix:{qmp},server=on,wait=off"),
+        ]
+    }
 }
+
+/// What every machine is: supervised by vKore, never by QEMU's own
+/// defaults, monitor or reboot.
+const SUPERVISED: [&str; 9] = [
+    "-no-user-config",
+    "-nodefaults",
+    "-no-reboot",
+    "-rtc",
+    "base=utc,clock=host",
+    "-boot",
+    "menu=off,strict=on",
+    "-monitor",
+    "none",
+];
 
 #[cfg(test)]
 mod tests {
@@ -581,6 +831,7 @@ mod tests {
             generic_initiators: false,
             amd_dma_remap: false,
             la57: true,
+            aarch64_virt: false,
         }
     }
 
@@ -593,7 +844,7 @@ mod tests {
             firmware_code: "/usr/share/OVMF/OVMF_CODE_4M.fd".into(),
             firmware_vars: "/m/vars.fd".into(),
             firmware_format: "raw".into(),
-            vendor: Vendor::Intel,
+            platform: Platform::X86_64(Vendor::Intel),
             accel: Accel::Tcg,
             paging: Paging::FourLevel,
             cpus: 4,
@@ -752,7 +1003,7 @@ mod tests {
         assert!(
             line.contains("-object acpi-generic-initiator,id=gi_nvme0,pci-dev=nvme_dev0,node=1")
         );
-        spec.vendor = Vendor::Amd;
+        spec.platform = Platform::X86_64(Vendor::Amd);
         spec.accel = Accel::Tcg;
         let line = joined(&spec.arguments(&caps).unwrap());
         assert!(line.contains("-cpu EPYC-v4,+x2apic,+arat,-fxsr-opt"));
@@ -783,7 +1034,7 @@ mod tests {
             Err(ProfileError::Path(..))
         ));
         let mut spec = self::spec();
-        spec.vendor = Vendor::Amd;
+        spec.platform = Platform::X86_64(Vendor::Amd);
         assert!(matches!(
             spec.arguments(&caps()),
             Err(ProfileError::Unsupported(_))
@@ -818,6 +1069,100 @@ mod tests {
         assert!(line.contains("pci-dev=nvme_dev0,node=0"));
         assert!(!line.contains("nodeid=1") && !line.contains("target=1") && !line.contains("ram1"));
         assert!(!line.contains("dist,src="));
+    }
+
+    fn aarch64(accel: Accel) -> (MachineSpec, QemuCaps) {
+        let mut machine = spec();
+        machine.platform = Platform::Aarch64;
+        machine.accel = accel;
+        machine.resources.guest_numa = crate::hardware::GuestNuma::Single;
+        machine.firmware_code = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into();
+        let mut capabilities = caps();
+        capabilities.la57 = false;
+        capabilities.aarch64_virt = true;
+        (machine, capabilities)
+    }
+
+    #[test]
+    fn the_aarch64_gate_topology_on_hvf() {
+        let (machine, capabilities) = aarch64(Accel::Hvf);
+        let line = joined(&machine.arguments(&capabilities).unwrap());
+        // What `make -n run-boot-gate-aarch64-dt` composes on an Apple
+        // silicon host, item for item, with the x86 machine's USB layout.
+        for expected in [
+            "-machine virt,gic-version=3,its=on,acpi=off,iommu=smmuv3,default-bus-bypass-iommu=off -accel hvf -cpu host -m 4096 -smp 4,cores=4,threads=1,sockets=1",
+            "-no-user-config -nodefaults -no-reboot -rtc base=utc,clock=host -boot menu=off,strict=on -monitor none -display none -device ramfb",
+            "-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1",
+            "-device pcie-root-port,id=rp3,bus=pcie.0,chassis=4,slot=4",
+            "-netdev user,id=net0,ipv6=off,restrict=on -device e1000e,id=nic0,netdev=net0,bus=rp0",
+            "-drive file=/m/disk.raw,if=none,id=nvme0,format=raw,cache=none,discard=unmap,detect-zeroes=off -device nvme,id=nvme_dev0,serial=nvme0,drive=nvme0,bus=rp1,max_ioqpairs=4,msix_qsize=65",
+            "-device qemu-xhci,id=xhci,bus=rp2,p3=0 -device usb-kbd,id=primary-kbd,bus=xhci.0,port=1 -device usb-mouse,id=primary-mouse,bus=xhci.0,port=3",
+            "-device virtio-scsi-pci,id=scsi0,bus=rp3 -drive file=/m/kore.iso,if=none,id=cd0,format=raw,media=cdrom,readonly=on -device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=1",
+            "-drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd -drive if=pflash,format=raw,file=/m/vars.fd",
+            "-serial file:/m/serial.log -qmp unix:/m/qmp.sock,server=on,wait=off",
+        ] {
+            assert!(line.contains(expected), "missing {expected:?} in {line}");
+        }
+        // Nothing of the PC: no x86 IOMMU, NUMA, ISA port, VGA or IDE.
+        for absent in [
+            "q35", "iommu,", "-numa", "debugcon", "isa-", "bochs", "-cdrom", "pxb",
+        ] {
+            assert!(!line.contains(absent), "{absent:?} in {line}");
+        }
+    }
+
+    #[test]
+    fn the_aarch64_cpu_follows_the_accelerator() {
+        for (accel, expected) in [
+            (Accel::Kvm, "-accel kvm -cpu host"),
+            (Accel::Tcg, "-accel tcg,thread=multi -cpu max"),
+        ] {
+            let (machine, capabilities) = aarch64(accel);
+            assert!(joined(&machine.arguments(&capabilities).unwrap()).contains(expected));
+        }
+    }
+
+    #[test]
+    fn what_the_aarch64_topology_does_not_carry_is_refused_in_words() {
+        let refused = |change: &dyn Fn(&mut MachineSpec, &mut QemuCaps)| {
+            let (mut machine, mut capabilities) = aarch64(Accel::Hvf);
+            change(&mut machine, &mut capabilities);
+            match machine.arguments(&capabilities) {
+                Err(ProfileError::Unsupported(why)) => why,
+                other => panic!("composed {other:?}"),
+            }
+        };
+        assert!(
+            refused(&|m, _| m.console_socket = Some("/m/c.sock".into()))
+                .contains("second serial line")
+        );
+        assert!(refused(&|m, _| m.paging = Paging::FiveLevel).contains("five-level"));
+        assert!(
+            refused(&|m, _| m.resources.guest_numa = crate::hardware::GuestNuma::Split)
+                .contains("one NUMA node")
+        );
+        assert!(
+            refused(&|m, _| m.resources.cpu_power_management = true).contains("native CPU waits")
+        );
+        assert!(refused(&|_, c| c.aarch64_virt = false).contains("SMMUv3"));
+        let (mut machine, capabilities) = aarch64(Accel::Hvf);
+        machine
+            .resources
+            .passthrough
+            .push(crate::passthrough::Selection {
+                address: "0000:00:0b.0".into(),
+                vendor_id: 0x8086,
+                device_id: 0x643e,
+                physical_function: None,
+            });
+        assert!(matches!(
+            machine.arguments(&capabilities),
+            Err(ProfileError::Unsupported(why)) if why.contains("passthrough")
+        ));
+        // The shared checks still run first.
+        let (mut machine, capabilities) = aarch64(Accel::Hvf);
+        machine.cpus = 1;
+        assert_eq!(machine.arguments(&capabilities), Err(ProfileError::Cpus(1)));
     }
 
     #[test]

@@ -155,11 +155,45 @@ fn create_from_source(
         medium
     };
     check_cancelled(cancelled)?;
+    fit_to_architecture(&mut config, medium.arch)?;
     config.iso = medium.path;
     // This records the imported identity; the boot preflight still rechecks it.
     config.iso_sha256 = Some(medium.sha256);
     store.create(&config).map_err(|e| e.to_string())?;
     Ok(config)
+}
+
+/// Fit a new machine to the topology its medium's architecture boots. An
+/// aarch64 machine is Kore's aarch64 gate machine: one NUMA node, the
+/// display mode the firmware sets, ordinary pages, no vendor IOMMU and no
+/// x86 native waits. An image with no UEFI loader vKore knows is refused here, before
+/// it becomes a machine that can never boot.
+fn fit_to_architecture(
+    config: &mut MachineConfig,
+    arch: Option<vkore_vm::GuestArch>,
+) -> Result<(), String> {
+    match arch {
+        None => Err(
+            "the image has no EFI/BOOT/BOOTX64.EFI or BOOTAA64.EFI: not a Kore UEFI image \
+             vKore can boot"
+                .into(),
+        ),
+        Some(vkore_vm::GuestArch::X86_64) => Ok(()),
+        Some(vkore_vm::GuestArch::Aarch64) => {
+            if let Some(vendor) = config.vendor {
+                return Err(format!(
+                    "the {} IOMMU vendor was asked for, and this image is aarch64, whose \
+                     machine has an SMMUv3",
+                    vendor.cpuid()
+                ));
+            }
+            config.resources.guest_numa = vkore_vm::hardware::GuestNuma::Single;
+            config.resources.pages = vkore_vm::hardware::PageSize::System;
+            config.resources.cpu_power_management = false;
+            config.framebuffer = crate::run::AARCH64_FRAMEBUFFER;
+            Ok(())
+        }
+    }
 }
 
 fn verify(medium: &BootMedium, expected: Option<&str>) -> Result<(), String> {
@@ -390,15 +424,65 @@ mod tests {
 
     // An ISO descriptor fixture, not a bootable Kore image. The VM parser's
     // tests own Joliet semantics; these tests exercise publication and identity.
+    /// The smallest medium vKore takes: ISO 9660 with a Joliet tree whose
+    /// one file is the x86-64 UEFI loader, `EFI/BOOT/BOOTX64.EFI`.
     fn image() -> Vec<u8> {
-        let mut bytes = vec![0u8; 18 * 2048];
-        for (sector, kind) in [(16, 1), (17, 255)] {
-            let at = sector * 2048;
+        const SECTOR: usize = 2048;
+        let mut bytes = vec![0u8; 22 * SECTOR];
+        for (sector, kind) in [(16, 1), (17, 2), (18, 255)] {
+            let at = sector * SECTOR;
             bytes[at] = kind;
             bytes[at + 1..at + 6].copy_from_slice(b"CD001");
             bytes[at + 6] = 1;
         }
+        // A directory record: extent, size, flags, then a UCS-2 name.
+        let record = |name: &str, extent: u32, directory: bool| {
+            let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            let mut out = vec![0u8; 33];
+            out[2..6].copy_from_slice(&extent.to_le_bytes());
+            out[10..14].copy_from_slice(&(if directory { SECTOR as u32 } else { 0 }).to_le_bytes());
+            out[25] = if directory { 2 } else { 0 };
+            out[32] = name.len() as u8;
+            out.extend_from_slice(&name);
+            out.resize(out.len().next_multiple_of(2), 0);
+            out[0] = out.len() as u8;
+            out
+        };
+        let joliet = 17 * SECTOR;
+        bytes[joliet + 88..joliet + 91].copy_from_slice(b"%/E");
+        let root = record("", 19, true);
+        bytes[joliet + 156..joliet + 156 + root.len()].copy_from_slice(&root);
+        for (sector, entry) in [
+            (19, record("EFI", 20, true)),
+            (20, record("BOOT", 21, true)),
+            (21, record("BOOTX64.EFI;1", 0, false)),
+        ] {
+            bytes[sector * SECTOR..sector * SECTOR + entry.len()].copy_from_slice(&entry);
+        }
         bytes
+    }
+
+    #[test]
+    fn an_aarch64_image_makes_kore_s_aarch64_machine() {
+        let mut config = MachineConfig::new("arm", "/pending.iso");
+        config.resources.cpu_power_management = true;
+        config.resources.pages = vkore_vm::hardware::PageSize::Huge2M;
+        fit_to_architecture(&mut config, Some(vkore_vm::GuestArch::Aarch64)).unwrap();
+        assert_eq!(
+            config.resources.guest_numa,
+            vkore_vm::hardware::GuestNuma::Single
+        );
+        assert!(!config.resources.cpu_power_management);
+        assert_eq!(config.resources.pages, vkore_vm::hardware::PageSize::System);
+        assert_eq!(config.framebuffer, crate::run::AARCH64_FRAMEBUFFER);
+        let mut x86 = MachineConfig::new("pc", "/pending.iso");
+        let before = x86.clone();
+        fit_to_architecture(&mut x86, Some(vkore_vm::GuestArch::X86_64)).unwrap();
+        assert_eq!(x86, before);
+        assert!(fit_to_architecture(&mut x86, None).is_err());
+        let mut vendor = MachineConfig::new("arm", "/pending.iso");
+        vendor.vendor = Some(vkore_vm::Vendor::Amd);
+        assert!(fit_to_architecture(&mut vendor, Some(vkore_vm::GuestArch::Aarch64)).is_err());
     }
 
     #[test]

@@ -12,7 +12,10 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use vkore_vm::{AccelChoice, BootMedium, Display, HostCaps, QemuCaps, Stage, Vendor, firmware};
+use vkore_vm::{
+    AccelChoice, BootMedium, Display, GuestArch, HostCaps, Platform, QemuCaps, Stage, Vendor,
+    firmware,
+};
 use vkore_volume::{
     Browser, Disk, EntryKind, ExportOptions, Listing, Preview, VolPath, preview,
     workspace::{Changes, DEFAULT_EXCLUDES},
@@ -46,10 +49,14 @@ enum Command {
     Probe {
         #[arg(long)]
         qemu: Option<PathBuf>,
+        /// The guest architecture to probe for: x86_64 or aarch64 (default:
+        /// this host's own, the one it can accelerate)
+        #[arg(long)]
+        arch: Option<String>,
     },
     /// Discover host CPU, memory and storage resources
     Hardware,
-    /// Inspect a Kore ISO: its SHA-256 and the paging mode it boots
+    /// Inspect a Kore ISO: its SHA-256, architecture and the paging mode it boots
     Iso { iso: PathBuf },
     /// Kore machines
     #[command(subcommand)]
@@ -112,7 +119,7 @@ enum WritebackArg {
 #[derive(Args)]
 struct CreateArgs {
     name: String,
-    /// A local Kore x86_64 ISO or an HTTPS download link
+    /// A local Kore ISO (x86_64 or aarch64, read from the image) or an HTTPS download link
     #[arg(long, required_unless_present = "image", conflicts_with = "image")]
     iso: Option<String>,
     /// Official image ID from `vkore machine images`
@@ -319,15 +326,25 @@ fn store(state: Option<PathBuf>) -> Result<MachineStore, Failure> {
     Ok(MachineStore::new(state))
 }
 
-fn qemu(explicit: Option<PathBuf>) -> Result<PathBuf, Failure> {
-    explicit
-        .or_else(run::default_qemu)
-        .ok_or_else(|| "qemu-system-x86_64 is not on PATH (install QEMU, or pass --qemu)".into())
+fn qemu(explicit: Option<PathBuf>, arch: GuestArch) -> Result<PathBuf, Failure> {
+    explicit.or_else(|| run::default_qemu(arch)).ok_or_else(|| {
+        format!(
+            "{} is not on PATH (install QEMU, or pass --qemu)",
+            arch.qemu_binary()
+        )
+    })
 }
 
 fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
     match cli.command {
-        Command::Probe { qemu: path } => probe(qemu(path)?),
+        Command::Probe { qemu: path, arch } => {
+            let arch = match arch {
+                Some(name) => GuestArch::parse(&name)
+                    .ok_or_else(|| format!("--arch {name}: x86_64 or aarch64"))?,
+                None => GuestArch::host().unwrap_or(GuestArch::X86_64),
+            };
+            probe(qemu(path, arch)?, arch)
+        }
         Command::Hardware => {
             let store = store(cli.state)?;
             let host = vkore_vm::hardware::HostResources::probe(store.state().root())?;
@@ -365,22 +382,25 @@ fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
     }
 }
 
-fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
-    let runtime = vkore_vm::runtime::Runtime::for_qemu(&qemu)
+fn probe(qemu: PathBuf, arch: GuestArch) -> Result<ExitCode, Failure> {
+    let runtime = vkore_vm::runtime::Runtime::for_qemu(&qemu, arch)
         .map_err(|error| format!("QEMU runtime: {error}"))?;
     let host = HostCaps::probe();
-    let vendor = host.native_vendor();
+    let platform = match arch {
+        GuestArch::X86_64 => Platform::X86_64(host.native_vendor()),
+        GuestArch::Aarch64 => Platform::Aarch64,
+    };
     let accel = host
-        .choose(AccelChoice::Auto, vendor)
+        .choose(AccelChoice::Auto, platform)
         .map_err(|error| error.to_string())?;
-    let caps = QemuCaps::probe(&qemu, vendor, accel).map_err(|error| error.to_string())?;
+    let caps = QemuCaps::probe(&qemu, platform, accel).map_err(|error| error.to_string())?;
     let firmware = runtime
         .map(|runtime| runtime.firmware)
-        .or_else(firmware::discover);
+        .or_else(|| firmware::discover(arch));
     let report = serde_json::json!({
         "qemu": qemu,
         "host": host,
-        "vendor": vendor,
+        "platform": platform,
         "accel": accel,
         "qemu_caps": caps,
         "firmware": firmware,
@@ -667,7 +687,7 @@ fn print_event(event: &Event, json: bool, started: Instant) {
             preflight.qemu_caps.version.0,
             preflight.qemu_caps.version.1,
             preflight.qemu_caps.version.2,
-            preflight.vendor,
+            preflight.platform,
             preflight.accel,
             preflight.firmware.code.display()
         ),
@@ -715,7 +735,6 @@ fn print_event(event: &Event, json: bool, started: Instant) {
 }
 
 fn run_machine(store: &MachineStore, arguments: RunArgs) -> Result<ExitCode, Failure> {
-    let qemu = qemu(arguments.qemu.clone())?;
     let display = match arguments.display.as_str() {
         "window" => Display::Window,
         "headless" => Display::Headless,
@@ -733,8 +752,14 @@ fn run_machine(store: &MachineStore, arguments: RunArgs) -> Result<ExitCode, Fai
     let started = Instant::now();
     let json = arguments.json;
     let mut sink = |event: &Event| print_event(event, json, started);
-    let mut session = Session::start(store, &arguments.name, &qemu, display, &mut sink)
-        .map_err(|error| error.to_string())?;
+    let mut session = Session::start(
+        store,
+        &arguments.name,
+        arguments.qemu.as_deref(),
+        display,
+        &mut sink,
+    )
+    .map_err(|error| error.to_string())?;
     let goal = match arguments.until {
         Until::Kernel => Stage::Kernel,
         Until::Shell => Stage::Shell,

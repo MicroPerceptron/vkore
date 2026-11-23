@@ -20,8 +20,16 @@ import tarfile
 import urllib.request
 
 REPO = Path(__file__).resolve().parent.parent
-BINARY = Path("bin/qemu-system-x86_64")
-FIRMWARE = ("edk2-x86_64-code.fd", "edk2-i386-vars.fd")
+# One emulator and its split UEFI firmware per guest architecture, by the
+# names QEMU installs (and vkore-vm's `GuestArch::bundle_files` expects).
+TARGETS = {
+    "x86_64": (Path("bin/qemu-system-x86_64"), ("edk2-x86_64-code.fd", "edk2-i386-vars.fd")),
+    "aarch64": (Path("bin/qemu-system-aarch64"), ("edk2-aarch64-code.fd", "edk2-arm-vars.fd")),
+}
+BINARIES = tuple(binary for binary, _ in TARGETS.values())
+FIRMWARE = tuple(name for _, names in TARGETS.values() for name in names)
+# The smoke test's machine per architecture: the profile's, paused.
+SMOKE = {"x86_64": ("q35", "qemu64"), "aarch64": ("virt", "max")}
 
 
 def run(*args, **kwargs):
@@ -59,7 +67,8 @@ def bundle_libraries(root, system):
     """Copy non-system dependencies and rewrite their loader paths."""
     libdir = root / "lib"
     libdir.mkdir()
-    pending = [(root / BINARY, root / BINARY)]
+    executables = {root / binary for binary in BINARIES}
+    pending = [(path, path) for path in sorted(executables)]
     copied = {}
     # glibc and its loader stay matched to the target distribution.
     system_elf = re.compile(r"^(ld-linux.*|lib(c|m|pthread|dl|rt|resolv|util)\.so\..*)$")
@@ -83,16 +92,18 @@ def bundle_libraries(root, system):
                 run("install_name_tool", "-change", old, f"@rpath/{name}", destination)
         if system == "Linux":
             run("patchelf", "--force-rpath", "--set-rpath",
-                "$ORIGIN/../lib" if destination == root / BINARY else "$ORIGIN", destination)
+                "$ORIGIN/../lib" if destination in executables else "$ORIGIN", destination)
         else:
-            if destination != root / BINARY:
+            if destination not in executables:
                 run("install_name_tool", "-id", f"@rpath/{destination.name}", destination)
             run("install_name_tool", "-add_rpath",
-                "@loader_path/../lib" if destination == root / BINARY else "@loader_path", destination)
+                "@loader_path/../lib" if destination in executables else "@loader_path", destination)
     if system == "Darwin":
         for _, path in reversed(pending):
             signing = ["codesign", "--force", "--sign", "-"]
-            if path == root / BINARY:
+            # Each emulator needs the hypervisor entitlement: HVF runs an
+            # x86_64 guest on an Intel Mac, an aarch64 guest on Apple silicon.
+            if path in executables:
                 signing += ["--entitlements", root / "share/qemu/vkore-hvf.entitlements"]
             run(*signing, path)
 
@@ -139,36 +150,42 @@ def verify(root):
         full = root / path
         if full.is_symlink() or not full.is_file() or digest(full) != expected:
             raise RuntimeError(f"runtime integrity check failed: {name}")
-    required = {str(BINARY)} | {f"share/qemu/{name}" for name in FIRMWARE}
+    required = {str(binary) for binary in BINARIES} | {f"share/qemu/{name}" for name in FIRMWARE}
     if not required.issubset(manifest["files"]):
-        raise RuntimeError("runtime manifest omits executable or firmware")
+        raise RuntimeError("runtime manifest omits an executable or firmware")
     if manifest.get("schema") != 1 or not manifest.get("version"):
         raise RuntimeError("unsupported runtime manifest")
-    output = run(root / BINARY, "--version", capture_output=True, text=True).stdout
-    if f'version {manifest["version"]}' not in output:
-        raise RuntimeError("runtime version differs from lock")
+    for binary in BINARIES:
+        output = run(root / binary, "--version", capture_output=True, text=True).stdout
+        if f'version {manifest["version"]}' not in output:
+            raise RuntimeError(f"{binary} version differs from lock")
     for name in FIRMWARE:
         if not (root / "share/qemu" / name).is_file():
             raise RuntimeError(f"firmware missing: {name}")
 
 
 def smoke(root):
-    """Negotiate QMP against the relocated binary and bundled UEFI assets."""
+    """Negotiate QMP against each relocated emulator and its bundled UEFI assets."""
     if platform.system() == "Linux":
         # Exercise compiled capabilities without opening or assigning a host device.
         for kind, name, properties in (("-device", "vfio-pci", ("fd=", "iommufd=")),
                                        ("-object", "iommufd", ("fd=",))):
-            result = run(root / BINARY, kind, name + ",help", capture_output=True, text=True)
+            result = run(root / TARGETS["x86_64"][0], kind, name + ",help", capture_output=True, text=True)
             help_text = result.stdout + result.stderr
             if any(not any(line.lstrip().startswith(prop) for line in help_text.splitlines()) for prop in properties):
                 raise RuntimeError(f"packaged QEMU lacks required {name} FD passing support")
+    for arch, (binary, (code, variables)) in TARGETS.items():
+        smoke_target(root, binary, code, variables, *SMOKE[arch])
+
+
+def smoke_target(root, binary, code, variables, machine, cpu):
     with tempfile.TemporaryDirectory() as directory:
         vars_path = Path(directory) / "vars.fd"
-        shutil.copy2(root / "share/qemu" / FIRMWARE[1], vars_path)
-        command = [str(root / BINARY), "-L", str(root / "share/qemu"),
-                   "-machine", "q35", "-accel", "tcg", "-S", "-nodefaults",
+        shutil.copy2(root / "share/qemu" / variables, vars_path)
+        command = [str(root / binary), "-L", str(root / "share/qemu"),
+                   "-machine", machine, "-accel", "tcg", "-cpu", cpu, "-S", "-nodefaults",
                    "-display", "none", "-monitor", "none", "-qmp", "stdio",
-                   "-drive", f"if=pflash,format=raw,readonly=on,file={root / 'share/qemu' / FIRMWARE[0]}",
+                   "-drive", f"if=pflash,format=raw,readonly=on,file={root / 'share/qemu' / code}",
                    "-drive", f"if=pflash,format=raw,file={vars_path}"]
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, bufsize=0)
@@ -257,7 +274,7 @@ def main():
     source = work / "source" / f'qemu-{lock["version"]}'
     build, stage = work / "build", work / "qemu-runtime"
     build.mkdir()
-    flags = [f"--prefix={stage}", "--target-list=x86_64-softmmu",
+    flags = [f"--prefix={stage}", "--target-list=x86_64-softmmu,aarch64-softmmu",
              "--without-default-features", "--disable-download", "--disable-docs",
              "--disable-tools", "--disable-guest-agent", "--disable-modules",
              "--enable-install-blobs", "--enable-tcg", "--enable-slirp",

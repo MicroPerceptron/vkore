@@ -1063,6 +1063,7 @@ mod tests {
         host.cpu_pinning = true;
         host.cpu_power_management = Ok(());
         host.acceleration = vkore_vm::HostCaps {
+            arch: Some(vkore_vm::GuestArch::X86_64),
             vendor: Some(vkore_vm::Vendor::Intel),
             kvm: true,
             hvf: false,

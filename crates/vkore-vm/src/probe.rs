@@ -14,7 +14,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::profile::Vendor;
+use crate::{
+    arch::GuestArch,
+    profile::{AARCH64_MACHINE, Platform, Vendor},
+};
 
 const SENTINEL: &str = "vkore-probe-sentinel";
 
@@ -22,11 +25,14 @@ const SENTINEL: &str = "vkore-probe-sentinel";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Accel {
-    /// Linux KVM: `-cpu host`, only when the host's vendor is the IOMMU's.
+    /// Linux KVM: `-cpu host`, only for a guest of the host's own
+    /// instruction set and, on x86, of the host's vendor.
     Kvm,
-    /// macOS Hypervisor.framework, on an Intel Mac.
+    /// macOS Hypervisor.framework, under the same rule: an x86-64 guest on
+    /// an Intel Mac, an aarch64 guest on Apple silicon.
     Hvf,
-    /// QEMU's portable translator: a CPU model of the IOMMU's vendor.
+    /// QEMU's portable translator: any guest, on a CPU model of the
+    /// IOMMU's vendor on x86.
     Tcg,
 }
 
@@ -58,16 +64,22 @@ pub struct QemuCaps {
     pub amd_dma_remap: bool,
     /// Five-level paging on the chosen accelerator and CPU.
     pub la57: bool,
+    /// The aarch64 `virt` machine with a GICv3, its ITS and an SMMUv3, on
+    /// the chosen accelerator and CPU.
+    #[serde(default)]
+    pub aarch64_virt: bool,
 }
 
 /// What this host offers.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct HostCaps {
+    /// The host's instruction set, when vKore composes guests for it.
+    pub arch: Option<GuestArch>,
     /// The CPU vendor, when it is Intel or AMD.
     pub vendor: Option<Vendor>,
     /// `/dev/kvm` opens for reading and writing.
     pub kvm: bool,
-    /// macOS on an Intel CPU.
+    /// macOS, whose Hypervisor.framework runs the host's own instruction set.
     pub hvf: bool,
 }
 
@@ -126,14 +138,61 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 }
 
 impl QemuCaps {
-    /// Probe `qemu` for a machine of `vendor` running on `accel`.
-    pub fn probe(qemu: &Path, vendor: Vendor, accel: Accel) -> Result<Self, ProbeError> {
+    /// Probe `qemu` for a machine of `platform` running on `accel`.
+    pub fn probe(qemu: &Path, platform: Platform, accel: Accel) -> Result<Self, ProbeError> {
         let version = parse_version(&run(qemu, &["--version"])?).ok_or_else(|| {
             ProbeError::Qemu(format!(
                 "{}: not a QEMU this probe understands",
                 qemu.display()
             ))
         })?;
+        // The emulator is the medium's: it lists the profile's machine.
+        let arch = platform.arch();
+        let machines = run(qemu, &["-machine", "help"])?;
+        if !machines
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some(arch.machine()))
+        {
+            return Err(ProbeError::Qemu(format!(
+                "{}: not an emulator for {arch} guests (it has no {} machine; use {})",
+                qemu.display(),
+                arch.machine(),
+                arch.qemu_binary()
+            )));
+        }
+        let accel_argument = match accel {
+            Accel::Kvm => "kvm",
+            Accel::Hvf => "hvf",
+            Accel::Tcg => "tcg",
+        };
+        let vendor = match platform {
+            Platform::X86_64(vendor) => vendor,
+            Platform::Aarch64 => {
+                let cpu = if accel == Accel::Tcg { "max" } else { "host" };
+                return Ok(Self {
+                    vfio_iommufd: false,
+                    version,
+                    vtd_scalable_property: "x-scalable-mode",
+                    vtd_sva: false,
+                    generic_initiators: false,
+                    amd_dma_remap: false,
+                    la57: false,
+                    aarch64_virt: realizes(
+                        qemu,
+                        &[
+                            "-machine",
+                            AARCH64_MACHINE,
+                            "-accel",
+                            accel_argument,
+                            "-cpu",
+                            cpu,
+                            "-m",
+                            "128",
+                        ],
+                    )?,
+                });
+            }
+        };
         let help = run(qemu, &["-device", "intel-iommu,help"])?;
         let vtd_scalable_property = if help
             .lines()
@@ -170,11 +229,6 @@ impl QemuCaps {
             (Accel::Tcg, Vendor::Intel) => "max,+x2apic,+arat,vendor=GenuineIntel,+la57,enforce",
             (Accel::Tcg, Vendor::Amd) => "EPYC-v4,+la57,enforce",
         };
-        let accel_argument = match accel {
-            Accel::Kvm => "kvm",
-            Accel::Hvf => "hvf",
-            Accel::Tcg => "tcg",
-        };
         let la57 = realizes(
             qemu,
             &[
@@ -206,6 +260,7 @@ impl QemuCaps {
             generic_initiators: version.0 >= 9,
             amd_dma_remap,
             la57,
+            aarch64_virt: false,
         })
     }
 }
@@ -220,15 +275,27 @@ impl HostCaps {
                 .write(true)
                 .open("/dev/kvm")
                 .is_ok();
-        let hvf = cfg!(target_os = "macos") && cfg!(target_arch = "x86_64");
-        Self { vendor, kvm, hvf }
+        let hvf = cfg!(target_os = "macos");
+        Self {
+            arch: GuestArch::host(),
+            vendor,
+            kvm,
+            hvf,
+        }
     }
 
-    /// The accelerator for a machine of `vendor`: hardware only when the
-    /// host's CPU vendor is the IOMMU's (`-cpu host` copies it, and Kore
-    /// checks it against the remapping table), else the translator.
-    pub fn choose(&self, choice: AccelChoice, vendor: Vendor) -> Result<Accel, ProbeError> {
-        let coherent = self.vendor == Some(vendor);
+    /// The accelerator for a machine of `platform`: hardware only when it
+    /// is the host's own instruction set and, on x86, the host's CPU
+    /// vendor is the IOMMU's (`-cpu host` copies it, and Kore checks it
+    /// against the remapping table); else the translator.
+    pub fn choose(&self, choice: AccelChoice, platform: Platform) -> Result<Accel, ProbeError> {
+        let arch = platform.arch();
+        let native = self.arch == Some(arch);
+        let coherent = native
+            && match platform {
+                Platform::X86_64(vendor) => self.vendor == Some(vendor),
+                Platform::Aarch64 => true,
+            };
         match choice {
             AccelChoice::Auto if self.kvm && coherent => Ok(Accel::Kvm),
             AccelChoice::Auto if self.hvf && coherent => Ok(Accel::Hvf),
@@ -237,17 +304,25 @@ impl HostCaps {
                 "KVM was asked for, and /dev/kvm does not open for reading and writing".into(),
             )),
             AccelChoice::Hvf if !self.hvf => Err(ProbeError::Accel(
-                "HVF was asked for, and this is not macOS on an Intel CPU".into(),
+                "HVF was asked for, and this is not macOS".into(),
             )),
-            AccelChoice::Kvm | AccelChoice::Hvf if !coherent => Err(ProbeError::Accel(format!(
-                "hardware acceleration runs the host's own CPU, and Kore checks the CPU \
-                 vendor against the {} IOMMU: use TCG, or the {} profile on this host",
-                vendor.cpuid(),
-                match vendor {
-                    Vendor::Intel => "amd",
-                    Vendor::Amd => "intel",
-                }
+            AccelChoice::Kvm | AccelChoice::Hvf if !native => Err(ProbeError::Accel(format!(
+                "hardware acceleration runs the host's own instruction set: this host runs {} \
+                 and the ISO is {arch}, so use TCG",
+                self.arch.map_or("another architecture", GuestArch::name)
             ))),
+            AccelChoice::Kvm | AccelChoice::Hvf if !coherent => {
+                let vendor = platform.vendor().unwrap_or(Vendor::Intel);
+                Err(ProbeError::Accel(format!(
+                    "hardware acceleration runs the host's own CPU, and Kore checks the CPU \
+                     vendor against the {} IOMMU: use TCG, or the {} profile on this host",
+                    vendor.cpuid(),
+                    match vendor {
+                        Vendor::Intel => "amd",
+                        Vendor::Amd => "intel",
+                    }
+                )))
+            }
             AccelChoice::Kvm => Ok(Accel::Kvm),
             AccelChoice::Hvf => Ok(Accel::Hvf),
         }
@@ -302,33 +377,85 @@ mod tests {
         assert_eq!(parse_version("not qemu"), None);
     }
 
+    const INTEL: Platform = Platform::X86_64(Vendor::Intel);
+    const AMD: Platform = Platform::X86_64(Vendor::Amd);
+
     #[test]
     fn acceleration_keeps_the_vendor_check_coherent() {
         let intel_kvm = HostCaps {
+            arch: Some(GuestArch::X86_64),
             vendor: Some(Vendor::Intel),
             kvm: true,
             hvf: false,
         };
         assert_eq!(
-            intel_kvm.choose(AccelChoice::Auto, Vendor::Intel).unwrap(),
+            intel_kvm.choose(AccelChoice::Auto, INTEL).unwrap(),
             Accel::Kvm
         );
         assert_eq!(
-            intel_kvm.choose(AccelChoice::Auto, Vendor::Amd).unwrap(),
+            intel_kvm.choose(AccelChoice::Auto, AMD).unwrap(),
             Accel::Tcg
         );
-        assert!(intel_kvm.choose(AccelChoice::Kvm, Vendor::Amd).is_err());
-        assert!(intel_kvm.choose(AccelChoice::Hvf, Vendor::Intel).is_err());
+        assert!(intel_kvm.choose(AccelChoice::Kvm, AMD).is_err());
+        assert!(intel_kvm.choose(AccelChoice::Hvf, INTEL).is_err());
+        // An aarch64 ISO on an x86 host runs on the translator only.
+        assert_eq!(
+            intel_kvm
+                .choose(AccelChoice::Auto, Platform::Aarch64)
+                .unwrap(),
+            Accel::Tcg
+        );
+        assert!(
+            intel_kvm
+                .choose(AccelChoice::Kvm, Platform::Aarch64)
+                .is_err()
+        );
         let bare = HostCaps {
+            arch: Some(GuestArch::X86_64),
             vendor: Some(Vendor::Amd),
             kvm: false,
             hvf: false,
         };
-        assert_eq!(
-            bare.choose(AccelChoice::Auto, Vendor::Amd).unwrap(),
-            Accel::Tcg
-        );
-        assert!(bare.choose(AccelChoice::Kvm, Vendor::Amd).is_err());
+        assert_eq!(bare.choose(AccelChoice::Auto, AMD).unwrap(), Accel::Tcg);
+        assert!(bare.choose(AccelChoice::Kvm, AMD).is_err());
         assert_eq!(bare.native_vendor(), Vendor::Amd);
+    }
+
+    #[test]
+    fn apple_silicon_accelerates_aarch64_and_translates_x86() {
+        let mac = HostCaps {
+            arch: Some(GuestArch::Aarch64),
+            vendor: None,
+            kvm: false,
+            hvf: true,
+        };
+        assert_eq!(
+            mac.choose(AccelChoice::Auto, Platform::Aarch64).unwrap(),
+            Accel::Hvf
+        );
+        assert_eq!(
+            mac.choose(AccelChoice::Hvf, Platform::Aarch64).unwrap(),
+            Accel::Hvf
+        );
+        assert_eq!(mac.choose(AccelChoice::Auto, INTEL).unwrap(), Accel::Tcg);
+        let refused = mac.choose(AccelChoice::Hvf, INTEL).unwrap_err().to_string();
+        assert!(
+            refused.contains("runs aarch64 and the ISO is x86_64"),
+            "{refused}"
+        );
+        assert!(mac.choose(AccelChoice::Kvm, Platform::Aarch64).is_err());
+        // An aarch64 Linux host accelerates an aarch64 guest with KVM.
+        let arm_linux = HostCaps {
+            arch: Some(GuestArch::Aarch64),
+            vendor: None,
+            kvm: true,
+            hvf: false,
+        };
+        assert_eq!(
+            arm_linux
+                .choose(AccelChoice::Auto, Platform::Aarch64)
+                .unwrap(),
+            Accel::Kvm
+        );
     }
 }

@@ -1,6 +1,12 @@
 //! Relocatable, release-built QEMU and firmware. Host capability probes still
 //! run: a packaged binary cannot promise KVM permissions or host CPU features.
-use crate::Firmware;
+//!
+//! One bundle may carry an emulator per guest architecture
+//! ([`GuestArch::bundle_files`]); a bundle is asked for one architecture and
+//! must hold that one's emulator and both firmware halves, so a bundle
+//! built before aarch64 guests refuses one in words instead of booting the
+//! wrong firmware.
+use crate::{Firmware, arch::GuestArch};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,9 +17,6 @@ use std::{
 };
 
 const MANIFEST: &str = "bundle.json";
-const BINARY: &str = "bin/qemu-system-x86_64";
-const CODE: &str = "share/qemu/edk2-x86_64-code.fd";
-const VARS: &str = "share/qemu/edk2-i386-vars.fd";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,12 +38,18 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-/// Explicit bundle, installed sibling, then macOS app Resources. Returning a
-/// damaged installation is intentional: preflight must explain it, not silently
-/// substitute a different emulator from PATH.
-pub fn bundled_qemu(executable: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
+/// The `arch` emulator of the explicit bundle, the installed sibling, then
+/// the macOS app's Resources. Returning a damaged installation is
+/// intentional: preflight must explain it, not silently substitute a
+/// different emulator from PATH.
+pub fn bundled_qemu(
+    executable: &Path,
+    explicit: Option<PathBuf>,
+    arch: GuestArch,
+) -> Option<PathBuf> {
+    let binary = arch.bundle_files()[0];
     if let Some(root) = explicit {
-        return Some(root.join(BINARY));
+        return Some(root.join(binary));
     }
     let parent = executable.parent()?;
     [
@@ -49,17 +58,20 @@ pub fn bundled_qemu(executable: &Path, explicit: Option<PathBuf>) -> Option<Path
     ]
     .into_iter()
     .find(|root| root.exists())
-    .map(|root| root.join(BINARY))
+    .map(|root| root.join(binary))
 }
 
 impl Runtime {
-    pub fn for_qemu(qemu: &Path) -> io::Result<Option<Self>> {
+    /// The bundle `qemu` belongs to, verified, for a guest of `arch`; `None`
+    /// when `qemu` is not a bundled emulator.
+    pub fn for_qemu(qemu: &Path, arch: GuestArch) -> io::Result<Option<Self>> {
+        let [binary, code, vars] = arch.bundle_files();
         let Some(root) = qemu.parent().and_then(Path::parent) else {
             return Ok(None);
         };
         let manifest_path = root.join(MANIFEST);
         let explicit = std::env::var_os("VKORE_QEMU_BUNDLE")
-            .is_some_and(|path| PathBuf::from(path).join(BINARY) == qemu);
+            .is_some_and(|path| PathBuf::from(path).join(binary) == qemu);
         if !manifest_path.exists()
             && !explicit
             && root.file_name().is_none_or(|n| n != "qemu-runtime")
@@ -85,9 +97,11 @@ impl Runtime {
                 "QEMU bundle version or host platform is incompatible",
             ));
         }
-        for required in [BINARY, CODE, VARS] {
+        for required in [binary, code, vars] {
             if !manifest.files.contains_key(required) {
-                return Err(invalid(format!("QEMU bundle omits {required}")));
+                return Err(invalid(format!(
+                    "QEMU bundle omits {required}, which {arch} guests need"
+                )));
             }
         }
         let mut total_bytes = 0u64;
@@ -131,8 +145,8 @@ impl Runtime {
         Ok(Some(Self {
             firmware: Firmware {
                 descriptor: Some(manifest_path),
-                code: root.join(CODE),
-                vars_template: root.join(VARS),
+                code: root.join(code),
+                vars_template: root.join(vars),
                 format: "raw".into(),
             },
             data: root.join("share/qemu"),
@@ -143,12 +157,15 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const X86: GuestArch = GuestArch::X86_64;
+
     #[test]
     fn relocated_bundle_is_verified_and_corruption_is_refused() {
+        let [binary, code, _] = X86.bundle_files();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("qemu-runtime");
         let mut files = BTreeMap::new();
-        for name in [BINARY, CODE, VARS] {
+        for name in X86.bundle_files() {
             let path = root.join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, name).unwrap();
@@ -158,16 +175,49 @@ mod tests {
             "host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"files":files});
         fs::write(root.join(MANIFEST), serde_json::to_vec(&value).unwrap()).unwrap();
         assert_eq!(
-            Runtime::for_qemu(&root.join(BINARY))
+            Runtime::for_qemu(&root.join(binary), X86)
                 .unwrap()
                 .unwrap()
                 .firmware
                 .code,
-            root.join(CODE)
+            root.join(code)
         );
-        fs::write(root.join(CODE), "changed").unwrap();
-        assert!(Runtime::for_qemu(&root.join(BINARY)).is_err());
+        // An x86-only bundle has no aarch64 emulator or firmware to offer.
+        let aarch64 = GuestArch::Aarch64.bundle_files()[0];
+        let refused = Runtime::for_qemu(&root.join(aarch64), GuestArch::Aarch64)
+            .err()
+            .unwrap();
+        assert!(
+            refused.to_string().contains("aarch64 guests need"),
+            "{refused}"
+        );
+        fs::write(root.join(code), "changed").unwrap();
+        assert!(Runtime::for_qemu(&root.join(binary), X86).is_err());
         fs::remove_file(root.join(MANIFEST)).unwrap();
-        assert!(Runtime::for_qemu(&root.join(BINARY)).is_err());
+        assert!(Runtime::for_qemu(&root.join(binary), X86).is_err());
+    }
+
+    #[test]
+    fn one_bundle_serves_each_architecture_it_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("qemu-runtime");
+        let mut files = BTreeMap::new();
+        for name in GuestArch::ALL.into_iter().flat_map(GuestArch::bundle_files) {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, name).unwrap();
+            files.insert(name, format!("{:x}", Sha256::digest(name.as_bytes())));
+        }
+        let value = serde_json::json!({"schema":1,"version":"test","source_sha256":"a".repeat(64),
+            "host_os":std::env::consts::OS,"host_arch":std::env::consts::ARCH,"files":files});
+        fs::write(root.join(MANIFEST), serde_json::to_vec(&value).unwrap()).unwrap();
+        for arch in GuestArch::ALL {
+            let [binary, code, vars] = arch.bundle_files();
+            let runtime = Runtime::for_qemu(&root.join(binary), arch)
+                .unwrap()
+                .unwrap();
+            assert_eq!(runtime.firmware.code, root.join(code));
+            assert_eq!(runtime.firmware.vars_template, root.join(vars));
+        }
     }
 }

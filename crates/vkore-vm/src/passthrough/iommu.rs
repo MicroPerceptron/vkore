@@ -331,7 +331,7 @@ mod tests {
             return;
         };
         let qemu = std::path::Path::new(&qemu);
-        let runtime = crate::runtime::Runtime::for_qemu(qemu)
+        let runtime = crate::runtime::Runtime::for_qemu(qemu, crate::GuestArch::X86_64)
             .unwrap()
             .expect("packaged QEMU runtime");
         let mut args = original();

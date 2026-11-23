@@ -52,6 +52,8 @@ impl Requirements {
 
 /// Recommend native waits only when this configuration resolves to pinned KVM.
 /// Explicit saved choices are validated separately and never replaced here.
+/// Native waits are x86's MONITOR/MWAIT, so this asks about an x86 machine;
+/// an aarch64 medium clears the recommendation when the machine is created.
 pub fn recommended_cpu_waits(
     host: &HostResources,
     pin_cpus: bool,
@@ -65,7 +67,9 @@ pub fn recommended_cpu_waits(
             .acceleration
             .choose(
                 accel,
-                vendor.unwrap_or_else(|| host.acceleration.native_vendor()),
+                vkore_vm::Platform::X86_64(
+                    vendor.unwrap_or_else(|| host.acceleration.native_vendor()),
+                ),
             )
             .is_ok_and(|accel| accel == vkore_vm::Accel::Kvm)
 }
@@ -477,6 +481,7 @@ mod tests {
             storage_available_mib: 102400,
             cpu_pinning: true,
             acceleration: vkore_vm::HostCaps {
+                arch: Some(vkore_vm::GuestArch::X86_64),
                 vendor: Some(vkore_vm::Vendor::Intel),
                 kvm: true,
                 hvf: false,

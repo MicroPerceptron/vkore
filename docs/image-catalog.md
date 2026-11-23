@@ -18,7 +18,7 @@ The response has `archives: [...]` and `page: {next, nextUrl}`. Each record maps
 | Archive field | vKore meaning |
 | --- | --- |
 | `id`, `distro`, `version` | Stable ID and display label |
-| `isa`, `variant`, `fileName` | Public x86_64 ISOs with headless/inference or desktop profiles are selectable |
+| `isa`, `variant`, `fileName` | Public `x86_64` and `aarch64` ISOs with headless/inference or desktop profiles are selectable |
 | `requiresAuth` | Authenticated-only entries are omitted until authentication is supported |
 | `url` | Same-origin `/dl/{id}/{fileName}` HTTPS artifact URL |
 | `sha256`, `size` | Required full lowercase SHA-256 and exact nonzero byte count |
@@ -60,7 +60,7 @@ Every image entry requires these fields:
 | `name` | User-facing name, 1–64 printable ASCII characters. |
 | `version` | Release/build label, 1–64 printable ASCII characters. |
 | `profile` | `desktop` or `inference`; describes the image, does not advertise an inference backend. |
-| `architecture` | `x86_64` in v1. This is the guest architecture, not the host architecture. |
+| `architecture` | `x86_64` or `aarch64`: the guest architecture the ISO boots, not the host's. Either runs on any host; only the host's own accelerates (an aarch64 image on Apple silicon or an aarch64 Linux host, an x86_64 image on an x86 host), and the desktop lists those first. |
 | `format` | `iso` in v1, an uncompressed bootable Kore ISO. |
 | `url` | Absolute HTTPS URL, at most 2048 bytes, with a host and no credentials or fragment. No tokens, signed expiring links or secrets may be embedded in releases. |
 | `sha256` | Exactly 64 lowercase hexadecimal characters, the digest of the complete uncompressed ISO. Required. |

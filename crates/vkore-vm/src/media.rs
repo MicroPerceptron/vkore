@@ -9,6 +9,10 @@
 //! words. Every offset and length is checked against the image; directory
 //! extents and the file itself are bounded.
 //!
+//! The same walk answers the medium's architecture: Limine's UEFI stage is
+//! the image's one removable-media boot file (`EFI/BOOT/BOOTX64.EFI` or
+//! `BOOTAA64.EFI`), and only its presence is read, never its bytes.
+//!
 //! No crate was adopted for this: those vetted either drag a FUSE server and
 //! a CLI parser into the library (`cdfs`), read only the lossy primary 8.3
 //! names (`iso9660`), or are pre-release with their own I/O stack
@@ -23,7 +27,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::profile::Paging;
+use crate::{arch::GuestArch, profile::Paging};
 
 const SECTOR: u64 = 2048;
 /// Volume descriptors start at sector 16; a real image has a handful.
@@ -31,6 +35,7 @@ const DESCRIPTOR_LIMIT: u64 = 32;
 const MAX_DIRECTORY_BYTES: u32 = 1 << 20;
 const MAX_CONFIG_BYTES: u32 = 64 << 10;
 const LIMINE_CONF: [&str; 3] = ["boot", "limine", "limine.conf"];
+const EFI_BOOT: [&str; 2] = ["EFI", "BOOT"];
 
 /// A boot medium, inspected.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -39,6 +44,9 @@ pub struct BootMedium {
     pub bytes: u64,
     /// SHA-256 of the whole image, as Kore releases publish it.
     pub sha256: String,
+    /// The instruction set its UEFI boot file is built for, when it has
+    /// exactly one.
+    pub arch: Option<GuestArch>,
     /// The paging mode its Limine configuration names, when it has one.
     pub paging: Option<Paging>,
     /// Whether the image is a console image: its Limine configuration loads
@@ -76,13 +84,14 @@ impl BootMedium {
         let mut hasher = Sha256::new();
         io::copy(&mut file, &mut hasher).map_err(io)?;
         let sha256 = format!("{:x}", hasher.finalize());
-        let config =
-            read_joliet_file(&mut file, bytes, &LIMINE_CONF).map_err(|error| match error {
-                ReadError::Io(error) => io(error),
-                ReadError::Format(message) => {
-                    MediaError::Format(format!("{}: {message}", path.display()))
-                }
-            })?;
+        let failed = |error| match error {
+            ReadError::Io(error) => io(error),
+            ReadError::Format(message) => {
+                MediaError::Format(format!("{}: {message}", path.display()))
+            }
+        };
+        let arch = boot_arch(&mut file, bytes).map_err(failed)?;
+        let config = read_joliet_file(&mut file, bytes, &LIMINE_CONF).map_err(failed)?;
         let text = config.as_deref().map(String::from_utf8_lossy);
         let paging = text.as_deref().and_then(paging_mode);
         let console = text.as_deref().is_some_and(loads_console);
@@ -90,10 +99,42 @@ impl BootMedium {
             path: path.to_path_buf(),
             bytes,
             sha256,
+            arch,
             paging,
             console,
         })
     }
+}
+
+/// The architecture of the medium at `path`, read without digesting it: a
+/// caller choosing an emulator needs this before the (whole-image)
+/// [`BootMedium::inspect`].
+pub fn guest_arch(path: &Path) -> Result<Option<GuestArch>, MediaError> {
+    let io = |error| MediaError::Io(path.to_path_buf(), error);
+    let mut file = File::open(path).map_err(io)?;
+    let bytes = file.metadata().map_err(io)?.len();
+    boot_arch(&mut file, bytes).map_err(|error| match error {
+        ReadError::Io(error) => io(error),
+        ReadError::Format(message) => MediaError::Format(format!("{}: {message}", path.display())),
+    })
+}
+
+/// The architecture whose removable-media boot file the image carries; an
+/// image carrying two is refused rather than guessed between.
+fn boot_arch<R: io::Read + Seek>(image: &mut R, len: u64) -> Result<Option<GuestArch>, ReadError> {
+    let mut found = None;
+    for arch in GuestArch::ALL {
+        let path = [EFI_BOOT[0], EFI_BOOT[1], arch.efi_boot_file()];
+        if find_joliet(image, len, &path)?.is_some_and(|record| !record.directory) {
+            if let Some(other) = found {
+                return Err(format_error(format!(
+                    "the image boots both {other} and {arch} (two EFI/BOOT loaders)"
+                )));
+            }
+            found = Some(arch);
+        }
+    }
+    Ok(found)
 }
 
 /// The `paging_mode` the configuration's entry names.
@@ -195,13 +236,14 @@ fn parse_record(record: &[u8]) -> Result<Record, ReadError> {
     })
 }
 
-/// Read the file at `path` through the image's Joliet tree; `None` when the
-/// image has no Joliet tree or no such file.
-fn read_joliet_file<R: io::Read + Seek>(
+/// The record at `path` in the image's Joliet tree; `None` when the image
+/// has no Joliet tree or no such entry. Names compare ASCII
+/// case-insensitively, as UEFI's own FAT paths do.
+fn find_joliet<R: io::Read + Seek>(
     image: &mut R,
     len: u64,
     path: &[&str],
-) -> Result<Option<Vec<u8>>, ReadError> {
+) -> Result<Option<Record>, ReadError> {
     let mut descriptor = [0u8; SECTOR as usize];
     let mut root = None;
     for index in 0..DESCRIPTOR_LIMIT {
@@ -222,7 +264,7 @@ fn read_joliet_file<R: io::Read + Seek>(
     let Some(mut at) = root else {
         return Ok(None);
     };
-    for (depth, part) in path.iter().enumerate() {
+    for part in path {
         if !at.directory || at.size > MAX_DIRECTORY_BYTES {
             return Err(format_error("a directory larger than an ISO's should be"));
         }
@@ -241,7 +283,7 @@ fn read_joliet_file<R: io::Read + Seek>(
                 .get(offset..offset + record_len)
                 .ok_or_else(|| format_error("a directory record runs past its extent"))?;
             let parsed = parse_record(record)?;
-            if parsed.name == *part {
+            if parsed.name.eq_ignore_ascii_case(part) {
                 found = Some(parsed);
                 break;
             }
@@ -250,18 +292,27 @@ fn read_joliet_file<R: io::Read + Seek>(
         let Some(next) = found else {
             return Ok(None);
         };
-        let last = depth + 1 == path.len();
-        if last {
-            if next.directory || next.size > MAX_CONFIG_BYTES {
-                return Err(format_error("the Limine configuration is not a small file"));
-            }
-            let mut content = vec![0u8; next.size as usize];
-            read_at(image, len, u64::from(next.extent) * SECTOR, &mut content)?;
-            return Ok(Some(content));
-        }
         at = next;
     }
-    Ok(None)
+    Ok(Some(at))
+}
+
+/// Read the file at `path` through the image's Joliet tree; `None` when the
+/// image has no Joliet tree or no such file.
+fn read_joliet_file<R: io::Read + Seek>(
+    image: &mut R,
+    len: u64,
+    path: &[&str],
+) -> Result<Option<Vec<u8>>, ReadError> {
+    let Some(file) = find_joliet(image, len, path)? else {
+        return Ok(None);
+    };
+    if file.directory || file.size > MAX_CONFIG_BYTES {
+        return Err(format_error("the Limine configuration is not a small file"));
+    }
+    let mut content = vec![0u8; file.size as usize];
+    read_at(image, len, u64::from(file.extent) * SECTOR, &mut content)?;
+    Ok(Some(content))
 }
 
 #[cfg(test)]
@@ -293,6 +344,11 @@ mod tests {
     /// A minimal ISO: a primary descriptor, a Joliet descriptor, the
     /// terminator, and `/boot/limine/limine.conf`.
     fn image(config: &[u8]) -> Vec<u8> {
+        image_booting(config, &[])
+    }
+
+    /// [`image`] plus `/EFI/BOOT/<loader>` for each of `loaders`.
+    fn image_booting(config: &[u8], loaders: &[&str]) -> Vec<u8> {
         let sector = SECTOR as usize;
         let mut iso = vec![0u8; 26 * sector];
         let descriptor = |iso: &mut Vec<u8>, index: usize, kind: u8| {
@@ -315,15 +371,31 @@ mod tests {
                 at += entry.len();
             }
         };
-        directory(
-            &mut iso,
-            20,
-            &[
-                record(&[0], 20, 2048, true),
-                record(&[1], 20, 2048, true),
-                record(&ucs2("boot"), 21, 2048, true),
-            ],
-        );
+        let mut root = vec![
+            record(&[0], 20, 2048, true),
+            record(&[1], 20, 2048, true),
+            record(&ucs2("boot"), 21, 2048, true),
+        ];
+        if !loaders.is_empty() {
+            root.push(record(&ucs2("EFI"), 24, 2048, true));
+            let mut boot = vec![record(&[0], 25, 2048, true), record(&[1], 24, 2048, true)];
+            boot.extend(
+                loaders
+                    .iter()
+                    .map(|loader| record(&ucs2(&format!("{loader};1")), 0, 0, false)),
+            );
+            directory(
+                &mut iso,
+                24,
+                &[
+                    record(&[0], 24, 2048, true),
+                    record(&[1], 20, 2048, true),
+                    record(&ucs2("BOOT"), 25, 2048, true),
+                ],
+            );
+            directory(&mut iso, 25, &boot);
+        }
+        directory(&mut iso, 20, &root);
         directory(
             &mut iso,
             21,
@@ -365,6 +437,39 @@ mod tests {
             Some(Paging::FourLevel)
         );
         assert_eq!(paging_mode("kaslr: no"), None);
+    }
+
+    #[test]
+    fn the_architecture_is_the_one_efi_loader_the_image_carries() {
+        let arch = |loaders: &[&str]| {
+            let iso = image_booting(b"paging_mode: 4level\n", loaders);
+            boot_arch(&mut Cursor::new(&iso), iso.len() as u64)
+        };
+        assert_eq!(arch(&[]).ok().flatten(), None);
+        assert_eq!(
+            arch(&["BOOTX64.EFI"]).ok().flatten(),
+            Some(GuestArch::X86_64)
+        );
+        assert_eq!(
+            arch(&["BOOTAA64.EFI"]).ok().flatten(),
+            Some(GuestArch::Aarch64)
+        );
+        // UEFI paths are case-insensitive, and so is the lookup.
+        assert_eq!(
+            arch(&["bootaa64.efi"]).ok().flatten(),
+            Some(GuestArch::Aarch64)
+        );
+        assert!(matches!(
+            arch(&["BOOTX64.EFI", "BOOTAA64.EFI"]),
+            Err(ReadError::Format(_))
+        ));
+        // The configuration still reads beside the loader tree.
+        let iso = image_booting(b"paging_mode: 4level\n", &["BOOTAA64.EFI"]);
+        let config = read_joliet_file(&mut Cursor::new(&iso), iso.len() as u64, &LIMINE_CONF);
+        assert_eq!(
+            config.ok().flatten().as_deref(),
+            Some(&b"paging_mode: 4level\n"[..])
+        );
     }
 
     #[test]
@@ -415,6 +520,17 @@ mod tests {
         std::fs::write(&path, image(b"paging_mode: 4level\n")).unwrap();
         let medium = BootMedium::inspect(&path).unwrap();
         assert_eq!(medium.paging, Some(Paging::FourLevel));
+        assert_eq!(medium.arch, None);
+        std::fs::write(
+            &path,
+            image_booting(b"paging_mode: 4level\n", &["BOOTAA64.EFI"]),
+        )
+        .unwrap();
+        assert_eq!(guest_arch(&path).unwrap(), Some(GuestArch::Aarch64));
+        assert_eq!(
+            BootMedium::inspect(&path).unwrap().arch,
+            Some(GuestArch::Aarch64)
+        );
         assert_eq!(medium.sha256.len(), 64);
         assert_eq!(medium.bytes, 26 * SECTOR);
     }

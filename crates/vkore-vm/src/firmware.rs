@@ -3,7 +3,8 @@
 //! (`docs/interop/firmware.json`), not a list of guessed file names.
 //!
 //! Kore boots through Limine's unsigned EFI image, so the firmware must be
-//! UEFI for x86_64 `q35`, split into executable and variable-store flash
+//! UEFI for the guest's architecture and machine (x86_64 `q35`, aarch64
+//! `virt`), split into executable and variable-store flash
 //! (the machine keeps its own copy of the variables), and must not enforce
 //! Secure Boot, enroll keys, or require SMM. Confidential-computing capability
 //! tags do not activate a confidential guest; that requires machine options.
@@ -14,6 +15,8 @@ use std::{
 };
 
 use serde_json::Value;
+
+use crate::arch::GuestArch;
 
 /// A firmware the machine boots.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -48,8 +51,8 @@ pub fn descriptor_dirs() -> Vec<PathBuf> {
 /// SEV/TDX tags advertise supported modes, not mandatory launch requirements.
 const REFUSED_FEATURES: &[&str] = &["secure-boot", "enrolled-keys", "requires-smm"];
 
-/// The firmware a descriptor names, if a Kore machine can boot it.
-pub fn from_descriptor(path: &Path, descriptor: &Value) -> Option<Firmware> {
+/// The firmware a descriptor names, if a Kore machine of `arch` can boot it.
+pub fn from_descriptor(path: &Path, descriptor: &Value, arch: GuestArch) -> Option<Firmware> {
     let strings = |value: &Value| {
         value
             .as_array()
@@ -75,15 +78,15 @@ pub fn from_descriptor(path: &Path, descriptor: &Value) -> Option<Firmware> {
     if mapping["mode"].as_str().is_some_and(|mode| mode != "split") {
         return None;
     }
-    let targets_q35 = descriptor["targets"].as_array().is_some_and(|targets| {
+    let targets_machine = descriptor["targets"].as_array().is_some_and(|targets| {
         targets.iter().any(|target| {
-            target["architecture"].as_str() == Some("x86_64")
+            target["architecture"].as_str() == Some(arch.name())
                 && strings(&target["machines"])
                     .iter()
-                    .any(|machine| machine.starts_with("pc-q35-"))
+                    .any(|machine| machine.starts_with(arch.firmware_machine_prefix()))
         })
     });
-    if !targets_q35 {
+    if !targets_machine {
         return None;
     }
     let features = strings(&descriptor["features"]);
@@ -112,15 +115,15 @@ pub fn from_descriptor(path: &Path, descriptor: &Value) -> Option<Firmware> {
     })
 }
 
-/// The first bootable firmware the installed descriptors name: descriptors
-/// by file name across the search directories (an earlier directory's file
-/// overriding a later one's of the same name), then the first whose files
-/// exist.
-pub fn discover() -> Option<Firmware> {
-    discover_in(&descriptor_dirs())
+/// The first firmware for `arch` the installed descriptors name:
+/// descriptors by file name across the search directories (an earlier
+/// directory's file overriding a later one's of the same name), then the
+/// first whose files exist.
+pub fn discover(arch: GuestArch) -> Option<Firmware> {
+    discover_in(&descriptor_dirs(), arch)
 }
 
-pub fn discover_in(dirs: &[PathBuf]) -> Option<Firmware> {
+pub fn discover_in(dirs: &[PathBuf], arch: GuestArch) -> Option<Firmware> {
     let mut by_name = std::collections::BTreeMap::new();
     for dir in dirs {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -138,7 +141,7 @@ pub fn discover_in(dirs: &[PathBuf]) -> Option<Firmware> {
     }
     by_name.into_values().find_map(|path| {
         let descriptor = serde_json::from_slice::<Value>(&fs::read(&path).ok()?).ok()?;
-        let firmware = from_descriptor(&path, &descriptor)?;
+        let firmware = from_descriptor(&path, &descriptor, arch)?;
         (firmware.code.is_file() && firmware.vars_template.is_file()).then_some(firmware)
     })
 }
@@ -146,6 +149,8 @@ pub fn discover_in(dirs: &[PathBuf]) -> Option<Firmware> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const X86: GuestArch = GuestArch::X86_64;
 
     fn descriptor(features: &[&str], with_vars: bool) -> Value {
         let mut mapping = serde_json::json!({
@@ -173,6 +178,7 @@ mod tests {
                 &["acpi-s3", "amd-sev", "amd-sev-es", "verbose-dynamic"],
                 true,
             ),
+            X86,
         )
         .unwrap();
         assert_eq!(firmware.code, PathBuf::from("/fw/CODE.fd"));
@@ -180,21 +186,23 @@ mod tests {
         assert_eq!(firmware.format, "raw");
         for refused in ["secure-boot", "requires-smm", "enrolled-keys"] {
             assert!(
-                from_descriptor(path, &descriptor(&[refused], true)).is_none(),
+                from_descriptor(path, &descriptor(&[refused], true), X86).is_none(),
                 "{refused}"
             );
         }
         for capability in ["amd-sev", "amd-sev-es", "amd-sev-snp", "intel-tdx"] {
-            assert!(from_descriptor(path, &descriptor(&[capability], true)).is_some());
+            assert!(from_descriptor(path, &descriptor(&[capability], true), X86).is_some());
             for refused in REFUSED_FEATURES {
-                assert!(from_descriptor(path, &descriptor(&[capability, refused], true)).is_none());
+                assert!(
+                    from_descriptor(path, &descriptor(&[capability, refused], true), X86).is_none()
+                );
             }
         }
         // A stateless image has no variable store to give each machine.
-        assert!(from_descriptor(path, &descriptor(&[], false)).is_none());
+        assert!(from_descriptor(path, &descriptor(&[], false), X86).is_none());
         let mut bios = descriptor(&[], true);
         bios["interface-types"] = serde_json::json!(["bios"]);
-        assert!(from_descriptor(path, &bios).is_none());
+        assert!(from_descriptor(path, &bios, X86).is_none());
     }
 
     #[test]
@@ -215,14 +223,33 @@ mod tests {
             "nvram-template": {"filename": vars, "format": "qcow2"},
         });
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let found = discover_in(&[root.path().to_owned()]).unwrap();
+        let found = discover_in(&[root.path().to_owned()], X86).unwrap();
         assert_eq!(found.descriptor.as_ref(), Some(&path));
         assert_eq!(found.code, code);
         assert_eq!(found.vars_template, vars);
         assert_eq!(found.format, "qcow2");
         value["features"] = serde_json::json!(["amd-sev-es", "enrolled-keys"]);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(discover_in(&[root.path().to_owned()]).is_none());
+        assert!(discover_in(&[root.path().to_owned()], X86).is_none());
+    }
+
+    #[test]
+    fn each_architecture_takes_only_its_own_machine_s_firmware() {
+        let path = Path::new("/d/60-edk2-aarch64.json");
+        // Homebrew's and Debian's AAVMF descriptor, as installed.
+        let mut aavmf = descriptor(&["verbose-static"], true);
+        aavmf["targets"] = serde_json::json!([{"architecture": "aarch64", "machines": ["virt-*"]}]);
+        assert!(from_descriptor(path, &aavmf, GuestArch::Aarch64).is_some());
+        assert!(from_descriptor(path, &aavmf, X86).is_none());
+        assert!(from_descriptor(path, &descriptor(&[], true), GuestArch::Aarch64).is_none());
+        // 32-bit Arm firmware (`60-edk2-arm.json`) never boots an aarch64 Kore.
+        let mut arm = aavmf.clone();
+        arm["targets"] = serde_json::json!([{"architecture": "arm", "machines": ["virt-*"]}]);
+        assert!(from_descriptor(path, &arm, GuestArch::Aarch64).is_none());
+        // Secure Boot is refused on aarch64 exactly as on x86.
+        let mut secure = aavmf;
+        secure["features"] = serde_json::json!(["secure-boot"]);
+        assert!(from_descriptor(path, &secure, GuestArch::Aarch64).is_none());
     }
 
     #[test]
@@ -243,11 +270,11 @@ mod tests {
         };
         write(&low, "50-missing.json", &root.path().join("absent.fd"));
         write(&low, "60-edk2.json", &code);
-        let found = discover_in(&[high.clone(), low.clone()]).unwrap();
+        let found = discover_in(&[high.clone(), low.clone()], X86).unwrap();
         assert_eq!(found.code, code);
         assert_eq!(found.descriptor.unwrap(), low.join("60-edk2.json"));
         // The same name in an earlier directory overrides the later one.
         write(&high, "60-edk2.json", &root.path().join("absent.fd"));
-        assert!(discover_in(&[high, low]).is_none());
+        assert!(discover_in(&[high, low], X86).is_none());
     }
 }

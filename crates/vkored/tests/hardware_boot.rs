@@ -30,7 +30,7 @@ fn minimum_hardware_reserves_a_disk_and_boots_through_the_session() {
     let mut session = Session::start(
         &store,
         "hardware",
-        &PathBuf::from(qemu),
+        Some(PathBuf::from(qemu).as_path()),
         vkore_vm::Display::Headless,
         &mut |event| {
             if let vkored::Event::Console { socket } = event {

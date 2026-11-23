@@ -19,7 +19,8 @@ pub struct Image {
     pub profile: Profile,
     #[serde(default)]
     pub minimum: crate::hardware::Requirements,
-    architecture: String,
+    /// The guest architecture the ISO boots, not the host's.
+    pub(crate) architecture: vkore_vm::GuestArch,
     format: String,
     pub(crate) url: String,
     pub(crate) sha256: String,
@@ -40,6 +41,13 @@ pub enum Profile {
 pub struct Catalog {
     schema_version: u32,
     images: Vec<Image>,
+}
+
+impl Image {
+    /// The guest architecture the image boots.
+    pub fn arch(&self) -> vkore_vm::GuestArch {
+        self.architecture
+    }
 }
 
 impl Catalog {
@@ -75,8 +83,8 @@ impl Catalog {
             if !printable(&image.name) || !printable(&image.version) {
                 return Err("image name/version must be 1 to 64 printable ASCII characters".into());
             }
-            if image.architecture != "x86_64" || image.format != "iso" {
-                return Err("catalog v1 supports x86_64 ISO images only".into());
+            if image.format != "iso" {
+                return Err("catalog v1 supports ISO images only".into());
             }
             let url = url::Url::parse(&image.url).map_err(|_| "invalid image URL")?;
             if image.url.len() > 2048
@@ -123,6 +131,15 @@ impl Catalog {
     pub fn images(&self) -> &[Image] {
         &self.images
     }
+
+    /// The images, those this host can accelerate (its own architecture)
+    /// first, each group in catalogue order.
+    pub fn images_for_host(&self) -> Vec<Image> {
+        let host = vkore_vm::GuestArch::host();
+        let mut images = self.images.clone();
+        images.sort_by_key(|image| Some(image.architecture) != host);
+        images
+    }
     pub fn get(&self, id: &str) -> Option<&Image> {
         self.images.iter().find(|image| image.id == id)
     }
@@ -160,6 +177,22 @@ mod tests {
     }
     fn parse(value: &Value) -> Result<Catalog, String> {
         Catalog::parse(&serde_json::to_vec(value).unwrap())
+    }
+
+    #[test]
+    fn aarch64_images_are_admitted_and_the_host_s_own_come_first() {
+        let mut document = fixture();
+        let mut arm = document["images"][0].clone();
+        arm["id"] = json!("test-desktop-arm");
+        arm["architecture"] = json!("aarch64");
+        document["images"].as_array_mut().unwrap().push(arm);
+        let catalog = parse(&document).unwrap();
+        assert_eq!(catalog.images()[1].arch(), vkore_vm::GuestArch::Aarch64);
+        let ordered = catalog.images_for_host();
+        assert_eq!(ordered.len(), 2);
+        if let Some(host) = vkore_vm::GuestArch::host() {
+            assert_eq!(ordered[0].arch(), host);
+        }
     }
 
     #[test]
@@ -202,7 +235,7 @@ mod tests {
             ("sha256", json!("bad")),
             ("bytes", json!(0)),
             ("bytes", json!(MAX_IMAGE_BYTES + 1)),
-            ("architecture", json!("aarch64")),
+            ("architecture", json!("riscv64")),
             ("format", json!("raw")),
             ("kore_revision", json!("abc")),
             ("dagfs_format_version", json!(0)),

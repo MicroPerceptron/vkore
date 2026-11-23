@@ -1193,7 +1193,8 @@ pub(crate) fn npu_inventory<'a>(
                         ty.body(route.name, 13., theme::TEXT_SECONDARY),
                         ty.badge(route.status.label(), theme::TEXT_MUTED)
                     ]
-                    .spacing(8)
+                    .align_y(alignment::Vertical::Center)
+                    .spacing(ty.size(theme::SPACE_2))
                     .wrap(),
                     ty.body(route.detail, 12., theme::TEXT_MUTED),
                 ]

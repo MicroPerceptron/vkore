@@ -226,13 +226,16 @@ impl Typography {
         label: impl text::IntoFragment<'a>,
         tone: theme::Tone,
     ) -> crate::UiElement<'a> {
+        // Size to the content. Decoration and spacing follow the resolved
+        // label size, so changing fonts or text scale needs no pixel offsets.
+        let em = self.size(12.);
         container(
-            row![self.body("·", 16., tone), self.body(label, 12., tone)]
-                .spacing(5)
+            row![self.body("·", 12., tone), self.body(label, 12., tone)]
+                .spacing(em / 3.)
                 .align_y(alignment::Vertical::Center),
         )
-        .padding([3, 9])
-        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 20.))
+        .padding([em / 4., em * 0.75])
+        .style(move |appearance| theme::panel(appearance, theme::PANEL_FILE, None, em * 2.))
         .into()
     }
 

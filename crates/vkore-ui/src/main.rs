@@ -1035,7 +1035,9 @@ mod tests {
             for (size, scale) in [(Size::new(900., 560.), 1.), (Size::new(1280., 800.), 2.)] {
                 for page in [Page::Machines, Page::Settings] {
                     let content = match page {
-                        Page::Machines => machines::view(&machines, Typography::default()),
+                        Page::Machines => {
+                            machines::view(&machines, Typography::default(), appearance.clone())
+                        }
                         _ => settings::view(theme::Appearance::System, None, &settings),
                     };
                     let element =

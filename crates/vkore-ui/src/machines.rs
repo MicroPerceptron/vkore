@@ -1490,7 +1490,8 @@ fn console_pane<'a>(
                         theme::TEXT_MUTED
                     }
                 )
-            ],
+            ]
+            .align_y(alignment::Vertical::Center),
             crate::console::interactive(console.output(), name, enabled, focused, terminal),
             ty.body(
                 format!("Click to type · Ctrl+Shift+V / Cmd+V to paste · Ctrl+Shift+Esc releases the keyboard · {} × {}", console.output().cols, console.output().rows),

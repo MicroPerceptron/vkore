@@ -68,12 +68,15 @@ from the CLI's explicit `vkore serve --listen` option.
 ## Volumes
 
 Use **Choose image…** for the system file dialog, or **Choose physical disk…**
-on Linux for a list of host disks and partitions with their sizes. You can also
+on Linux for a list of host disks and partitions with their sizes, partition
+names and filesystem labels (when the host reports them). Device paths remain
+visible so similarly named partitions can be distinguished. You can also
 enter a path (a raw image, a Linux block device, or `@NAME`) or use a machine
 button under the field. Opening starts at the volume root; it does not assume
 that a screenshots folder exists. The header shows what is open
-and the volume's generation, which grows with every publication Kore or vKore
-makes.
+and the recovered DagFS format version and generation. Generation grows with
+every publication Kore or vKore makes; format version identifies the recovered
+root, not the version of the app or its current writer.
 
 - **Places.** Terminal 0's and terminal 1's homes, and the volume root. A home
   nothing has written to yet says so; the machine creates it on its first boot.
@@ -98,6 +101,19 @@ A disk a running machine holds cannot be opened; stop the machine first. While
 the browser has a disk open it holds the disk's lock, and another vKore cannot
 open it; a machine started from this window closes the browser first.
 
+Readable disks are identified automatically through Kore's engine without
+writing to them. The chooser distinguishes detected DagFS, blank media, no
+DagFS found, and volumes that could not be verified (including busy or
+unsupported volumes). A host filesystem label or type is descriptive metadata,
+not proof of DagFS. Linux names/types come from one bounded, unprivileged
+`lsblk` query; missing host metadata does not prevent disk selection.
+
+If identification needs permission, **Identify DagFS…** retries those devices
+in one read-only authorization batch. Each probe releases its engine handles
+before the next disk, and a cancelled request preserves the choices. Opening a
+disk still establishes its own authorized browsing session; an identification
+result does not grant continuing access.
+
 ### Linux disk permissions
 
 If a physical disk denies ordinary read access, opening it requests authorization
@@ -116,7 +132,9 @@ block device, verifies the polkit caller and device identity, and keeps the
 engine's shared lock for the session. Its bounded protocol has no disk writes,
 host file paths, or command-execution operations. Exports stream back in 64 KiB
 chunks and are written by the ordinary desktop user using the existing confined,
-non-overwriting exporter. Disconnects release the mount. macOS supports image
+non-overwriting exporter. Disconnects release the mount. The separate `--vkore-volume-identify` entry point verifies the same caller
+and device identities and accepts at most 256 physical devices for read-only
+metadata recovery. macOS supports image
 files; its physical devices are not supported by the current engine.
 
 The native image chooser uses MIT-licensed `rfd` 0.17 with platform FFI confined

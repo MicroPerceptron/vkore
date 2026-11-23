@@ -20,67 +20,6 @@ pub enum DiskKind {
     Device,
 }
 
-/// A host-reported physical disk or partition offered by the desktop chooser.
-/// Discovery never opens it, probes its filesystem, or requests authorization.
-#[derive(Clone, Debug)]
-pub struct PhysicalDisk {
-    pub path: PathBuf,
-    pub description: String,
-    pub bytes: u64,
-}
-
-pub fn physical_disks() -> Result<Vec<PhysicalDisk>, Error> {
-    #[cfg(target_os = "linux")]
-    {
-        let root = Path::new("/sys/class/block");
-        let mut devices = Vec::new();
-        for entry in fs::read_dir(root)
-            .map_err(|error| Error::host(root, error))?
-            .take(256)
-        {
-            let entry = entry.map_err(|error| Error::host(root, error))?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") {
-                continue;
-            }
-            let sys = entry.path();
-            let sectors = fs::read_to_string(sys.join("size"))
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(0);
-            if sectors == 0 {
-                continue;
-            }
-            let path = Path::new("/dev").join(name.as_ref());
-            if !fs::metadata(&path).is_ok_and(|m| m.file_type().is_block_device()) {
-                continue;
-            }
-            let model = fs::read_to_string(sys.join("device/model")).unwrap_or_default();
-            let kind = if sys.join("partition").exists() {
-                "Partition"
-            } else {
-                "Disk"
-            };
-            devices.push(PhysicalDisk {
-                path,
-                description: if model.trim().is_empty() {
-                    kind.into()
-                } else {
-                    format!("{kind} · {}", model.trim())
-                },
-                bytes: sectors.saturating_mul(512),
-            });
-        }
-        devices.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(devices)
-    }
-    #[cfg(not(target_os = "linux"))]
-    Err(Error::Path(
-        "Physical disks are supported on Linux. Choose a disk image on this host.".into(),
-    ))
-}
-
 /// A Kore machine's disk, as the host names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disk {

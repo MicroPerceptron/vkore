@@ -1,4 +1,4 @@
-//! A read-only, one-disk broker. Polkit authorizes the executable, not a
+//! A read-only broker: one-disk browsing or bounded disk identification. Polkit authorizes the executable, not a
 //! generated shell command. No host filenames, writes or shell commands are
 //! accepted after admission. Kore's engine retains the disk lock throughout.
 
@@ -16,10 +16,11 @@ use std::{
 };
 
 const FLAG: &str = "--vkore-volume-reader";
+const IDENTIFY_FLAG: &str = "--vkore-volume-identify";
 const CHUNK: usize = 64 << 10;
 // A walk holds at most MAX_OBJECTS paths, each at most MAX_PATH_DEPTH names.
 const FRAME: usize = 8 << 20;
-const REQUEST: usize = 8 << 10;
+const REQUEST: usize = 64 << 10;
 const WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Serialize, Deserialize)]
@@ -42,7 +43,25 @@ impl Path {
     }
 }
 #[derive(Serialize, Deserialize)]
+struct Target {
+    path: std::path::PathBuf,
+    identity: (u64, u64),
+}
+#[cfg(target_os = "linux")]
+impl Target {
+    fn disk(&self) -> Result<crate::Disk, Error> {
+        let disk = crate::Disk::new(&self.path)?;
+        if disk.kind() != crate::DiskKind::Device || disk.identity() != self.identity {
+            return Err(failure(
+                "The selected physical disk changed. Select it again.",
+            ));
+        }
+        Ok(disk)
+    }
+}
+#[derive(Serialize, Deserialize)]
 enum Request {
+    Identify(Vec<Target>),
     List(Path),
     Walk(Path),
     Head(Path, usize),
@@ -51,6 +70,8 @@ enum Request {
 }
 #[derive(Serialize, Deserialize)]
 enum Response {
+    Admitted,
+    Identified(Vec<crate::DagfsPresence>),
     Ready(MountStatus),
     Listing(Listing),
     Walk(Vec<Walked>),
@@ -309,6 +330,9 @@ fn serve(
             Err(error) => return Err(error),
         };
         let result = match request {
+            Request::Identify(_) => Err(failure(
+                "Identification is only allowed at session admission.",
+            )),
             Request::List(path) => path
                 .checked()
                 .and_then(|p| browser.list(&p))
@@ -354,13 +378,18 @@ fn serve(
 /// Call before starting a desktop event loop. This is a private, read-only
 /// polkit entry point, not a user-facing command or an arbitrary root runner.
 pub fn helper_entry() -> Option<i32> {
-    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new(FLAG)) {
+    let mode = std::env::args_os().nth(1)?;
+    if mode != FLAG && mode != IDENTIFY_FLAG {
         return None;
     }
     #[cfg(target_os = "linux")]
-    let result = admit()
-        .and_then(|disk| Browser::open(&disk))
-        .and_then(|browser| serve(&mut io::stdin().lock(), io::stdout(), browser).map_err(wire));
+    let result = if mode == IDENTIFY_FLAG {
+        identify_entry()
+    } else {
+        admit()
+            .and_then(|disk| Browser::open(&disk))
+            .and_then(|browser| serve(&mut io::stdin().lock(), io::stdout(), browser).map_err(wire))
+    };
     #[cfg(not(target_os = "linux"))]
     let result: Result<(), Error> = Err(failure("Physical disk authorization requires Linux."));
     Some(match result {
@@ -377,19 +406,11 @@ pub fn helper_entry() -> Option<i32> {
 }
 
 #[cfg(target_os = "linux")]
-fn admit() -> Result<crate::Disk, Error> {
+fn admit_caller(parent: u64) -> Result<(), Error> {
     use rustix::process::{geteuid, getppid};
-    let args = std::env::args_os().skip(2).collect::<Vec<_>>();
-    if args.len() != 4 || !geteuid().is_root() {
+    if !geteuid().is_root() {
         return Err(failure("Invalid disk helper invocation."));
     }
-    let number = |i: usize| {
-        args[i]
-            .to_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or_else(|| failure("Invalid disk helper identity."))
-    };
-    let parent = number(3)?;
     let uid: u32 = std::env::var("PKEXEC_UID")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -410,13 +431,91 @@ fn admit() -> Result<crate::Disk, Error> {
     if ids != [uid; 4] {
         return Err(failure("Polkit caller identity does not match."));
     }
-    let disk = crate::Disk::new(&args[0])?;
-    if disk.kind() != crate::DiskKind::Device || disk.identity() != (number(1)?, number(2)?) {
-        return Err(failure(
-            "The selected physical disk changed. Select it again.",
-        ));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn admit() -> Result<crate::Disk, Error> {
+    let args = std::env::args_os().skip(2).collect::<Vec<_>>();
+    if args.len() != 4 {
+        return Err(failure("Invalid disk helper invocation."));
     }
-    Ok(disk)
+    let number = |i: usize| {
+        args[i]
+            .to_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| failure("Invalid disk helper identity."))
+    };
+    admit_caller(number(3)?)?;
+    Target {
+        path: args[0].clone().into(),
+        identity: (number(1)?, number(2)?),
+    }
+    .disk()
+}
+
+#[cfg(target_os = "linux")]
+fn identify_entry() -> Result<(), Error> {
+    let args = std::env::args_os().skip(2).collect::<Vec<_>>();
+    if args.len() != 1 {
+        return Err(failure("Invalid disk identification invocation."));
+    }
+    let parent = args[0]
+        .to_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| failure("Invalid caller identity."))?;
+    admit_caller(parent)?;
+    send(&mut io::stdout(), &Response::Admitted, FRAME).map_err(wire)?;
+    let Request::Identify(targets) = receive(&mut io::stdin().lock(), REQUEST).map_err(wire)?
+    else {
+        return Err(failure("Expected disk identification request."));
+    };
+    if targets.is_empty() || targets.len() > 256 {
+        return Err(failure("Identify between 1 and 256 disks."));
+    }
+    let results = targets
+        .iter()
+        .map(|target| match target.disk() {
+            Ok(disk) => crate::inventory::probe(&disk),
+            Err(error) => crate::DagfsPresence::Unavailable(error.to_string()),
+        })
+        .collect();
+    send(&mut io::stdout(), &Response::Identified(results), FRAME).map_err(wire)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn identify(disks: &[crate::Disk]) -> Result<Vec<crate::DagfsPresence>, Error> {
+    use std::process::{Command, Stdio};
+    if disks.is_empty() || disks.len() > 256 {
+        return Err(failure("Identify between 1 and 256 disks."));
+    }
+    let mut child = Command::new("/usr/bin/pkexec")
+        .arg("--disable-internal-agent")
+        .arg(std::env::current_exe().map_err(wire)?)
+        .arg(IDENTIFY_FLAG)
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| failure(format!("Cannot authorize identification: {error}")))?;
+    let input = child.stdin.take().ok_or(Error::SessionEnded)?;
+    let output = child.stdout.take().ok_or(Error::SessionEnded)?;
+    let mut client = Client::new(input, output, Some(child)).map_err(wire)?;
+    if !matches!(client.next()?, Response::Admitted) {
+        return Err(wire("unexpected admission reply"));
+    }
+    let targets = disks
+        .iter()
+        .map(|disk| Target {
+            path: disk.path().to_owned(),
+            identity: disk.identity(),
+        })
+        .collect();
+    match client.request(&Request::Identify(targets))? {
+        Response::Identified(results) if results.len() == disks.len() => Ok(results),
+        _ => Err(wire("unexpected identification reply")),
+    }
 }
 
 #[cfg(test)]
@@ -461,7 +560,11 @@ mod tests {
         let writer = right.try_clone().unwrap();
         let worker = thread::spawn(move || serve(&mut right, writer, browser).unwrap());
         let mut client = Client::new(left.try_clone().unwrap(), left, None).unwrap();
-        assert!(matches!(client.next().unwrap(), Response::Ready(_)));
+        let Response::Ready(status) = client.next().unwrap() else {
+            panic!("expected mount metadata");
+        };
+        assert_eq!(status.format_version, kore_host::volume::FORMAT_VERSION);
+        assert!(client.request(&Request::Identify(Vec::new())).is_err());
         let remote = Remote(Mutex::new(client));
         assert_eq!(remote.head(&path, 10).unwrap(), vec![b'x'; 10]);
         assert!(remote.head(&path, CHUNK + 1).is_err());

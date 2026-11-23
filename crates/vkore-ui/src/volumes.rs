@@ -37,6 +37,7 @@ pub enum Request {
     },
     PickImage,
     DiscoverDisks,
+    IdentifyDisks(vkore_volume::PhysicalDisks),
     List(VolPath),
     /// A file's summary, from its head; `len` is its length as listed.
     Preview {
@@ -63,11 +64,12 @@ pub enum Reply {
         label: String,
         kind: DiskKind,
         generation: u64,
+        format_version: u32,
         fallback: bool,
         read_only: bool,
     },
     ImagePicked(Option<PathBuf>),
-    Disks(Result<Vec<vkore_volume::PhysicalDisk>, String>),
+    Disks(Result<vkore_volume::PhysicalDisks, String>),
     OpenFailed(String),
     Listed(VolPath, Result<Listing, String>),
     Previewed(VolPath, Result<Summary, String>),
@@ -124,6 +126,12 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
             Request::DiscoverDisks => reply(Reply::Disks(
                 vkore_volume::physical_disks().map_err(|error| error.to_string()),
             )),
+            Request::IdentifyDisks(mut inventory) => {
+                match vkore_volume::identify_disks(&mut inventory) {
+                    Ok(()) => reply(Reply::Disks(Ok(inventory))),
+                    Err(error) => reply(Reply::Disks(Err(error.to_string()))),
+                }
+            }
             Request::Open { disk, label } => {
                 // Release any disk held before taking another.
                 drop(open.take());
@@ -134,6 +142,7 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                             label,
                             kind: disk.kind(),
                             generation: status.generation,
+                            format_version: status.format_version,
                             fallback: status.used_fallback_root,
                             read_only: browser.is_authorized_read_only(),
                         });
@@ -253,6 +262,7 @@ fn reopen(disk: Disk, open: &mut Option<(Disk, Browser)>, reply: &impl Fn(Reply)
                 label: disk.path().display().to_string(),
                 kind: disk.kind(),
                 generation: status.generation,
+                format_version: status.format_version,
                 fallback: status.used_fallback_root,
                 read_only: browser.is_authorized_read_only(),
             });
@@ -354,9 +364,10 @@ pub struct State {
     pub label: Option<String>,
     pub kind: Option<DiskKind>,
     pub generation: u64,
+    pub format_version: Option<u32>,
     pub fallback: bool,
     pub read_only: bool,
-    pub disk_choices: Option<Vec<vkore_volume::PhysicalDisk>>,
+    pub disk_choices: Option<vkore_volume::PhysicalDisks>,
     pub place: Place,
     pub path: Vec<String>,
     pub listing: Option<Listing>,
@@ -383,6 +394,7 @@ impl State {
             label: None,
             kind: None,
             generation: 0,
+            format_version: None,
             fallback: false,
             read_only: false,
             disk_choices: None,
@@ -468,6 +480,7 @@ impl State {
         match Disk::new(&path) {
             Ok(disk) => {
                 self.label = None;
+                self.format_version = None;
                 self.listing = None;
                 self.selected = None;
                 self.summary = None;
@@ -491,12 +504,14 @@ impl State {
                 label,
                 kind,
                 generation,
+                format_version,
                 fallback,
                 read_only,
             } => {
                 self.label = Some(label);
                 self.kind = Some(kind);
                 self.generation = generation;
+                self.format_version = Some(format_version);
                 self.fallback = fallback;
                 self.read_only = read_only || fallback;
                 self.status = format!("generation {generation}");
@@ -508,12 +523,16 @@ impl State {
                 }
             }
             Reply::Disks(result) => match result {
-                Ok(disks) => self.disk_choices = Some(disks),
+                Ok(disks) => {
+                    self.disk_choices = Some(disks);
+                    self.status.clear();
+                }
                 Err(error) => self.status = error,
             },
             Reply::OpenFailed(error) => {
                 self.held = None;
                 self.label = None;
+                self.format_version = None;
                 self.listing = None;
                 self.selected = None;
                 self.summary = None;
@@ -544,6 +563,7 @@ impl State {
             Reply::Closed => {
                 self.held = None;
                 self.label = None;
+                self.format_version = None;
                 self.listing = None;
                 self.summary = None;
                 self.selected = None;
@@ -565,6 +585,7 @@ impl State {
             && !matches!(
                 &message,
                 VolumeMessage::ChooseDisk
+                    | VolumeMessage::IdentifyDisks
                     | VolumeMessage::CancelDisk
                     | VolumeMessage::SelectDisk(_)
             )
@@ -574,6 +595,12 @@ impl State {
         match message {
             VolumeMessage::PickImage => self.send(Request::PickImage),
             VolumeMessage::ChooseDisk => self.send(Request::DiscoverDisks),
+            VolumeMessage::IdentifyDisks => {
+                if let Some(inventory) = self.disk_choices.clone() {
+                    self.status = "Identifying DagFS volumes…".into();
+                    self.send(Request::IdentifyDisks(inventory));
+                }
+            }
             VolumeMessage::CancelDisk => self.disk_choices = None,
             VolumeMessage::SelectDisk(path) => {
                 self.open_path(path.clone(), path.display().to_string())
@@ -675,6 +702,7 @@ pub enum VolumeMessage {
     DiskInput(String),
     PickImage,
     ChooseDisk,
+    IdentifyDisks,
     SelectDisk(PathBuf),
     CancelDisk,
     Open,
@@ -706,52 +734,121 @@ fn wrap(message: VolumeMessage) -> Message {
 /// The browser.
 pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElement<'a> {
     let page = content(state, machines, ty);
-    let Some(disks) = &state.disk_choices else {
+    let Some(inventory) = &state.disk_choices else {
         return page;
     };
     let mut choices = column![].spacing(theme::SPACE_2);
-    for disk in disks {
+    for disk in &inventory.disks {
+        let mut details = column![
+            ty.data(
+                disk.name()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| disk.path.display().to_string()),
+                theme::TEXT
+            ),
+        ]
+        .spacing(theme::SPACE_1);
+        if disk.name().is_some() {
+            details = details.push(ty.data(disk.path.display().to_string(), theme::TEXT_SECONDARY));
+        }
+        details = details.push(ty.data(
+            format!(
+                "{} · {:.1} GiB",
+                disk.description,
+                disk.bytes as f64 / (1u64 << 30) as f64
+            ),
+            theme::TEXT_MUTED,
+        ));
+        if let Some(label) = &disk.host.label
+            && Some(label.as_str()) != disk.name()
+        {
+            details =
+                details.push(ty.data(format!("Filesystem label: {label}"), theme::TEXT_MUTED));
+        }
+        if let Some(kind) = &disk.host.fstype {
+            let version = disk
+                .host
+                .fsver
+                .as_ref()
+                .map(|v| format!(" · version {v}"))
+                .unwrap_or_default();
+            details =
+                details.push(ty.data(format!("Host reports: {kind}{version}"), theme::TEXT_MUTED));
+        }
+        let (description, tone) = match &disk.dagfs {
+            vkore_volume::DagfsPresence::Detected(status) => (
+                format!(
+                    "DagFS v{} · generation {}{}",
+                    status.format_version,
+                    status.generation,
+                    if status.used_fallback_root {
+                        " · fallback root"
+                    } else {
+                        ""
+                    }
+                ),
+                theme::SUCCESS,
+            ),
+            vkore_volume::DagfsPresence::NeedsAuthorization => (
+                "DagFS unknown · authorize identification".into(),
+                theme::TEXT_MUTED,
+            ),
+            vkore_volume::DagfsPresence::Blank => {
+                ("Blank volume · no DagFS yet".into(), theme::TEXT_MUTED)
+            }
+            vkore_volume::DagfsPresence::NotDetected => {
+                ("DagFS not detected".into(), theme::TEXT_MUTED)
+            }
+            vkore_volume::DagfsPresence::Unavailable(reason) => {
+                (format!("DagFS unverified · {reason}"), theme::WARNING)
+            }
+        };
+        details = details.push(ty.data(description, tone));
         choices = choices.push(
-            button(
-                column![
-                    ty.data(disk.path.display().to_string(), theme::TEXT),
-                    ty.data(
-                        format!(
-                            "{} · {:.1} GiB",
-                            disk.description,
-                            disk.bytes as f64 / (1u64 << 30) as f64
-                        ),
-                        theme::TEXT_MUTED
-                    ),
-                ]
-                .spacing(theme::SPACE_1),
-            )
-            .width(Length::Fill)
-            .padding(12)
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press(wrap(VolumeMessage::SelectDisk(disk.path.clone()))),
+            button(details)
+                .width(Length::Fill)
+                .padding(12)
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    (!state.busy).then(|| wrap(VolumeMessage::SelectDisk(disk.path.clone()))),
+                ),
         );
     }
-    if disks.is_empty() {
+    if inventory.disks.is_empty() {
         choices = choices.push(ty.body(
             "No physical disks were reported by this host.",
             theme::SIZE_SM,
             theme::TEXT_MUTED,
         ));
     }
+    let blocked = inventory
+        .disks
+        .iter()
+        .any(|disk| disk.dagfs == vkore_volume::DagfsPresence::NeedsAuthorization);
+    let mut notes = column![].spacing(theme::SPACE_1);
+    if let Some(warning) = &inventory.metadata_warning {
+        notes = notes.push(ty.data(warning, theme::WARNING));
+    }
+    if !state.status.is_empty() {
+        notes = notes.push(ty.data(&state.status, theme::TEXT_SECONDARY));
+    }
     let panel = container(column![
         ty.body("Choose a physical disk", 20.0, theme::TEXT),
         ty.body("Stop any machine using the disk first. Access is read-only; Linux may ask you to authorize it.", theme::SIZE_SM, theme::TEXT_SECONDARY),
         widgets::scroll(choices).height(Length::Fill),
+        notes,
         row![
+            button(ty.control("Identify DagFS…")).padding([8, 14]).height(ty.control_height())
+                .style(widgets::button_style(widgets::Button::Primary))
+                .on_press_maybe((!state.busy && blocked).then(|| wrap(VolumeMessage::IdentifyDisks))),
             button(ty.control("Refresh")).padding([8, 14]).height(ty.control_height())
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::ChooseDisk))),
             button(ty.control("Cancel")).padding([8, 14]).height(ty.control_height())
                 .style(widgets::button_style(widgets::Button::Secondary))
                 .on_press(wrap(VolumeMessage::CancelDisk)),
-        ].spacing(theme::SPACE_2),
-    ].spacing(theme::SPACE_2)).padding(24).width(Length::Fill.max(640))
+        ].spacing(theme::SPACE_2).wrap(),
+    ].spacing(theme::SPACE_2)).padding(24).width(Length::Fill.max(680))
         .height(Length::Fill.max(520)).style(widgets::card);
     iced_widget::stack![
         page,
@@ -837,7 +934,11 @@ fn content<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiEleme
     let header = row![
         ty.data(
             format!(
-                "{label} · {kind} · generation {}{}",
+                "{label} · {kind} · DagFS {} · generation {}{}",
+                state
+                    .format_version
+                    .map(|version| format!("v{version}"))
+                    .unwrap_or_else(|| "version unknown".into()),
                 state.generation,
                 if state.fallback {
                     " · fallback root: read-only"
@@ -1161,6 +1262,25 @@ mod tests {
         state.update(VolumeMessage::Remove, |_| None);
         assert!(!state.confirm_remove);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn identification_is_available_in_the_chooser_and_cancelled_auth_keeps_choices() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = State::new(sender);
+        state.disk_choices = Some(vkore_volume::PhysicalDisks::default());
+        state.update(VolumeMessage::IdentifyDisks, |_| None);
+        assert!(state.busy);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            Request::IdentifyDisks(_)
+        ));
+        state.reply(Reply::Disks(Err("Authorization cancelled".into())));
+        assert!(!state.busy);
+        assert!(state.disk_choices.is_some());
+        assert_eq!(state.status, "Authorization cancelled");
+        state.update(VolumeMessage::CancelDisk, |_| None);
+        assert!(state.disk_choices.is_none());
     }
 
     #[test]

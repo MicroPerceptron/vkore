@@ -52,6 +52,8 @@ pub enum Listing {
 /// What recovery found when the volume was mounted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountStatus {
+    /// Format version of the recovered root, supplied by Kore's engine.
+    pub format_version: u32,
     /// The root generation the mount reads.
     pub generation: u64,
     /// Recovery took the fallback root: Kore itself keeps this volume
@@ -105,6 +107,7 @@ impl Browser {
                     let status = mount.status();
                     // A browser that stopped waiting is no reason to fail.
                     let _ = ready.send(MountStatus {
+                        format_version: status.format_version,
                         generation: status.generation,
                         used_fallback_root: status.used_fallback_root,
                     });

@@ -76,7 +76,7 @@ pub fn create_official(
     if !config::valid_name(image_id) {
         return Err("select an available official image".into());
     }
-    let catalog = crate::catalog::fetch(cancelled)?;
+    let catalog = crate::catalog::fetch_with_account(cancelled, &store.account)?;
     let image = catalog
         .get(image_id)
         .ok_or("select an available official image")?;
@@ -218,21 +218,10 @@ fn download(
             Err(error) => return Err(format!("cached image: {error}")),
         }
     }
-    let tls =
-        native_tls::TlsConnector::new().map_err(|e| format!("Cannot initialize HTTPS: {e}"))?;
-    let agent = ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(tls))
-        .https_only(true)
-        .redirects(5)
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(15))
-        .timeout(Duration::from_secs(3600))
-        .build();
-    // Do not include a possibly signed download URL in error messages.
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|_| "image download failed (HTTPS, connection or HTTP status)")?;
+    let request = store.account.download_request(url)?;
+    check_cancelled(cancelled)?;
+    let response = request.call()
+        .map_err(|_| "Image download refused or interrupted. Sign in and review the current agreement in Settings > Account.")?;
     if response.status() != 200 {
         return Err("image download did not return a complete image (HTTP 200)".into());
     }
@@ -429,6 +418,23 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &first.path).unwrap();
         assert!(import(None).is_err());
         assert!(!dir.path().join("elsewhere").exists());
+    }
+
+    #[test]
+    fn unauthenticated_remote_import_never_stages_bytes_or_creates_a_machine() {
+        let root = tempfile::tempdir().unwrap();
+        let store = MachineStore::new(crate::State::open(root.path()).unwrap());
+        let result = create(
+            &store,
+            MachineConfig::new("blocked", "/pending"),
+            "https://dev.microperceptron.com/dl/release/image.iso",
+            None,
+            &AtomicBool::new(false),
+            |_| panic!("unauthorized transfer started"),
+        );
+        assert!(result.unwrap_err().contains("sign-in"));
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(fs::read_dir(root.path().join("images")).unwrap().count(), 0);
     }
 
     #[test]

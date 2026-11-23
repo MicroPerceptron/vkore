@@ -111,6 +111,9 @@ enum WritebackArg {
 
 #[derive(Args)]
 struct CreateArgs {
+    /// Sign in in a browser and accept the image agreement before downloading
+    #[arg(long)]
+    sign_in: bool,
     name: String,
     /// A local Kore x86_64 ISO or an HTTPS download link
     #[arg(long, required_unless_present = "image", conflicts_with = "image")]
@@ -411,6 +414,7 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
             Ok(ExitCode::SUCCESS)
         }
         MachineCommand::Create(arguments) => {
+            let sign_in = arguments.sign_in;
             let source = arguments.iso.clone();
             let image = arguments.image.clone();
             let digest = arguments.sha256.clone();
@@ -419,6 +423,16 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
             let signal = cancelled.clone();
             ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
                 .map_err(|e| e.to_string())?;
+            let account = vkored::account::Account::default();
+            if sign_in {
+                account.sign_in(&cancelled, |challenge| {
+                    eprintln!(
+                        "Open {} and enter code {}. Review and accept the agreement there.",
+                        challenge.url, challenge.code
+                    );
+                })?;
+            }
+            let store = store.with_account(account);
             let progress = |progress: vkored::images::Progress| {
                 eprintln!(
                     "{}: {} MiB{}",

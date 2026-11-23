@@ -29,6 +29,7 @@ pub enum SettingsMessage {
 /// server; `port` is the saved choice for its next start, and `port_input`
 /// is the uncommitted field. The runtime still owns listener policy/lifecycle.
 pub struct State {
+    pub account: crate::account::State,
     pub typography: Typography,
     typography_error: String,
     root: PathBuf,
@@ -55,6 +56,7 @@ impl State {
             ),
         };
         Self {
+            account: Default::default(),
             typography,
             typography_error,
             root,
@@ -381,7 +383,11 @@ fn panels(
     } else {
         column![appearance, api].spacing(theme::SPACE_6).into()
     };
-    widgets::scroll(content).height(Length::Fill).into()
+    widgets::scroll(
+        column![crate::account::view(&state.account, ty), content].spacing(theme::SPACE_6),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 fn typography_controls(state: &State) -> UiElement<'_> {

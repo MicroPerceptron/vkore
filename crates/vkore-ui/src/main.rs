@@ -1,11 +1,12 @@
 //! vKore's native desktop: Kore machines, and their DagFS volumes browsed
 //! from the host through Kore's own engine. Rendered with Iced over Axiom's
-//! software rasterizer; no browser, no daemon, no login.
+//! software rasterizer. Accounts are optional and authorize image downloads.
 
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;
 
+mod account;
 mod console;
 mod fonts;
 mod hardware;
@@ -76,6 +77,7 @@ pub enum Message {
     Show(Page),
     Appearance(theme::Appearance),
     Settings(settings::SettingsMessage),
+    Account(account::Action),
     Volume(volumes::VolumeMessage),
     Machine(machines::MachineMessage),
 }
@@ -91,6 +93,7 @@ pub enum Page {
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    Account(account::Reply),
     SystemTheme(Option<bool>),
     Volume(volumes::Reply),
     Machine(String, machines::Update),
@@ -121,6 +124,7 @@ impl Model {
             return;
         }
         match message {
+            Message::Account(action) => self.settings.account.update(action, &self.proxy),
             Message::Settings(message) => self.settings.update(message),
             Message::Appearance(appearance) => {
                 self.appearance = appearance;
@@ -167,6 +171,11 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            UserEvent::Account(reply) => {
+                if self.settings.account.reply(reply) {
+                    self.machines.refresh_images(self.proxy.clone());
+                }
+            }
             UserEvent::SystemTheme(dark) => self.system_dark = dark,
             UserEvent::Volume(reply) => {
                 let closed = matches!(reply, volumes::Reply::Closed);
@@ -781,6 +790,7 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
+    model.machines.account = model.settings.account.account.clone();
     model.machines.refresh_images(model.proxy.clone());
     if let Some(disk) = options.disk {
         let machines = &model.machines;
@@ -965,6 +975,7 @@ mod tests {
             assert!(bounds.get("page-content").is_some());
         }
         if snapshot == Some("settings") {
+            assert!(bounds.get("settings-account").is_some());
             assert!(bounds.get("settings-appearance").is_some());
             assert!(bounds.get("settings-api").is_some());
         }
@@ -1015,6 +1026,38 @@ mod tests {
             }
         }
         (frame.glyph_runs().len(), renderer.take_text_errors())
+    }
+
+    #[test]
+    fn account_authorization_renders_at_compact_and_wide_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = settings::State::new(root.path().to_owned());
+        for pending in [false, true] {
+            if pending {
+                settings.account.preview_sign_in();
+            }
+            for (width, height) in [(900., 560.), (1760., 1000.)] {
+                for appearance in [Theme::Light, Theme::Dark] {
+                    let content = settings::view(theme::Appearance::System, None, &settings);
+                    let content = container(row![
+                        sidebar(Page::Settings, 0, "", settings.typography),
+                        content
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                    .into();
+                    let (_, refused) = draw_at_scale(
+                        content,
+                        Size::new(width, height),
+                        &appearance,
+                        1.,
+                        Some("settings"),
+                    );
+                    assert!(refused.is_empty(), "{refused:?}");
+                }
+            }
+        }
     }
 
     #[test]

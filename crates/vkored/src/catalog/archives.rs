@@ -1,9 +1,8 @@
-//! Adapter for the configured first-party archive service. No API key is sent.
+//! Adapter for the configured first-party archive service. Authentication is optional for metadata.
 use super::*;
 use std::{
     io::Read,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 
 pub const ARCHIVES_URL: &str = "https://dev.microperceptron.com/api/v1/archives";
@@ -32,7 +31,8 @@ struct Archive {
     size: u64,
     sha256: String,
     url: String,
-    requires_auth: bool,
+    #[serde(rename = "requiresAuth")]
+    _requires_auth: bool,
     #[serde(default)]
     minimum: crate::hardware::Requirements,
     kore_revision: Option<String>,
@@ -58,19 +58,16 @@ fn url(value: &str) -> Result<url::Url, String> {
 }
 
 pub fn fetch(cancelled: &AtomicBool) -> Result<Catalog, String> {
-    let tls =
-        native_tls::TlsConnector::new().map_err(|e| format!("Cannot initialize HTTPS: {e}"))?;
-    let agent = ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(tls))
-        .https_only(true)
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build();
+    fetch_with_account(cancelled, &crate::account::Account::default())
+}
+
+pub fn fetch_with_account(
+    cancelled: &AtomicBool,
+    account: &crate::account::Account,
+) -> Result<Catalog, String> {
     collect(cancelled, |address, budget| {
-        let response = agent.get(address).set("Accept", "application/json").call()
-            .map_err(|_| "Cannot load official images. Check your connection and refresh; the archive service must allow anonymous access.")?;
+        let response = account.catalog_request(address)?.call()
+            .map_err(|_| "Cannot load official images. Check your connection and refresh; sign in for restricted images.")?;
         if response.status() != 200 {
             return Err("Archive metadata did not return HTTP 200".into());
         }
@@ -112,10 +109,7 @@ fn collect(
                 return Err("Archive IDs must be valid and unique, with at most 64 entries".into());
             }
             // The service may host other products/architectures and private builds.
-            if archive.requires_auth
-                || archive.isa != "x86_64"
-                || !archive.file_name.ends_with(".iso")
-            {
+            if archive.isa != "x86_64" || !archive.file_name.ends_with(".iso") {
                 continue;
             }
             let profile = match archive.variant.as_str() {
@@ -195,11 +189,10 @@ mod tests {
         assert_eq!(image.profile, Profile::Inference);
         assert_eq!(image.minimum, Default::default());
         assert!(image.kore_revision.is_none() && image.dagfs_format_version.is_none());
-        for (field, value) in [
-            ("requiresAuth", json!(true)),
-            ("isa", json!("aarch64")),
-            ("variant", json!("unknown")),
-        ] {
+        let mut protected = page();
+        protected["archives"][0]["requiresAuth"] = json!(true);
+        assert_eq!(parse(&protected).unwrap().images().len(), 1);
+        for (field, value) in [("isa", json!("aarch64")), ("variant", json!("unknown"))] {
             let mut doc = page();
             doc["archives"][0][field] = value;
             assert!(parse(&doc).unwrap().images().is_empty());

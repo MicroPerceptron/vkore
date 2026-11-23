@@ -4291,7 +4291,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vkore-addon-sdk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "serde",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-devices"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libloading",
  "objc2 0.6.5",
@@ -4316,7 +4316,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-git-addon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "serde_json",
@@ -4326,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-gmail-addon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "blake3",
@@ -4339,7 +4339,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-packages"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-policy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "serde",
@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-reference-addon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "serde_json",
@@ -4375,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-ui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axcomp",
  "axgfx",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-vm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ctrlc",
  "kvm-bindings",
@@ -4421,7 +4421,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-volume"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "vkored"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "clap",

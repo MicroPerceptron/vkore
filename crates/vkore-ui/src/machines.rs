@@ -109,6 +109,7 @@ pub struct Finished {
 
 /// Machines, and the form that creates one.
 pub struct State {
+    pub account: vkored::account::Account,
     pub state_root: PathBuf,
     pub host: Result<vkore_vm::hardware::HostResources, String>,
     pub form_hardware: crate::hardware::Draft,
@@ -169,6 +170,7 @@ impl State {
         let host = vkore_vm::hardware::HostResources::probe(&state_root);
         let form_hardware = crate::hardware::Draft::new(host.as_ref().ok(), Default::default());
         let mut state = Self {
+            account: Default::default(),
             host,
             form_hardware,
             edit_hardware: None,
@@ -429,10 +431,11 @@ impl State {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let signal = cancel.clone();
+        let account = self.account.clone();
         match thread::Builder::new()
             .name("vkore-image-catalog".into())
             .spawn(move || {
-                let result = vkored::catalog::fetch(&signal);
+                let result = vkored::catalog::fetch_with_account(&signal, &account);
                 let _ =
                     proxy.send_event(UserEvent::Machine(String::new(), Update::Catalog(result)));
             }) {
@@ -464,6 +467,7 @@ impl State {
             return;
         }
         self.image_menu_open = false;
+        let account = self.account.clone();
         let Some(image_id) = self
             .selected_image
             .clone()
@@ -525,7 +529,7 @@ impl State {
                             let _ = proxy.send_event(UserEvent::Machine(name.clone(), update));
                         };
                         let outcome = VkoreState::open(root)
-                            .map(MachineStore::new)
+                            .map(|state| MachineStore::new(state).with_account(account))
                             .map_err(|e| e.to_string())
                             .and_then(|store| {
                                 vkored::images::create_official(
@@ -1107,6 +1111,7 @@ fn view_sized(
     let mut form = column![
         ty.body("Create a machine", 18., theme::TEXT),
         ty.body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
+        crate::account::download_hint(ty),
         ty.label("Machine name", theme::TEXT_MUTED),
         text_input("e.g. inference", &state.form_name)
             .on_input_maybe(

@@ -1,8 +1,8 @@
 //! The MicroPerceptron mark.
 //!
-//! The published asset is an SVG of eighteen filled shapes. The display list
-//! carries no images and no SVG, but it does carry the geometry lane, and
-//! zeno parses SVG path data directly -- so the mark is drawn as paths rather
+//! The published asset is an SVG of eighteen filled shapes. The mark uses
+//! the display list's geometry lane: zeno parses SVG path data directly,
+//! so the mark is drawn as paths rather
 //! than rasterized elsewhere and blitted. It stays sharp at any size for the
 //! same reason the topology edges do.
 //!

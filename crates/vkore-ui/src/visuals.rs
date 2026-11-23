@@ -9,6 +9,9 @@ pub enum Icon {
     Volume,
     Settings,
     Terminal,
+    Account,
+    Collapse,
+    Expand,
 }
 
 struct Glyph(Icon, theme::Tone);
@@ -39,6 +42,27 @@ impl canvas::Program<Message, Theme, AxUi> for Glyph {
             );
         };
         match self.0 {
+            Icon::Account => {
+                line(&[
+                    (3., 21.),
+                    (3., 18.),
+                    (6., 15.),
+                    (18., 15.),
+                    (21., 18.),
+                    (21., 21.),
+                ]);
+                frame.stroke(&Path::circle(Point::new(12., 7.), 4.), ink);
+            }
+            Icon::Collapse | Icon::Expand => {
+                line(&[(3., 4.), (21., 4.), (21., 20.), (3., 20.), (3., 4.)]);
+                line(&[(9., 4.), (9., 20.)]);
+                let (tip, end) = if matches!(self.0, Icon::Collapse) {
+                    (13., 17.)
+                } else {
+                    (17., 13.)
+                };
+                line(&[(end, 8.), (tip, 12.), (end, 16.)]);
+            }
             Icon::Machine => {
                 line(&[(3., 4.), (21., 4.), (21., 17.), (3., 17.), (3., 4.)]);
                 line(&[(12., 17.), (12., 21.)]);

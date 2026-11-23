@@ -135,6 +135,34 @@ fn open_browser(url: &str) -> Result<(), String> {
         Err(_) => Err("Could not open the browser. Open dev.microperceptron.com/download-account?device=1 and enter the code below.".into()),
     }
 }
+/// Display-only summary. Download authorization remains in vkored and the server.
+#[derive(Default)]
+pub struct Preview {
+    pub email: Option<String>,
+    pub pending: bool,
+}
+impl State {
+    pub fn preview(&self) -> Preview {
+        Preview {
+            email: self.account.status().map(|status| status.email),
+            pending: self.busy,
+        }
+    }
+}
+
+pub fn page(state: &State, ty: Typography) -> UiElement<'_> {
+    widgets::page_frame(
+        column![
+            ty.page_header(
+                "Account",
+                "Manage your sign-in and image download agreement."
+            ),
+            widgets::scroll(column![view(state, ty)]).height(Length::Fill),
+        ]
+        .spacing(theme::SPACE_6),
+    )
+}
+
 pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     let control = |label, action| {
         button(ty.control(label))
@@ -143,7 +171,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             .on_press(Message::Account(action))
     };
     let mut content = column![
-        ty.body("Account", 18., theme::TEXT),
+        ty.body("Image downloads", 18., theme::TEXT),
         ty.body(
             "Optional for your workspace. Required to download official images.",
             14.,
@@ -168,7 +196,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     } else if !state.busy {
         content = content
             .push(ty.badge("Not signed in", theme::TEXT_MUTED))
-            .push(control("Sign in with Google", Action::SignIn));
+            .push(crate::google_sign_in::button(ty));
     }
     if let Some(challenge) = &state.challenge {
         content = content
@@ -198,7 +226,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     }
     content = content.push(ty.body("Local images, running machines, volumes and the local API remain available offline. Credentials are not saved to disk.", 12., theme::TEXT_MUTED));
     container(content)
-        .id("settings-account")
+        .id("account-details")
         .padding(24)
         .width(Length::Fill)
         .style(widgets::card)
@@ -208,6 +236,6 @@ pub fn download_hint(ty: Typography) -> UiElement<'static> {
     button(ty.control("Account · Sign in for downloads"))
         .padding([8, 12])
         .style(widgets::button_style(widgets::Button::Secondary))
-        .on_press(Message::Show(Page::Settings))
+        .on_press(Message::Show(Page::Account))
         .into()
 }

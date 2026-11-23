@@ -7,10 +7,14 @@ work; catalog metadata is never download authorization.
 
 ## Using an account
 
-Open **Settings → Account → Sign in with Google**. The browser opens the
+Open the **Account widget at the bottom left → Sign in with Google**. The browser opens the
 first-party service. Enter the code displayed in vKore, sign in with a verified
 Google account, read the agreement and explicitly confirm review and acceptance.
-The Account card shows the server's acceptance version and timestamp. Review
+The sidebar previews the current account (or the local workspace when signed out).
+The navigation can collapse to an icon rail; hover for labels and the full account address.
+Appearance and Local API controls remain in Settings.
+
+The Account page shows the server's acceptance version and timestamp. Review
 agreement starts a new authorization, so changed terms can be accepted there.
 Sign-out discards the local credential even when the server is unreachable.
 

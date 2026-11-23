@@ -4390,6 +4390,7 @@ dependencies = [
  "iced_widget",
  "iced_winit",
  "mundy",
+ "png",
  "softbuffer",
  "tempfile",
  "ttf-parser",

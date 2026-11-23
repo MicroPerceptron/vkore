@@ -29,7 +29,9 @@ pub fn view<'a>(
     let tip = |content: UiElement<'a>, label: UiElement<'a>| -> UiElement<'a> {
         tooltip(
             content,
-            container(label).padding(8).style(widgets::card),
+            // Iced supplies an unbounded viewport to tooltip contents. Keep
+            // text clips finite, as required by Axiom's display-list contract.
+            container(label).padding(8).style(widgets::card).clip(true),
             tooltip::Position::Right,
         )
         .gap(10)

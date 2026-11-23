@@ -887,6 +887,26 @@ mod tests {
         scale: f32,
         snapshot: Option<&str>,
     ) -> (usize, Vec<axui_iced::TextError>) {
+        draw_interactive(
+            element,
+            size,
+            appearance,
+            scale,
+            snapshot,
+            mouse::Cursor::Unavailable,
+            &[],
+        )
+    }
+
+    fn draw_interactive(
+        element: UiElement<'_>,
+        size: Size,
+        appearance: &Theme,
+        scale: f32,
+        snapshot: Option<&str>,
+        cursor: mouse::Cursor,
+        events: &[iced_core::Event],
+    ) -> (usize, Vec<axui_iced::TextError>) {
         fonts::register().expect("MONOLITH faces register");
         let mut renderer = native_renderer();
         renderer.hint(Scale {
@@ -896,13 +916,15 @@ mod tests {
         renderer.reset(iced_core::Rectangle::with_size(size));
         let mut interface =
             UserInterface::build(element, size, user_interface::Cache::new(), &mut renderer);
+        let mut events = events.to_vec();
+        events.push(iced_core::Event::Window(
+            iced_core::window::Event::RedrawRequested(Instant::now()),
+        ));
         let _ = interface.update(
             &iced_core::window::Headless,
             &shell::Waker::noop(),
-            &[iced_core::Event::Window(
-                iced_core::window::Event::RedrawRequested(Instant::now()),
-            )],
-            mouse::Cursor::Unavailable,
+            &events,
+            cursor,
             &mut renderer,
             &mut shell::Bus::new(),
         );
@@ -912,7 +934,7 @@ mod tests {
             &renderer::Style {
                 text_color: theme::color(appearance, theme::TEXT),
             },
-            mouse::Cursor::Unavailable,
+            cursor,
         );
         let mut bounds = LayoutBounds::default();
         interface.operate(&renderer, &mut bounds);
@@ -926,6 +948,7 @@ mod tests {
         }
         bounds.check();
         let frame = renderer.take_frame().expect("a frame");
+        axgfx::frame_requirements(frame.view()).expect("desktop accepts the display list");
         assert!(renderer.take_geometry_errors().is_empty());
         assert!(renderer.take_image_errors().is_empty());
         // Optional artifact from the actual desktop renderer for visual QA on
@@ -975,10 +998,81 @@ mod tests {
     }
 
     #[test]
+    fn scrollbars_reserve_a_gutter_and_pages_render_after_scrolling() {
+        fonts::register().unwrap();
+        let mut renderer = native_renderer();
+        let content = container(
+            widgets::scroll(
+                container(text("Tall content"))
+                    .id("scroll-content")
+                    .width(Length::Fill)
+                    .height(1200),
+            )
+            .height(Length::Fill),
+        )
+        .id("scroll-viewport")
+        .width(360)
+        .height(500);
+        let mut interface = UserInterface::build(
+            content,
+            Size::new(360., 500.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = LayoutBounds::default();
+        interface.operate(&renderer, &mut bounds);
+        let viewport = bounds.get("scroll-viewport").unwrap();
+        let content = bounds.get("scroll-content").unwrap();
+        assert!(
+            viewport.x + viewport.width - content.x - content.width >= 12.,
+            "scrollbar overlaps content: {viewport:?}, {content:?}"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let machines = machines::State::new(root.path().to_owned());
+        let settings = settings::State::new(root.path().to_owned());
+        for appearance in [Theme::Light, Theme::Dark] {
+            for (size, scale) in [(Size::new(900., 560.), 1.), (Size::new(1280., 800.), 2.)] {
+                for page in [Page::Machines, Page::Settings] {
+                    let content = match page {
+                        Page::Machines => machines::view(&machines, Typography::default()),
+                        _ => settings::view(theme::Appearance::System, None, &settings),
+                    };
+                    let element =
+                        container(row![sidebar(page, 0, "", Typography::default()), content])
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(|appearance| {
+                                theme::panel(appearance, theme::BACKGROUND, None, 0.)
+                            })
+                            .into();
+                    let (_, refused) = draw_interactive(
+                        element,
+                        size,
+                        &appearance,
+                        scale,
+                        Some(if page == Page::Machines {
+                            "machines-scrolled"
+                        } else {
+                            "settings-scrolled"
+                        }),
+                        mouse::Cursor::Available(iced_core::Point::new(400., 300.)),
+                        &[iced_core::Event::Mouse(mouse::Event::WheelScrolled {
+                            delta: mouse::ScrollDelta::Lines { x: 0., y: -4. },
+                        })],
+                    );
+                    assert!(refused.is_empty(), "{refused:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn navigation_buttons_work_in_both_modes() {
         fonts::register().unwrap();
         for collapsed in [false, true] {
             let mut renderer = native_renderer();
+            renderer.reset(iced_core::Rectangle::with_size(Size::new(900., 560.)));
             let content = navigation::view(
                 Page::Machines,
                 0,
@@ -1010,6 +1104,19 @@ mod tests {
                     &mut renderer,
                     &mut messages,
                 );
+                interface.operate(&renderer, &mut LayoutBounds::default());
+                interface.draw(
+                    &mut renderer,
+                    &Theme::Light,
+                    &renderer::Style {
+                        text_color: theme::color(&Theme::Light, theme::TEXT),
+                    },
+                    mouse::Cursor::Available(center),
+                );
+                let frame = renderer.take_frame().unwrap();
+                axgfx::frame_requirements(frame.view())
+                    .expect("desktop accepts the hovered navigation");
+                renderer.reset(iced_core::Rectangle::with_size(Size::new(900., 560.)));
                 let messages: Vec<_> = messages.into_iter().collect();
                 assert_eq!(messages.len(), 1, "{id}: {messages:?}");
                 assert!(matches!(

@@ -8,7 +8,7 @@ login) and shares its state with the `vkore` command line.
 vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]
 ```
 
-`--open` lands on that disk's screenshots; `--state` is the same directory the
+`--open` lands at that volume's root; `--state` is the same directory the
 command line uses.
 
 The sidebar groups Machines and Volumes, with Settings at the bottom. Shared
@@ -67,8 +67,11 @@ from the CLI's explicit `vkore serve --listen` option.
 
 ## Volumes
 
-Open a disk by typing it (a raw image, a block device on Linux, or `@NAME`) or
-with one of the machine buttons under the field. The header shows what is open
+Use **Choose image…** for the system file dialog, or **Choose physical disk…**
+on Linux for a list of host disks and partitions with their sizes. You can also
+enter a path (a raw image, a Linux block device, or `@NAME`) or use a machine
+button under the field. Opening starts at the volume root; it does not assume
+that a screenshots folder exists. The header shows what is open
 and the volume's generation, which grows with every publication Kore or vKore
 makes.
 
@@ -94,6 +97,32 @@ makes.
 A disk a running machine holds cannot be opened; stop the machine first. While
 the browser has a disk open it holds the disk's lock, and another vKore cannot
 open it; a machine started from this window closes the browser first.
+
+### Linux disk permissions
+
+If a physical disk denies ordinary read access, opening it requests authorization
+through the desktop polkit agent (`pkexec`). The main desktop stays unprivileged;
+no permissions or ownership are changed. Cancelling leaves the disk closed.
+Polkit and a running desktop authentication agent are required for this path.
+
+An authorized session is **read-only**: browse, preview, open in a host viewer,
+and export. Import and Remove are disabled in both the UI and worker. Close the
+volume to release authorization and its disk lock. Normal writable image-file
+sessions retain their existing Import and Remove actions. This feature is a
+browser through Kore's engine, not an OS filesystem mount.
+
+The private `--vkore-volume-reader` entry point admits only the selected Linux
+block device, verifies the polkit caller and device identity, and keeps the
+engine's shared lock for the session. Its bounded protocol has no disk writes,
+host file paths, or command-execution operations. Exports stream back in 64 KiB
+chunks and are written by the ordinary desktop user using the existing confined,
+non-overwriting exporter. Disconnects release the mount. macOS supports image
+files; its physical devices are not supported by the current engine.
+
+The native image chooser uses MIT-licensed `rfd` 0.17 with platform FFI confined
+to that dependency. Linux uses the XDG desktop portal (with its runtime desktop
+backend, or Zenity fallback), without adding a GTK development-library dependency.
+The chooser does not infer a volume format or bypass Kore's validation.
 
 ## Machines
 
@@ -133,8 +162,8 @@ machine stops.
    that exists.
 2. Stop the machine once Kore has saved the capture: it writes it a few seconds
    after the press (up to ten under TCG), and a stop does not wait for one
-   still being written. The Volumes page reopens the disk on the screenshots,
-   newest last by name (names are UTC times).
+   still being written. The Volumes page reopens the volume root. Choose **Terminal 0**,
+   then `pictures/screenshots`; captures are sorted by their UTC names.
 3. Select a capture to read its record; **Save** it, or **Open** it in your
    image viewer.
 

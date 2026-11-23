@@ -641,6 +641,9 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
 }
 
 fn main() {
+    if let Some(code) = vkore_volume::helper_entry() {
+        std::process::exit(code);
+    }
     if let Some(code) = vkore_vm::passthrough::helper_entry() {
         std::process::exit(code);
     }
@@ -1967,6 +1970,7 @@ mod tests {
             kind: DiskKind::Image,
             generation: 173,
             fallback: false,
+            read_only: false,
         });
         let here = state.here().expect("the screenshots folder");
         let names = [
@@ -2019,6 +2023,45 @@ mod tests {
         ));
         state.status = GUEST_TEXT.into();
         (state, worker)
+    }
+
+    #[test]
+    fn volume_choosers_render_at_small_and_large_sizes() {
+        for size in [Size::new(760.0, 600.0), Size::new(1280.0, 800.0)] {
+            for light in [true, false] {
+                let appearance = if light { Theme::Light } else { Theme::Dark };
+                let (sender, _receiver) = mpsc::channel();
+                let mut state = volumes::State::new(sender);
+                let (_, errors) = draw_at_scale(
+                    volumes::view(&state, &[], Typography::default()),
+                    size,
+                    &appearance,
+                    1.0,
+                    Some("volume-open"),
+                );
+                assert!(errors.is_empty());
+                state.disk_choices = Some(vec![
+                    vkore_volume::PhysicalDisk {
+                        path: "/dev/nvme0n1p5".into(),
+                        description: "Partition · Kore workspace".into(),
+                        bytes: 256 << 30,
+                    },
+                    vkore_volume::PhysicalDisk {
+                        path: "/dev/sdb".into(),
+                        description: "Disk · USB storage".into(),
+                        bytes: 64 << 30,
+                    },
+                ]);
+                let (_, errors) = draw_at_scale(
+                    volumes::view(&state, &[], Typography::default()),
+                    size,
+                    &appearance,
+                    1.0,
+                    Some("volume-disks"),
+                );
+                assert!(errors.is_empty());
+            }
+        }
     }
 
     #[test]

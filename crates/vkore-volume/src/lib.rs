@@ -35,14 +35,16 @@ mod disk;
 mod error;
 mod path;
 pub mod preview;
+mod privileged;
 mod transfer;
 pub mod workspace;
 
 pub use browse::{Browser, Entry, EntryKind, Listing, MountStatus, Walked};
-pub use disk::{Disk, DiskKind};
+pub use disk::{Disk, DiskKind, PhysicalDisk, physical_disks};
 pub use error::Error;
 pub use path::{Place, VolPath};
 pub use preview::{Capture, Preview};
+pub use privileged::helper_entry;
 pub use transfer::{ExportOptions, Exported, Installed, Removed};
 
 /// The volume bounds Kore's engine enforces, checked before anything is

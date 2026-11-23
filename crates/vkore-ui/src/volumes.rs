@@ -35,6 +35,8 @@ pub enum Request {
         disk: Disk,
         label: String,
     },
+    PickImage,
+    DiscoverDisks,
     List(VolPath),
     /// A file's summary, from its head; `len` is its length as listed.
     Preview {
@@ -62,7 +64,11 @@ pub enum Reply {
         kind: DiskKind,
         generation: u64,
         fallback: bool,
+        read_only: bool,
     },
+    ImagePicked(Option<PathBuf>),
+    Disks(Result<Vec<vkore_volume::PhysicalDisk>, String>),
+    OpenFailed(String),
     Listed(VolPath, Result<Listing, String>),
     Previewed(VolPath, Result<Summary, String>),
     Done(String),
@@ -107,10 +113,21 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
     let mut open: Option<(Disk, Browser)> = None;
     while let Ok(request) = requests.recv() {
         match request {
+            Request::PickImage => {
+                let path = rfd::FileDialog::new()
+                    .set_title("Open a Kore disk image")
+                    .add_filter("Disk images", &["raw", "img", "disk"])
+                    .add_filter("All files", &["*"])
+                    .pick_file();
+                reply(Reply::ImagePicked(path));
+            }
+            Request::DiscoverDisks => reply(Reply::Disks(
+                vkore_volume::physical_disks().map_err(|error| error.to_string()),
+            )),
             Request::Open { disk, label } => {
                 // Release any disk held before taking another.
                 drop(open.take());
-                match Browser::open(&disk) {
+                match Browser::open_with_authorization(&disk) {
                     Ok(browser) => {
                         let status = browser.status();
                         reply(Reply::Opened {
@@ -118,16 +135,17 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                             kind: disk.kind(),
                             generation: status.generation,
                             fallback: status.used_fallback_root,
+                            read_only: browser.is_authorized_read_only(),
                         });
                         open = Some((disk, browser));
                     }
-                    Err(error) if error.is_blank() => reply(Reply::Failed(format!(
+                    Err(error) if error.is_blank() => reply(Reply::OpenFailed(format!(
                         "{label}: a blank disk — its machine formats it at first boot"
                     ))),
-                    Err(error) if error.is_in_use() => reply(Reply::Failed(format!(
+                    Err(error) if error.is_in_use() => reply(Reply::OpenFailed(format!(
                         "{label}: in use — a machine is running on it; stop it first"
                     ))),
-                    Err(error) => reply(Reply::Failed(format!("{label}: {error}"))),
+                    Err(error) => reply(Reply::OpenFailed(format!("{label}: {error}"))),
                 }
             }
             Request::List(path) => {
@@ -181,6 +199,11 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                 let Some((disk, browser)) = open.take() else {
                     continue;
                 };
+                if browser.is_authorized_read_only() || browser.status().used_fallback_root {
+                    reply(Reply::Failed("This volume is open read-only.".into()));
+                    open = Some((disk, browser));
+                    continue;
+                }
                 // The browser's lock must close before the engine writes.
                 drop(browser);
                 let outcome = disk.install(&source, &destination, false);
@@ -199,6 +222,11 @@ fn worker(requests: mpsc::Receiver<Request>, proxy: EventLoopProxy<UserEvent>) {
                 let Some((disk, browser)) = open.take() else {
                     continue;
                 };
+                if browser.is_authorized_read_only() || browser.status().used_fallback_root {
+                    reply(Reply::Failed("This volume is open read-only.".into()));
+                    open = Some((disk, browser));
+                    continue;
+                }
                 drop(browser);
                 reply(match disk.remove(&path) {
                     Ok(removed) => Reply::Done(format!(
@@ -226,10 +254,11 @@ fn reopen(disk: Disk, open: &mut Option<(Disk, Browser)>, reply: &impl Fn(Reply)
                 kind: disk.kind(),
                 generation: status.generation,
                 fallback: status.used_fallback_root,
+                read_only: browser.is_authorized_read_only(),
             });
             *open = Some((disk, browser));
         }
-        Err(error) => reply(Reply::Failed(error.to_string())),
+        Err(error) => reply(Reply::OpenFailed(error.to_string())),
     }
 }
 
@@ -326,6 +355,8 @@ pub struct State {
     pub kind: Option<DiskKind>,
     pub generation: u64,
     pub fallback: bool,
+    pub read_only: bool,
+    pub disk_choices: Option<Vec<vkore_volume::PhysicalDisk>>,
     pub place: Place,
     pub path: Vec<String>,
     pub listing: Option<Listing>,
@@ -353,8 +384,10 @@ impl State {
             kind: None,
             generation: 0,
             fallback: false,
-            place: Place::Home(0),
-            path: vec!["pictures".into(), "screenshots".into()],
+            read_only: false,
+            disk_choices: None,
+            place: Place::Root,
+            path: Vec::new(),
             listing: None,
             selected: None,
             summary: None,
@@ -397,7 +430,10 @@ impl State {
 
     pub fn send(&mut self, request: Request) {
         self.busy = true;
-        let _ = self.requests.send(request);
+        if self.requests.send(request).is_err() {
+            self.busy = false;
+            self.status = "The volume worker stopped. Restart vKore to reconnect.".into();
+        }
     }
 
     pub fn list(&mut self) {
@@ -411,6 +447,9 @@ impl State {
 
     /// Open `input`: a path, or `@machine` for a machine's own disk.
     pub fn open(&mut self, input: &str, machine_disk: impl Fn(&str) -> Option<PathBuf>) {
+        if self.busy {
+            return;
+        }
         let input = input.trim();
         let path = match input.strip_prefix('@') {
             Some(machine) => match machine_disk(machine) {
@@ -422,14 +461,24 @@ impl State {
             },
             None => PathBuf::from(input),
         };
+        self.open_path(path, input.to_owned());
+    }
+
+    fn open_path(&mut self, path: PathBuf, label: String) {
         match Disk::new(&path) {
             Ok(disk) => {
+                self.label = None;
+                self.listing = None;
+                self.selected = None;
+                self.summary = None;
+                self.disk_choices = None;
+                self.place = Place::Root;
+                self.path.clear();
+                self.status =
+                    "Opening volume… Disk access may require system authorization.".into();
                 self.held = Some(canonical(&path));
-                self.disk_input = input.to_owned();
-                self.send(Request::Open {
-                    disk,
-                    label: input.to_owned(),
-                });
+                self.disk_input = label.clone();
+                self.send(Request::Open { disk, label });
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -443,13 +492,33 @@ impl State {
                 kind,
                 generation,
                 fallback,
+                read_only,
             } => {
                 self.label = Some(label);
                 self.kind = Some(kind);
                 self.generation = generation;
                 self.fallback = fallback;
+                self.read_only = read_only || fallback;
                 self.status = format!("generation {generation}");
                 self.list();
+            }
+            Reply::ImagePicked(path) => {
+                if let Some(path) = path {
+                    self.open_path(path.clone(), path.display().to_string());
+                }
+            }
+            Reply::Disks(result) => match result {
+                Ok(disks) => self.disk_choices = Some(disks),
+                Err(error) => self.status = error,
+            },
+            Reply::OpenFailed(error) => {
+                self.held = None;
+                self.label = None;
+                self.listing = None;
+                self.selected = None;
+                self.summary = None;
+                self.read_only = false;
+                self.status = error;
             }
             Reply::Listed(path, listing) => {
                 if Some(&path) != self.here().as_ref() {
@@ -476,6 +545,9 @@ impl State {
                 self.held = None;
                 self.label = None;
                 self.listing = None;
+                self.summary = None;
+                self.selected = None;
+                self.read_only = false;
                 self.status = "closed".into();
             }
         }
@@ -486,7 +558,26 @@ impl State {
         message: VolumeMessage,
         machine_disk: impl Fn(&str) -> Option<PathBuf>,
     ) {
+        if self.busy {
+            return;
+        }
+        if self.disk_choices.is_some()
+            && !matches!(
+                &message,
+                VolumeMessage::ChooseDisk
+                    | VolumeMessage::CancelDisk
+                    | VolumeMessage::SelectDisk(_)
+            )
+        {
+            return;
+        }
         match message {
+            VolumeMessage::PickImage => self.send(Request::PickImage),
+            VolumeMessage::ChooseDisk => self.send(Request::DiscoverDisks),
+            VolumeMessage::CancelDisk => self.disk_choices = None,
+            VolumeMessage::SelectDisk(path) => {
+                self.open_path(path.clone(), path.display().to_string())
+            }
             VolumeMessage::DiskInput(value) => self.disk_input = value,
             VolumeMessage::Open => {
                 let input = self.disk_input.clone();
@@ -542,6 +633,8 @@ impl State {
                     self.send(Request::View(path));
                 }
             }
+            VolumeMessage::Import if self.read_only => {}
+            VolumeMessage::Remove if self.read_only => {}
             VolumeMessage::Import => {
                 let source = PathBuf::from(self.import_input.trim());
                 let Some(name) = source
@@ -580,6 +673,10 @@ impl State {
 #[derive(Debug, Clone)]
 pub enum VolumeMessage {
     DiskInput(String),
+    PickImage,
+    ChooseDisk,
+    SelectDisk(PathBuf),
+    CancelDisk,
     Open,
     Close,
     Place(Place),
@@ -608,6 +705,74 @@ fn wrap(message: VolumeMessage) -> Message {
 
 /// The browser.
 pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElement<'a> {
+    let page = content(state, machines, ty);
+    let Some(disks) = &state.disk_choices else {
+        return page;
+    };
+    let mut choices = column![].spacing(theme::SPACE_2);
+    for disk in disks {
+        choices = choices.push(
+            button(
+                column![
+                    ty.data(disk.path.display().to_string(), theme::TEXT),
+                    ty.data(
+                        format!(
+                            "{} · {:.1} GiB",
+                            disk.description,
+                            disk.bytes as f64 / (1u64 << 30) as f64
+                        ),
+                        theme::TEXT_MUTED
+                    ),
+                ]
+                .spacing(theme::SPACE_1),
+            )
+            .width(Length::Fill)
+            .padding(12)
+            .style(widgets::button_style(widgets::Button::Secondary))
+            .on_press(wrap(VolumeMessage::SelectDisk(disk.path.clone()))),
+        );
+    }
+    if disks.is_empty() {
+        choices = choices.push(ty.body(
+            "No physical disks were reported by this host.",
+            theme::SIZE_SM,
+            theme::TEXT_MUTED,
+        ));
+    }
+    let panel = container(column![
+        ty.body("Choose a physical disk", 20.0, theme::TEXT),
+        ty.body("Stop any machine using the disk first. Access is read-only; Linux may ask you to authorize it.", theme::SIZE_SM, theme::TEXT_SECONDARY),
+        widgets::scroll(choices).height(Length::Fill),
+        row![
+            button(ty.control("Refresh")).padding([8, 14]).height(ty.control_height())
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::ChooseDisk))),
+            button(ty.control("Cancel")).padding([8, 14]).height(ty.control_height())
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(wrap(VolumeMessage::CancelDisk)),
+        ].spacing(theme::SPACE_2),
+    ].spacing(theme::SPACE_2)).padding(24).width(Length::Fill.max(640))
+        .height(Length::Fill.max(520)).style(widgets::card);
+    iced_widget::stack![
+        page,
+        iced_widget::opaque(
+            container(panel)
+                .style(|appearance| container::Style {
+                    background: Some(iced_core::Background::Color(iced_core::Color {
+                        a: 0.92,
+                        ..theme::color(appearance, theme::BACKGROUND)
+                    })),
+                    ..container::Style::default()
+                })
+                .padding(24)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        )
+    ]
+    .into()
+}
+
+fn content<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElement<'a> {
     let open_row = row![
         text_input(
             "/path/to/disk.raw, /dev/nvme0n1p5, or @machine",
@@ -643,6 +808,15 @@ pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElem
                 "Your files, closer to Kore",
                 "Browse a stopped machine's volume, inspect captures and move project files between Kore and this computer.")).height(240),
             ty.label("Disk image, device or machine", theme::TEXT_MUTED),
+            row![
+                button(ty.control("Choose image…"))
+                    .padding([8, 14]).style(widgets::button_style(widgets::Button::Primary))
+                    .on_press_maybe((!state.busy).then(|| wrap(VolumeMessage::PickImage))),
+                button(ty.control("Choose physical disk…"))
+                    .padding([8, 14]).style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press_maybe((!state.busy && cfg!(target_os = "linux")).then(|| wrap(VolumeMessage::ChooseDisk))),
+            ].spacing(theme::SPACE_2).wrap(),
+            ty.body("Or enter a path below. Physical disks can be browsed and exported read-only.", theme::SIZE_SM, theme::TEXT_MUTED),
             open_row, quick,
             ty.data(state.status.as_str(), theme::TEXT_MUTED),
         ].spacing(16)).padding(24).width(Length::Fill.max(760)).style(widgets::card);
@@ -667,6 +841,8 @@ pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElem
                 state.generation,
                 if state.fallback {
                     " · fallback root: read-only"
+                } else if state.read_only {
+                    " · authorized read-only"
                 } else {
                     ""
                 }
@@ -801,7 +977,7 @@ pub fn view<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiElem
             .padding([8, 14])
             .style(widgets::button_style(widgets::Button::Secondary))
             .on_press_maybe(
-                (!state.busy && matches!(state.place, Place::Home(_)))
+                (!state.busy && !state.read_only && matches!(state.place, Place::Home(_)))
                     .then(|| wrap(VolumeMessage::Import))
             ),
     ]
@@ -939,7 +1115,7 @@ fn detail_pane(state: &State, ty: Typography) -> UiElement<'_> {
         .padding([6, 12])
         .style(widgets::button_style(widgets::Button::Danger))
         .on_press_maybe(
-            (!state.busy && matches!(state.place, Place::Home(_)))
+            (!state.busy && !state.read_only && matches!(state.place, Place::Home(_)))
                 .then(|| wrap(VolumeMessage::Remove)),
         ),
     ]
@@ -948,4 +1124,52 @@ fn detail_pane(state: &State, ty: Typography) -> UiElement<'_> {
         .spacing(theme::SPACE_2)
         .height(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_starts_at_root_and_failure_releases_ui_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Disk::create_image(dir.path().join("disk.raw"), 16 << 20).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let mut state = State::new(sender);
+        state.path = vec!["missing".into()];
+        state.open_path(disk.path().to_owned(), "chosen disk".into());
+        assert!(matches!(receiver.recv().unwrap(), Request::Open { .. }));
+        assert_eq!(state.here(), Some(VolPath::root()));
+        assert!(state.holds(disk.path()));
+        state.reply(Reply::OpenFailed("Authorization cancelled".into()));
+        assert!(!state.busy && !state.holds(disk.path()));
+        assert!(state.label.is_none() && state.listing.is_none());
+    }
+
+    #[test]
+    fn cancelling_picker_keeps_session_and_read_only_blocks_keyboard_writes() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = State::new(sender);
+        state.label = Some("existing disk".into());
+        state.reply(Reply::ImagePicked(None));
+        assert_eq!(state.label.as_deref(), Some("existing disk"));
+        assert!(receiver.try_recv().is_err());
+        state.read_only = true;
+        state.place = Place::Home(0);
+        state.import_input = "/tmp/source".into();
+        state.update(VolumeMessage::Import, |_| None);
+        state.update(VolumeMessage::Remove, |_| None);
+        assert!(!state.confirm_remove);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_opening_disk_cannot_queue_a_second_open() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = State::new(sender);
+        state.busy = true;
+        state.update(VolumeMessage::Open, |_| None);
+        state.update(VolumeMessage::PickImage, |_| None);
+        assert!(receiver.try_recv().is_err());
+    }
 }

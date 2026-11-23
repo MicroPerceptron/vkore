@@ -1162,10 +1162,11 @@ fn view_sized(
         ty.label("Hardware", theme::TEXT_MUTED),
         ty.data(
             format!(
-                "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk",
+                "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk · {}",
                 state.form_hardware.cpus,
                 f64::from(state.form_hardware.memory_mib) / 1024.,
-                state.form_hardware.disk_mib as f64 / 1024.
+                state.form_hardware.disk_mib as f64 / 1024.,
+                state.form_hardware.resources.network.label(),
             ),
             theme::TEXT_SECONDARY
         ),
@@ -1392,7 +1393,7 @@ fn view_sized(
                         "off"
                     },
                     config.resources.pages.label()
-                ) + &passthrough_summary(&config.resources),
+                ) + &topology_summary(&config.resources),
                 theme::TEXT_MUTED,
             ));
             let finished = state.finished.get(&config.name);
@@ -1520,9 +1521,8 @@ fn console_pane<'a>(
         .into()
 }
 
-/// The overview's note of the host NPUs a machine holds while it runs, empty
-/// when it passes none through.
-fn passthrough_summary(resources: &vkore_vm::hardware::Resources) -> String {
+/// The guest layout, network mode, and accelerator assignments.
+fn topology_summary(resources: &vkore_vm::hardware::Resources) -> String {
     let mut devices: Vec<_> = resources
         .passthrough
         .iter()
@@ -1538,10 +1538,11 @@ fn passthrough_summary(resources: &vkore_vm::hardware::Resources) -> String {
         vkore_vm::hardware::GuestNuma::Single => "1 NUMA node",
         vkore_vm::hardware::GuestNuma::Split => "2 NUMA nodes",
     };
+    let network = resources.network.label();
     if devices.is_empty() {
-        format!(" · {layout}")
+        format!(" · {layout} · {network}")
     } else {
-        format!(" · {layout} · {}", devices.join(", "))
+        format!(" · {layout} · {network} · {}", devices.join(", "))
     }
 }
 

@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use vkore_vm::{
     Accel, BootMedium, Display, HostCaps, Machine, MachineSpec, Paging, QemuCaps, Stage, Vendor,
-    firmware, machine::private_vars,
+    firmware,
+    hardware::{GuestNuma, NetworkMode},
+    machine::private_vars,
 };
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -51,11 +53,15 @@ fn a_real_kore_iso_names_its_paging_mode() {
 /// shell and the seeded store, then stops the machine.
 #[test]
 fn a_real_kore_iso_boots_to_ready() {
-    boot_to_ready(vkore_vm::hardware::GuestNuma::Split, false);
+    boot_to_ready(GuestNuma::Split, false, NetworkMode::Isolated);
 }
 #[test]
 fn a_real_kore_iso_boots_with_one_memory_node() {
-    boot_to_ready(vkore_vm::hardware::GuestNuma::Single, false);
+    boot_to_ready(GuestNuma::Single, false, NetworkMode::Isolated);
+}
+#[test]
+fn a_real_kore_iso_boots_with_shared_e1000e() {
+    boot_to_ready(GuestNuma::Single, false, NetworkMode::E1000e);
 }
 /// Opt in separately: this changes host idle behavior and requires native KVM.
 #[test]
@@ -66,13 +72,13 @@ fn a_real_kore_iso_boots_with_native_cpu_waits() {
     }
     vkore_vm::cpu_pm::available()
         .expect("native CPU waits must be supported when explicitly requested");
-    boot_to_ready(vkore_vm::hardware::GuestNuma::Single, true);
+    boot_to_ready(GuestNuma::Single, true, NetworkMode::Isolated);
 }
-fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma, cpu_pm: bool) {
+fn boot_to_ready(topology: GuestNuma, cpu_pm: bool, network: NetworkMode) {
     let (Some(qemu), Some(iso)) = (env_path("VKORE_TEST_QEMU"), env_path("VKORE_TEST_ISO")) else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso, topology, cpu_pm);
+    let (dir, mut machine) = start_machine(&qemu, iso, topology, cpu_pm, network);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     while machine.readiness().stage() < Stage::Ready && std::time::Instant::now() < deadline {
         machine.poll(std::time::Duration::from_millis(500)).unwrap();
@@ -112,8 +118,9 @@ fn boot_to_ready(topology: vkore_vm::hardware::GuestNuma, cpu_pm: bool) {
 fn start_machine(
     qemu: &std::path::Path,
     iso: PathBuf,
-    topology: vkore_vm::hardware::GuestNuma,
+    topology: GuestNuma,
     cpu_pm: bool,
+    network: NetworkMode,
 ) -> (tempfile::TempDir, Machine) {
     let firmware = vkore_vm::runtime::Runtime::for_qemu(qemu)
         .expect("valid QEMU runtime")
@@ -166,6 +173,7 @@ fn start_machine(
         memory_mib: 2048,
         resources: vkore_vm::hardware::Resources {
             guest_numa: topology,
+            network,
             cpu_power_management: cpu_pm,
             pin_cpus: cpu_pm,
             host_cpus: if cpu_pm {
@@ -196,7 +204,8 @@ fn a_kernel_self_test_iso_passes_and_powers_off() {
     else {
         return;
     };
-    let (dir, mut machine) = start_machine(&qemu, iso, vkore_vm::hardware::GuestNuma::Split, false);
+    let (dir, mut machine) =
+        start_machine(&qemu, iso, GuestNuma::Split, false, NetworkMode::Isolated);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let mut captured = false;
     while std::time::Instant::now() < deadline {

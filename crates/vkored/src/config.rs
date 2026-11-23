@@ -457,6 +457,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert_eq!(store.get("demo").unwrap(), c);
         c.resources.pin_cpus = true;
+        c.resources.network = vkore_vm::hardware::NetworkMode::E1000e;
         c.resources.host_cpus = vec![1, 3, 5, 7];
         c.resources.pin_memory = true;
         c.resources.pages = vkore_vm::hardware::PageSize::Huge2M;

@@ -1315,6 +1315,11 @@ mod tests {
         ] {
             for expanded in [false, true] {
                 state.form_hardware.show_cores = expanded;
+                state.form_hardware.resources.network = if expanded {
+                    vkore_vm::hardware::NetworkMode::E1000e
+                } else {
+                    vkore_vm::hardware::NetworkMode::Isolated
+                };
                 for (width, height, scale) in [
                     (900., 560., 1.),
                     (1280., 900., 1.),

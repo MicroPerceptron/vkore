@@ -144,6 +144,11 @@ The chooser does not infer a volume format or bypass Kore's validation.
 
 ## Machines
 
+Under **Configure hardware → Networking**, choose **Isolated** (the default)
+or **Shared (e1000e)**. Shared mode uses QEMU’s IPv4 NAT and applies at the next
+launch. The guest image needs IPv4 support to use it. The USB adapter remains
+isolated and no inbound ports are forwarded.
+
 The list shows each machine and where its boot is: starting, kernel up,
 services, shell ready, ready, degraded or failed. Select one to see its ISO and
 the SHA-256 it last booted, its resources, and the project it stages.

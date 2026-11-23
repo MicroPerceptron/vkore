@@ -1969,6 +1969,7 @@ mod tests {
             label: "@demo".into(),
             kind: DiskKind::Image,
             generation: 173,
+            format_version: 5,
             fallback: false,
             read_only: false,
         });
@@ -2040,18 +2041,35 @@ mod tests {
                     Some("volume-open"),
                 );
                 assert!(errors.is_empty());
-                state.disk_choices = Some(vec![
-                    vkore_volume::PhysicalDisk {
-                        path: "/dev/nvme0n1p5".into(),
-                        description: "Partition · Kore workspace".into(),
-                        bytes: 256 << 30,
-                    },
-                    vkore_volume::PhysicalDisk {
-                        path: "/dev/sdb".into(),
-                        description: "Disk · USB storage".into(),
-                        bytes: 64 << 30,
-                    },
-                ]);
+                state.disk_choices = Some(vkore_volume::PhysicalDisks {
+                    disks: vec![
+                        vkore_volume::PhysicalDisk {
+                            path: "/dev/nvme0n1p5".into(),
+                            description: "Partition".into(),
+                            bytes: 256 << 30,
+                            host: vkore_volume::HostDiskMetadata {
+                                partlabel: Some("Kore workspace".into()),
+                                label: Some("Models".into()),
+                                ..Default::default()
+                            },
+                            dagfs: vkore_volume::DagfsPresence::Detected(
+                                vkore_volume::MountStatus {
+                                    format_version: 4,
+                                    generation: 173,
+                                    used_fallback_root: false,
+                                },
+                            ),
+                        },
+                        vkore_volume::PhysicalDisk {
+                            path: "/dev/sdb".into(),
+                            description: "Disk · USB storage".into(),
+                            bytes: 64 << 30,
+                            host: Default::default(),
+                            dagfs: vkore_volume::DagfsPresence::NeedsAuthorization,
+                        },
+                    ],
+                    metadata_warning: None,
+                });
                 let (_, errors) = draw_at_scale(
                     volumes::view(&state, &[], Typography::default()),
                     size,

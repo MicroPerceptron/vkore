@@ -9,12 +9,19 @@ volume layer runs.
 
 | | Revision | What it is |
 | --- | --- | --- |
-| libkore | `3aac3b5ce4870421581ffa9b8abc0837c63d2c41` | `kore-host`, the host facade, over the exported `kore-vol` closure (26 packages) |
-| Kore source | `7074bda28c416ffe34562857ee43cbc883482782` | Kore main with MicroPerceptron/kore#1475: the volume procedure as a library whose mount releases every handle it opens, and the ACPI PM1 registers accessed at their width |
-| DagFS on disk | format version 5 | `kore_host::volume::FORMAT_VERSION`; a volume another version wrote is refused, never rewritten |
+| libkore | `29ff1836fe3535f6ecec01e5f17fe0f08b433e6b` | `kore-host`, the host facade, over the exported `kore-vol` closure (26 packages) |
+| Kore source | `576ccc99ae11b3c83227c4a6d4fca74693b44f07` | Narrow metadata export on `7074bda2`; exposes the recovered root format version without changing the disk format or recovery policy |
+| DagFS on disk | writer format version 5 | `FORMAT_VERSION` names the writer; `MountStatus::format_version` names the recovered root. The engine can read older supported formats; reading never upgrades them. An explicit write may upgrade a supported older format |
 | Kore ISO, main | SHA-256 `b085e919144afc01e302405d379d399f80f0fc84fd323cff68c5a91daca5b838` | `make iso-sealed-boot-x86 BOOT_FEATURES=boot PAGING_PROFILE=4k48 MODE=release` at Kore `7074bda2`: the power button stops it gracefully |
 | Kore ISO, v0.40.0 | SHA-256 `029ddd7e1e1cc1819c7e3ecf7ec22ffc3f0f6e01105972cd4d968313465aab23` | the same build at Kore `1b6cb322`: v0.40.0 (`e5e0b96a`) plus host-tool commits from MicroPerceptron/kore#1475 that the ISO does not carry. A stop ends QEMU after the grace period |
 | QEMU | 8.2.2, TCG | the oldest QEMU vKore has booted Kore on; newer ones add capabilities vKore probes for |
+
+The metadata pin was checked on 2026-11-23 with real engine recovery tests,
+including supported older formats, and a QEMU 11.0.1 TCG single-node boot to
+ready with a display capture and shutdown. That boot used the existing test ISO
+(SHA-256 `d97a0faac4cd8b313fc9e2435f2fcb5e8dbdd4c5c6a7b1b7317fc593c155c12f`), not a newly
+built ISO at the metadata-export revision. Full owner architecture/image gates
+and Linux physical-device authorization remain separate acceptance checks.
 
 The Kore `v0.40.0` tag points at an older tree (Cargo version 0.30.0); the
 Cargo bump to 0.40.0 is `61dc1b84` on main. vKore names Kore by commit.

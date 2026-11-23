@@ -17,16 +17,18 @@
 //!   and a **32-bpp framebuffer** the compositor founds over.
 //! - **UEFI only**: Limine boots from the ISO's EFI image; Secure Boot off.
 //!
-//! The guest's networks are QEMU user-mode and isolated (`restrict=on`):
-//! Kore has no IP stack, and nothing it does needs a packet to leave the
-//! host.
+//! Both QEMU user-mode networks are isolated by default. Shared networking
+//! enables IPv4 routing on e1000e for guests with an IP stack.
 
 use std::{
     fmt,
     path::{Path, PathBuf},
 };
 
-use crate::probe::{Accel, QemuCaps};
+use crate::{
+    hardware::NetworkMode,
+    probe::{Accel, QemuCaps},
+};
 
 /// The IOMMU (and so the CPU vendor) a machine presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -460,6 +462,18 @@ impl MachineSpec {
                 arguments.extend(["-display".into(), format!("vnc=unix:{socket}")]);
             }
         }
+        let (pci_network, usb_network) = match self.resources.network {
+            NetworkMode::Isolated => (
+                "user,id=net0,ipv6=off,restrict=on",
+                "user,id=netusb0,ipv6=off,restrict=on",
+            ),
+            // Keep the isolated USB adapter on a separate subnet in shared
+            // mode so a guest configuring both links can distinguish them.
+            NetworkMode::E1000e => (
+                "user,id=net0,ipv6=off,restrict=off",
+                "user,id=netusb0,ipv6=off,restrict=on,net=10.0.3.0/24",
+            ),
+        };
         arguments.extend([
             "-debugcon".into(),
             format!("file:{debugcon}"),
@@ -481,7 +495,7 @@ impl MachineSpec {
             "-device".into(),
             iommu,
             "-netdev".into(),
-            "user,id=net0,ipv6=off,restrict=on".into(),
+            pci_network.into(),
             "-device".into(),
             "e1000e,id=nic0,netdev=net0,bus=rp0".into(),
             "-drive".into(),
@@ -505,7 +519,7 @@ impl MachineSpec {
             "-device".into(),
             "qemu-xhci,id=xhci_net,bus=rp3,p3=0".into(),
             "-netdev".into(),
-            "user,id=netusb0,ipv6=off,restrict=on".into(),
+            usb_network.into(),
             "-device".into(),
             "usb-net,bus=xhci_net.0,port=1,netdev=netusb0".into(),
             "-device".into(),
@@ -801,6 +815,29 @@ mod tests {
             spec.arguments(&caps()),
             Err(ProfileError::Name(_))
         ));
+    }
+
+    #[test]
+    fn shared_network_routes_only_the_e1000e_adapter() {
+        let mut spec = spec();
+        spec.resources.network = NetworkMode::E1000e;
+        let args = spec.arguments(&caps()).unwrap();
+        let networks: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-netdev")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            networks,
+            [
+                "user,id=net0,ipv6=off,restrict=off",
+                "user,id=netusb0,ipv6=off,restrict=on,net=10.0.3.0/24",
+            ]
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "e1000e,id=nic0,netdev=net0,bus=rp0")
+        );
     }
 
     #[test]

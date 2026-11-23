@@ -90,6 +90,7 @@ pub fn defaults(host: &HostResources, minimum: Requirements) -> (u16, u32, u64, 
         Resources {
             gpu_vfs: Vec::new(),
             guest_numa: vkore_vm::hardware::GuestNuma::Single,
+            network: Default::default(),
             passthrough: Vec::new(),
             pin_cpus: host.cpu_pinning,
             cpu_power_management: recommended_cpu_waits(

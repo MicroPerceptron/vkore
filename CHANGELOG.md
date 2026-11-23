@@ -11,6 +11,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 - Desktop authorization for read-only browsing and exporting Linux physical disks that deny ordinary read access. A one-disk helper retains Kore's engine lock without elevating the UI or changing disk permissions; authorized sessions cannot import or remove files.
 
 ### Fixed
+- Hide the Machines download sign-in prompt while an authorized account session is active.
 - Open volumes at their root instead of assuming a screenshots folder exists. Clear stale contents and disk ownership after failed opens, and prevent overlapping open requests.
 
 ## [0.8.0] - 2026-11-23

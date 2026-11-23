@@ -1108,10 +1108,16 @@ fn view_sized(
     } else {
         None
     };
-    let mut form = column![
+    let mut header = column![
         ty.body("Create a machine", 18., theme::TEXT),
         ty.body("Start with a verified Kore image.", 13., theme::TEXT_MUTED),
-        crate::account::download_hint(ty),
+    ]
+    .spacing(12);
+    if state.account.status().is_none() {
+        header = header.push(crate::account::download_hint(ty));
+    }
+    let mut form = column![
+        header,
         ty.label("Machine name", theme::TEXT_MUTED),
         text_input("e.g. inference", &state.form_name)
             .on_input_maybe(

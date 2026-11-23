@@ -99,7 +99,10 @@ pub fn view<'a>(
             20.,
         );
         let content: UiElement<'a> = if collapsed {
-            glyph
+            container(glyph)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
         } else {
             row![glyph, ty.nav(label)]
                 .spacing(12)

@@ -13,7 +13,7 @@ description = "A Kore machine's DagFS volume from the host: browse, preview and 
 kore-host.workspace = true
 blake3 = { workspace = true, features = ["std"] }
 cap-std = "4.0.3"
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 tempfile = "3.23.0"
 # The `*_nofollow` directory opens cap-std leaves to its extension crate.
 cap-fs-ext = "4.0.3"

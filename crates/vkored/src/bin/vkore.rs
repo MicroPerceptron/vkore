@@ -882,16 +882,16 @@ fn volume(state: Option<PathBuf>, arguments: VolumeArgs) -> Result<ExitCode, Fai
             let browser = browse()?;
             let status = browser.status();
             println!(
-                "{} ({:?}), DagFS generation {}{}; this vKore writes format {}",
+                "{} ({:?}), DagFS v{} · generation {}{}",
                 disk.path().display(),
                 disk.kind(),
+                status.format_version,
                 status.generation,
                 if status.used_fallback_root {
                     ", from its fallback root: Kore keeps it read-only"
                 } else {
                     ""
-                },
-                vkore_volume::bounds::FORMAT_VERSION
+                }
             );
         }
         VolumeCommand::Ls { path: text, json } => {

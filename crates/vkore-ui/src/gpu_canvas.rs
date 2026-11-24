@@ -45,7 +45,7 @@ impl Drop for Worker {
 }
 
 impl Pane {
-    pub fn open(path: PathBuf, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn open(path: Option<PathBuf>, proxy: EventLoopProxy<UserEvent>) -> Self {
         let mut pane = Self {
             frame: None,
             status: "Starting WASI-P2 component…".into(),
@@ -61,7 +61,11 @@ impl Pane {
             .name("vkore-gpu-canvas".into())
             .spawn(move || {
                 let run = || {
-                    let mut canvas = Canvas::open(&path).map_err(|error| format!("{error:#}"))?;
+                    let mut canvas = match &path {
+                        Some(path) => Canvas::open(path),
+                        None => Canvas::from_bytes(crate::plugins::DEMO_WASM),
+                    }
+                    .map_err(|error| format!("{error:#}"))?;
                     let adapter = canvas.adapter().to_owned();
                     let start = Instant::now();
                     while !run_stopped.load(Ordering::Relaxed) {
@@ -164,24 +168,24 @@ pub(super) fn view<'a>(
         .center(Length::Fill)
         .into()
     };
-    widgets::page_frame(
-        column![
-            ty.body("GPU Canvas", 28., theme::TEXT),
-            container(canvas)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(widgets::card)
-                .padding(theme::SPACE_4),
-            ty.data(
-                status,
-                if failed {
-                    theme::ERROR
-                } else {
-                    theme::TEXT_MUTED
-                }
-            )
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
-        ]
-        .spacing(theme::SPACE_4),
-    )
+    column![
+        ty.body("Animated canvas", 24., theme::TEXT),
+        container(canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(widgets::card)
+            .padding(theme::SPACE_4),
+        ty.data(
+            status,
+            if failed {
+                theme::ERROR
+            } else {
+                theme::TEXT_MUTED
+            }
+        )
+        .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(theme::SPACE_4)
+    .height(Length::Fill)
+    .into()
 }

@@ -19,7 +19,7 @@ visible scroll thumbs show when more controls are below the fold.
 Pages share a centered content area up to 1440 logical pixels wide, with
 24-pixel gutters. Settings stacks its cards on compact windows and places them
 side by side when its content area reaches 1240 pixels. The machine creation
-column grows only up to 360 pixels. Window sizes and breakpoints use logical
+form grows up to 800 logical pixels. Window sizes and breakpoints use logical
 pixels: the initial window is 1280×800 and the minimum is 900×560, independent
 of display density.
 
@@ -69,16 +69,27 @@ Guest inference remains disconnected; starting a machine does not advertise a
 model. See [the API contract](inference.md). The desktop's saved port is separate
 from the CLI's explicit `vkore serve --listen` option.
 
-## Experimental GPU canvas
+## Plugins
 
-The optional `gpu-canvas` feature opens a WASI-P2 component in a native pane.
-Build the example and open it from the repository root:
+Open **Plugins → Add plugin** and choose a local `.wasm` file. The library
+accepts validated WebAssembly components, including WASI-P2 bundles, and core
+Wasm modules, including WASI-P1 binaries. Open a machine and use its
+**Plugins** tile to load a bundle. **Reload** replaces that machine's copy
+from the source file after validation. If a reload fails, the previous copy
+remains loaded. **Unload** releases the attachment.
+
+The library and attachments are scoped to the current desktop session.
+Loading validates the format and keeps the bundle available in the host
+workspace. The machine integration ABI and guest execution are future work.
+
+### Animated canvas sample
+
+The library includes a bundled WASI-P2 sample. In a desktop built with
+`gpu-canvas`, click **Preview** to run it in the Plugins page. From the
+repository root:
 
 ```sh
-rustup target add wasm32-wasip2
-cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/gpu-canvas/Cargo.toml
-cargo run --locked -p vkore-ui --features gpu-canvas -- \
-  --gpu-canvas examples/gpu-canvas/target/wasm32-wasip2/release/vkore_animated_canvas.wasm
+cargo run --locked -p vkore-ui --features gpu-canvas
 ```
 
 The [canvas WIT world](../crates/vkored/wit/gpu-canvas/canvas.wit) gives the
@@ -94,9 +105,17 @@ inherited process state. The host compiles the supplied shader and submits it
 through the system GPU driver. Browser WebGPU and the proposed `wasi:webgpu`
 interfaces require their own bindings.
 
-To verify animated frames through the desktop renderer, set
-`VKORE_TEST_GPU_CANVAS` to the path of the built component and run
-`cargo test -p vkore-ui --features gpu-canvas gpu_component_frames_render_in_the_native_canvas_pane -- --nocapture`.
+To rebuild the bundled example after changing its source:
+
+```sh
+rustup target add wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/gpu-canvas/Cargo.toml
+cp examples/gpu-canvas/target/wasm32-wasip2/release/vkore_animated_canvas.wasm \
+  crates/vkore-ui/assets/plugins/animated-canvas.wasm
+```
+
+To verify frames through the desktop renderer, set `VKORE_TEST_GPU_CANVAS` to
+the bundled file and run `cargo test -p vkore-ui --features gpu-canvas gpu_component_frames_render_in_the_native_canvas_pane -- --nocapture`.
 
 ## Volumes
 
@@ -176,6 +195,16 @@ backend, or Zenity fallback), without adding a GTK development-library dependenc
 The chooser does not infer a volume format or bypass Kore's validation.
 
 ## Machines
+
+The **Machines** page lists your machines. Choose **New machine** to open
+the creation form, or select a machine to open its workspace. **All machines**
+returns to the list from either view.
+
+Each workspace has Console, Overview, Boot activity, and Plugins tiles.
+Drag the dividers to resize the neighboring tiles. The tile header controls
+collapse a tile or expand it to fill the workspace. Use **Show …** to reopen
+a collapsed tile and the restore control to return an expanded tile to the
+grid. Each machine keeps its layout for the current desktop session.
 
 Under **Configure hardware → Networking**, choose **Isolated** (the default)
 or **Shared (e1000e)**. Shared mode uses QEMU’s IPv4 NAT and applies at the next

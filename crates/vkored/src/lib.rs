@@ -20,6 +20,7 @@ pub mod console;
 pub mod hardware;
 pub mod images;
 pub mod inference;
+pub mod plugins;
 pub mod run;
 pub mod state;
 

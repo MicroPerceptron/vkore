@@ -128,16 +128,10 @@ pub fn view<'a>(
     }
     rail = rail
         .push(nav("Machines", Page::Machines, Icon::Machine))
-        .push(nav("Volumes", Page::Volumes, Icon::Volume));
-    #[cfg(feature = "gpu-canvas")]
-    {
-        rail = rail.push(nav("GPU Canvas", Page::GpuCanvas, Icon::Machine));
-    }
-    rail = rail.push(iced_widget::space::vertical()).push(nav(
-        "Settings",
-        Page::Settings,
-        Icon::Settings,
-    ));
+        .push(nav("Volumes", Page::Volumes, Icon::Volume))
+        .push(nav("Plugins", Page::Plugins, Icon::Plugin))
+        .push(iced_widget::space::vertical())
+        .push(nav("Settings", Page::Settings, Icon::Settings));
     let running_label = if running == 0 {
         "No machines running".to_owned()
     } else {

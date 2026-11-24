@@ -30,6 +30,8 @@ use vkored::{
 
 use crate::{Message, UiElement, UserEvent, fonts, theme, widgets};
 
+mod tiles;
+
 /// What a machine's worker reports.
 #[derive(Debug)]
 pub enum Update {
@@ -116,8 +118,11 @@ pub struct State {
     pub edit_hardware: Option<(String, crate::hardware::Draft)>,
     hardware_busy: bool,
     pub configure_new: bool,
+    pub creating: bool,
     pub configs: Vec<MachineConfig>,
     pub selected: Option<String>,
+    pub plugins: crate::plugins::State,
+    layouts: BTreeMap<String, tiles::Workspace>,
     pub console_focus: Option<String>,
     console_focus_epoch: u64,
     paste_pending: bool,
@@ -141,7 +146,10 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum MachineMessage {
+    OpenLibrary,
+    OpenCreate,
     Select(String),
+    TileLayout(String, tiles::Change),
     Hardware(bool, crate::hardware::Change),
     EditHardware(String),
     ConfigureNew(bool),
@@ -176,9 +184,12 @@ impl State {
             edit_hardware: None,
             hardware_busy: false,
             configure_new: false,
+            creating: false,
             state_root,
             configs: Vec::new(),
             selected: None,
+            plugins: Default::default(),
+            layouts: BTreeMap::new(),
             console_focus: None,
             console_focus_epoch: 0,
             paste_pending: false,
@@ -213,7 +224,22 @@ impl State {
             .store()
             .and_then(|store| store.list().map_err(|error| error.to_string()))
         {
-            Ok(configs) => self.configs = configs,
+            Ok(configs) => {
+                self.layouts
+                    .retain(|name, _| configs.iter().any(|config| &config.name == name));
+                self.plugins
+                    .retain_machines(|name| configs.iter().any(|config| config.name == name));
+                if self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|name| !configs.iter().any(|config| &config.name == name))
+                {
+                    self.unfocus_console();
+                    self.selected = None;
+                    self.edit_hardware = None;
+                }
+                self.configs = configs;
+            }
             Err(error) => self.status = error,
         }
     }
@@ -297,11 +323,30 @@ impl State {
                     }
                 }
             }
-            MachineMessage::Select(name) => {
+            MachineMessage::OpenLibrary | MachineMessage::OpenCreate => {
                 self.unfocus_console();
                 self.configure_new = false;
-                self.selected = Some(name);
+                self.creating = matches!(message, MachineMessage::OpenCreate);
+                self.selected = None;
                 self.edit_hardware = None;
+            }
+            MachineMessage::Select(name) => {
+                if self.configs.iter().any(|config| config.name == name) {
+                    self.unfocus_console();
+                    self.configure_new = false;
+                    self.creating = false;
+                    self.selected = Some(name);
+                    self.edit_hardware = None;
+                }
+            }
+            MachineMessage::TileLayout(name, change) => {
+                if self.selected.as_ref() == Some(&name) && self.edit_hardware.is_none() {
+                    // A hidden or replaced terminal must not retain keyboard input.
+                    if !matches!(change, tiles::Change::Resize(_)) {
+                        self.unfocus_console();
+                    }
+                    self.layouts.entry(name).or_default().change(change);
+                }
             }
             MachineMessage::Hardware(editing, change) => {
                 if !self.hardware_busy
@@ -698,6 +743,7 @@ impl State {
                 match result {
                     Ok(()) => {
                         self.configure_new = false;
+                        self.creating = false;
                         self.status = format!("Created {name}");
                         self.selected = Some(name);
                         self.refresh();
@@ -945,29 +991,37 @@ fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
     }
 }
 
-/// The machines page.
+/// The machine library, creation flow, or selected instance.
 pub fn view(state: &State, ty: Typography, appearance: iced_core::Theme) -> UiElement<'_> {
-    iced_widget::responsive(move |size| {
-        view_sized(
-            state,
-            ty,
-            crate::console::Presentation::new(ty, &appearance, size.height),
-        )
-    })
-    .into()
+    let mut page = if state.creating || state.configure_new {
+        creation(state, ty)
+    } else if let Some(config) = state
+        .configs
+        .iter()
+        .find(|config| Some(&config.name) == state.selected.as_ref())
+    {
+        instance(state, config, ty, &appearance)
+    } else {
+        library(state, ty)
+    };
+    if !state.status.is_empty() {
+        page = page.push(
+            ty.data(state.status.as_str(), theme::TEXT_MUTED)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        );
+    }
+    widgets::page_frame(page.spacing(theme::SPACE_4).height(Length::Fill))
 }
 
-fn view_sized(
-    state: &State,
-    ty: Typography,
-    terminal: crate::console::Presentation,
-) -> UiElement<'_> {
+type PageColumn<'a> = iced_widget::Column<'a, Message, iced_core::Theme, crate::AxUi>;
+
+fn library(state: &State, ty: Typography) -> PageColumn<'_> {
     let mut list = column![ty.label("Your machines", theme::TEXT_MUTED)].spacing(10);
     if state.configs.is_empty() {
         list = list
             .push(ty.body("No machines yet", 15., theme::TEXT))
             .push(ty.body(
-                "Add an official image below to get started.",
+                "Create a machine from an official Kore image.",
                 13.,
                 theme::TEXT_MUTED,
             ));
@@ -994,6 +1048,56 @@ fn view_sized(
             .on_press(wrap(MachineMessage::Select(config.name.clone()))),
         );
     }
+
+    column![
+        row![
+            ty.page_header("Machines", "Create or open a Kore machine."),
+            space::horizontal(),
+            action(
+                ty,
+                "New machine",
+                widgets::Button::Primary,
+                MachineMessage::OpenCreate
+            ),
+        ]
+        .align_y(alignment::Vertical::Center)
+        .spacing(theme::SPACE_2),
+        widgets::scroll(
+            container(list)
+                .id("machine-library")
+                .padding(theme::SPACE_4)
+                .width(Length::Fill)
+                .style(widgets::card),
+        )
+        .height(Length::Fill),
+    ]
+}
+
+fn creation(state: &State, ty: Typography) -> PageColumn<'_> {
+    let content = if state.configure_new {
+        new_hardware(state, ty)
+    } else {
+        widgets::scroll(create_form(state, ty))
+            .height(Length::Fill)
+            .into()
+    };
+    column![
+        action(
+            ty,
+            "All machines",
+            widgets::Button::Secondary,
+            MachineMessage::OpenLibrary
+        ),
+        container(content)
+            .id("machine-creation")
+            .width(Length::Fill.max(800))
+            .height(Length::Fill)
+            .padding(theme::SPACE_4)
+            .style(widgets::card),
+    ]
+}
+
+fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
     let selected_image = state
         .official_images
         .iter()
@@ -1209,29 +1313,11 @@ fn view_sized(
                 .on_press_maybe(create_action),
         );
     }
-    let left = widgets::scroll(
-        column![
-            container(list)
-                .padding(18)
-                .width(Length::Fill)
-                .style(widgets::card),
-            container(form)
-                .padding(18)
-                .width(Length::Fill)
-                .style(widgets::card),
-        ]
-        .spacing(16),
-    )
-    .height(Length::Fill)
-    .width(Length::FillPortion(2).max(360))
-    .id("machine-list");
+    form
+}
 
-    let detail: UiElement<'_> = match state
-        .selected
-        .as_ref()
-        .and_then(|name| state.configs.iter().find(|config| &config.name == name))
-    {
-        _ if state.configure_new => widgets::scroll(column![
+fn new_hardware(state: &State, ty: Typography) -> UiElement<'_> {
+    widgets::scroll(column![
             ty.body("New machine hardware",23.,theme::TEXT),
             ty.body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
             crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some(),ty),
@@ -1240,234 +1326,271 @@ fn view_sized(
                 .style(widgets::button_style(widgets::Button::Primary))
                 .on_press_maybe((!state.hardware_busy && state.importing.is_none())
                     .then_some(wrap(MachineMessage::FinishHardware))),
-        ].spacing(18)).height(Length::Fill).into(),
-        None => ty.empty_state(
-            crate::visuals::Icon::Machine,
-            if state.configs.is_empty() {
-                "A home for your Kore machines"
-            } else {
-                "Choose a machine"
-            },
-            if state.configs.is_empty() {
-                "Choose an official image to create your first machine. Its boot status and controls will appear here."
-            } else {
-                "Select a machine to see its resources, manage its power and follow its boot."
-            },
-        ),
-        Some(config)
-            if state
-                .edit_hardware
-                .as_ref()
-                .is_some_and(|(name, _)| name == &config.name) =>
-        {
-            let (_, draft) = state.edit_hardware.as_ref().unwrap();
-            widgets::scroll(
-                column![
-                    ty.data(format!("Configure {}", config.name), theme::TEXT).size(ty.size(23.)),
-                    crate::hardware::view(draft, &state.host, true, state.hardware_busy, ty),
-                    row![
-                        button(ty.control("Save hardware"))
-                            .height(ty.control_height())
-                            .padding([8, 14])
-                            .style(widgets::button_style(widgets::Button::Primary))
-                            .on_press_maybe(
-                                (!state.hardware_busy)
-                                    .then_some(wrap(MachineMessage::SaveHardware))
-                            ),
-                        button(ty.control("Cancel"))
-                            .height(ty.control_height())
-                            .padding([8, 14])
-                            .style(widgets::button_style(widgets::Button::Secondary))
-                            .on_press_maybe(
-                                (!state.hardware_busy)
-                                    .then_some(wrap(MachineMessage::CancelHardware))
-                            ),
-                    ]
-                    .spacing(8),
-                ]
-                .spacing(18),
-            )
-            .height(Length::Fill)
-            .into()
-        }
-        Some(config) => {
-            let running = state.running.get(&config.name);
-            let (status, tone) =
-                running.map_or(("Stopped", theme::TEXT_MUTED), |run| stage_label(run.stage));
-            let metric = |label, value: String, unit| {
-                container(
-                    column![
-                        ty.label(label, theme::TEXT_MUTED),
-                        ty.data(value, theme::TEXT).size(ty.size(20.)),
-                        ty.body(unit, 12., theme::TEXT_MUTED)
-                    ]
-                    .spacing(8),
-                )
-                .padding(14)
-                .width(Length::Fill)
-                .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.))
-            };
-            let mut pane = column![
-                row![
-                    ty.data(config.name.as_str(), theme::TEXT).size(ty.size(23.)),
-                    space::horizontal(),
-                    ty.badge(status, tone)
-                ]
-                .spacing(12)
-                .align_y(alignment::Vertical::Center),
-                ty.body("Machine overview", 13., theme::TEXT_MUTED),
-                row![
-                    metric("CPUs", config.cpus.to_string(), "cores"),
-                    metric("Memory", config.memory_mib.to_string(), "MiB"),
-                    metric("Disk", config.disk_mib.to_string(), "MiB")
-                ]
-                .spacing(10),
-                ty.label("Boot image", theme::TEXT_MUTED),
-                ty.data(config.iso.display().to_string(), theme::TEXT_SECONDARY),
-                ty.label("SHA-256", theme::TEXT_MUTED),
-                ty.data(
-                    config
-                        .iso_sha256
-                        .as_deref()
-                        .unwrap_or("Recorded after the first boot"),
-                    theme::TEXT_MUTED
-                ),
-            ]
-            .spacing(14);
-            if let Some(workspace) = &config.workspace {
-                pane = pane.push(ty.data(
-                    format!(
-                        "project  {} → ~{}/{} ({:?})",
-                        workspace.root.display(),
-                        workspace.face,
-                        workspace.name,
-                        workspace.writeback
+        ].spacing(18)).height(Length::Fill).into()
+}
+
+fn edit_hardware<'a>(state: &'a State, config: &MachineConfig, ty: Typography) -> UiElement<'a> {
+    let (_, draft) = state.edit_hardware.as_ref().unwrap();
+    widgets::scroll(
+        column![
+            ty.data(format!("Configure {}", config.name), theme::TEXT)
+                .size(ty.size(23.)),
+            crate::hardware::view(draft, &state.host, true, state.hardware_busy, ty),
+            row![
+                button(ty.control("Save hardware"))
+                    .height(ty.control_height())
+                    .padding([8, 14])
+                    .style(widgets::button_style(widgets::Button::Primary))
+                    .on_press_maybe(
+                        (!state.hardware_busy).then_some(wrap(MachineMessage::SaveHardware))
                     ),
-                    theme::TEXT_SECONDARY,
-                ));
-            }
-            let controls = match running {
-                None => row![
-                    button(ty.control("Start in a window"))
-                        .height(ty.control_height())
-                        .padding([8, 14])
-                        .style(widgets::button_style(widgets::Button::Primary))
-                        .on_press(wrap(MachineMessage::Start(config.name.clone(), true))),
-                    button(ty.control("Start headless"))
-                        .height(ty.control_height())
-                        .padding([8, 14])
-                        .style(widgets::button_style(widgets::Button::Secondary))
-                        .on_press(wrap(MachineMessage::Start(config.name.clone(), false))),
-                ],
-                Some(_) => row![
-                    button(ty.control("Stop"))
-                        .height(ty.control_height())
-                        .padding([8, 14])
-                        .style(widgets::button_style(widgets::Button::Danger))
-                        .on_press(wrap(MachineMessage::Stop(config.name.clone()))),
-                ],
-            }
-            .spacing(theme::SPACE_2);
-            pane = pane.push(controls.wrap());
-            if running.is_none() {
-                pane = pane.push(
-                    button(ty.control("Configure hardware"))
-                        .height(ty.control_height())
-                        .padding([8, 14])
-                        .style(widgets::button_style(widgets::Button::Secondary))
-                        .on_press(wrap(MachineMessage::EditHardware(config.name.clone()))),
-                );
-            }
-            pane = pane.push(ty.data(
-                format!(
-                    "CPU pinning: {} · native waits: {} · memory pinning: {} · preferred pages: {}",
-                    if config.resources.pin_cpus {
-                        "on"
-                    } else {
-                        "off"
-                    },
-                    if config.resources.cpu_power_management { "on" } else { "off" },
-                    if config.resources.pin_memory {
-                        "on"
-                    } else {
-                        "off"
-                    },
-                    config.resources.pages.label()
-                ) + &topology_summary(&config.resources),
-                theme::TEXT_MUTED,
-            ));
-            let finished = state.finished.get(&config.name);
-            if let Some(running) = running {
-                if let Some(console) = &running.console {
-                    pane = pane.push(console_pane(&config.name, running, console, state.closing || state.hardware_busy, state.console_focus.as_deref() == Some(config.name.as_str()), terminal));
-                } else if !running.console_error.is_empty() {
-                    pane = pane.push(ty.data(running.console_error.as_str(), theme::ERROR));
-                }
-            } else if let Some(transcript) = finished.and_then(|run| run.console.as_ref()) {
-                pane = pane.push(crate::console::view(transcript, terminal));
-            }
-            if let Some(finished) = finished {
-                pane = pane.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
-            }
-            let log = match (running, finished) {
-                (Some(running), _) => running.log.as_str(),
-                (None, Some(finished)) => finished.log.as_str(),
-                (None, None) => "",
-            };
-            pane = pane.push(ty.label("Boot activity", theme::TEXT_MUTED));
-            if log.is_empty() {
-                pane = pane.push(
-                    container(
-                        column![
-                            ty.body("Ready when you are", 16., theme::TEXT),
-                            ty.body(
-                                "Start this machine to follow its boot activity here.",
-                                13.,
-                                theme::TEXT_MUTED
-                            ),
-                        ]
-                        .spacing(8),
-                    )
-                    .padding(20)
-                    .width(Length::Fill)
-                    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
-                );
-            } else {
-                pane = pane.push(
-                    container(
-                        widgets::scroll(ty.mono(log, theme::TEXT_SECONDARY))
-                            .height(220)
-                            .anchor_bottom(),
-                    )
-                    .padding(14)
-                    .width(Length::Fill)
-                    .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 8.)),
-                );
-            }
-            widgets::scroll(pane.spacing(16))
-                .height(Length::Fill)
-                .into()
-        }
-    };
-    let mut page = column![
-        ty.page_header("Machines", "Your Kore guests, ready for work."),
-        row![
-            left,
-            container(detail)
-                .id("machine-detail")
-                .width(Length::FillPortion(3))
-                .height(Length::Fill)
-                .padding(24)
-                .style(widgets::card),
+                button(ty.control("Cancel"))
+                    .height(ty.control_height())
+                    .padding([8, 14])
+                    .style(widgets::button_style(widgets::Button::Secondary))
+                    .on_press_maybe(
+                        (!state.hardware_busy).then_some(wrap(MachineMessage::CancelHardware))
+                    ),
+            ]
+            .spacing(8),
         ]
-        .spacing(theme::SPACE_4)
+        .spacing(18),
+    )
+    .height(Length::Fill)
+    .into()
+}
+
+fn action<'a>(
+    ty: Typography,
+    label: &'static str,
+    style: widgets::Button,
+    message: MachineMessage,
+) -> iced_widget::Button<'a, Message, iced_core::Theme, crate::AxUi> {
+    button(ty.control(label))
+        .height(ty.control_height())
+        .padding([0, 12])
+        .style(widgets::button_style(style))
+        .on_press(wrap(message))
+}
+
+fn instance<'a>(
+    state: &'a State,
+    config: &'a MachineConfig,
+    ty: Typography,
+    appearance: &iced_core::Theme,
+) -> PageColumn<'a> {
+    let controls = action(
+        ty,
+        "All machines",
+        widgets::Button::Secondary,
+        MachineMessage::OpenLibrary,
+    );
+    if state
+        .edit_hardware
+        .as_ref()
+        .is_some_and(|(name, _)| name == &config.name)
+    {
+        return column![
+            controls,
+            container(edit_hardware(state, config, ty))
+                .padding(theme::SPACE_4)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(widgets::card),
+        ];
+    }
+
+    let running = state.running.get(&config.name);
+    let (status, tone) =
+        running.map_or(("Stopped", theme::TEXT_MUTED), |run| stage_label(run.stage));
+    let mut header = row![
+        controls,
+        ty.data(config.name.as_str(), theme::TEXT)
+            .size(ty.size(23.))
+            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        ty.badge(status, tone),
+    ];
+    if running.is_some() {
+        header = header.push(action(
+            ty,
+            "Stop",
+            widgets::Button::Danger,
+            MachineMessage::Stop(config.name.clone()),
+        ));
+    } else {
+        header = header
+            .push(action(
+                ty,
+                "Hardware",
+                widgets::Button::Secondary,
+                MachineMessage::EditHardware(config.name.clone()),
+            ))
+            .push(action(
+                ty,
+                "Start in a window",
+                widgets::Button::Secondary,
+                MachineMessage::Start(config.name.clone(), true),
+            ))
+            .push(action(
+                ty,
+                "Start headless",
+                widgets::Button::Primary,
+                MachineMessage::Start(config.name.clone(), false),
+            ));
+    }
+    static DEFAULT: std::sync::LazyLock<tiles::Workspace> =
+        std::sync::LazyLock::new(tiles::Workspace::default);
+    let workspace = state.layouts.get(&config.name).unwrap_or(&DEFAULT);
+    let terminal = crate::console::Presentation::tile(ty, appearance);
+    column![
+        header
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center)
+            .wrap(),
+        container(workspace.view(&config.name, ty, |tile| match tile {
+            tiles::Tile::Overview => overview(config, ty),
+            tiles::Tile::BootActivity => boot_activity(state, &config.name, ty),
+            tiles::Tile::Console => console_tile(state, &config.name, terminal),
+            tiles::Tile::Plugins => state.plugins.machine(&config.name, ty),
+        }))
+        .id("machine-workspace")
+        .width(Length::Fill)
         .height(Length::Fill),
     ]
-    .spacing(theme::SPACE_4);
-    if !state.status.is_empty() {
-        page = page.push(ty.data(state.status.as_str(), theme::TEXT_MUTED));
+}
+
+fn overview(config: &MachineConfig, ty: Typography) -> UiElement<'_> {
+    let data = |value| {
+        ty.data(value, theme::TEXT_SECONDARY)
+            .wrapping(iced_core::text::Wrapping::WordOrGlyph)
+    };
+    let mut details = column![
+        data(format!(
+            "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk",
+            config.cpus,
+            f64::from(config.memory_mib) / 1024.,
+            config.disk_mib as f64 / 1024.
+        )),
+        ty.label("Boot image", theme::TEXT_MUTED),
+        data(config.iso.display().to_string()),
+        ty.label("SHA-256", theme::TEXT_MUTED),
+        data(
+            config
+                .iso_sha256
+                .as_deref()
+                .unwrap_or("Recorded after the first boot")
+                .to_owned()
+        ),
+        ty.label("Hardware", theme::TEXT_MUTED),
+        data(
+            format!(
+                "CPU pinning: {} · native waits: {} · memory pinning: {} · preferred pages: {}",
+                if config.resources.pin_cpus {
+                    "on"
+                } else {
+                    "off"
+                },
+                if config.resources.cpu_power_management {
+                    "on"
+                } else {
+                    "off"
+                },
+                if config.resources.pin_memory {
+                    "on"
+                } else {
+                    "off"
+                },
+                config.resources.pages.label()
+            ) + &topology_summary(&config.resources)
+        ),
+    ]
+    .spacing(theme::SPACE_2);
+    if let Some(workspace) = &config.workspace {
+        details = details
+            .push(ty.label("Project folder", theme::TEXT_MUTED))
+            .push(data(format!(
+                "{} → ~{}/{} ({:?})",
+                workspace.root.display(),
+                workspace.face,
+                workspace.name,
+                workspace.writeback
+            )));
     }
-    widgets::page_frame(page)
+    widgets::scroll(details).height(Length::Fill).into()
+}
+
+fn boot_activity<'a>(state: &'a State, name: &str, ty: Typography) -> UiElement<'a> {
+    let finished = state.finished.get(name);
+    let log = state
+        .running
+        .get(name)
+        .map(|run| run.log.as_str())
+        .or_else(|| finished.map(|run| run.log.as_str()))
+        .unwrap_or_default();
+    let mut contents = column![].spacing(theme::SPACE_2);
+    if let Some(finished) = finished {
+        contents = contents.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
+    }
+    if log.is_empty() {
+        contents = contents.push(ty.body(
+            "Boot activity appears after you start the machine.",
+            13.,
+            theme::TEXT_MUTED,
+        ));
+    } else {
+        // Log lines were escaped when the worker recorded them.
+        contents = contents.push(
+            ty.mono(log, theme::TEXT_SECONDARY)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        );
+    }
+    widgets::scroll(contents)
+        .height(Length::Fill)
+        .anchor_bottom()
+        .into()
+}
+
+fn console_tile<'a>(
+    state: &'a State,
+    name: &'a str,
+    terminal: crate::console::Presentation,
+) -> UiElement<'a> {
+    let ty = terminal.ty;
+    if let Some(running) = state.running.get(name) {
+        if let Some(console) = &running.console {
+            return console_pane(
+                name,
+                running,
+                console,
+                state.closing || state.hardware_busy,
+                state.console_focus.as_deref() == Some(name),
+                terminal,
+            );
+        }
+        if !running.console_error.is_empty() {
+            return ty
+                .data(running.console_error.as_str(), theme::ERROR)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph)
+                .into();
+        }
+    } else if let Some(transcript) = state
+        .finished
+        .get(name)
+        .and_then(|run| run.console.as_ref())
+    {
+        return crate::console::view(transcript, terminal);
+    }
+    container(ty.body(
+        if state.running.contains_key(name) {
+            "Waiting for the guest console…"
+        } else {
+            "Start the machine to connect to its console."
+        },
+        14.,
+        theme::TEXT_MUTED,
+    ))
+    .center(Length::Fill)
+    .into()
 }
 
 fn console_pane<'a>(
@@ -1483,8 +1606,6 @@ fn console_pane<'a>(
     let mut pane =
         column![
             row![
-                ty.body("Console", 18., theme::TEXT),
-                space::horizontal(),
                 ty.badge(
                     if console.connected() {
                         "Connected"
@@ -1515,9 +1636,8 @@ fn console_pane<'a>(
     }
     container(pane)
         .id("machine-console")
-        .padding(16)
         .width(Length::Fill)
-        .style(widgets::card)
+        .height(Length::Fill)
         .into()
 }
 

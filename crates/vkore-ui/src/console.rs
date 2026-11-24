@@ -13,10 +13,11 @@ const LINE_HEIGHT: f32 = 1.35;
 pub struct Presentation {
     pub ty: Typography,
     light: bool,
-    height: f32,
+    height: Length,
 }
 
 impl Presentation {
+    #[cfg(test)]
     pub fn new(ty: Typography, appearance: &iced_core::Theme, viewport_height: f32) -> Self {
         Self {
             ty,
@@ -24,7 +25,23 @@ impl Presentation {
             // The detail pane also contains launch controls and boot activity.
             // Keep the terminal proportional to the window, with a usable
             // minimum in short windows (the containing detail pane scrolls).
-            height: (viewport_height * 0.6).clamp(160., 1600.),
+            height: Length::Fixed((viewport_height * 0.6).clamp(160., 1600.) - 2. * PADDING),
+        }
+    }
+
+    #[cfg(test)]
+    fn fixed_height(self) -> f32 {
+        let Length::Fixed(content) = self.height else {
+            unreachable!()
+        };
+        content + 2. * PADDING
+    }
+
+    pub fn tile(ty: Typography, appearance: &iced_core::Theme) -> Self {
+        Self {
+            ty,
+            light: matches!(appearance, iced_core::Theme::Light),
+            height: Length::Fill,
         }
     }
 
@@ -174,7 +191,7 @@ fn screen(output: &Output, focused: bool, presentation: Presentation) -> UiEleme
             vertical: iced_widget::scrollable::Scrollbar::default(),
             horizontal: iced_widget::scrollable::Scrollbar::default(),
         })
-        .height(presentation.height - 2. * PADDING)
+        .height(presentation.height)
         .anchor_bottom(),
     )
     .padding(PADDING)
@@ -424,8 +441,10 @@ mod tests {
                 &iced_core::Theme::Light,
                 bounds.height,
             );
-            let expected =
-                presentation.geometry(iced_core::Size::new(bounds.width, presentation.height));
+            let expected = presentation.geometry(iced_core::Size::new(
+                bounds.width,
+                presentation.fixed_height(),
+            ));
             assert!(expected.0 > previous.0 && expected.1 > previous.1);
             previous = expected;
             for current in [(24, 120), expected] {
@@ -482,7 +501,7 @@ mod tests {
                     let presentation = Presentation::new(ty, &appearance, bounds.height);
                     let geometry = presentation.geometry(iced_core::Size::new(
                         bounds.width - 48.,
-                        presentation.height,
+                        presentation.fixed_height(),
                     ));
                     if text_size == TextSize::Default {
                         normal_geometry = Some(geometry);

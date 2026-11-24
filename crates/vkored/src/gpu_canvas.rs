@@ -59,6 +59,10 @@ impl Canvas {
         wasmtime::ensure!(source.metadata()?.is_file(), "expected a component file");
         let mut bytes = Vec::new();
         source.take(COMPONENT_LIMIT + 1).read_to_end(&mut bytes)?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> wasmtime::Result<Self> {
         wasmtime::ensure!(
             bytes.len() as u64 <= COMPONENT_LIMIT,
             "component exceeds 4 MiB"
@@ -67,7 +71,7 @@ impl Canvas {
         let mut config = Config::new();
         config.consume_fuel(true);
         let engine = Engine::new(&config)?;
-        let component = Component::from_binary(&engine, &bytes)?;
+        let component = Component::from_binary(&engine, bytes)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         linker.root().func_wrap(

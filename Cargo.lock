@@ -5268,6 +5268,7 @@ dependencies = [
  "vkore-vm",
  "vkore-volume",
  "vt100",
+ "wasmparser",
  "wasmtime",
  "wasmtime-wasi",
  "wgpu",

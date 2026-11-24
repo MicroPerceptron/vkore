@@ -11,6 +11,7 @@
 //!                         manifest.json  the staged project's record
 //!                         runs/          one event transcript per boot
 //!                         scratch/       staging and collected changes
+//! <state>/state.sqlite3                 desktop preferences
 //! ```
 //!
 //! QMP sockets live under the runtime directory when the host has one
@@ -22,6 +23,8 @@ use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+pub mod desktop;
 
 /// vKore's state directory.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -137,7 +137,7 @@ impl Model {
             Message::Settings(message) => self.settings.update(message),
             Message::Appearance(appearance) => {
                 self.appearance = appearance;
-                if let Err(error) = appearance.save(&self.machines.state_root) {
+                if let Err(error) = self.settings.save_appearance(appearance) {
                     self.status =
                         format!("Appearance changed for this session; could not save: {error}");
                 }
@@ -226,9 +226,11 @@ impl Model {
         let ty = self.settings.typography;
         let page = match self.page {
             Page::Volumes => volumes::view(&self.volumes, &self.machines.names(), ty),
-            Page::Machines => {
-                machines::view(&self.machines, ty, self.appearance.iced(self.system_dark))
-            }
+            Page::Machines => machines::view(
+                &self.machines,
+                ty,
+                theme::appearance_theme(self.appearance, self.system_dark),
+            ),
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
             Page::Account => account::page(&self.settings.account, ty),
         };
@@ -383,7 +385,7 @@ impl App {
                 ..
             }
         );
-        let appearance = self.model.appearance.iced(self.model.system_dark);
+        let appearance = theme::appearance_theme(self.model.appearance, self.model.system_dark);
         interface.draw(
             &mut self.renderer,
             &appearance,
@@ -697,24 +699,18 @@ fn main() {
     };
     let context = SoftContext::new(event_loop.owned_display_handle())
         .expect("create software presentation context");
-    let (saved_appearance, appearance_status) = match theme::Appearance::load(&state_root) {
-        Ok(appearance) => (appearance, String::new()),
-        Err(error) => (
-            theme::Appearance::default(),
-            format!("Could not load appearance: {error}"),
-        ),
-    };
+    let settings = settings::State::new(state_root.clone());
     let mut model = Model {
         page: Page::Volumes,
         navigation_collapsed: false,
-        appearance: options.appearance.unwrap_or(saved_appearance),
+        appearance: options.appearance.unwrap_or(settings.saved_appearance),
         system_dark,
         volumes: volumes::State::new(volumes::spawn(proxy.clone())),
-        machines: machines::State::new(state_root.clone()),
-        settings: settings::State::new(state_root),
+        machines: machines::State::new(state_root),
+        settings,
         proxy,
         booted_at: Some(Instant::now()),
-        status: appearance_status,
+        status: String::new(),
         pending_start: None,
         reopen: None,
     };
@@ -1251,7 +1247,7 @@ mod tests {
             (theme::Appearance::System, Some(true)),
             (theme::Appearance::System, Some(false)),
         ] {
-            let appearance = choice.iced(system_dark);
+            let appearance = theme::appearance_theme(choice, system_dark);
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),

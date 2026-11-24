@@ -32,8 +32,8 @@ that a new sign-in is temporary and keeps it only for the current process.
 The credential expires within one hour, also capped by the verified Google
 identity token's expiration. Restarting vKore restores the remaining session
 locally. Every new download checks current authorization with the server.
-The state directory holds ordinary app state such as preferences, machine
-configuration, and the image cache. The download secret goes only to the
+The state directory holds the SQLite desktop preferences database, machine
+configuration and the image cache. The download secret goes only to the
 system keyring. Google credentials and refresh tokens stay in the browser.
 
 **Settings → This device** shows the active state directory, the system

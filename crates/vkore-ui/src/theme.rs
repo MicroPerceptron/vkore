@@ -76,65 +76,13 @@ pub const ERROR: Tone = Tone {
     light: 0xB32620,
 };
 
-/// User choice, stored separately from machine configuration.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Appearance {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
+pub use vkored::state::desktop::Appearance;
 
-impl Appearance {
-    pub fn iced(self, system_dark: Option<bool>) -> iced_core::Theme {
-        match self {
-            Self::System if system_dark == Some(false) => iced_core::Theme::Light,
-            Self::System => iced_core::Theme::Dark,
-            Self::Light => iced_core::Theme::Light,
-            Self::Dark => iced_core::Theme::Dark,
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
-            "system" => Ok(Self::System),
-            "light" => Ok(Self::Light),
-            "dark" => Ok(Self::Dark),
-            _ => Err("appearance must be system, light or dark".into()),
-        }
-    }
-
-    pub fn load(root: &std::path::Path) -> std::io::Result<Self> {
-        use std::io::Read;
-        let file = match std::fs::File::open(root.join("appearance")) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(error) => return Err(error),
-        };
-        let mut text = String::new();
-        file.take(17).read_to_string(&mut text)?;
-        if text.len() > 16 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "appearance preference exceeds 16 bytes",
-            ));
-        }
-        Self::parse(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    }
-
-    pub fn save(self, root: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = tempfile::NamedTempFile::new_in(root)?;
-        file.write_all(match self {
-            Self::System => b"system\n",
-            Self::Light => b"light\n",
-            Self::Dark => b"dark\n",
-        })?;
-        file.as_file().sync_all()?;
-        file.persist(root.join("appearance")).map_err(|e| e.error)?;
-        Ok(())
+pub fn appearance_theme(appearance: Appearance, system_dark: Option<bool>) -> iced_core::Theme {
+    match appearance {
+        Appearance::System if system_dark == Some(false) => iced_core::Theme::Light,
+        Appearance::Light => iced_core::Theme::Light,
+        Appearance::System | Appearance::Dark => iced_core::Theme::Dark,
     }
 }
 
@@ -269,12 +217,18 @@ mod tests {
     #[test]
     fn system_appearance_tracks_reported_changes_without_changing_explicit_choices() {
         use iced_core::Theme;
-        assert_eq!(Appearance::System.iced(Some(false)), Theme::Light);
-        assert_eq!(Appearance::System.iced(Some(true)), Theme::Dark);
-        assert_eq!(Appearance::System.iced(None), Theme::Dark);
+        assert_eq!(
+            appearance_theme(Appearance::System, Some(false)),
+            Theme::Light
+        );
+        assert_eq!(
+            appearance_theme(Appearance::System, Some(true)),
+            Theme::Dark
+        );
+        assert_eq!(appearance_theme(Appearance::System, None), Theme::Dark);
         for reported in [None, Some(false), Some(true)] {
-            assert_eq!(Appearance::Light.iced(reported), Theme::Light);
-            assert_eq!(Appearance::Dark.iced(reported), Theme::Dark);
+            assert_eq!(appearance_theme(Appearance::Light, reported), Theme::Light);
+            assert_eq!(appearance_theme(Appearance::Dark, reported), Theme::Dark);
         }
     }
 
@@ -314,23 +268,6 @@ mod tests {
             }
         }
         assert!(contrast(BACKGROUND.light, BORDER.light) >= 3.0);
-    }
-
-    #[test]
-    fn appearance_is_persistent_bounded_and_rejects_bad_data() {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(Appearance::load(root.path()).unwrap(), Appearance::System);
-        for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
-            choice.save(root.path()).unwrap();
-            assert_eq!(Appearance::load(root.path()).unwrap(), choice);
-        }
-        for invalid in ["unknown".to_owned(), "light".to_owned() + &" ".repeat(100)] {
-            std::fs::write(root.path().join("appearance"), invalid).unwrap();
-            assert_eq!(
-                Appearance::load(root.path()).unwrap_err().kind(),
-                std::io::ErrorKind::InvalidData
-            );
-        }
     }
 
     #[test]

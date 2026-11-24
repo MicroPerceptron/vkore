@@ -144,28 +144,21 @@ impl Browser {
     pub fn open_with_authorization(disk: &Disk) -> Result<Self, Error> {
         #[cfg(target_os = "linux")]
         if disk.kind() == crate::DiskKind::Device {
-            // Probe while holding the process claim. Closing a probe descriptor
-            // must never release another local browser's POSIX record lock.
-            let claim = Claim::take(disk)?;
-            let denied = match File::open(disk.path()) {
-                Ok(file) => {
-                    drop(file);
-                    false
+            return match Self::open(disk) {
+                Err(error) if error.needs_read_authorization() => {
+                    let claim = Claim::take(disk)?;
+                    let (remote, status) = crate::privileged::Remote::authorize(disk)?;
+                    Ok(Self {
+                        disk: disk.clone(),
+                        status,
+                        jobs: None,
+                        worker: None,
+                        _claim: claim,
+                        remote: Some(remote),
+                    })
                 }
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => true,
-                Err(error) => return Err(Error::host(disk.path(), error)),
+                result => result,
             };
-            if denied {
-                let (remote, status) = crate::privileged::Remote::authorize(disk)?;
-                return Ok(Self {
-                    disk: disk.clone(),
-                    status,
-                    jobs: None,
-                    worker: None,
-                    _claim: claim,
-                    remote: Some(remote),
-                });
-            }
         }
         Self::open(disk)
     }

@@ -2,7 +2,7 @@
 //! Only recovery through Kore's engine confirms DagFS and its format version.
 
 #[cfg(any(target_os = "linux", test))]
-use crate::{Browser, Disk, claim::Claim};
+use crate::{Browser, Disk};
 use crate::{Error, MountStatus};
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", test))]
@@ -58,22 +58,10 @@ pub struct PhysicalDisks {
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn probe(disk: &Disk) -> DagfsPresence {
-    // A permission probe opens then closes a descriptor, so it must hold the
-    // local claim: POSIX locks must not be released under an existing reader.
-    let claim = match Claim::take(disk) {
-        Ok(claim) => claim,
-        Err(error) => return DagfsPresence::Unavailable(error.to_string()),
-    };
-    match std::fs::File::open(disk.path()) {
-        Ok(file) => drop(file),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            return DagfsPresence::NeedsAuthorization;
-        }
-        Err(error) => return DagfsPresence::Unavailable(error.to_string()),
-    }
-    drop(claim);
     match Browser::open(disk) {
         Ok(browser) => DagfsPresence::Detected(browser.status()),
+        #[cfg(target_os = "linux")]
+        Err(error) if error.needs_read_authorization() => DagfsPresence::NeedsAuthorization,
         Err(error) if error.is_blank() => DagfsPresence::Blank,
         Err(Error::Volume(kore_host::volume::VolError::NoVolume(_))) => DagfsPresence::NotDetected,
         // Busy, incompatible and corrupt volumes are not "not DagFS".

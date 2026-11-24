@@ -11,6 +11,7 @@ use vkored::account::{Account, SignIn};
 
 #[derive(Debug, Clone)]
 pub enum Action {
+    CheckPersistence,
     SignIn,
     Cancel,
     SignOut,
@@ -20,7 +21,7 @@ pub enum Action {
 }
 #[derive(Debug)]
 pub enum Reply {
-    Restored,
+    Restored { refresh_catalog: bool },
     Challenge(u64, SignIn),
     CodeCopied(u64, Result<(), clipboard::Error>),
     Finished(u64, Result<(), String>),
@@ -34,6 +35,7 @@ pub struct State {
     clipboard: Option<iced_winit::Clipboard>,
     copy_result: Option<Result<(), clipboard::Error>>,
     busy: bool,
+    checking_storage: bool,
     error: String,
 }
 impl Drop for State {
@@ -44,15 +46,28 @@ impl Drop for State {
     }
 }
 impl State {
-    pub fn restore(&self, proxy: EventLoopProxy<UserEvent>) -> bool {
+    pub fn restore(&mut self, proxy: EventLoopProxy<UserEvent>, refresh_catalog: bool) -> bool {
+        if !self.can_check_storage() {
+            return false;
+        }
         let account = self.account.clone();
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("vkore-account-restore".into())
             .spawn(move || {
                 account.restore();
-                let _ = proxy.send_event(UserEvent::Account(Reply::Restored));
+                let _ = proxy.send_event(UserEvent::Account(Reply::Restored { refresh_catalog }));
             })
-            .is_ok()
+            .is_ok();
+        self.checking_storage = started;
+        started
+    }
+
+    pub fn checking_storage(&self) -> bool {
+        self.checking_storage
+    }
+
+    pub fn can_check_storage(&self) -> bool {
+        !self.busy && !self.checking_storage
     }
 
     #[cfg(test)]
@@ -64,6 +79,10 @@ impl State {
         });
     }
     pub fn update(&mut self, action: Action, proxy: &EventLoopProxy<UserEvent>) {
+        if matches!(action, Action::CheckPersistence) {
+            self.restore(proxy.clone(), false);
+            return;
+        }
         if matches!(action, Action::CopyCode) {
             if let Some(challenge) = &self.challenge {
                 let generation = self.generation;
@@ -98,7 +117,7 @@ impl State {
             self.error = "Cancelling sign-in…".into();
             return;
         }
-        if self.busy {
+        if !self.can_check_storage() {
             return;
         }
         self.generation += 1;
@@ -134,7 +153,10 @@ impl State {
     }
     pub fn reply(&mut self, reply: Reply) -> bool {
         match reply {
-            Reply::Restored => return true,
+            Reply::Restored { refresh_catalog } => {
+                self.checking_storage = false;
+                return refresh_catalog;
+            }
             Reply::Challenge(generation, challenge)
                 if generation == self.generation
                     && self
@@ -233,7 +255,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         content = content.push(ty.data(format!("Signed in · {}", status.email), theme::SUCCESS))
             .push(ty.data(format!("Agreement accepted · {} · {}", status.receipt.version, status.receipt.accepted_at), theme::TEXT_MUTED))
             .push(ty.body("Downloads check authorization each time. Sign in again when the one-hour session expires.", 12., theme::TEXT_MUTED));
-        if !state.busy {
+        if state.can_check_storage() {
             content = content.push(
                 row![
                     control("Review agreement", Action::Review),
@@ -243,7 +265,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 .wrap(),
             );
         }
-    } else if !state.busy {
+    } else if state.can_check_storage() {
         content = content
             .push(ty.badge("Not signed in", theme::TEXT_MUTED))
             .push(crate::google_sign_in::button(ty));
@@ -291,6 +313,8 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                 theme::ERROR,
             ));
         }
+    } else if state.checking_storage() {
+        content = content.push(ty.body("Checking saved sign-in…", 14., theme::TEXT_MUTED));
     } else if state.busy {
         content = content.push(ty.body("Contacting the account service…", 14., theme::TEXT_MUTED));
     }
@@ -321,6 +345,20 @@ pub fn download_hint(ty: Typography) -> UiElement<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_persistence_only_refreshes_catalog_during_startup() {
+        let mut state = State::default();
+        for refresh_catalog in [false, true] {
+            state.checking_storage = true;
+            assert!(!state.can_check_storage());
+            assert_eq!(
+                state.reply(Reply::Restored { refresh_catalog }),
+                refresh_catalog
+            );
+            assert!(state.can_check_storage());
+        }
+    }
 
     #[test]
     fn clipboard_feedback_belongs_to_the_active_sign_in() {

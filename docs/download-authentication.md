@@ -36,6 +36,11 @@ The state directory holds ordinary app state such as preferences, machine
 configuration, and the image cache. The download secret goes only to the
 system keyring. Google credentials and refresh tokens stay in the browser.
 
+**Settings → This device** shows the active state directory, the system
+credential store, and the last observed local sign-in status. **Refresh status**
+checks local persistence without contacting the download service. Account
+actions such as sign-out and agreement review are available under **Manage account**.
+
 CLI users can run `vkore account sign-in`, `vkore account status`, and
 `vkore account sign-out`. For immediate authorization, add `--sign-in` to
 `vkore machine create --image ID` or a first-party

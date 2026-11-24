@@ -1,5 +1,5 @@
-//! Optional, memory-only download credentials. Constructing an account performs
-//! no I/O. Only first-party HTTPS requests can carry the credential; redirects
+//! Optional download credentials scoped to a vKore state directory. Constructing
+//! an account performs no I/O. Only first-party HTTPS requests can carry the credential; redirects
 //! are disabled. The server checks identity and current acceptance again before
 //! serving any image bytes, independently of this open-source client.
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,34 @@ enum Access {
 #[derive(Default)]
 struct Display {
     status: Option<Status>,
-    warning: Option<&'static str>,
+    persistence: CredentialPersistence,
+}
+
+/// Last observed local credential state. This says nothing about server
+/// authorization, which is checked independently before a download.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CredentialPersistence {
+    #[default]
+    NotChecked,
+    NoSavedSignIn,
+    Saved,
+    Temporary,
+    Expired,
+    StoreUnavailable,
+    Invalid,
+    SignOutIncomplete,
+}
+
+impl CredentialPersistence {
+    pub fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Temporary => Some(TEMPORARY),
+            Self::StoreUnavailable => Some(keyring::UNAVAILABLE),
+            Self::Invalid => Some(keyring::INVALID),
+            Self::SignOutIncomplete => Some(REMOVE_FAILED),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for Account {
@@ -218,23 +245,44 @@ impl Account {
     }
 
     pub fn storage_warning(&self) -> Option<&'static str> {
-        self.0.display.lock().ok()?.warning
+        self.persistence().warning()
     }
 
     pub fn sign_out_incomplete(&self) -> bool {
-        self.storage_warning() == Some(REMOVE_FAILED)
+        self.persistence() == CredentialPersistence::SignOutIncomplete
     }
 
-    fn display(&self, status: Option<&Status>, warning: Option<&'static str>) {
+    /// Read display metadata without touching the system store.
+    pub fn persistence(&self) -> CredentialPersistence {
+        let Ok(display) = self.0.display.lock() else {
+            return CredentialPersistence::StoreUnavailable;
+        };
+        if display
+            .status
+            .as_ref()
+            .is_some_and(|status| status.expires_at <= now())
+        {
+            return CredentialPersistence::Expired;
+        }
+        display.persistence
+    }
+
+    pub fn storage_provider(&self) -> &'static str {
+        keyring::PROVIDER
+    }
+
+    fn display(&self, status: Option<&Status>, persistence: CredentialPersistence) {
         if let Ok(mut display) = self.0.display.lock() {
             *display = Display {
                 status: status.cloned(),
-                warning,
+                persistence,
             };
         }
     }
 
     fn session(&self) -> Result<Option<Session>, &'static str> {
+        use CredentialPersistence as Storage;
+
         let mut access = self
             .0
             .access
@@ -248,7 +296,7 @@ impl Account {
                 // If saving failed, an older account could still be in the
                 // vault. Keep this process signed out when its session ends.
                 *temporary = None;
-                self.display(None, None);
+                self.display(None, Storage::Expired);
                 return Ok(None);
             }
             Access::SignOutIncomplete => return Err(REMOVE_FAILED),
@@ -257,23 +305,25 @@ impl Account {
         // The keyring is authoritative for saved credentials. A running
         // desktop must see a deletion or replacement from another process
         // before it starts another authenticated request.
-        let result = self
-            .0
-            .keyring
-            .as_ref()
-            .map_or(Ok(None), Keyring::load)
-            .and_then(|session| match session {
-                Some(s) if s.status.expires_at <= now() => Ok(None),
-                Some(s) if !valid_token(&s.token) || s.status.validate().is_err() => {
-                    Err(keyring::INVALID)
-                }
-                session => Ok(session),
-            });
-        match &result {
-            Ok(session) => self.display(session.as_ref().map(|s| &s.status), None),
-            Err(message) => self.display(None, Some(message)),
-        }
-        result
+        let (session, persistence) = match self.0.keyring.as_ref().map_or(Ok(None), Keyring::load) {
+            Ok(None) => (None, Storage::NoSavedSignIn),
+            Ok(Some(session)) if session.status.expires_at <= now() => (None, Storage::Expired),
+            Ok(Some(session))
+                if valid_token(&session.token) && session.status.validate().is_ok() =>
+            {
+                (Some(session), Storage::Saved)
+            }
+            Ok(Some(_)) | Err(keyring::Failure::Invalid) => {
+                self.display(None, Storage::Invalid);
+                return Err(keyring::INVALID);
+            }
+            Err(keyring::Failure::Unavailable) => {
+                self.display(None, Storage::StoreUnavailable);
+                return Err(keyring::UNAVAILABLE);
+            }
+        };
+        self.display(session.as_ref().map(|session| &session.status), persistence);
+        Ok(session)
     }
 
     fn remember(&self, session: &Session, cancelled: &AtomicBool) -> Result<bool, String> {
@@ -288,15 +338,14 @@ impl Account {
         // Start committing only after cancellation has been checked. The OS
         // may require its own confirmation to complete the write.
         let saved = self.0.keyring.as_ref().map(|keyring| keyring.save(session));
-        let warning = saved
-            .as_ref()
-            .is_some_and(Result::is_err)
-            .then_some(TEMPORARY);
-        self.display(Some(&session.status), warning);
-        *access = match saved {
-            Some(Ok(())) => Access::Saved,
-            _ => Access::Temporary(Some(session.clone())),
+        let persistence = if matches!(saved, Some(Ok(()))) {
+            *access = Access::Saved;
+            CredentialPersistence::Saved
+        } else {
+            *access = Access::Temporary(Some(session.clone()));
+            CredentialPersistence::Temporary
         };
+        self.display(Some(&session.status), persistence);
         Ok(true)
     }
     /// The callback contains only the public user code; never the polling secret.
@@ -383,12 +432,17 @@ impl Account {
             Access::Temporary(session) => session,
             _ => None,
         };
-        self.display(None, None);
+        self.display(None, CredentialPersistence::NotChecked);
         let (saved, removed) = self.0.keyring.as_ref().map_or((None, true), Keyring::take);
         if !removed {
             *access = Access::SignOutIncomplete;
         }
-        self.display(None, (!removed).then_some(REMOVE_FAILED));
+        let persistence = if removed {
+            CredentialPersistence::NoSavedSignIn
+        } else {
+            CredentialPersistence::SignOutIncomplete
+        };
+        self.display(None, persistence);
         Ok((temporary, saved, removed))
     }
     pub(crate) fn catalog_request(&self, address: &str) -> Result<ureq::Request, String> {
@@ -471,13 +525,16 @@ mod tests {
     fn new_account_process_can_restore_and_forget_an_unexpired_sign_in() {
         let (account, entry) = test_account();
         let session = test_session();
+        assert_eq!(account.persistence(), CredentialPersistence::NotChecked);
         assert!(account.remember(&session, &AtomicBool::new(false)).unwrap());
         assert!(matches!(*account.0.access.lock().unwrap(), Access::Saved));
+        assert_eq!(account.persistence(), CredentialPersistence::Saved);
         drop(account);
 
         let restored = account_using(entry.clone());
         restored.restore();
         assert_eq!(restored.status().unwrap().email, session.status.email);
+        assert_eq!(restored.persistence(), CredentialPersistence::Saved);
         assert_eq!(restored.session().unwrap().unwrap().token, session.token);
 
         let other = account_using(entry.clone());
@@ -486,6 +543,7 @@ mod tests {
         assert_eq!(saved.unwrap().token, session.token);
         assert!(restored.session().unwrap().is_none());
         assert!(restored.status().is_none());
+        assert_eq!(restored.persistence(), CredentialPersistence::NoSavedSignIn);
         assert!(account_using(entry).session().unwrap().is_none());
     }
 
@@ -499,8 +557,10 @@ mod tests {
             .set_password(&serde_json::to_string(&session).unwrap())
             .unwrap();
         assert!(account.session().unwrap().is_none());
+        assert_eq!(account.persistence(), CredentialPersistence::Expired);
         entry.set_password("not a session").unwrap();
         assert_eq!(account.session().err(), Some(keyring::INVALID));
+        assert_eq!(account.persistence(), CredentialPersistence::Invalid);
         assert!(account.status().is_none());
     }
 
@@ -508,9 +568,17 @@ mod tests {
     fn unavailable_keyring_falls_back_only_for_the_current_process() {
         let (account, entry) = test_account();
         entry.set_error(keyring_core::Error::NoDefaultStore);
+        assert_eq!(account.persistence(), CredentialPersistence::NotChecked);
+        account.restore();
+        assert_eq!(
+            account.persistence(),
+            CredentialPersistence::StoreUnavailable
+        );
+        entry.set_error(keyring_core::Error::NoDefaultStore);
         let session = test_session();
         assert!(account.remember(&session, &AtomicBool::new(false)).unwrap());
         assert_eq!(account.storage_warning(), Some(TEMPORARY));
+        assert_eq!(account.persistence(), CredentialPersistence::Temporary);
         assert!(account.session().unwrap().is_some());
         assert!(account_using(entry).session().unwrap().is_none());
     }

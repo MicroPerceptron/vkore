@@ -7,6 +7,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ### Added
 - Restore unexpired download sign-in across desktop and CLI launches from macOS Keychain or Linux Secret Service. Credentials are scoped to the state directory. The CLI adds `account status`, `account sign-in` and `account sign-out`.
+- Show the active state directory, credential store and local sign-in status in Settings.
 
 ## [0.9.0] - 2026-11-23
 

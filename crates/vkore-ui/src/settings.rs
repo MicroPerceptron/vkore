@@ -9,9 +9,12 @@ use std::{
 
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, text_input};
-use vkored::inference::{Server, Unavailable};
+use vkored::{
+    account::CredentialPersistence,
+    inference::{Server, Unavailable},
+};
 
-use crate::{Message, UiElement, fonts, theme, widgets};
+use crate::{Message, Page, UiElement, account, fonts, theme, visuals, widgets};
 
 const DEFAULT_PORT: u16 = 8080;
 
@@ -378,12 +381,103 @@ fn panels(
         .width(Length::Fill)
         .style(widgets::card);
 
+    let device = device_settings(state);
     let content: UiElement<'_> = if wide {
-        row![appearance, api].spacing(theme::SPACE_6).into()
+        row![
+            appearance,
+            column![api, device]
+                .spacing(theme::SPACE_6)
+                .width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_6)
+        .into()
     } else {
-        column![appearance, api].spacing(theme::SPACE_6).into()
+        column![appearance, api, device]
+            .spacing(theme::SPACE_6)
+            .into()
     };
     widgets::scroll(content).height(Length::Fill).into()
+}
+
+fn device_settings(state: &State) -> UiElement<'_> {
+    let ty = state.typography;
+    let account = &state.account.account;
+    let checking = state.account.checking_storage();
+    let persistence = account.persistence();
+    let (label, tone) = if checking {
+        ("Checking…", theme::TEXT_MUTED)
+    } else {
+        match persistence {
+            CredentialPersistence::NotChecked => ("Unchecked", theme::TEXT_MUTED),
+            CredentialPersistence::NoSavedSignIn => ("No saved sign-in", theme::TEXT_MUTED),
+            CredentialPersistence::Saved => ("Saved locally", theme::SUCCESS),
+            CredentialPersistence::Temporary => ("Temporary sign-in", theme::WARNING),
+            CredentialPersistence::Expired => ("Sign-in expired", theme::TEXT_MUTED),
+            CredentialPersistence::StoreUnavailable => ("Store unavailable", theme::WARNING),
+            CredentialPersistence::Invalid => ("Invalid saved sign-in", theme::WARNING),
+            CredentialPersistence::SignOutIncomplete => ("Sign-out incomplete", theme::WARNING),
+        }
+    };
+    let mut content = column![
+        row![
+            visuals::icon(visuals::Icon::Machine, theme::TEXT_SECONDARY, 22.),
+            ty.body("This device", 18., theme::TEXT),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center),
+        ty.label("State directory", theme::TEXT_MUTED),
+        container(
+            ty.data(state.root.display().to_string(), theme::TEXT)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 6.)),
+        ty.body(
+            "Preferences, machines and cached images are stored here.",
+            theme::SIZE_SM,
+            theme::TEXT_MUTED,
+        ),
+        ty.label("Credential store", theme::TEXT_MUTED),
+        row![
+            ty.body(account.storage_provider(), 14., theme::TEXT),
+            ty.badge(label, tone),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center)
+        .wrap(),
+    ]
+    .spacing(theme::SPACE_4);
+    if !checking && let Some(warning) = persistence.warning() {
+        content = content.push(ty.body(warning, theme::SIZE_SM, theme::WARNING));
+    }
+    content = content.push(
+        row![
+            button(ty.control("Refresh status"))
+                .height(ty.control_height())
+                .padding([0, 14])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    state
+                        .account
+                        .can_check_storage()
+                        .then_some(Message::Account(account::Action::CheckPersistence),)
+                ),
+            button(ty.control("Manage account"))
+                .height(ty.control_height())
+                .padding([0, 14])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(Message::Show(Page::Account)),
+        ]
+        .spacing(theme::SPACE_2)
+        .wrap(),
+    );
+    container(content)
+        .id("settings-device")
+        .padding(theme::SPACE_6)
+        .width(Length::Fill)
+        .style(widgets::card)
+        .into()
 }
 
 fn typography_controls(state: &State) -> UiElement<'_> {

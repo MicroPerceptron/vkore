@@ -721,7 +721,7 @@ fn main() {
     let account = vkored::account::Account::for_state(&state);
     model.settings.account.account = account.clone();
     model.machines.account = account;
-    if !model.settings.account.restore(model.proxy.clone()) {
+    if !model.settings.account.restore(model.proxy.clone(), true) {
         model.machines.refresh_images(model.proxy.clone());
     }
     if let Some(disk) = options.disk {
@@ -881,6 +881,11 @@ mod tests {
                                 && card.x + card.width <= content.x + content.width + 1.
                         );
                     }
+                    if let Some(device) = self.get("settings-device") {
+                        assert!((device.x - api.x).abs() < 1.);
+                        assert!((device.width - api.width).abs() < 1.);
+                        assert!(device.y >= api.y + api.height + 23.);
+                    }
                 }
             }
         }
@@ -951,6 +956,7 @@ mod tests {
         if snapshot == Some("settings") {
             assert!(bounds.get("settings-appearance").is_some());
             assert!(bounds.get("settings-api").is_some());
+            assert!(bounds.get("settings-device").is_some());
         }
         bounds.check();
         let frame = renderer.take_frame().expect("a frame");
@@ -1779,6 +1785,7 @@ mod tests {
         let machines = machines::State::new(root.path().to_owned());
         let (volumes, _worker) = guest_listing();
         let settings = settings::State::new(root.path().to_owned());
+        settings.account.account.restore();
         for (width, height, scale) in [
             (900., 560., 1.),
             (1280., 800., 1.),

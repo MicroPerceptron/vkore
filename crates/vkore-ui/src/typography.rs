@@ -2,70 +2,25 @@
 use crate::{fonts, theme};
 use iced_core::{Font, Length, Theme, alignment};
 use iced_widget::{column, container, row, text};
-use std::{
-    io::{Read, Write},
-    path::Path,
-};
+pub use vkored::state::desktop::{FontPreset, TextSize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TextSize {
-    Small,
-    #[default]
-    Default,
-    Large,
-    ExtraLarge,
-}
-impl TextSize {
-    pub const ALL: [Self; 4] = [Self::Small, Self::Default, Self::Large, Self::ExtraLarge];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small",
-            Self::Default => "Default",
-            Self::Large => "Large",
-            Self::ExtraLarge => "Extra large",
-        }
-    }
-    fn key(self) -> &'static str {
-        match self {
-            Self::Small => "small",
-            Self::Default => "default",
-            Self::Large => "large",
-            Self::ExtraLarge => "extra-large",
-        }
-    }
-    fn factor(self) -> f32 {
-        match self {
-            Self::Small => 0.9,
-            Self::Default => 1.,
-            Self::Large => 1.15,
-            Self::ExtraLarge => 1.3,
-        }
+pub fn text_size_label(size: TextSize) -> &'static str {
+    match size {
+        TextSize::Small => "Small",
+        TextSize::Default => "Default",
+        TextSize::Large => "Large",
+        TextSize::ExtraLarge => "Extra large",
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FontPreset {
-    #[default]
-    Grotesk,
-    Sans,
-    Mono,
-}
-impl FontPreset {
-    pub const ALL: [Self; 3] = [Self::Grotesk, Self::Sans, Self::Mono];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Grotesk => "Space Grotesk",
-            Self::Sans => "DM Sans",
-            Self::Mono => "JetBrains Mono",
-        }
-    }
-    fn key(self) -> &'static str {
-        match self {
-            Self::Grotesk => "grotesk",
-            Self::Sans => "sans",
-            Self::Mono => "mono",
-        }
+
+pub fn font_preset_label(preset: FontPreset) -> &'static str {
+    match preset {
+        FontPreset::Grotesk => "Space Grotesk",
+        FontPreset::Sans => "DM Sans",
+        FontPreset::Mono => "JetBrains Mono",
     }
 }
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Typography {
     pub text_size: TextSize,
@@ -80,48 +35,16 @@ impl Typography {
         }
     }
     pub fn size(self, points: f32) -> f32 {
-        points * self.text_size.factor()
+        points
+            * match self.text_size {
+                TextSize::Small => 0.9,
+                TextSize::Default => 1.,
+                TextSize::Large => 1.15,
+                TextSize::ExtraLarge => 1.3,
+            }
     }
     pub fn control_height(self) -> f32 {
         self.size(theme::CONTROL_SM)
-    }
-    pub fn load(root: &Path) -> std::io::Result<Self> {
-        let file = match std::fs::File::open(root.join("typography")) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e),
-        };
-        let mut value = String::new();
-        file.take(65).read_to_string(&mut value)?;
-        let invalid = || {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid typography preference",
-            )
-        };
-        if value.len() > 64 {
-            return Err(invalid());
-        }
-        let keys: Vec<_> = value.split_whitespace().collect();
-        if keys.len() != 2 {
-            return Err(invalid());
-        }
-        let text_size = TextSize::ALL
-            .into_iter()
-            .find(|size| size.key() == keys[0])
-            .ok_or_else(invalid)?;
-        let preset = FontPreset::ALL
-            .into_iter()
-            .find(|preset| preset.key() == keys[1])
-            .ok_or_else(invalid)?;
-        Ok(Self { text_size, preset })
-    }
-    pub fn save(self, root: &Path) -> std::io::Result<()> {
-        let mut file = tempfile::NamedTempFile::new_in(root)?;
-        writeln!(file, "{} {}", self.text_size.key(), self.preset.key())?;
-        file.as_file().sync_all()?;
-        file.persist(root.join("typography")).map_err(|e| e.error)?;
-        Ok(())
     }
     pub fn label<'a>(
         self,
@@ -267,37 +190,5 @@ impl Typography {
         .center_y(Length::Fill)
         .padding(24)
         .into()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn preferences_round_trip_and_reject_unbounded_or_unknown_values() {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(
-            Typography::load(root.path()).unwrap(),
-            Typography::default()
-        );
-        for preset in FontPreset::ALL {
-            for text_size in TextSize::ALL {
-                let ty = Typography { preset, text_size };
-                ty.save(root.path()).unwrap();
-                assert_eq!(Typography::load(root.path()).unwrap(), ty);
-            }
-        }
-        for invalid in [
-            "large host-font".to_owned(),
-            "infinite mono".into(),
-            "default sans extra".into(),
-            "default mono".to_owned() + &" ".repeat(100),
-        ] {
-            std::fs::write(root.path().join("typography"), invalid).unwrap();
-            assert_eq!(
-                Typography::load(root.path()).unwrap_err().kind(),
-                std::io::ErrorKind::InvalidData
-            );
-        }
     }
 }

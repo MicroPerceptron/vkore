@@ -137,7 +137,7 @@ impl Model {
             Message::Settings(message) => self.settings.update(message),
             Message::Appearance(appearance) => {
                 self.appearance = appearance;
-                if let Err(error) = appearance.save(&self.machines.state_root) {
+                if let Err(error) = self.settings.save_appearance(appearance) {
                     self.status =
                         format!("Appearance changed for this session; could not save: {error}");
                 }
@@ -226,9 +226,11 @@ impl Model {
         let ty = self.settings.typography;
         let page = match self.page {
             Page::Volumes => volumes::view(&self.volumes, &self.machines.names(), ty),
-            Page::Machines => {
-                machines::view(&self.machines, ty, self.appearance.iced(self.system_dark))
-            }
+            Page::Machines => machines::view(
+                &self.machines,
+                ty,
+                theme::appearance_theme(self.appearance, self.system_dark),
+            ),
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
             Page::Account => account::page(&self.settings.account, ty),
         };
@@ -383,7 +385,7 @@ impl App {
                 ..
             }
         );
-        let appearance = self.model.appearance.iced(self.model.system_dark);
+        let appearance = theme::appearance_theme(self.model.appearance, self.model.system_dark);
         interface.draw(
             &mut self.renderer,
             &appearance,
@@ -662,15 +664,14 @@ fn main() {
     // Resolve/create state before probing storage or loading preferences.
     // Discovery and launch helpers must share one absolute root, even when
     // the requested relative directory does not exist yet.
-    let state_root = vkored::State::open(&state_root)
-        .map(|state| state.root().to_owned())
-        .unwrap_or_else(|error| {
-            eprintln!(
-                "vkore-ui: state directory {}: {error}",
-                state_root.display()
-            );
-            std::process::exit(2);
-        });
+    let state = vkored::State::open(&state_root).unwrap_or_else(|error| {
+        eprintln!(
+            "vkore-ui: state directory {}: {error}",
+            state_root.display()
+        );
+        std::process::exit(2);
+    });
+    let state_root = state.root().to_owned();
     // Before the first frame, so that frame already shapes in our faces. Axiom
     // keeps shaping to the faces it can draw; registering adds ours to them.
     if let Err(error) = fonts::register() {
@@ -698,29 +699,27 @@ fn main() {
     };
     let context = SoftContext::new(event_loop.owned_display_handle())
         .expect("create software presentation context");
-    let (saved_appearance, appearance_status) = match theme::Appearance::load(&state_root) {
-        Ok(appearance) => (appearance, String::new()),
-        Err(error) => (
-            theme::Appearance::default(),
-            format!("Could not load appearance: {error}"),
-        ),
-    };
+    let settings = settings::State::new(state_root.clone());
     let mut model = Model {
         page: Page::Volumes,
         navigation_collapsed: false,
-        appearance: options.appearance.unwrap_or(saved_appearance),
+        appearance: options.appearance.unwrap_or(settings.saved_appearance),
         system_dark,
         volumes: volumes::State::new(volumes::spawn(proxy.clone())),
-        machines: machines::State::new(state_root.clone()),
-        settings: settings::State::new(state_root),
+        machines: machines::State::new(state_root),
+        settings,
         proxy,
         booted_at: Some(Instant::now()),
-        status: appearance_status,
+        status: String::new(),
         pending_start: None,
         reopen: None,
     };
-    model.machines.account = model.settings.account.account.clone();
-    model.machines.refresh_images(model.proxy.clone());
+    let account = vkored::account::Account::for_state(&state);
+    model.settings.account.account = account.clone();
+    model.machines.account = account;
+    if !model.settings.account.restore(model.proxy.clone(), true) {
+        model.machines.refresh_images(model.proxy.clone());
+    }
     if let Some(disk) = options.disk {
         let machines = &model.machines;
         model.volumes.open(&disk, |name| machines.disk_of(name));
@@ -878,6 +877,11 @@ mod tests {
                                 && card.x + card.width <= content.x + content.width + 1.
                         );
                     }
+                    if let Some(device) = self.get("settings-device") {
+                        assert!((device.x - api.x).abs() < 1.);
+                        assert!((device.width - api.width).abs() < 1.);
+                        assert!(device.y >= api.y + api.height + 23.);
+                    }
                 }
             }
         }
@@ -948,6 +952,7 @@ mod tests {
         if snapshot == Some("settings") {
             assert!(bounds.get("settings-appearance").is_some());
             assert!(bounds.get("settings-api").is_some());
+            assert!(bounds.get("settings-device").is_some());
         }
         bounds.check();
         let frame = renderer.take_frame().expect("a frame");
@@ -1242,7 +1247,7 @@ mod tests {
             (theme::Appearance::System, Some(true)),
             (theme::Appearance::System, Some(false)),
         ] {
-            let appearance = choice.iced(system_dark);
+            let appearance = theme::appearance_theme(choice, system_dark);
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
@@ -1776,6 +1781,7 @@ mod tests {
         let machines = machines::State::new(root.path().to_owned());
         let (volumes, _worker) = guest_listing();
         let settings = settings::State::new(root.path().to_owned());
+        settings.account.account.restore();
         for (width, height, scale) in [
             (900., 560., 1.),
             (1280., 800., 1.),

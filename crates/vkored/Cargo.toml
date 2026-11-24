@@ -25,12 +25,22 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 # MIT terminal screen model; no std feature keeps vte's OSC buffer bounded.
 vt100 = { version = "=0.18.1", default-features = false }
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "limits"] }
 
 [target.'cfg(unix)'.dependencies]
 vkore-volume = { path = "../vkore-volume" }
+blake3.workspace = true
+keyring-core = "1.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # Ctrl-C asks the guest to stop rather than killing QEMU under it.
 ctrlc = "3.5.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Encrypted Secret Service sessions over pure Rust D-Bus, without libdbus headers.
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-openssl"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

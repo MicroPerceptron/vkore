@@ -1,8 +1,8 @@
-//! Optional, memory-only download credentials. Constructing an account performs
-//! no I/O. Only first-party HTTPS requests can carry the credential; redirects
+//! Optional download credentials scoped to a vKore state directory. Constructing
+//! an account performs no I/O. Only first-party HTTPS requests can carry the credential; redirects
 //! are disabled. The server checks identity and current acceptance again before
 //! serving any image bytes, independently of this open-source client.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     io::Read,
@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod keyring;
+use keyring::Keyring;
+
 pub const ORIGIN: &str = "https://dev.microperceptron.com";
 pub const ACCOUNT_URL: &str = "https://dev.microperceptron.com/download-account";
 const API: &str = "https://dev.microperceptron.com/api/v1/download-account";
@@ -20,17 +23,69 @@ const MAX_RESPONSE: u64 = 32 * 1024;
 const REQUIRED: &str = "Image downloads require sign-in and agreement review. Open Settings > Account, or use --sign-in with the CLI create command.";
 
 #[derive(Clone, Default)]
-pub struct Account(Arc<Mutex<Option<Session>>>);
+pub struct Account(Arc<LocalAccount>);
+
+#[derive(Default)]
+struct LocalAccount {
+    keyring: Option<Keyring>,
+    access: Mutex<Access>,
+    // Views only read this snapshot. System keychain calls can prompt or
+    // wait for IPC and must never hold the lock used by the render loop.
+    display: Mutex<Display>,
+}
+
+#[derive(Default)]
+enum Access {
+    #[default]
+    Saved,
+    Temporary(Option<Session>),
+    SignOutIncomplete,
+}
+
+#[derive(Default)]
+struct Display {
+    status: Option<Status>,
+    persistence: CredentialPersistence,
+}
+
+/// Last observed local credential state. This says nothing about server
+/// authorization, which is checked independently before a download.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CredentialPersistence {
+    #[default]
+    NotChecked,
+    NoSavedSignIn,
+    Saved,
+    Temporary,
+    Expired,
+    StoreUnavailable,
+    Invalid,
+    SignOutIncomplete,
+}
+
+impl CredentialPersistence {
+    pub fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Temporary => Some(TEMPORARY),
+            Self::StoreUnavailable => Some(keyring::UNAVAILABLE),
+            Self::Invalid => Some(keyring::INVALID),
+            Self::SignOutIncomplete => Some(REMOVE_FAILED),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Debug for Account {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Account([credentials redacted])")
     }
 }
+#[derive(Clone, Deserialize, Serialize)]
 struct Session {
     token: String,
     status: Status,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Receipt {
     pub id: String,
     pub subject: String,
@@ -39,7 +94,7 @@ pub struct Receipt {
     #[serde(rename = "acceptedAt")]
     pub accepted_at: String,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Status {
     pub email: String,
     pub expires_at: u64,
@@ -133,10 +188,11 @@ fn checked_url(address: &str, download: bool) -> Result<(), String> {
 impl Status {
     fn validate(&self) -> Result<(), String> {
         let r = &self.receipt;
+        let now = now();
         if self.email.is_empty()
             || self.email.len() > 320
-            || self.expires_at <= now()
-            || self.expires_at > now() + 3_660_000
+            || self.expires_at <= now
+            || self.expires_at > now + 3_660_000
             || r.id.is_empty()
             || r.id.len() > 128
             || r.subject.is_empty()
@@ -153,14 +209,144 @@ impl Status {
         Ok(())
     }
 }
+
+const TEMPORARY: &str = "This sign-in is temporary. Unlock or start your system keyring and sign in again to keep it across launches.";
+const REMOVE_FAILED: &str =
+    "Could not remove the saved sign-in. Unlock your system keyring to finish signing out.";
+
 impl Account {
+    /// Bind desktop and CLI account operations to the canonical state root.
+    /// Construction is local and does not contact a keyring or the network.
+    pub fn for_state(state: &crate::State) -> Self {
+        Self::with_keyring(Keyring::for_root(state.root()))
+    }
+
+    fn with_keyring(keyring: Keyring) -> Self {
+        Self(Arc::new(LocalAccount {
+            keyring: Some(keyring),
+            ..LocalAccount::default()
+        }))
+    }
+
+    /// Restore the display state on an account worker, entirely offline.
+    pub fn restore(&self) {
+        let _ = self.session();
+    }
+
     pub fn status(&self) -> Option<Status> {
         self.0
+            .display
             .lock()
             .ok()?
+            .status
             .as_ref()
-            .filter(|s| s.status.expires_at > now())
-            .map(|s| s.status.clone())
+            .filter(|status| status.expires_at > now())
+            .cloned()
+    }
+
+    pub fn storage_warning(&self) -> Option<&'static str> {
+        self.persistence().warning()
+    }
+
+    pub fn sign_out_incomplete(&self) -> bool {
+        self.persistence() == CredentialPersistence::SignOutIncomplete
+    }
+
+    /// Read display metadata without touching the system store.
+    pub fn persistence(&self) -> CredentialPersistence {
+        let Ok(display) = self.0.display.lock() else {
+            return CredentialPersistence::StoreUnavailable;
+        };
+        if display
+            .status
+            .as_ref()
+            .is_some_and(|status| status.expires_at <= now())
+        {
+            return CredentialPersistence::Expired;
+        }
+        display.persistence
+    }
+
+    pub fn storage_provider(&self) -> &'static str {
+        keyring::PROVIDER
+    }
+
+    fn display(&self, status: Option<&Status>, persistence: CredentialPersistence) {
+        if let Ok(mut display) = self.0.display.lock() {
+            *display = Display {
+                status: status.cloned(),
+                persistence,
+            };
+        }
+    }
+
+    fn session(&self) -> Result<Option<Session>, &'static str> {
+        use CredentialPersistence as Storage;
+
+        let mut access = self
+            .0
+            .access
+            .lock()
+            .map_err(|_| "Account state unavailable")?;
+        match &mut *access {
+            Access::Temporary(temporary) => {
+                if let Some(session) = temporary.as_ref().filter(|s| s.status.expires_at > now()) {
+                    return Ok(Some(session.clone()));
+                }
+                // If saving failed, an older account could still be in the
+                // vault. Keep this process signed out when its session ends.
+                *temporary = None;
+                self.display(None, Storage::Expired);
+                return Ok(None);
+            }
+            Access::SignOutIncomplete => return Err(REMOVE_FAILED),
+            Access::Saved => {}
+        }
+        // The keyring is authoritative for saved credentials. A running
+        // desktop must see a deletion or replacement from another process
+        // before it starts another authenticated request.
+        let (session, persistence) = match self.0.keyring.as_ref().map_or(Ok(None), Keyring::load) {
+            Ok(None) => (None, Storage::NoSavedSignIn),
+            Ok(Some(session)) if session.status.expires_at <= now() => (None, Storage::Expired),
+            Ok(Some(session))
+                if valid_token(&session.token) && session.status.validate().is_ok() =>
+            {
+                (Some(session), Storage::Saved)
+            }
+            Ok(Some(_)) | Err(keyring::Failure::Invalid) => {
+                self.display(None, Storage::Invalid);
+                return Err(keyring::INVALID);
+            }
+            Err(keyring::Failure::Unavailable) => {
+                self.display(None, Storage::StoreUnavailable);
+                return Err(keyring::UNAVAILABLE);
+            }
+        };
+        self.display(session.as_ref().map(|session| &session.status), persistence);
+        Ok(session)
+    }
+
+    fn remember(&self, session: &Session, cancelled: &AtomicBool) -> Result<bool, String> {
+        let mut access = self
+            .0
+            .access
+            .lock()
+            .map_err(|_| "Account state unavailable")?;
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        // Start committing only after cancellation has been checked. The OS
+        // may require its own confirmation to complete the write.
+        let saved = self.0.keyring.as_ref().map(|keyring| keyring.save(session));
+        let persistence = if matches!(saved, Some(Ok(()))) {
+            *access = Access::Saved;
+            CredentialPersistence::Saved
+        } else {
+            *access = Access::Temporary(Some(session.clone()));
+            CredentialPersistence::Temporary
+        };
+        self.display(Some(&session.status), persistence);
+        Ok(true)
     }
     /// The callback contains only the public user code; never the polling secret.
     pub fn sign_in(&self, cancelled: &AtomicBool, show: impl Fn(SignIn)) -> Result<Status, String> {
@@ -204,46 +390,65 @@ impl Account {
             if grant.token_type != "Bearer" || !valid_token(&grant.access_token) {
                 return Err("Invalid download credential".into());
             }
-            let mut session = self.0.lock().map_err(|_| "Account state unavailable")?;
-            if cancelled.load(Ordering::Acquire) {
-                drop(session);
-                let _ = agent
-                    .post(&format!("{API}/revoke"))
-                    .set("Authorization", &format!("Bearer {}", grant.access_token))
-                    .call();
-                return Err("Sign-in cancelled".into());
-            }
-            *session = Some(Session {
+            let session = Session {
                 token: grant.access_token,
                 status: grant.status.clone(),
-            });
+            };
+            if !self.remember(&session, cancelled)? {
+                let _ = revoke(&agent, &session.token);
+                return Err("Sign-in cancelled".into());
+            }
             return Ok(grant.status);
         }
         Err("Sign-in expired. Start again.".into())
     }
     /// Local credentials are discarded immediately, even if revocation is offline.
     pub fn sign_out(&self) -> Result<(), String> {
-        let session = self
-            .0
-            .lock()
-            .map_err(|_| "Account state unavailable")?
-            .take();
-        if let Some(session) = session {
-            agent(20)?.post(&format!("{API}/revoke")).set("Authorization", &format!("Bearer {}", session.token)).call()
-                .map_err(|_| "Signed out locally. The server could not be reached; the previous credential expires within one hour.")?;
+        let (temporary, saved, removed) = self.forget()?;
+        let mut revocation_failed = false;
+        for session in [temporary, saved].into_iter().flatten() {
+            if session.status.expires_at > now() && valid_token(&session.token) {
+                revocation_failed |= agent(20)
+                    .and_then(|agent| revoke(&agent, &session.token))
+                    .is_err();
+            }
+        }
+        if !removed {
+            return Err(REMOVE_FAILED.into());
+        }
+        if revocation_failed {
+            return Err("Signed out locally. The server could not revoke the previous credential; it expires within one hour.".into());
         }
         Ok(())
+    }
+
+    fn forget(&self) -> Result<(Option<Session>, Option<Session>, bool), String> {
+        let mut access = self
+            .0
+            .access
+            .lock()
+            .map_err(|_| "Account state unavailable")?;
+        let temporary = match std::mem::take(&mut *access) {
+            Access::Temporary(session) => session,
+            _ => None,
+        };
+        self.display(None, CredentialPersistence::NotChecked);
+        let (saved, removed) = self.0.keyring.as_ref().map_or((None, true), Keyring::take);
+        if !removed {
+            *access = Access::SignOutIncomplete;
+        }
+        let persistence = if removed {
+            CredentialPersistence::NoSavedSignIn
+        } else {
+            CredentialPersistence::SignOutIncomplete
+        };
+        self.display(None, persistence);
+        Ok((temporary, saved, removed))
     }
     pub(crate) fn catalog_request(&self, address: &str) -> Result<ureq::Request, String> {
         checked_url(address, false)?;
         let mut request = agent(20)?.get(address).set("Accept", "application/json");
-        if let Some(session) = self
-            .0
-            .lock()
-            .map_err(|_| "Account state unavailable")?
-            .as_ref()
-            .filter(|s| s.status.expires_at > now())
-        {
+        if let Ok(Some(session)) = self.session() {
             request = request.set("Authorization", &format!("Bearer {}", session.token));
         }
         Ok(request)
@@ -251,13 +456,8 @@ impl Account {
     /// Called only after cache lookup, and before any image request/staging.
     pub(crate) fn download_request(&self, address: &str) -> Result<ureq::Request, String> {
         checked_url(address, true)?;
-        let guard = self.0.lock().map_err(|_| "Account state unavailable")?;
-        let session = guard
-            .as_ref()
-            .filter(|s| s.status.expires_at > now())
-            .ok_or(REQUIRED)?;
+        let session = self.session()?.ok_or(REQUIRED)?;
         let authorization = format!("Bearer {}", session.token);
-        drop(guard);
         let status: Status = read(
             agent(20)?
                 .get(&format!("{API}/session"))
@@ -271,6 +471,14 @@ impl Account {
             .set("Authorization", &authorization))
     }
 }
+fn revoke(agent: &ureq::Agent, token: &str) -> Result<(), String> {
+    agent
+        .post(&format!("{API}/revoke"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map(|_| ())
+        .map_err(|_| "Could not revoke download authorization".into())
+}
 fn valid_token(token: &str) -> bool {
     token.len() == 48
         && token.starts_with("vkdl_")
@@ -282,6 +490,99 @@ fn valid_token(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn test_account() -> (Account, Arc<keyring_core::mock::Cred>) {
+        let entry = Arc::new(keyring_core::mock::Cred {
+            specifiers: ("test-vkore".into(), "test-account".into()),
+            inner: Default::default(),
+        });
+        (account_using(entry.clone()), entry)
+    }
+
+    fn account_using(entry: Arc<keyring_core::mock::Cred>) -> Account {
+        Account::with_keyring(Keyring::for_root(Path::new("/test")).with_test_credential(entry))
+    }
+
+    fn test_session() -> Session {
+        Session {
+            token: format!("vkdl_{}", "a".repeat(43)),
+            status: Status {
+                email: "demo@example.test".into(),
+                expires_at: now() + 60_000,
+                receipt: Receipt {
+                    id: "receipt".into(),
+                    subject: "subject".into(),
+                    version: "1".into(),
+                    sha256: "b".repeat(64),
+                    accepted_at: "2026-11-24T00:00:00Z".into(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn new_account_process_can_restore_and_forget_an_unexpired_sign_in() {
+        let (account, entry) = test_account();
+        let session = test_session();
+        assert_eq!(account.persistence(), CredentialPersistence::NotChecked);
+        assert!(account.remember(&session, &AtomicBool::new(false)).unwrap());
+        assert!(matches!(*account.0.access.lock().unwrap(), Access::Saved));
+        assert_eq!(account.persistence(), CredentialPersistence::Saved);
+        drop(account);
+
+        let restored = account_using(entry.clone());
+        restored.restore();
+        assert_eq!(restored.status().unwrap().email, session.status.email);
+        assert_eq!(restored.persistence(), CredentialPersistence::Saved);
+        assert_eq!(restored.session().unwrap().unwrap().token, session.token);
+
+        let other = account_using(entry.clone());
+        let (_, saved, removed) = other.forget().unwrap();
+        assert!(removed);
+        assert_eq!(saved.unwrap().token, session.token);
+        assert!(restored.session().unwrap().is_none());
+        assert!(restored.status().is_none());
+        assert_eq!(restored.persistence(), CredentialPersistence::NoSavedSignIn);
+        assert!(account_using(entry).session().unwrap().is_none());
+    }
+
+    #[test]
+    fn expired_or_corrupt_keyring_data_cannot_authorize_a_request() {
+        let (account, entry) = test_account();
+        let mut session = test_session();
+        session.status.expires_at = 1;
+        let entry = keyring_core::Entry::new_with_credential(entry);
+        entry
+            .set_password(&serde_json::to_string(&session).unwrap())
+            .unwrap();
+        assert!(account.session().unwrap().is_none());
+        assert_eq!(account.persistence(), CredentialPersistence::Expired);
+        entry.set_password("not a session").unwrap();
+        assert_eq!(account.session().err(), Some(keyring::INVALID));
+        assert_eq!(account.persistence(), CredentialPersistence::Invalid);
+        assert!(account.status().is_none());
+    }
+
+    #[test]
+    fn unavailable_keyring_falls_back_only_for_the_current_process() {
+        let (account, entry) = test_account();
+        entry.set_error(keyring_core::Error::NoDefaultStore);
+        assert_eq!(account.persistence(), CredentialPersistence::NotChecked);
+        account.restore();
+        assert_eq!(
+            account.persistence(),
+            CredentialPersistence::StoreUnavailable
+        );
+        entry.set_error(keyring_core::Error::NoDefaultStore);
+        let session = test_session();
+        assert!(account.remember(&session, &AtomicBool::new(false)).unwrap());
+        assert_eq!(account.storage_warning(), Some(TEMPORARY));
+        assert_eq!(account.persistence(), CredentialPersistence::Temporary);
+        assert!(account.session().unwrap().is_some());
+        assert!(account_using(entry).session().unwrap().is_none());
+    }
+
     #[test]
     fn offline_account_cannot_request_any_download() {
         let account = Account::default();

@@ -31,9 +31,7 @@ Open **Settings** in the sidebar, then choose **System**, **Light** or **Dark** 
 The **Text** section offers four sizes (90%, 100%, 115% and 130%) and three
 bundled interface-font presets: Space Grotesk, DM Sans and JetBrains Mono.
 Changes apply immediately across pages, with a live sample and **Reset text
-settings**. Preferences are saved separately from color scheme and API settings
-in a bounded, atomically replaced `typography` file. Corrupt settings fall back
-to defaults with a visible message.
+settings**.
 
 Typography is passed explicitly through the views, so windows/tests do not
 share a mutable font preference. Page titles retain Archivo; paths, filenames and
@@ -48,9 +46,15 @@ reports no preference, it uses dark mode and says so in Settings. Existing
 saved Light/Dark choices remain fixed. The logo keeps its original colors in
 both modes. Window chrome follows the choice where supported by the host.
 
-`--theme system`, `--theme light` or `--theme dark` overrides the saved preference for that launch;
-using Settings saves a new preference. A failure to load or save preferences
-is shown in the sidebar rather than silently discarded.
+`--theme system`, `--theme light` or `--theme dark` overrides the saved preference for
+that launch. Choosing an appearance in Settings saves it for subsequent launches.
+
+**This device** shows the active state directory and explains where account
+credentials are stored. Appearance, text preferences and the saved API port
+live in `state.sqlite3` under that directory. The first open imports the existing
+`appearance`, `typography` and `api-port` files and leaves them available to older
+builds. Invalid legacy values use defaults with a message in **This device**,
+which also reports database open errors. Credentials live in the OS keyring.
 
 Under **Local API**, enter a port from 1 to 65535 (default 8080) and choose
 **Save port**. **Start API** also saves the field before starting. The saved port

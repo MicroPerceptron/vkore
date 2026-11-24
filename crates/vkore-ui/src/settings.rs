@@ -1,19 +1,20 @@
 //! Desktop preferences and controls over the runtime's local API.
-use crate::typography::{FontPreset, TextSize, Typography};
+use crate::typography::{FontPreset, TextSize, Typography, font_preset_label, text_size_label};
 use std::{
-    io::{Read, Write},
     net::{Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, text_input};
-use vkored::inference::{Server, Unavailable};
+use vkored::{
+    account::CredentialPersistence,
+    inference::{Server, Unavailable},
+    state::desktop::{Appearance, DATABASE_NAME, Preference, Preferences, Store, parse_port},
+};
 
-use crate::{Message, UiElement, fonts, theme, widgets};
-
-const DEFAULT_PORT: u16 = 8080;
+use crate::{Message, Page, UiElement, account, fonts, theme, visuals, widgets};
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
@@ -31,7 +32,10 @@ pub enum SettingsMessage {
 pub struct State {
     pub account: crate::account::State,
     pub typography: Typography,
+    pub saved_appearance: Appearance,
     typography_error: String,
+    store: Option<Store>,
+    storage_warnings: Vec<String>,
     root: PathBuf,
     port: u16,
     port_input: String,
@@ -41,29 +45,31 @@ pub struct State {
 
 impl State {
     pub fn new(root: PathBuf) -> Self {
-        let (port, error) = match load_port(&root) {
-            Ok(port) => (port, String::new()),
+        let (store, preferences, storage_warnings) = match Store::open(&root) {
+            Ok((store, preferences, warnings)) => (Some(store), preferences, warnings),
             Err(error) => (
-                DEFAULT_PORT,
-                format!("Could not load API port; using {DEFAULT_PORT}: {error}"),
-            ),
-        };
-        let (typography, typography_error) = match Typography::load(&root) {
-            Ok(value) => (value, String::new()),
-            Err(error) => (
-                Typography::default(),
-                format!("Could not load text preferences: {error}"),
+                None,
+                Preferences::default(),
+                vec![format!(
+                    "Could not open the state database. Using default preferences. {error}"
+                )],
             ),
         };
         Self {
             account: Default::default(),
-            typography,
-            typography_error,
+            typography: Typography {
+                text_size: preferences.text_size,
+                preset: preferences.font_preset,
+            },
+            saved_appearance: preferences.appearance,
+            typography_error: String::new(),
+            store,
+            storage_warnings,
             root,
-            port,
-            port_input: port.to_string(),
+            port: preferences.api_port,
+            port_input: preferences.api_port.to_string(),
             api: None,
-            error,
+            error: String::new(),
         }
     }
 
@@ -71,15 +77,15 @@ impl State {
         match message {
             SettingsMessage::TextSize(size) => {
                 self.typography.text_size = size;
-                self.save_typography();
+                self.save_typography(Preference::TextSize(size));
             }
             SettingsMessage::Font(preset) => {
                 self.typography.preset = preset;
-                self.save_typography();
+                self.save_typography(Preference::Font(preset));
             }
             SettingsMessage::ResetTypography => {
                 self.typography = Typography::default();
-                self.save_typography();
+                self.save_typography(Preference::ResetTypography);
             }
             SettingsMessage::Port(value) => {
                 // Numeric fields stay bounded and within the bundled font.
@@ -116,25 +122,32 @@ impl State {
         }
     }
 
-    fn save_typography(&mut self) {
+    fn save(&self, choice: Preference) -> Result<(), String> {
+        self.store
+            .as_ref()
+            .ok_or("State database is unavailable")?
+            .save(choice)
+    }
+
+    pub fn save_appearance(&mut self, appearance: Appearance) -> Result<(), String> {
+        self.save(Preference::Appearance(appearance))?;
+        self.saved_appearance = appearance;
+        Ok(())
+    }
+
+    fn save_typography(&mut self, choice: Preference) {
         self.typography_error = self
-            .typography
-            .save(&self.root)
+            .save(choice)
             .err()
-            .map(|error| format!("Text changed for this session; could not save: {error}"))
+            .map(|error| {
+                format!("Text changed for this session. Could not save preferences. {error}")
+            })
             .unwrap_or_default();
     }
 
     fn save_port(&mut self) -> bool {
         let result = parse_port(&self.port_input).and_then(|port| {
-            let mut file =
-                tempfile::NamedTempFile::new_in(&self.root).map_err(|error| error.to_string())?;
-            writeln!(file, "{port}").map_err(|error| error.to_string())?;
-            file.as_file()
-                .sync_all()
-                .map_err(|error| error.to_string())?;
-            file.persist(self.root.join("api-port"))
-                .map_err(|error| error.error.to_string())?;
+            self.save(Preference::ApiPort(port))?;
             Ok(port)
         });
         match result {
@@ -155,33 +168,6 @@ impl State {
         // Dropping the runtime owner closes the listener and cancels requests.
         self.api.take();
     }
-}
-
-fn parse_port(value: &str) -> Result<u16, String> {
-    let text = value.trim();
-    if text.is_empty() || text.len() > 5 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("enter a port from 1 to 65535".into());
-    }
-    text.parse::<u16>()
-        .ok()
-        .filter(|port| *port != 0)
-        .ok_or_else(|| "enter a port from 1 to 65535".into())
-}
-
-fn load_port(root: &Path) -> Result<u16, String> {
-    let file = match std::fs::File::open(root.join("api-port")) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(DEFAULT_PORT),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut text = String::new();
-    file.take(17)
-        .read_to_string(&mut text)
-        .map_err(|error| error.to_string())?;
-    if text.len() > 16 {
-        return Err("saved port exceeds 16 bytes".into());
-    }
-    parse_port(&text)
 }
 
 fn wrap(message: SettingsMessage) -> Message {
@@ -378,12 +364,112 @@ fn panels(
         .width(Length::Fill)
         .style(widgets::card);
 
+    let device = device_settings(state);
     let content: UiElement<'_> = if wide {
-        row![appearance, api].spacing(theme::SPACE_6).into()
+        row![
+            appearance,
+            column![api, device]
+                .spacing(theme::SPACE_6)
+                .width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_6)
+        .into()
     } else {
-        column![appearance, api].spacing(theme::SPACE_6).into()
+        column![appearance, api, device]
+            .spacing(theme::SPACE_6)
+            .into()
     };
     widgets::scroll(content).height(Length::Fill).into()
+}
+
+fn device_settings(state: &State) -> UiElement<'_> {
+    let ty = state.typography;
+    let account = &state.account.account;
+    let checking = state.account.checking_storage();
+    let persistence = account.persistence();
+    let (label, tone) = if checking {
+        ("Checking…", theme::TEXT_MUTED)
+    } else {
+        match persistence {
+            CredentialPersistence::NotChecked => ("Unchecked", theme::TEXT_MUTED),
+            CredentialPersistence::NoSavedSignIn => ("No saved sign-in", theme::TEXT_MUTED),
+            CredentialPersistence::Saved => ("Saved locally", theme::SUCCESS),
+            CredentialPersistence::Temporary => ("Temporary sign-in", theme::WARNING),
+            CredentialPersistence::Expired => ("Sign-in expired", theme::TEXT_MUTED),
+            CredentialPersistence::StoreUnavailable => ("Store unavailable", theme::WARNING),
+            CredentialPersistence::Invalid => ("Invalid saved sign-in", theme::WARNING),
+            CredentialPersistence::SignOutIncomplete => ("Sign-out incomplete", theme::WARNING),
+        }
+    };
+    let mut storage = column![
+        row![
+            visuals::icon(visuals::Icon::Machine, theme::TEXT_SECONDARY, 22.),
+            ty.body("This device", 18., theme::TEXT),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center),
+        ty.label("State directory", theme::TEXT_MUTED),
+        container(
+            ty.data(state.root.display().to_string(), theme::TEXT)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 6.)),
+        ty.body(
+            format!("Desktop preferences database · {DATABASE_NAME}"),
+            theme::SIZE_SM,
+            theme::TEXT_MUTED,
+        ),
+    ]
+    .spacing(theme::SPACE_4);
+    for warning in &state.storage_warnings {
+        storage = storage.push(
+            ty.data(warning, theme::WARNING)
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+        );
+    }
+    let mut content = storage
+        .push(ty.label("Credential store", theme::TEXT_MUTED))
+        .push(
+            row![
+                ty.body(account.storage_provider(), 14., theme::TEXT),
+                ty.badge(label, tone),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center)
+            .wrap(),
+        );
+    if !checking && let Some(warning) = persistence.warning() {
+        content = content.push(ty.body(warning, theme::SIZE_SM, theme::WARNING));
+    }
+    content = content.push(
+        row![
+            button(ty.control("Refresh status"))
+                .height(ty.control_height())
+                .padding([0, 14])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press_maybe(
+                    state
+                        .account
+                        .can_check_storage()
+                        .then_some(Message::Account(account::Action::CheckPersistence),)
+                ),
+            button(ty.control("Manage account"))
+                .height(ty.control_height())
+                .padding([0, 14])
+                .style(widgets::button_style(widgets::Button::Secondary))
+                .on_press(Message::Show(Page::Account)),
+        ]
+        .spacing(theme::SPACE_2)
+        .wrap(),
+    );
+    container(content)
+        .id("settings-device")
+        .padding(theme::SPACE_6)
+        .width(Length::Fill)
+        .style(widgets::card)
+        .into()
 }
 
 fn typography_controls(state: &State) -> UiElement<'_> {
@@ -391,7 +477,7 @@ fn typography_controls(state: &State) -> UiElement<'_> {
     let mut sizes = row![].spacing(6);
     for size in TextSize::ALL {
         sizes = sizes.push(
-            button(ty.body(size.label(), 13., theme::TEXT))
+            button(ty.body(text_size_label(size), 13., theme::TEXT))
                 .padding([8, 10])
                 .style(widgets::button_style(widgets::Button::Choice(
                     ty.text_size == size,
@@ -403,7 +489,7 @@ fn typography_controls(state: &State) -> UiElement<'_> {
     for preset in FontPreset::ALL {
         presets = presets.push(
             button(
-                ty.body(preset.label(), 13., theme::TEXT)
+                ty.body(font_preset_label(preset), 13., theme::TEXT)
                     .font(Typography { preset, ..ty }.font()),
             )
             .padding([8, 10])
@@ -439,10 +525,11 @@ fn typography_controls(state: &State) -> UiElement<'_> {
 mod tests {
     use super::*;
     use std::{
-        io::ErrorKind,
+        io::{ErrorKind, Read},
         net::{TcpListener, TcpStream},
         time::Duration,
     };
+    use vkored::state::desktop::DEFAULT_PORT;
 
     fn assert_disconnected(mut connection: TcpStream) {
         match connection.read(&mut [0]) {
@@ -459,7 +546,10 @@ mod tests {
         state.update(SettingsMessage::TextSize(TextSize::ExtraLarge));
         state.update(SettingsMessage::Font(FontPreset::Sans));
         assert_eq!(state.typography.text_size, TextSize::ExtraLarge);
-        assert_eq!(Typography::load(root.path()).unwrap(), state.typography);
+        assert_eq!(
+            State::new(root.path().to_owned()).typography,
+            state.typography
+        );
         assert_eq!(state.port, DEFAULT_PORT);
         state.update(SettingsMessage::ResetTypography);
         assert_eq!(
@@ -469,7 +559,7 @@ mod tests {
         std::fs::remove_dir_all(root.path()).unwrap();
         state.update(SettingsMessage::Font(FontPreset::Mono));
         assert_eq!(state.typography.preset, FontPreset::Mono);
-        assert!(state.typography_error.contains("could not save"));
+        assert!(state.typography_error.contains("Could not save"));
     }
 
     #[test]
@@ -484,7 +574,7 @@ mod tests {
             state.update(SettingsMessage::ToggleApi);
             assert!(state.api.is_none());
             assert!(!state.error.is_empty());
-            assert_eq!(load_port(root.path()).unwrap(), 9090);
+            assert_eq!(State::new(root.path().to_owned()).port, 9090);
         }
         for invalid in ["123456", "abc", "日本語"] {
             let before = state.port_input.clone();
@@ -492,10 +582,6 @@ mod tests {
             assert_eq!(state.port_input, before);
             assert!(!state.error.is_empty());
         }
-        std::fs::write(root.path().join("api-port"), "9".repeat(100)).unwrap();
-        let state = State::new(root.path().to_owned());
-        assert_eq!(state.port, DEFAULT_PORT);
-        assert!(!state.error.is_empty());
     }
 
     #[test]
@@ -522,7 +608,7 @@ mod tests {
         state.update(SettingsMessage::Port(next_address.port().to_string()));
         state.update(SettingsMessage::SavePort);
         assert_eq!(state.api.as_ref().unwrap().address, first);
-        assert_eq!(load_port(root.path()).unwrap(), next_address.port());
+        assert_eq!(State::new(root.path().to_owned()).port, next_address.port());
         state.update(SettingsMessage::ToggleApi);
         assert!(state.api.is_none());
         assert_disconnected(first_connection);

@@ -3,6 +3,16 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.8.0] - 2026-11-23
+
+### Added
+- Optional Account controls in Settings: browser Google sign-in, versioned agreement review, session status, cancellation and sign-out. Credentials remain in memory and expire within one hour; local features remain available offline.
+- CLI `machine create --sign-in` performs the same browser authorization without putting credentials in command-line arguments or state files.
+
+### Security
+- Require authenticated, server-recorded agreement acceptance before new image transfers. The shared runtime gates desktop and CLI downloads, restricts credentials to the official service and refuses redirects and query-token shortcuts. Verified cached images and local ISO imports remain available without authentication.
+- Requires the matching Placement server account API and mandatory download gate before remote downloads become available.
+
 ## [0.7.0] - 2026-11-20
 
 ### Added

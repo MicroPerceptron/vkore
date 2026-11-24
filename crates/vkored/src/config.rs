@@ -143,6 +143,7 @@ impl std::error::Error for StoreError {}
 /// Machines, by name.
 pub struct MachineStore {
     state: State,
+    pub(crate) account: crate::account::Account,
 }
 
 /// Whether `name` can name a machine (and so a directory and a QEMU name).
@@ -176,7 +177,15 @@ pub fn broad_root_warning(root: &Path) -> Option<String> {
 
 impl MachineStore {
     pub fn new(state: State) -> Self {
-        Self { state }
+        Self {
+            state,
+            account: Default::default(),
+        }
+    }
+
+    pub fn with_account(mut self, account: crate::account::Account) -> Self {
+        self.account = account;
+        self
     }
 
     pub fn state(&self) -> &State {

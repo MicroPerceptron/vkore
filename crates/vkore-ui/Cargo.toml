@@ -14,12 +14,14 @@ axui-fonts = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139d
 axui-iced = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }
 axui-raster = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }
 cosmic-text = "0.19"
+# Decode bundled Google artwork to the renderer's RGBA image lane. Already in-tree.
+png = "0.18.1"
 # Parses the mark's SVG path data; already reached through the geometry lane.
 zeno = "0.3.3"
 iced_core = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["crisp"] }
 iced_graphics = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["geometry"] }
 iced_runtime = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false }
-iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["canvas"] }
+iced_widget = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["canvas", "image"] }
 iced_winit = { git = "https://github.com/MicroPerceptron/iced", rev = "1021994b8a155e8285ca5ea18239467616387fbd", default-features = false, features = ["x11", "wayland"] }
 softbuffer = "0.4.8"
 # Character maps of the bundled faces. Already built for fontdb; no new code.

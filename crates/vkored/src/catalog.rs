@@ -129,7 +129,7 @@ impl Catalog {
 }
 
 mod archives;
-pub use archives::{ARCHIVES_URL, fetch};
+pub use archives::{ARCHIVES_URL, fetch, fetch_with_account};
 
 pub fn official() -> Result<Catalog, String> {
     fetch(&std::sync::atomic::AtomicBool::new(false))

@@ -29,6 +29,7 @@ pub enum SettingsMessage {
 /// server; `port` is the saved choice for its next start, and `port_input`
 /// is the uncommitted field. The runtime still owns listener policy/lifecycle.
 pub struct State {
+    pub account: crate::account::State,
     pub typography: Typography,
     typography_error: String,
     root: PathBuf,
@@ -55,6 +56,7 @@ impl State {
             ),
         };
         Self {
+            account: Default::default(),
             typography,
             typography_error,
             root,

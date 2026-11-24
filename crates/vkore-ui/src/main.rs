@@ -1,21 +1,25 @@
 //! vKore's native desktop: Kore machines, and their DagFS volumes browsed
 //! from the host through Kore's own engine. Rendered with Iced over Axiom's
-//! software rasterizer; no browser, no daemon, no login.
+//! software rasterizer. Accounts are optional and authorize image downloads.
 
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;
 
+mod account;
 mod console;
 mod fonts;
+mod google_sign_in;
 mod hardware;
 mod logo;
 mod machines;
+mod navigation;
 mod render_backend;
 mod settings;
 mod splash;
 mod theme;
 mod typography;
+#[cfg(test)]
 use typography::Typography;
 mod visuals;
 mod volumes;
@@ -25,12 +29,14 @@ use axgfx::Extent2d;
 use axui_iced::Renderer as AxRenderer;
 use iced_core::Renderer as _;
 use iced_core::{
-    Element, Length, Size, Theme, alignment, mouse,
+    Element, Length, Size, Theme, mouse,
     renderer::{self, Scale},
     shell,
 };
 use iced_runtime::user_interface::{self, UserInterface};
-use iced_widget::{button, column, container, row, stack, text};
+#[cfg(test)]
+use iced_widget::text;
+use iced_widget::{container, row, stack};
 use iced_winit::{conversion, winit};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
 use std::{
@@ -74,8 +80,10 @@ fn native_renderer() -> AxRenderer<System> {
 #[derive(Debug, Clone)]
 pub enum Message {
     Show(Page),
+    ToggleNavigation,
     Appearance(theme::Appearance),
     Settings(settings::SettingsMessage),
+    Account(account::Action),
     Volume(volumes::VolumeMessage),
     Machine(machines::MachineMessage),
 }
@@ -86,11 +94,13 @@ pub enum Page {
     Volumes,
     Machines,
     Settings,
+    Account,
 }
 
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    Account(account::Reply),
     SystemTheme(Option<bool>),
     Volume(volumes::Reply),
     Machine(String, machines::Update),
@@ -98,6 +108,7 @@ pub enum UserEvent {
 
 struct Model {
     page: Page,
+    navigation_collapsed: bool,
     appearance: theme::Appearance,
     system_dark: Option<bool>,
     settings: settings::State,
@@ -121,6 +132,8 @@ impl Model {
             return;
         }
         match message {
+            Message::ToggleNavigation => self.navigation_collapsed = !self.navigation_collapsed,
+            Message::Account(action) => self.settings.account.update(action, &self.proxy),
             Message::Settings(message) => self.settings.update(message),
             Message::Appearance(appearance) => {
                 self.appearance = appearance;
@@ -167,6 +180,11 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            UserEvent::Account(reply) => {
+                if self.settings.account.reply(reply) {
+                    self.machines.refresh_images(self.proxy.clone());
+                }
+            }
             UserEvent::SystemTheme(dark) => self.system_dark = dark,
             UserEvent::Volume(reply) => {
                 let closed = matches!(reply, volumes::Reply::Closed);
@@ -212,9 +230,17 @@ impl Model {
                 machines::view(&self.machines, ty, self.appearance.iced(self.system_dark))
             }
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
+            Page::Account => account::page(&self.settings.account, ty),
         };
         let base: UiElement<'_> = row![
-            sidebar(self.page, self.machines.running.len(), &self.status, ty),
+            navigation::view(
+                self.page,
+                self.machines.running.len(),
+                &self.status,
+                self.navigation_collapsed,
+                self.settings.account.preview(),
+                ty
+            ),
             page
         ]
         .height(Length::Fill)
@@ -232,98 +258,6 @@ impl Model {
         }
         base
     }
-}
-
-/// The navigation rail: pages and what is running.
-fn sidebar(current: Page, running: usize, status: &str, ty: Typography) -> UiElement<'_> {
-    let brand = row![
-        splash::mark(36.0),
-        column![
-            text("vKore")
-                .font(fonts::DISPLAY)
-                .size(23.0)
-                .style(theme::text(theme::TEXT)),
-            ty.body("Your Kore workspace", 11., theme::TEXT_MUTED),
-        ]
-        .spacing(2)
-    ]
-    .spacing(9)
-    .align_y(alignment::Vertical::Center);
-    let nav = |label: &'static str, page: Page, icon| {
-        let active = current == page;
-        button(
-            row![
-                visuals::icon(
-                    icon,
-                    if active {
-                        theme::MAGENTA
-                    } else {
-                        theme::TEXT_MUTED
-                    },
-                    20.
-                ),
-                ty.nav(label)
-            ]
-            .spacing(12)
-            .align_y(alignment::Vertical::Center),
-        )
-        .height(44)
-        .padding([0, 12])
-        .width(Length::Fill)
-        .style(widgets::button_style(widgets::Button::Navigation(active)))
-        .on_press(Message::Show(page))
-    };
-    let mut rail = column![
-        container(brand).padding([10, 0]),
-        iced_widget::space::vertical().height(20),
-        ty.label("Workspace", theme::TEXT_MUTED),
-        nav("Machines", Page::Machines, visuals::Icon::Machine),
-        nav("Volumes", Page::Volumes, visuals::Icon::Volume),
-        iced_widget::space::vertical(),
-        nav("Settings", Page::Settings, visuals::Icon::Settings),
-        container(
-            column![
-                ty.body("On this computer", 12., theme::TEXT_SECONDARY),
-                ty.badge(
-                    if running == 0 {
-                        "No machines running".to_owned()
-                    } else {
-                        format!("{running} running")
-                    },
-                    if running == 0 {
-                        theme::TEXT_MUTED
-                    } else {
-                        theme::SUCCESS
-                    }
-                ),
-            ]
-            .spacing(8)
-        )
-        .padding([14, 4]),
-    ]
-    .spacing(6);
-    if !status.is_empty() {
-        rail = rail.push(ty.data(status, theme::ERROR));
-    }
-    rail = rail.push(
-        container(ty.body(
-            concat!(
-                "v",
-                env!("CARGO_PKG_VERSION"),
-                "-",
-                env!("VKORE_BUILD_REVISION")
-            ),
-            12.,
-            theme::TEXT_MUTED,
-        ))
-        .padding([0, 4]),
-    );
-    container(rail)
-        .padding(18)
-        .width(224)
-        .height(Length::Fill)
-        .style(|appearance| theme::panel(appearance, theme::PANEL, None, 0.))
-        .into()
 }
 
 #[cfg(target_os = "linux")]
@@ -770,6 +704,7 @@ fn main() {
     };
     let mut model = Model {
         page: Page::Volumes,
+        navigation_collapsed: false,
         appearance: options.appearance.unwrap_or(saved_appearance),
         system_dark,
         volumes: volumes::State::new(volumes::spawn(proxy.clone())),
@@ -781,6 +716,7 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
+    model.machines.account = model.settings.account.account.clone();
     model.machines.refresh_images(model.proxy.clone());
     if let Some(disk) = options.disk {
         let machines = &model.machines;
@@ -814,6 +750,17 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use vkore_volume::{Capture, DiskKind, Entry, EntryKind, Listing, VolPath};
+
+    fn sidebar(current: Page, running: usize, status: &str, ty: Typography) -> UiElement<'_> {
+        navigation::view(
+            current,
+            running,
+            status,
+            false,
+            account::Preview::default(),
+            ty,
+        )
+    }
 
     /// Text a guest may write into a file name, a log, or a capture's
     /// metadata: scripts and symbols none of the bundled faces cover, an
@@ -867,6 +814,15 @@ mod tests {
                 .map(|(_, bounds)| *bounds)
         }
         fn check(&self) {
+            if let (Some(rail), Some(account)) =
+                (self.get("navigation"), self.get("navigation-account"))
+            {
+                assert!(account.x >= rail.x && account.x + account.width <= rail.x + rail.width);
+                assert!(
+                    account.y >= rail.y && account.y + account.height <= rail.y + rail.height,
+                    "account leaves the navigation rail: {account:?}, {rail:?}"
+                );
+            }
             if let (Some(frame), Some(content)) = (self.get("page-frame"), self.get("page-content"))
             {
                 assert!(
@@ -931,6 +887,26 @@ mod tests {
         scale: f32,
         snapshot: Option<&str>,
     ) -> (usize, Vec<axui_iced::TextError>) {
+        draw_interactive(
+            element,
+            size,
+            appearance,
+            scale,
+            snapshot,
+            mouse::Cursor::Unavailable,
+            &[],
+        )
+    }
+
+    fn draw_interactive(
+        element: UiElement<'_>,
+        size: Size,
+        appearance: &Theme,
+        scale: f32,
+        snapshot: Option<&str>,
+        cursor: mouse::Cursor,
+        events: &[iced_core::Event],
+    ) -> (usize, Vec<axui_iced::TextError>) {
         fonts::register().expect("MONOLITH faces register");
         let mut renderer = native_renderer();
         renderer.hint(Scale {
@@ -940,13 +916,15 @@ mod tests {
         renderer.reset(iced_core::Rectangle::with_size(size));
         let mut interface =
             UserInterface::build(element, size, user_interface::Cache::new(), &mut renderer);
+        let mut events = events.to_vec();
+        events.push(iced_core::Event::Window(
+            iced_core::window::Event::RedrawRequested(Instant::now()),
+        ));
         let _ = interface.update(
             &iced_core::window::Headless,
             &shell::Waker::noop(),
-            &[iced_core::Event::Window(
-                iced_core::window::Event::RedrawRequested(Instant::now()),
-            )],
-            mouse::Cursor::Unavailable,
+            &events,
+            cursor,
             &mut renderer,
             &mut shell::Bus::new(),
         );
@@ -956,7 +934,7 @@ mod tests {
             &renderer::Style {
                 text_color: theme::color(appearance, theme::TEXT),
             },
-            mouse::Cursor::Unavailable,
+            cursor,
         );
         let mut bounds = LayoutBounds::default();
         interface.operate(&renderer, &mut bounds);
@@ -970,7 +948,9 @@ mod tests {
         }
         bounds.check();
         let frame = renderer.take_frame().expect("a frame");
+        axgfx::frame_requirements(frame.view()).expect("desktop accepts the display list");
         assert!(renderer.take_geometry_errors().is_empty());
+        assert!(renderer.take_image_errors().is_empty());
         // Optional artifact from the actual desktop renderer for visual QA on
         // hosts where a window server is unavailable. Run one page test at a time.
         if size.width >= 900.0
@@ -1018,6 +998,231 @@ mod tests {
     }
 
     #[test]
+    fn scrollbars_reserve_a_gutter_and_pages_render_after_scrolling() {
+        fonts::register().unwrap();
+        let mut renderer = native_renderer();
+        let content = container(
+            widgets::scroll(
+                container(text("Tall content"))
+                    .id("scroll-content")
+                    .width(Length::Fill)
+                    .height(1200),
+            )
+            .height(Length::Fill),
+        )
+        .id("scroll-viewport")
+        .width(360)
+        .height(500);
+        let mut interface = UserInterface::build(
+            content,
+            Size::new(360., 500.),
+            user_interface::Cache::new(),
+            &mut renderer,
+        );
+        let mut bounds = LayoutBounds::default();
+        interface.operate(&renderer, &mut bounds);
+        let viewport = bounds.get("scroll-viewport").unwrap();
+        let content = bounds.get("scroll-content").unwrap();
+        assert!(
+            viewport.x + viewport.width - content.x - content.width >= 12.,
+            "scrollbar overlaps content: {viewport:?}, {content:?}"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let machines = machines::State::new(root.path().to_owned());
+        let settings = settings::State::new(root.path().to_owned());
+        for appearance in [Theme::Light, Theme::Dark] {
+            for (size, scale) in [(Size::new(900., 560.), 1.), (Size::new(1280., 800.), 2.)] {
+                for page in [Page::Machines, Page::Settings] {
+                    let content = match page {
+                        Page::Machines => {
+                            machines::view(&machines, Typography::default(), appearance.clone())
+                        }
+                        _ => settings::view(theme::Appearance::System, None, &settings),
+                    };
+                    let element =
+                        container(row![sidebar(page, 0, "", Typography::default()), content])
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .style(|appearance| {
+                                theme::panel(appearance, theme::BACKGROUND, None, 0.)
+                            })
+                            .into();
+                    let (_, refused) = draw_interactive(
+                        element,
+                        size,
+                        &appearance,
+                        scale,
+                        Some(if page == Page::Machines {
+                            "machines-scrolled"
+                        } else {
+                            "settings-scrolled"
+                        }),
+                        mouse::Cursor::Available(iced_core::Point::new(400., 300.)),
+                        &[iced_core::Event::Mouse(mouse::Event::WheelScrolled {
+                            delta: mouse::ScrollDelta::Lines { x: 0., y: -4. },
+                        })],
+                    );
+                    assert!(refused.is_empty(), "{refused:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_buttons_work_in_both_modes() {
+        fonts::register().unwrap();
+        for collapsed in [false, true] {
+            let mut renderer = native_renderer();
+            renderer.reset(iced_core::Rectangle::with_size(Size::new(900., 560.)));
+            let content = navigation::view(
+                Page::Machines,
+                0,
+                "",
+                collapsed,
+                account::Preview::default(),
+                Typography::default(),
+            );
+            let mut interface = UserInterface::build(
+                content,
+                Size::new(900., 560.),
+                user_interface::Cache::new(),
+                &mut renderer,
+            );
+            let mut bounds = LayoutBounds::default();
+            interface.operate(&renderer, &mut bounds);
+            for id in ["navigation-toggle", "navigation-account"] {
+                let center = bounds.get(id).expect("navigation control").center();
+                let mut messages = shell::Bus::new();
+                let events = [
+                    iced_core::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced_core::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ];
+                let _ = interface.update(
+                    &iced_core::window::Headless,
+                    &shell::Waker::noop(),
+                    &events,
+                    mouse::Cursor::Available(center),
+                    &mut renderer,
+                    &mut messages,
+                );
+                interface.operate(&renderer, &mut LayoutBounds::default());
+                interface.draw(
+                    &mut renderer,
+                    &Theme::Light,
+                    &renderer::Style {
+                        text_color: theme::color(&Theme::Light, theme::TEXT),
+                    },
+                    mouse::Cursor::Available(center),
+                );
+                let frame = renderer.take_frame().unwrap();
+                axgfx::frame_requirements(frame.view())
+                    .expect("desktop accepts the hovered navigation");
+                renderer.reset(iced_core::Rectangle::with_size(Size::new(900., 560.)));
+                let messages: Vec<_> = messages.into_iter().collect();
+                assert_eq!(messages.len(), 1, "{id}: {messages:?}");
+                assert!(matches!(
+                    (id, &messages[0]),
+                    ("navigation-toggle", Message::ToggleNavigation)
+                        | ("navigation-account", Message::Show(Page::Account))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn account_navigation_fits_both_widths_and_large_text() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = settings::State::new(root.path().to_owned());
+        for large in [false, true] {
+            settings.typography.text_size = if large {
+                typography::TextSize::ExtraLarge
+            } else {
+                typography::TextSize::Default
+            };
+            for collapsed in [false, true] {
+                for (width, height) in [(900., 560.), (1440., 900.)] {
+                    for appearance in [Theme::Light, Theme::Dark] {
+                        // Deliberately long external text exercises ellipsis and escaping.
+                        let preview = account::Preview {
+                            email: Some("a.long.account.name+development@example.com".to_owned()),
+                            pending: false,
+                        };
+                        let content = container(row![
+                            navigation::view(
+                                Page::Account,
+                                2,
+                                "",
+                                collapsed,
+                                preview,
+                                settings.typography
+                            ),
+                            account::page(&settings.account, settings.typography)
+                        ])
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                        .into();
+                        let snapshot = match (collapsed, large) {
+                            (false, false) => "account-expanded",
+                            (true, false) => "account-collapsed",
+                            (false, true) => "account-expanded-large",
+                            (true, true) => "account-collapsed-large",
+                        };
+                        let (_, refused) = draw_at_scale(
+                            content,
+                            Size::new(width, height),
+                            &appearance,
+                            1.,
+                            Some(snapshot),
+                        );
+                        assert!(refused.is_empty(), "{refused:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn account_authorization_renders_at_compact_and_wide_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = settings::State::new(root.path().to_owned());
+        for pending in [false, true] {
+            if pending {
+                settings.account.preview_sign_in();
+            }
+            for (width, height) in [(900., 560.), (1760., 1000.)] {
+                for appearance in [Theme::Light, Theme::Dark] {
+                    let content = account::page(&settings.account, settings.typography);
+                    let content = container(row![
+                        navigation::view(
+                            Page::Account,
+                            0,
+                            "",
+                            false,
+                            settings.account.preview(),
+                            settings.typography
+                        ),
+                        content
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                    .into();
+                    let (_, refused) = draw_at_scale(
+                        content,
+                        Size::new(width, height),
+                        &appearance,
+                        1.,
+                        Some("account"),
+                    );
+                    assert!(refused.is_empty(), "{refused:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn all_pages_and_splash_render_in_each_appearance() {
         let root = tempfile::tempdir().unwrap();
         let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
@@ -1035,13 +1240,14 @@ mod tests {
             (theme::Appearance::System, Some(false)),
         ] {
             let appearance = choice.iced(system_dark);
-            for page in [Page::Volumes, Page::Machines, Page::Settings] {
+            for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())
                     }
                     Page::Settings => settings::view(choice, system_dark, &settings),
+                    Page::Account => account::page(&settings.account, settings.typography),
                 };
                 let shell = container(row![sidebar(page, 0, "", Typography::default()), content])
                     .width(Length::Fill)
@@ -1521,10 +1727,11 @@ mod tests {
                 settings.typography = ty;
                 for (width, height) in [(900., 560.), (1280., 900.)] {
                     for appearance in [Theme::Light, Theme::Dark] {
-                        for page in [Page::Machines, Page::Volumes, Page::Settings] {
+                        for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                             let content = match page {
                                 Page::Machines => machines::view(&machines, ty, appearance.clone()),
                                 Page::Volumes => volumes::view(&volumes, &[], ty),
+                                Page::Account => account::page(&settings.account, ty),
                                 Page::Settings => {
                                     settings::view(theme::Appearance::System, None, &settings)
                                 }
@@ -1573,12 +1780,13 @@ mod tests {
             (1280., 800., 2.),
         ] {
             for appearance in [Theme::Dark, Theme::Light] {
-                for page in [Page::Machines, Page::Volumes, Page::Settings] {
+                for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                     let content = match page {
                         Page::Machines => {
                             machines::view(&machines, Typography::default(), appearance.clone())
                         }
                         Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
+                        Page::Account => account::page(&settings.account, settings.typography),
                         Page::Settings => settings::view(
                             theme::Appearance::System,
                             Some(appearance == Theme::Dark),
@@ -1624,12 +1832,13 @@ mod tests {
         let (volumes, _worker) = guest_listing();
         let settings = settings::State::new(root.path().to_owned());
         for appearance in [Theme::Dark, Theme::Light] {
-            for page in [Page::Volumes, Page::Machines, Page::Settings] {
+            for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())
                     }
+                    Page::Account => account::page(&settings.account, settings.typography),
                     Page::Settings => settings::view(
                         theme::Appearance::System,
                         Some(appearance == Theme::Dark),

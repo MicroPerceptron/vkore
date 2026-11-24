@@ -201,6 +201,7 @@ the creation form, or select a machine to open its workspace. **All machines**
 returns to the list from either view.
 
 Each workspace has Console, Overview, Boot activity, and Plugins tiles.
+Drag the empty part of a tile's title bar onto another tile to swap them.
 Drag the dividers to resize the neighboring tiles. The tile header controls
 collapse a tile or expand it to fill the workspace. Use **Show …** to reopen
 a collapsed tile and the restore control to return an expanded tile to the

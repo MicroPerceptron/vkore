@@ -1,4 +1,4 @@
-//! Layout only. A tile can be hidden or maximized without changing its machine.
+//! Layout only. Tiles can swap slots, hide, or maximize independently.
 
 use iced_core::{Length, alignment};
 use iced_widget::{PaneGrid, button, column, container, pane_grid, row, tooltip};
@@ -35,6 +35,7 @@ impl Tile {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Change {
+    Drag(pane_grid::DragEvent),
     Resize(pane_grid::ResizeEvent),
     Collapse(Tile),
     Show(Tile),
@@ -44,26 +45,34 @@ pub enum Change {
 
 pub(super) struct Workspace {
     grid: Option<pane_grid::State<Tile>>,
+    /// The two left slots followed by the two right slots, including hidden tiles.
+    order: [Tile; 4],
     collapsed: [bool; 4],
-    console_split: Option<pane_grid::Split>,
-    details_split: Option<pane_grid::Split>,
-    plugins_split: Option<pane_grid::Split>,
-    console_ratio: f32,
-    details_ratio: f32,
-    plugins_ratio: f32,
+    columns_split: Option<pane_grid::Split>,
+    left_split: Option<pane_grid::Split>,
+    right_split: Option<pane_grid::Split>,
+    columns_ratio: f32,
+    left_ratio: f32,
+    right_ratio: f32,
 }
 
 impl Default for Workspace {
     fn default() -> Self {
         let mut workspace = Self {
             grid: None,
+            order: [
+                Tile::Console,
+                Tile::Plugins,
+                Tile::Overview,
+                Tile::BootActivity,
+            ],
             collapsed: [false; 4],
-            console_split: None,
-            details_split: None,
-            plugins_split: None,
-            console_ratio: 0.57,
-            details_ratio: 0.54,
-            plugins_ratio: 0.66,
+            columns_split: None,
+            left_split: None,
+            right_split: None,
+            columns_ratio: 0.57,
+            left_ratio: 0.66,
+            right_ratio: 0.54,
         };
         workspace.rebuild();
         workspace
@@ -74,14 +83,13 @@ impl Workspace {
     fn rebuild(&mut self) {
         use pane_grid::Axis;
 
-        self.console_split = None;
-        self.details_split = None;
-        self.plugins_split = None;
+        self.columns_split = None;
+        self.left_split = None;
+        self.right_split = None;
         let visible = |tile: &Tile| !self.collapsed[*tile as usize];
-        let mut left = [Tile::Console, Tile::Plugins].into_iter().filter(visible);
-        let mut right = [Tile::Overview, Tile::BootActivity]
-            .into_iter()
-            .filter(visible);
+        let (left_slots, right_slots) = self.order.split_at(2);
+        let mut left = left_slots.iter().copied().filter(visible);
+        let mut right = right_slots.iter().copied().filter(visible);
         let left_tile = left.next();
         let right_tile = right.next();
         let Some(first) = left_tile.or(right_tile) else {
@@ -89,32 +97,53 @@ impl Workspace {
             return;
         };
         let (mut grid, first_pane) = pane_grid::State::new(first);
-        let mut details_pane = first_pane;
+        let mut right_pane = first_pane;
         if left_tile.is_some()
             && let Some(tile) = right_tile
             && let Some((pane, split)) = grid.split(Axis::Vertical, first_pane, tile)
         {
-            grid.resize(split, self.console_ratio);
-            self.console_split = Some(split);
-            details_pane = pane;
+            grid.resize(split, self.columns_ratio);
+            self.columns_split = Some(split);
+            right_pane = pane;
         }
         if let Some(tile) = right.next()
-            && let Some((_, split)) = grid.split(Axis::Horizontal, details_pane, tile)
+            && let Some((_, split)) = grid.split(Axis::Horizontal, right_pane, tile)
         {
-            grid.resize(split, self.details_ratio);
-            self.details_split = Some(split);
+            grid.resize(split, self.right_ratio);
+            self.right_split = Some(split);
         }
         if let Some(tile) = left.next()
             && let Some((_, split)) = grid.split(Axis::Horizontal, first_pane, tile)
         {
-            grid.resize(split, self.plugins_ratio);
-            self.plugins_split = Some(split);
+            grid.resize(split, self.left_ratio);
+            self.left_split = Some(split);
         }
         self.grid = Some(grid);
     }
 
     pub(super) fn change(&mut self, change: Change) {
         match change {
+            Change::Drag(pane_grid::DragEvent::Dropped {
+                pane,
+                target: pane_grid::Target::Pane(target, _),
+            }) => {
+                if let Some(grid) = &mut self.grid
+                    && grid.maximized().is_none()
+                    && pane != target
+                    && let (Some(&first), Some(&second)) = (grid.get(pane), grid.get(target))
+                {
+                    grid.swap(pane, target);
+                    // Rebuilding after a hide or show restores the swapped slots.
+                    for tile in &mut self.order {
+                        if *tile == first {
+                            *tile = second;
+                        } else if *tile == second {
+                            *tile = first;
+                        }
+                    }
+                }
+            }
+            Change::Drag(_) => {}
             Change::Collapse(tile) | Change::Show(tile) => {
                 self.collapsed[tile as usize] = matches!(change, Change::Collapse(_));
                 self.rebuild();
@@ -124,12 +153,12 @@ impl Workspace {
                     && event.ratio.is_finite()
                 {
                     let ratio = event.ratio.clamp(0.15, 0.85);
-                    if self.console_split == Some(event.split) {
-                        self.console_ratio = ratio;
-                    } else if self.details_split == Some(event.split) {
-                        self.details_ratio = ratio;
-                    } else if self.plugins_split == Some(event.split) {
-                        self.plugins_ratio = ratio;
+                    if self.columns_split == Some(event.split) {
+                        self.columns_ratio = ratio;
+                    } else if self.right_split == Some(event.split) {
+                        self.right_ratio = ratio;
+                    } else if self.left_split == Some(event.split) {
+                        self.left_ratio = ratio;
                     } else {
                         return;
                     }
@@ -184,10 +213,14 @@ impl Workspace {
                 .align_y(alignment::Vertical::Center)
                 .spacing(theme::SPACE_1)
                 .into();
-                let title = pane_grid::TitleBar::new(ty.body(tile.title(), 14., theme::TEXT))
-                    .padding([theme::SPACE_1, theme::SPACE_2])
-                    .controls(controls)
-                    .always_show_controls();
+                // The drag preview gives the title bar an infinite viewport.
+                // Bound its text just as we do the body before recording it.
+                let title = pane_grid::TitleBar::new(
+                    container(ty.body(tile.title(), 14., theme::TEXT)).clip(true),
+                )
+                .padding([theme::SPACE_1, theme::SPACE_2])
+                .controls(UiElement::from(container(controls).clip(true)))
+                .always_show_controls();
                 pane_grid::Content::new(
                     container(contents(*tile))
                         .width(Length::Fill)
@@ -202,11 +235,15 @@ impl Workspace {
             .height(Length::Fill)
             .spacing(theme::SPACE_2)
             .min_size(140)
+            .on_drag(move |event| message(Change::Drag(event)))
             .on_resize(8, move |event| message(Change::Resize(event)))
             .style(|appearance| {
                 let mut style = pane_grid::default(appearance);
+                let accent = theme::color(appearance, theme::MAGENTA);
+                style.hovered_region.background = iced_core::Color { a: 0.12, ..accent }.into();
+                style.hovered_region.border.color = accent;
                 style.hovered_split.color = theme::color(appearance, theme::TEXT_MUTED);
-                style.picked_split.color = theme::color(appearance, theme::MAGENTA);
+                style.picked_split.color = accent;
                 style
             })
             .into(),
@@ -247,12 +284,73 @@ fn tile_button<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced_core::{Event, Point, Rectangle, Renderer as _, Size, Theme, mouse, shell};
+    use iced_runtime::user_interface;
+
+    #[test]
+    fn title_bar_drag_swaps_tiles_and_survives_a_collapse() {
+        let mut workspace = Workspace::default();
+        let size = Size::new(1000., 640.);
+        let tile_bounds = |workspace: &Workspace, wanted: Tile| {
+            let grid = workspace.grid.as_ref().unwrap();
+            let pane = grid.iter().find(|(_, tile)| **tile == wanted).unwrap().0;
+            grid.layout().pane_regions(theme::SPACE_2, 140., size)[pane]
+        };
+        let console = tile_bounds(&workspace, Tile::Console);
+        let overview = tile_bounds(&workspace, Tile::Overview);
+        let grab = Point::new(console.x + console.width * 0.6, console.y + 16.);
+        let drop_at = overview.center();
+        let mut renderer = crate::native_renderer();
+        crate::fonts::register().unwrap();
+        renderer.reset(Rectangle::with_size(size));
+        let mut cache = user_interface::Cache::new();
+        for (position, event) in [
+            (grab, mouse::Event::ButtonPressed(mouse::Button::Left)),
+            (drop_at, mouse::Event::CursorMoved { position: drop_at }),
+            (drop_at, mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ] {
+            let cursor = mouse::Cursor::Available(position);
+            let element = workspace.view("demo", Typography::default(), |_| {
+                iced_widget::space::vertical().into()
+            });
+            let mut interface =
+                user_interface::UserInterface::build(element, size, cache, &mut renderer);
+            let mut messages = shell::Bus::new();
+            interface.update(
+                &iced_core::window::Headless,
+                &shell::Waker::noop(),
+                &[Event::Mouse(event)],
+                cursor,
+                &mut renderer,
+                &mut messages,
+            );
+            if matches!(event, mouse::Event::CursorMoved { .. }) {
+                interface.draw(&mut renderer, &Theme::Dark, &Default::default(), cursor);
+                let frame = renderer.take_frame().unwrap();
+                axgfx::frame_requirements(frame.view()).unwrap();
+                assert!(renderer.take_text_errors().is_empty());
+            }
+            cache = interface.into_cache();
+            for message in messages {
+                if let Message::Machine(MachineMessage::TileLayout(_, change)) = message {
+                    workspace.change(change);
+                }
+            }
+        }
+
+        assert_eq!(tile_bounds(&workspace, Tile::Console), overview);
+        assert_eq!(tile_bounds(&workspace, Tile::Overview), console);
+        workspace.change(Change::Collapse(Tile::Console));
+        workspace.change(Change::Show(Tile::Console));
+        assert_eq!(tile_bounds(&workspace, Tile::Console), overview);
+        assert_eq!(tile_bounds(&workspace, Tile::Overview), console);
+    }
 
     #[test]
     fn collapsing_and_expanding_preserve_the_local_divider() {
         let mut workspace = Workspace::default();
         workspace.change(Change::Resize(pane_grid::ResizeEvent {
-            split: workspace.console_split.unwrap(),
+            split: workspace.columns_split.unwrap(),
             ratio: 0.68,
         }));
         for tile in Tile::ALL {

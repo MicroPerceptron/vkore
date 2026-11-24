@@ -662,15 +662,14 @@ fn main() {
     // Resolve/create state before probing storage or loading preferences.
     // Discovery and launch helpers must share one absolute root, even when
     // the requested relative directory does not exist yet.
-    let state_root = vkored::State::open(&state_root)
-        .map(|state| state.root().to_owned())
-        .unwrap_or_else(|error| {
-            eprintln!(
-                "vkore-ui: state directory {}: {error}",
-                state_root.display()
-            );
-            std::process::exit(2);
-        });
+    let state = vkored::State::open(&state_root).unwrap_or_else(|error| {
+        eprintln!(
+            "vkore-ui: state directory {}: {error}",
+            state_root.display()
+        );
+        std::process::exit(2);
+    });
+    let state_root = state.root().to_owned();
     // Before the first frame, so that frame already shapes in our faces. Axiom
     // keeps shaping to the faces it can draw; registering adds ours to them.
     if let Err(error) = fonts::register() {
@@ -719,8 +718,12 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
-    model.machines.account = model.settings.account.account.clone();
-    model.machines.refresh_images(model.proxy.clone());
+    let account = vkored::account::Account::for_state(&state);
+    model.settings.account.account = account.clone();
+    model.machines.account = account;
+    if !model.settings.account.restore(model.proxy.clone()) {
+        model.machines.refresh_images(model.proxy.clone());
+    }
     if let Some(disk) = options.disk {
         let machines = &model.machines;
         model.volumes.open(&disk, |name| machines.disk_of(name));

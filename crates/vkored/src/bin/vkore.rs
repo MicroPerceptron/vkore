@@ -19,6 +19,7 @@ use vkore_volume::{
 };
 use vkored::{
     Event, MachineConfig, MachineStore, State, WorkspaceConfig, Writeback,
+    account::Account,
     config::FirmwareConfig,
     run::{self, Session},
 };
@@ -54,6 +55,9 @@ enum Command {
     /// Kore machines
     #[command(subcommand)]
     Machine(MachineCommand),
+    /// Manage authorization for official image downloads
+    #[command(subcommand)]
+    Account(AccountCommand),
     /// A Kore volume: a raw disk image, a disk's block device (Linux), or @MACHINE
     Volume(VolumeArgs),
     /// Run the local OpenAI-compatible API (guest backend not connected yet)
@@ -64,8 +68,18 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum AccountCommand {
+    /// Check the saved sign-in for this state directory
+    Status,
+    /// Sign in in a browser and review the image agreement
+    SignIn,
+    /// Remove the local credential and revoke its server session
+    SignOut,
+}
+
+#[derive(Subcommand)]
 enum MachineCommand {
-    /// List public official images available to download
+    /// List official images visible to this account
     Images,
     /// Create a machine that boots ISO
     Create(Box<CreateArgs>),
@@ -349,6 +363,32 @@ fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Machine(command) => machine(store(cli.state)?, command),
+        Command::Account(command) => {
+            let account = Account::for_state(store(cli.state)?.state());
+            match command {
+                AccountCommand::Status => {
+                    account.restore();
+                    match account.status() {
+                        Some(status) => println!("Signed in as {:?}", status.email),
+                        None => println!("Not signed in"),
+                    }
+                    show_storage_warning(&account);
+                }
+                AccountCommand::SignIn => {
+                    let cancelled = interrupt_flag()?;
+                    sign_in(&account, &cancelled)?;
+                    if account.storage_warning().is_some() {
+                        return Err("Could not save sign-in for other commands.".into());
+                    }
+                    println!("Signed in");
+                }
+                AccountCommand::SignOut => {
+                    account.sign_out()?;
+                    println!("Signed out");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Volume(arguments) => volume(cli.state, arguments),
         Command::Serve { listen } => {
             let interrupted = Arc::new(AtomicBool::new(false));
@@ -366,6 +406,30 @@ fn run_cli(cli: Cli) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn interrupt_flag() -> Result<Arc<AtomicBool>, Failure> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed)).map_err(|e| e.to_string())?;
+    Ok(cancelled)
+}
+
+fn show_storage_warning(account: &Account) {
+    if let Some(warning) = account.storage_warning() {
+        eprintln!("vkore: {warning}");
+    }
+}
+
+fn sign_in(account: &Account, cancelled: &AtomicBool) -> Result<(), Failure> {
+    account.sign_in(cancelled, |challenge| {
+        eprintln!(
+            "Open {} and enter code {}. Review and accept the agreement there.",
+            challenge.url, challenge.code
+        );
+    })?;
+    show_storage_warning(account);
+    Ok(())
 }
 
 fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
@@ -402,7 +466,9 @@ fn probe(qemu: PathBuf) -> Result<ExitCode, Failure> {
 fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Failure> {
     match command {
         MachineCommand::Images => {
-            for image in vkored::catalog::official()?.images() {
+            let account = Account::for_state(store.state());
+            let cancelled = AtomicBool::new(false);
+            for image in vkored::catalog::fetch_with_account(&cancelled, &account)?.images() {
                 println!(
                     "{}  {} ({})  {:.1} MiB",
                     image.id,
@@ -414,23 +480,15 @@ fn machine(store: MachineStore, command: MachineCommand) -> Result<ExitCode, Fai
             Ok(ExitCode::SUCCESS)
         }
         MachineCommand::Create(arguments) => {
-            let sign_in = arguments.sign_in;
+            let should_sign_in = arguments.sign_in;
             let source = arguments.iso.clone();
             let image = arguments.image.clone();
             let digest = arguments.sha256.clone();
             let config = create_config(*arguments, store.state().root())?;
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let signal = cancelled.clone();
-            ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
-                .map_err(|e| e.to_string())?;
-            let account = vkored::account::Account::default();
-            if sign_in {
-                account.sign_in(&cancelled, |challenge| {
-                    eprintln!(
-                        "Open {} and enter code {}. Review and accept the agreement there.",
-                        challenge.url, challenge.code
-                    );
-                })?;
+            let cancelled = interrupt_flag()?;
+            let account = Account::for_state(store.state());
+            if should_sign_in {
+                sign_in(&account, &cancelled)?;
             }
             let store = store.with_account(account);
             let progress = |progress: vkored::images::Progress| {

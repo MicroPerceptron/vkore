@@ -3,6 +3,11 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.10.0] - 2026-11-24
+
+### Added
+- Restore unexpired download sign-in across desktop and CLI launches from macOS Keychain or Linux Secret Service. Credentials are scoped to the state directory. The CLI adds `account status`, `account sign-in` and `account sign-out`.
+
 ## [0.9.0] - 2026-11-23
 
 ### Added

@@ -17,14 +17,28 @@ Appearance and Local API controls remain in Settings.
 
 The Account page shows the server's acceptance version and timestamp. Review
 agreement starts a new authorization, so changed terms can be accepted there.
-Sign-out discards the local credential even when the server is unreachable.
+Sign-out removes the saved credential locally before trying server revocation.
+If the keyring refuses deletion, unlock it and retry sign-out.
 
-Credentials live only in memory, for at most one hour (also capped by the
-verified Google identity token's expiration). Restarting vKore requires a new
-sign-in. No passwords, refresh tokens or download secrets are stored in machine
-configuration, arguments, environment variables or preference files.
+### Local storage
 
-CLI users add `--sign-in` to `vkore machine create --image ID` or a first-party
+vKore saves the download session in the current user's macOS Keychain or Linux
+Secret Service. The desktop and CLI share the entry when they use the same
+canonical state directory. macOS can prompt when an executable accesses an
+entry created by another build. On Linux, an unlocked Secret Service collection
+is needed to save sign-in. If the system store is unavailable, vKore reports
+that a new sign-in is temporary and keeps it only for the current process.
+
+The credential expires within one hour, also capped by the verified Google
+identity token's expiration. Restarting vKore restores the remaining session
+locally. Every new download checks current authorization with the server.
+The state directory holds ordinary app state such as preferences, machine
+configuration, and the image cache. The download secret goes only to the
+system keyring. Google credentials and refresh tokens stay in the browser.
+
+CLI users can run `vkore account sign-in`, `vkore account status`, and
+`vkore account sign-out`. For immediate authorization, add `--sign-in` to
+`vkore machine create --image ID` or a first-party
 `--iso https://dev.microperceptron.com/dl/ID/FILE.iso` request. It prints the
 browser address and public code and waits for approval. Ctrl-C cancels. The flag
 is unnecessary for local imports and verified cache reuse. Other URL origins,
@@ -51,7 +65,7 @@ in [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628); these are a deliberately
 narrow JSON API, **not** a general OAuth authorization server. Google identity
 verification uses Placement's existing
 [Firebase Admin verifier](https://firebase.google.com/docs/auth/admin/verify-id-tokens).
-No new cryptographic implementation or Rust dependency is introduced.
+Native credential storage uses the host's keychain and Secret Service APIs.
 
 The receipt records stable Firebase subject, server timestamp, document version
 and digest, and receipt ID. It proves explicit acknowledgement from an

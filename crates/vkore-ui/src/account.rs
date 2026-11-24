@@ -20,6 +20,7 @@ pub enum Action {
 }
 #[derive(Debug)]
 pub enum Reply {
+    Restored,
     Challenge(u64, SignIn),
     CodeCopied(u64, Result<(), clipboard::Error>),
     Finished(u64, Result<(), String>),
@@ -43,6 +44,17 @@ impl Drop for State {
     }
 }
 impl State {
+    pub fn restore(&self, proxy: EventLoopProxy<UserEvent>) -> bool {
+        let account = self.account.clone();
+        std::thread::Builder::new()
+            .name("vkore-account-restore".into())
+            .spawn(move || {
+                account.restore();
+                let _ = proxy.send_event(UserEvent::Account(Reply::Restored));
+            })
+            .is_ok()
+    }
+
     #[cfg(test)]
     pub fn preview_sign_in(&mut self) {
         self.busy = true;
@@ -122,6 +134,7 @@ impl State {
     }
     pub fn reply(&mut self, reply: Reply) -> bool {
         match reply {
+            Reply::Restored => return true,
             Reply::Challenge(generation, challenge)
                 if generation == self.generation
                     && self
@@ -219,7 +232,7 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     if let Some(status) = state.account.status() {
         content = content.push(ty.data(format!("Signed in · {}", status.email), theme::SUCCESS))
             .push(ty.data(format!("Agreement accepted · {} · {}", status.receipt.version, status.receipt.accepted_at), theme::TEXT_MUTED))
-            .push(ty.body("Sign-in lasts up to one hour. Downloads check authorization each time. Sign in again when it expires.", 12., theme::TEXT_MUTED));
+            .push(ty.body("Downloads check authorization each time. Sign in again when the one-hour session expires.", 12., theme::TEXT_MUTED));
         if !state.busy {
             content = content.push(
                 row![
@@ -234,6 +247,9 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         content = content
             .push(ty.badge("Not signed in", theme::TEXT_MUTED))
             .push(crate::google_sign_in::button(ty));
+        if state.account.sign_out_incomplete() {
+            content = content.push(control("Retry sign-out", Action::SignOut));
+        }
     }
     if let Some(challenge) = &state.challenge {
         content = content
@@ -281,7 +297,12 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     if !state.error.is_empty() {
         content = content.push(ty.data(&state.error, theme::ERROR));
     }
-    content = content.push(ty.body("Local images, running machines, volumes and the local API remain available offline. Credentials are not saved to disk.", 12., theme::TEXT_MUTED));
+    if let Some(warning) = state.account.storage_warning()
+        && warning != state.error
+    {
+        content = content.push(ty.body(warning, 12., theme::WARNING));
+    }
+    content = content.push(ty.body("Your system keyring can restore sign-in across launches. Local images, machines, volumes and the local API remain available offline.", 12., theme::TEXT_MUTED));
     container(content)
         .id("account-details")
         .padding(24)

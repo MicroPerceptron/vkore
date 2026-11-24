@@ -33,6 +33,20 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(tarfile.AbsoluteLinkError):
                 runtime.source_filter(member, directory)
 
+    def test_a_runtime_without_every_guest_architecture_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary, firmware = runtime.TARGETS["x86_64"]
+            files = {}
+            for name in [binary] + [Path("share/qemu") / f for f in firmware]:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(str(name))
+                files[str(name)] = runtime.digest(root / name)
+            (root / "bundle.json").write_text(json.dumps({"schema": 1, "version": "test", "files": files}))
+            with self.assertRaisesRegex(RuntimeError, "omits"):
+                runtime.verify(root)
+        self.assertEqual(set(runtime.TARGETS), {"x86_64", "aarch64"})
+
     def test_symlinks_are_not_assets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

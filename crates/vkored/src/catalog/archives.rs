@@ -112,10 +112,10 @@ fn collect(
                 return Err("Archive IDs must be valid and unique, with at most 64 entries".into());
             }
             // The service may host other products/architectures and private builds.
-            if archive.requires_auth
-                || archive.isa != "x86_64"
-                || !archive.file_name.ends_with(".iso")
-            {
+            let Some(architecture) = vkore_vm::GuestArch::parse(&archive.isa) else {
+                continue;
+            };
+            if archive.requires_auth || !archive.file_name.ends_with(".iso") {
                 continue;
             }
             let profile = match archive.variant.as_str() {
@@ -142,7 +142,7 @@ fn collect(
                 version: archive.version,
                 profile,
                 minimum: archive.minimum,
-                architecture: archive.isa,
+                architecture,
                 format: "iso".into(),
                 url: location.into(),
                 sha256: archive.sha256,
@@ -197,13 +197,20 @@ mod tests {
         assert!(image.kore_revision.is_none() && image.dagfs_format_version.is_none());
         for (field, value) in [
             ("requiresAuth", json!(true)),
-            ("isa", json!("aarch64")),
+            ("isa", json!("riscv64")),
             ("variant", json!("unknown")),
         ] {
             let mut doc = page();
             doc["archives"][0][field] = value;
             assert!(parse(&doc).unwrap().images().is_empty());
         }
+        // An aarch64 build is a guest vKore boots, on any host.
+        let mut arm = page();
+        arm["archives"][0]["isa"] = json!("aarch64");
+        assert_eq!(
+            parse(&arm).unwrap().images()[0].arch(),
+            vkore_vm::GuestArch::Aarch64
+        );
     }
     #[test]
     fn rejects_bad_identity_digest_size_origin_and_compatibility() {

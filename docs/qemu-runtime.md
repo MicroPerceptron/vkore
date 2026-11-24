@@ -44,6 +44,7 @@ bin/vkore
 bin/vkore-ui
 libexec/vkore/qemu-runtime/
   bin/qemu-system-x86_64
+  bin/qemu-system-aarch64
   lib/...
   share/qemu/...
   licenses/...
@@ -57,8 +58,17 @@ distribution signing/notarization must be applied before generating the final
 manifest, since signing changes checksummed bytes. CI artifacts are development
 bundles, not signed application releases.
 
+The runtime carries one emulator per guest architecture, each with its split
+UEFI firmware (`edk2-x86_64-code.fd` and `edk2-i386-vars.fd`;
+`edk2-aarch64-code.fd` and `edk2-arm-vars.fd`), and every emulator is signed
+with the HVF entitlement: on a Mac, the one for the host's own architecture
+accelerates. A runtime is asked for the medium's architecture and refuses, in
+words, when it lacks that architecture's emulator or firmware, so an older
+x86-only runtime never boots an aarch64 ISO on the wrong firmware.
+
 Selection order is `VKORE_QEMU`, `VKORE_QEMU_BUNDLE`, an installed sibling/app
-bundle, then `qemu-system-x86_64` on PATH. The bundle override names the runtime
+bundle, then the medium's `qemu-system-x86_64` or `qemu-system-aarch64` on
+PATH; an emulator for the other architecture is refused by the probe. The bundle override names the runtime
 root, not its executable. Explicit machine firmware settings retain precedence.
 A selected bundle must match the host OS/architecture and pass its manifest
 checks. Missing/corrupt assets are errors; they never trigger a silent fallback.

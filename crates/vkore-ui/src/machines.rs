@@ -558,10 +558,6 @@ impl State {
         if self.closing || self.running.contains_key(&name) {
             return;
         }
-        let Some(qemu) = vkored::run::default_qemu() else {
-            self.status = "qemu-system-x86_64 is not on PATH".into();
-            return;
-        };
         let (stop, stopping) = mpsc::channel::<()>();
         let root = self.state_root.clone();
         let worker_name = name.clone();
@@ -571,7 +567,9 @@ impl State {
                 let send = |update: Update| {
                     let _ = proxy.send_event(UserEvent::Machine(worker_name.clone(), update));
                 };
-                let outcome = run_machine(&root, &worker_name, &qemu, window, &stopping, &send);
+                // The session picks the emulator for the machine's medium, and says
+                // so in words when this host has none.
+                let outcome = run_machine(&root, &worker_name, window, &stopping, &send);
                 send(Update::Finished(outcome));
             });
         match spawned {
@@ -627,7 +625,7 @@ impl State {
                             .find(|image| Some(&image.id) == self.selected_image.as_ref())
                             .cloned();
                         let had_selection = self.selected_image.is_some();
-                        self.official_images = catalog.images().to_vec();
+                        self.official_images = catalog.images_for_host();
                         self.catalog_error = None;
                         if had_selection
                             && !previous.as_ref().is_some_and(|old| {
@@ -813,7 +811,6 @@ impl Drop for State {
 fn run_machine(
     root: &std::path::Path,
     name: &str,
-    qemu: &std::path::Path,
     window: bool,
     stopping: &mpsc::Receiver<()>,
     send: &dyn Fn(Update),
@@ -851,7 +848,7 @@ fn run_machine(
     } else {
         Display::Headless
     };
-    let mut session = Session::start(&store, name, qemu, display, &mut sink)
+    let mut session = Session::start(&store, name, None, display, &mut sink)
         .map_err(|error| error.to_string())?;
     loop {
         let running = session
@@ -883,7 +880,7 @@ fn describe(event: &Event) -> String {
         Event::Preflight(preflight) => format!(
             "preflight: sha256 {} · {:?} on {:?}",
             &preflight.medium.sha256[..16],
-            preflight.vendor,
+            preflight.platform,
             preflight.accel
         ),
         Event::Staged { files, skipped, .. } => format!(
@@ -1006,7 +1003,7 @@ fn view_sized(
                 "Select an official image".to_owned()
             }
         },
-        |image| format!("{} ({})", image.name, image.version),
+        |image| format!("{} ({}, {})", image.name, image.version, image.arch()),
     );
     // Compose the dropdown from the same paragraph-backed controls as the
     // rest of the UI: Axiom's immediate-text path does not honor menu alignment.
@@ -1037,13 +1034,16 @@ fn view_sized(
         let mut options = column![].spacing(theme::SPACE_1);
         for image in &state.official_images {
             options = options.push(
-                button(ty.data(format!("{} ({})", image.name, image.version), theme::TEXT))
-                    .width(Length::Fill)
-                    .padding([7, 10])
-                    .style(widgets::button_style(widgets::Button::Row(
-                        Some(&image.id) == state.selected_image.as_ref(),
-                    )))
-                    .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
+                button(ty.data(
+                    format!("{} ({}, {})", image.name, image.version, image.arch()),
+                    theme::TEXT,
+                ))
+                .width(Length::Fill)
+                .padding([7, 10])
+                .style(widgets::button_style(widgets::Button::Row(
+                    Some(&image.id) == state.selected_image.as_ref(),
+                )))
+                .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
             );
         }
         images = images.push(
@@ -1142,7 +1142,7 @@ fn view_sized(
                 .unwrap_or(if state.catalog_cancel.is_some() {
                     "Checking dev.microperceptron.com…"
                 } else if state.official_images.is_empty() {
-                    "No public x86_64 Kore ISOs are listed. Refresh to check again."
+                    "No public Kore ISOs are listed. Refresh to check again."
                 } else {
                     "The official image is verified before it is added."
                 }),

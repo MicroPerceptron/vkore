@@ -39,7 +39,7 @@ fn boot_and_edit_command(reserve_storage: bool) {
     let mut session = Session::start(
         &store,
         "hardware",
-        &PathBuf::from(qemu),
+        Some(PathBuf::from(qemu).as_path()),
         vkore_vm::Display::Headless,
         &mut |event| {
             if let vkored::Event::Console { socket } = event {

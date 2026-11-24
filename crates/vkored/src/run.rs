@@ -24,8 +24,8 @@ use std::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use vkore_vm::{
-    Accel, BootMedium, Display, Firmware, HostCaps, Machine, MachineEvent, MachineSpec, Paging,
-    QemuCaps, Stage, StopOutcome, Vendor, firmware, machine::private_vars,
+    Accel, BootMedium, Display, Firmware, GuestArch, HostCaps, Machine, MachineEvent, MachineSpec,
+    Paging, Platform, QemuCaps, Stage, StopOutcome, firmware, machine::private_vars,
 };
 use vkore_volume::{
     Disk,
@@ -85,13 +85,16 @@ pub struct Preflight {
     pub qemu: PathBuf,
     pub qemu_caps: QemuCaps,
     pub host: HostCaps,
-    pub vendor: Vendor,
+    /// The machine the medium's architecture and the configuration make.
+    pub platform: Platform,
     pub accel: Accel,
     pub firmware: Firmware,
     pub medium: BootMedium,
     /// The ISO's digest differs from the one this machine last booted.
     pub iso_changed: bool,
     pub workspace_warning: Option<String>,
+    /// What this platform does not apply from the configuration.
+    pub platform_warning: Option<String>,
 }
 
 /// One thing that happened during a boot.
@@ -144,8 +147,10 @@ pub enum Event {
     },
 }
 
-/// Explicit QEMU override, packaged runtime, then the host PATH.
-pub fn default_qemu() -> Option<PathBuf> {
+/// The emulator for `arch` guests: the explicit QEMU override, the packaged
+/// runtime, then the host PATH. An override for the other architecture is
+/// refused by the probe, in words, rather than passed over.
+pub fn default_qemu(arch: GuestArch) -> Option<PathBuf> {
     if let Some(qemu) = std::env::var_os("VKORE_QEMU") {
         return Some(qemu.into());
     }
@@ -153,11 +158,12 @@ pub fn default_qemu() -> Option<PathBuf> {
         vkore_vm::runtime::bundled_qemu(
             &exe,
             std::env::var_os("VKORE_QEMU_BUNDLE").map(PathBuf::from),
+            arch,
         )
     }) {
         return Some(qemu);
     }
-    let name = "qemu-system-x86_64";
+    let name = arch.qemu_binary();
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|dir| dir.join(name))
@@ -165,8 +171,27 @@ pub fn default_qemu() -> Option<PathBuf> {
     })
 }
 
-/// Establish what `config` will boot on `qemu`, without starting it.
-pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunError> {
+/// The mode QEMU's EDK2 gives an aarch64 machine's `ramfb`, which has no
+/// mode of its own to set; new aarch64 machines record it.
+pub const AARCH64_FRAMEBUFFER: (u32, u32) = (800, 600);
+
+/// The architecture of the medium at `iso`; an image without a UEFI loader
+/// vKore knows is refused rather than guessed at.
+pub fn medium_arch(iso: &Path) -> Result<GuestArch, RunError> {
+    vkore_vm::media::guest_arch(iso)
+        .map_err(|error| RunError::Media(error.to_string()))?
+        .ok_or_else(|| {
+            RunError::Media(format!(
+                "{}: no EFI/BOOT/BOOTX64.EFI or BOOTAA64.EFI, so not a Kore UEFI image vKore \
+                 can boot",
+                iso.display()
+            ))
+        })
+}
+
+/// Establish what `config` will boot, without starting it: on `qemu`, or
+/// on the emulator for the medium's architecture when `qemu` is `None`.
+pub fn preflight(config: &MachineConfig, qemu: Option<&Path>) -> Result<Preflight, RunError> {
     crate::config::validate(config)?;
     let host_resources =
         vkore_vm::hardware::HostResources::probe(config.iso.parent().unwrap_or(Path::new("/")))
@@ -178,15 +203,38 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
     {
         return Err(RunError::Host("memory pinning needs authorization: finish hardware setup with Done/Save hardware, or turn off memory pinning".into()));
     }
-    let runtime = vkore_vm::runtime::Runtime::for_qemu(qemu)
+    let arch = medium_arch(&config.iso)?;
+    let qemu = match qemu {
+        Some(qemu) => qemu.to_path_buf(),
+        None => default_qemu(arch).ok_or_else(|| {
+            RunError::Host(format!(
+                "{} is not on PATH, and this ISO is {arch} (install QEMU, or pass --qemu)",
+                arch.qemu_binary()
+            ))
+        })?,
+    };
+    let qemu = qemu.as_path();
+    let runtime = vkore_vm::runtime::Runtime::for_qemu(qemu, arch)
         .map_err(|error| RunError::Host(format!("QEMU runtime: {error}")))?;
     let host = HostCaps::probe();
-    let vendor = config.vendor.unwrap_or_else(|| host.native_vendor());
+    let platform = match (arch, config.vendor) {
+        (GuestArch::X86_64, vendor) => {
+            Platform::X86_64(vendor.unwrap_or_else(|| host.native_vendor()))
+        }
+        (GuestArch::Aarch64, None) => Platform::Aarch64,
+        (GuestArch::Aarch64, Some(vendor)) => {
+            return Err(RunError::Host(format!(
+                "this machine names the {} IOMMU, and this ISO is aarch64, whose machine has \
+                 an SMMUv3: clear the machine's vendor",
+                vendor.cpuid()
+            )));
+        }
+    };
     let accel = host
-        .choose(config.accel, vendor)
+        .choose(config.accel, platform)
         .map_err(|error| RunError::Host(error.to_string()))?;
-    let qemu_caps =
-        QemuCaps::probe(qemu, vendor, accel).map_err(|error| RunError::Host(error.to_string()))?;
+    let qemu_caps = QemuCaps::probe(qemu, platform, accel)
+        .map_err(|error| RunError::Host(error.to_string()))?;
     if crate::hardware::has_devices(config)
         && (accel != vkore_vm::Accel::Kvm || !qemu_caps.vfio_iommufd)
     {
@@ -204,19 +252,32 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         },
         None => runtime
             .map(|r| r.firmware)
-            .or_else(firmware::discover)
+            .or_else(|| firmware::discover(arch))
             .ok_or_else(|| {
-                RunError::Host(
-                    "no UEFI firmware for x86_64 q35 without Secure Boot among QEMU's firmware \
-                 descriptors (install OVMF/edk2, or name one with --firmware-code and \
-                 --firmware-vars)"
-                        .into(),
-                )
+                RunError::Host(format!(
+                    "no UEFI firmware for {} without Secure Boot among QEMU's firmware \
+                     descriptors (install {}, or name one with --firmware-code and \
+                     --firmware-vars)",
+                    match arch {
+                        GuestArch::X86_64 => "x86_64 q35",
+                        GuestArch::Aarch64 => "aarch64 virt",
+                    },
+                    match arch {
+                        GuestArch::X86_64 => "OVMF/edk2",
+                        GuestArch::Aarch64 => "QEMU's edk2 aarch64 firmware (AAVMF)",
+                    }
+                ))
             })?,
     };
     let medium =
         BootMedium::inspect(&config.iso).map_err(|error| RunError::Media(error.to_string()))?;
-    if medium.paging == Some(Paging::FiveLevel) && !qemu_caps.la57 {
+    if medium.arch != Some(arch) {
+        return Err(RunError::Media(format!(
+            "{} changed while it was read",
+            config.iso.display()
+        )));
+    }
+    if arch == GuestArch::X86_64 && medium.paging == Some(Paging::FiveLevel) && !qemu_caps.la57 {
         return Err(RunError::Host(format!(
             "{} boots five-level paging (4k57), and this QEMU cannot realize LA57 on {accel:?}",
             config.iso.display()
@@ -230,16 +291,28 @@ pub fn preflight(config: &MachineConfig, qemu: &Path) -> Result<Preflight, RunEr
         .workspace
         .as_ref()
         .and_then(|workspace| broad_root_warning(&workspace.root));
+    let platform_warning =
+        (arch == GuestArch::Aarch64 && config.framebuffer != AARCH64_FRAMEBUFFER).then(|| {
+            format!(
+                "an aarch64 machine's display takes its mode from the firmware ({}x{}); the \
+                 configured {}x{} is not applied",
+                AARCH64_FRAMEBUFFER.0,
+                AARCH64_FRAMEBUFFER.1,
+                config.framebuffer.0,
+                config.framebuffer.1
+            )
+        });
     Ok(Preflight {
         qemu: qemu.to_path_buf(),
         qemu_caps,
         host,
-        vendor,
+        platform,
         accel,
         firmware,
         medium,
         iso_changed,
         workspace_warning,
+        platform_warning,
     })
 }
 
@@ -267,7 +340,7 @@ impl Session {
     pub fn start(
         store: &MachineStore,
         name: &str,
-        qemu: &Path,
+        qemu: Option<&Path>,
         display: Display,
         sink: &mut dyn FnMut(&Event),
     ) -> Result<Self, RunError> {
@@ -299,6 +372,11 @@ impl Session {
         if let Some(warning) = &checked.workspace_warning {
             record.emit(&Event::Warning {
                 message: format!("workspace: {warning}"),
+            });
+        }
+        if let Some(warning) = &checked.platform_warning {
+            record.emit(&Event::Warning {
+                message: warning.clone(),
             });
         }
         if config.iso_sha256.as_deref() != Some(checked.medium.sha256.as_str()) {
@@ -371,7 +449,7 @@ impl Session {
             firmware_code: checked.firmware.code.clone(),
             firmware_vars: paths.vars.clone(),
             firmware_format: checked.firmware.format.clone(),
-            vendor: checked.vendor,
+            platform: checked.platform,
             accel: checked.accel,
             paging,
             cpus: config.cpus,
@@ -384,7 +462,7 @@ impl Session {
             qmp_socket: paths.qmp.clone(),
             console_socket: checked.medium.console.then(|| paths.console.clone()),
         };
-        let machine = Machine::start(qemu, &checked.qemu_caps, &spec, &paths.qemu_log)
+        let machine = Machine::start(&checked.qemu, &checked.qemu_caps, &spec, &paths.qemu_log)
             .map_err(|error| RunError::Machine(error.to_string()))?;
         record.emit(&Event::Started { pid: machine.id() });
         if config.resources.cpu_power_management {

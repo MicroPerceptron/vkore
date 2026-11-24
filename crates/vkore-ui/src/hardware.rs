@@ -1229,6 +1229,7 @@ mod tests {
         let mut host = HostResources::probe(root.path()).unwrap();
         host.cpu_pinning = true;
         host.acceleration = vkore_vm::HostCaps {
+            arch: Some(vkore_vm::GuestArch::X86_64),
             vendor: Some(vkore_vm::Vendor::Intel),
             kvm: true,
             hvf: false,

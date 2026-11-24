@@ -11,8 +11,16 @@ Kore's public API. There is no second implementation of anything Kore owns.
 It comes as a desktop app (`vkore-ui`) and a command line (`vkore`).
 
 **Status: alpha.** Verified against production x86 ISOs of Kore v0.40.0 and of
-Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
+Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux, and against a
+production aarch64 ISO under HVF on an Apple silicon Mac (QEMU 11.0.1); see
 [what is and is not verified](#what-is-verified).
+
+A machine's architecture is the ISO's: vKore reads it from the medium's UEFI
+loader (`EFI/BOOT/BOOTX64.EFI` or `BOOTAA64.EFI`) and boots an x86_64 ISO on
+Kore's x86 gate topology (`q35`, VT-d or AMD-Vi) and an aarch64 ISO on its
+aarch64 one (`virt`, GICv3, SMMUv3). Either runs on any host under TCG; the
+host's own architecture accelerates, so on Apple silicon an aarch64 ISO runs
+under Hypervisor.framework.
 
 ## What it does today
 
@@ -43,6 +51,37 @@ Kore's main at `7074bda2`, under QEMU 8.2 with TCG on Linux; see
   Settings, exposes an OpenAI-compatible text-chat HTTP surface on
   loopback. The guest inference channel is not connected yet: model discovery
   is empty and chat returns HTTP 503. See [the API contract](docs/inference.md).
+
+## Quick start (macOS, Apple silicon)
+
+Install QEMU (9.2 or newer; Homebrew's ships the aarch64 UEFI firmware and its
+descriptor) and the Rust toolchain pinned in
+[rust-toolchain.toml](rust-toolchain.toml):
+
+```sh
+brew install qemu
+```
+
+```sh
+cargo build --release -p vkored -p vkore-ui
+```
+
+Create a machine from a Kore aarch64 ISO and boot it until Kore reports ready.
+Preflight reads the ISO's architecture, picks `qemu-system-aarch64`, finds the
+firmware through QEMU's descriptors and accelerates with HVF:
+
+```sh
+target/release/vkore machine create demo --iso /path/to/kore-boot-aarch64-release.iso
+```
+
+```sh
+target/release/vkore machine run demo --display window
+```
+
+An aarch64 machine is one NUMA node and its display is QEMU's `ramfb`, whose
+mode (800x600) the firmware sets. It has one serial line, so Kore's console
+image (shell on a second line) is refused, as are device passthrough and
+hugepages; an x86_64 ISO still runs here, under TCG.
 
 ## Quick start (Linux)
 
@@ -162,7 +201,7 @@ See [docs/desktop.md](docs/desktop.md).
    readiness from Kore's            |
    own console markers          kore-host (libkore)
             |                       |
-     qemu-system-x86_64         kore-vol + kore-svc-dagfs: Kore's own
+  qemu-system-{x86_64,aarch64}  kore-vol + kore-svc-dagfs: Kore's own
             |                   volume procedure and filesystem engine
        Kore guest  ─── disk ───┘
 ```
@@ -188,7 +227,8 @@ against, are in [docs/compatibility.md](docs/compatibility.md).
   allocations are capped, project staging and write-back carry file and byte
   limits, and QMP lines are bounded.
 - **Probe, don't guess.** QEMU's devices and properties, firmware descriptors,
-  acceleration and the ISO's paging mode are read from the host and the medium.
+  acceleration and the ISO's architecture and paging mode are read from the
+  host and the medium.
   What Kore or QEMU cannot take is refused before a machine starts, in words.
 
 ## What is verified
@@ -219,8 +259,27 @@ libkore exports from Kore's main at `7074bda2`:
 - `cargo test --workspace`, including Kore's volume engine end to end on real
   images, and the opt-in host test that boots each ISO through `vkore-vm`.
 
-Not verified yet: KVM or HVF acceleration, writing to a physical disk, macOS
-(`vkore-vm` supports HVF; nothing here has run it), and AMD hosts.
+On macOS 27 on an Apple M4 (QEMU 11.0.1 from Homebrew, HVF), with a production
+aarch64 ISO built from Kore at `423e64b05` (the aarch64 consolidation, whose
+filesystem keeps its durable NVMe store on aarch64 too):
+
+- `vkore machine create` read the ISO as aarch64 and recorded one NUMA node and
+  the firmware's 800x600 mode; `vkore machine run` found Homebrew's
+  `60-edk2-aarch64.json`, chose HVF and booted it to ready in 15 s of uptime
+  (19/19 services, `first-shell: ready`, 48/48 apps, 4/4 libraries, homes
+  present). A QMP screendump captured Kore's lock screen at 800x600.
+- After the stop, `vkore volume @NAME info` and `tree pictures` read the volume
+  the guest wrote (DagFS generation 220, its home's seven sample pictures)
+  through Kore's engine.
+- The stop ended QEMU after the grace period: Kore on aarch64 does not yet act
+  on the `virt` machine's power button (a devicetree `gpio-keys` line).
+- The packaged runtime's QMP smoke test passed against both of Homebrew's
+  emulators and firmware. The runtime build itself (now
+  `x86_64-softmmu,aarch64-softmmu`) was not run.
+
+Not verified yet: KVM acceleration (x86 or aarch64), HVF for x86 guests on an
+Intel Mac, an x86_64 ISO under TCG on Apple silicon, the desktop on macOS,
+writing to a physical disk, and AMD hosts.
 
 ## Workspace
 
@@ -259,6 +318,13 @@ The boot test is opt-in and uses your own QEMU and ISO:
 
 ```sh
 VKORE_TEST_QEMU=$(command -v qemu-system-x86_64) VKORE_TEST_ISO=/path/to/kore-x86-release.iso \
+  cargo test -p vkore-vm --test host -- --nocapture
+```
+
+On Apple silicon, the same test with an aarch64 ISO runs under HVF:
+
+```sh
+VKORE_TEST_QEMU=$(command -v qemu-system-aarch64) VKORE_TEST_ISO=/path/to/kore-boot-aarch64-release.iso \
   cargo test -p vkore-vm --test host -- --nocapture
 ```
 

@@ -4,7 +4,7 @@ use crate::typography::Typography;
 use crate::{Message, UiElement, machines::MachineMessage, theme, widgets};
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, slider, space, text_input, toggler};
-use vkore_vm::hardware::{GuestNuma, HostResources, PageSize, Resources};
+use vkore_vm::hardware::{GuestNuma, HostResources, NetworkMode, PageSize, Resources};
 use vkored::{MachineConfig, hardware::Requirements};
 
 #[derive(Clone, Debug)]
@@ -27,6 +27,7 @@ pub enum Change {
     Passthrough(vkore_vm::passthrough::Selection),
     Cpus(u16),
     GuestNuma(GuestNuma),
+    Network(NetworkMode),
     Gpu(vkore_vm::passthrough::gpu::Assignment, bool),
     Memory(u32),
     MemoryText(String),
@@ -156,6 +157,7 @@ impl Draft {
                 self.memory_mib = self.memory_mib.div_ceil(step) * step;
                 self.memory_gib = size_text(u64::from(self.memory_mib));
             }
+            Change::Network(mode) => self.resources.network = mode,
             Change::Memory(n) => {
                 self.memory_mib = n;
                 self.memory_gib = size_text(u64::from(n));
@@ -567,6 +569,25 @@ pub fn view<'a>(
             ]
             .spacing(8)
             .wrap(),
+            section(column![
+                ty.body("Networking", 18., theme::TEXT),
+                row([NetworkMode::Isolated, NetworkMode::E1000e].map(|mode| action(
+                    ty,
+                    mode.label(),
+                    (!busy).then(|| send(Change::Network(mode))),
+                    draft.resources.network == mode,
+                )))
+                .spacing(6)
+                .wrap(),
+                ty.body(
+                    match draft.resources.network {
+                        NetworkMode::Isolated => "Guest traffic stays inside the virtual network.",
+                        NetworkMode::E1000e => "Uses the host network for outbound IPv4. The guest image needs IPv4 support.",
+                    },
+                    12.,
+                    theme::TEXT_MUTED,
+                ),
+            ].spacing(12)),
             section(cpu),
             memory_view(draft, host, editing, busy, ty),
             section(npu_inventory(

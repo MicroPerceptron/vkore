@@ -52,7 +52,25 @@ impl GuestNuma {
     }
 }
 
-/// Legacy configurations deserialize without changing their scheduling policy.
+/// Connectivity presented by QEMU. Existing machines retain isolated networking.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    #[default]
+    Isolated,
+    E1000e,
+}
+
+impl NetworkMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Isolated => "Isolated",
+            Self::E1000e => "Shared (e1000e)",
+        }
+    }
+}
+
+/// Legacy configurations deserialize without changing their resource policy.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
@@ -60,6 +78,8 @@ pub struct Resources {
     pub gpu_vfs: Vec<crate::passthrough::gpu::Assignment>,
     #[serde(default)]
     pub guest_numa: GuestNuma,
+    #[serde(default)]
+    pub network: NetworkMode,
     /// Explicit whole-device assignments; identity is checked again before use.
     #[serde(default)]
     pub passthrough: Vec<crate::passthrough::Selection>,
@@ -473,6 +493,7 @@ mod tests {
     fn old_configs_keep_split_topology_and_no_gpu_intent() {
         let old: Resources = serde_json::from_str("{}").unwrap();
         assert_eq!(old.guest_numa, GuestNuma::Split);
+        assert_eq!(old.network, NetworkMode::Isolated);
         assert!(old.gpu_vfs.is_empty());
         assert_eq!(GuestNuma::Single.alignment(PageSize::Huge1G), 1024);
         assert_eq!(GuestNuma::Split.alignment(PageSize::Huge1G), 2048);

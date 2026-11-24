@@ -44,6 +44,23 @@ impl Error {
         matches!(self, Self::Volume(error) if error.is_in_use())
     }
 
+    /// Linux recovery can read a partition through its parent disk. Check
+    /// the node the engine actually failed on without opening another
+    /// descriptor, which could release a process-owned record lock.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn needs_read_authorization(&self) -> bool {
+        use rustix::fs::{Access, AtFlags, CWD, accessat};
+        use rustix::io::Errno;
+
+        match self {
+            Self::Volume(VolError::Device(node, _)) if !self.is_in_use() => matches!(
+                accessat(CWD, node, Access::READ_OK, AtFlags::EACCESS),
+                Err(Errno::ACCESS | Errno::PERM)
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether the disk carries blank roots: a volume Kore formats at its
     /// first boot.
     pub fn is_blank(&self) -> bool {

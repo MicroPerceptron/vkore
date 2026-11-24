@@ -3,6 +3,20 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.9.0] - 2026-11-23
+
+### Added
+- Machine hardware setup offers isolated networking or shared IPv4 through QEMU’s e1000e adapter for guests with an IP stack. Existing machines keep isolated networking.
+- Native disk-image picker and a Linux physical-disk/partition chooser showing host partition names, filesystem labels, device paths and capacities.
+- Read-only DagFS identification through Kore's engine, showing each recovered volume's actual format version. Permission-blocked disks can be identified together with one authorization request; labels never count as proof of DagFS.
+- Desktop authorization for read-only browsing and exporting Linux physical disks that deny ordinary read access. A one-disk helper retains Kore's engine lock without elevating the UI or changing disk permissions; authorized sessions cannot import or remove files.
+
+### Fixed
+- Offer read-only authorization when Linux denies access to the parent disk needed to identify a DagFS partition. Report the recovered DagFS version in `volume info`.
+- Hide the Machines download sign-in prompt while an authorized account session is active.
+- Copy the sign-in code to the system clipboard directly from the Account page.
+- Open volumes at their root instead of assuming a screenshots folder exists. Clear stale contents and disk ownership after failed opens, and prevent overlapping open requests.
+
 ## [0.8.0] - 2026-11-23
 
 ### Added

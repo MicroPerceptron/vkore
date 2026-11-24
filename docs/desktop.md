@@ -8,7 +8,7 @@ login) and shares its state with the `vkore` command line.
 vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]
 ```
 
-`--open` lands on that disk's screenshots; `--state` is the same directory the
+`--open` lands at that volume's root; `--state` is the same directory the
 command line uses.
 
 The sidebar groups Machines and Volumes, with Settings at the bottom. Shared
@@ -67,10 +67,16 @@ from the CLI's explicit `vkore serve --listen` option.
 
 ## Volumes
 
-Open a disk by typing it (a raw image, a block device on Linux, or `@NAME`) or
-with one of the machine buttons under the field. The header shows what is open
-and the volume's generation, which grows with every publication Kore or vKore
-makes.
+Use **Choose image…** for the system file dialog, or **Choose physical disk…**
+on Linux for a list of host disks and partitions with their sizes, partition
+names and filesystem labels (when the host reports them). Device paths remain
+visible so similarly named partitions can be distinguished. You can also
+enter a path (a raw image, a Linux block device, or `@NAME`) or use a machine
+button under the field. Opening starts at the volume root; it does not assume
+that a screenshots folder exists. The header shows what is open
+and the recovered DagFS format version and generation. Generation grows with
+every publication Kore or vKore makes; format version identifies the recovered
+root, not the version of the app or its current writer.
 
 - **Places.** Terminal 0's and terminal 1's homes, and the volume root. A home
   nothing has written to yet says so; the machine creates it on its first boot.
@@ -95,7 +101,53 @@ A disk a running machine holds cannot be opened; stop the machine first. While
 the browser has a disk open it holds the disk's lock, and another vKore cannot
 open it; a machine started from this window closes the browser first.
 
+Readable disks are identified automatically through Kore's engine without
+writing to them. The chooser distinguishes detected DagFS, blank media, no
+DagFS found, and volumes that could not be verified (including busy or
+unsupported volumes). A host filesystem label or type is descriptive metadata,
+not proof of DagFS. Linux names/types come from one bounded, unprivileged
+`lsblk` query; missing host metadata does not prevent disk selection.
+
+If identification needs permission, **Identify DagFS…** retries those devices
+in one read-only authorization batch. Each probe releases its engine handles
+before the next disk, and a cancelled request preserves the choices. Opening a
+disk still establishes its own authorized browsing session; an identification
+result does not grant continuing access.
+
+### Linux disk permissions
+
+If a physical disk denies ordinary read access, opening it requests authorization
+through the desktop polkit agent (`pkexec`). The main desktop stays unprivileged;
+no permissions or ownership are changed. Cancelling leaves the disk closed.
+Polkit and a running desktop authentication agent are required for this path.
+
+An authorized session is **read-only**: browse, preview, open in a host viewer,
+and export. Import and Remove are disabled in both the UI and worker. Close the
+volume to release authorization and its disk lock. Normal writable image-file
+sessions retain their existing Import and Remove actions. This feature is a
+browser through Kore's engine, not an OS filesystem mount.
+
+The private `--vkore-volume-reader` entry point admits only the selected Linux
+block device, verifies the polkit caller and device identity, and keeps the
+engine's shared lock for the session. Its bounded protocol has no disk writes,
+host file paths, or command-execution operations. Exports stream back in 64 KiB
+chunks and are written by the ordinary desktop user using the existing confined,
+non-overwriting exporter. Disconnects release the mount. The separate `--vkore-volume-identify` entry point verifies the same caller
+and device identities and accepts at most 256 physical devices for read-only
+metadata recovery. macOS supports image
+files; its physical devices are not supported by the current engine.
+
+The native image chooser uses MIT-licensed `rfd` 0.17 with platform FFI confined
+to that dependency. Linux uses the XDG desktop portal (with its runtime desktop
+backend, or Zenity fallback), without adding a GTK development-library dependency.
+The chooser does not infer a volume format or bypass Kore's validation.
+
 ## Machines
+
+Under **Configure hardware → Networking**, choose **Isolated** (the default)
+or **Shared (e1000e)**. Shared mode uses QEMU’s IPv4 NAT and applies at the next
+launch. The guest image needs IPv4 support to use it. The USB adapter remains
+isolated and no inbound ports are forwarded.
 
 The list shows each machine and where its boot is: starting, kernel up,
 services, shell ready, ready, degraded or failed. Select one to see its ISO and
@@ -133,8 +185,8 @@ machine stops.
    that exists.
 2. Stop the machine once Kore has saved the capture: it writes it a few seconds
    after the press (up to ten under TCG), and a stop does not wait for one
-   still being written. The Volumes page reopens the disk on the screenshots,
-   newest last by name (names are UTC times).
+   still being written. The Volumes page reopens the volume root. Choose **Terminal 0**,
+   then `pictures/screenshots`; captures are sorted by their UTC names.
 3. Select a capture to read its record; **Save** it, or **Open** it in your
    image viewer.
 

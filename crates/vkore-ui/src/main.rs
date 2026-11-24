@@ -641,6 +641,9 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
 }
 
 fn main() {
+    if let Some(code) = vkore_volume::helper_entry() {
+        std::process::exit(code);
+    }
     if let Some(code) = vkore_vm::passthrough::helper_entry() {
         std::process::exit(code);
     }
@@ -1312,6 +1315,11 @@ mod tests {
         ] {
             for expanded in [false, true] {
                 state.form_hardware.show_cores = expanded;
+                state.form_hardware.resources.network = if expanded {
+                    vkore_vm::hardware::NetworkMode::E1000e
+                } else {
+                    vkore_vm::hardware::NetworkMode::Isolated
+                };
                 for (width, height, scale) in [
                     (900., 560., 1.),
                     (1280., 900., 1.),
@@ -1966,7 +1974,9 @@ mod tests {
             label: "@demo".into(),
             kind: DiskKind::Image,
             generation: 173,
+            format_version: 5,
             fallback: false,
+            read_only: false,
         });
         let here = state.here().expect("the screenshots folder");
         let names = [
@@ -2019,6 +2029,62 @@ mod tests {
         ));
         state.status = GUEST_TEXT.into();
         (state, worker)
+    }
+
+    #[test]
+    fn volume_choosers_render_at_small_and_large_sizes() {
+        for size in [Size::new(760.0, 600.0), Size::new(1280.0, 800.0)] {
+            for light in [true, false] {
+                let appearance = if light { Theme::Light } else { Theme::Dark };
+                let (sender, _receiver) = mpsc::channel();
+                let mut state = volumes::State::new(sender);
+                let (_, errors) = draw_at_scale(
+                    volumes::view(&state, &[], Typography::default()),
+                    size,
+                    &appearance,
+                    1.0,
+                    Some("volume-open"),
+                );
+                assert!(errors.is_empty());
+                state.disk_choices = Some(vkore_volume::PhysicalDisks {
+                    disks: vec![
+                        vkore_volume::PhysicalDisk {
+                            path: "/dev/nvme0n1p5".into(),
+                            description: "Partition".into(),
+                            bytes: 256 << 30,
+                            host: vkore_volume::HostDiskMetadata {
+                                partlabel: Some("Kore workspace".into()),
+                                label: Some("Models".into()),
+                                ..Default::default()
+                            },
+                            dagfs: vkore_volume::DagfsPresence::Detected(
+                                vkore_volume::MountStatus {
+                                    format_version: 4,
+                                    generation: 173,
+                                    used_fallback_root: false,
+                                },
+                            ),
+                        },
+                        vkore_volume::PhysicalDisk {
+                            path: "/dev/sdb".into(),
+                            description: "Disk · USB storage".into(),
+                            bytes: 64 << 30,
+                            host: Default::default(),
+                            dagfs: vkore_volume::DagfsPresence::NeedsAuthorization,
+                        },
+                    ],
+                    metadata_warning: None,
+                });
+                let (_, errors) = draw_at_scale(
+                    volumes::view(&state, &[], Typography::default()),
+                    size,
+                    &appearance,
+                    1.0,
+                    Some("volume-disks"),
+                );
+                assert!(errors.is_empty());
+            }
+        }
     }
 
     #[test]

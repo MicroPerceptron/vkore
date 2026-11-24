@@ -6,12 +6,12 @@ use std::{
 };
 
 use kore_host::volume::{self, Kind, Mount, VolError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Disk, Error, VolPath, claim::Claim};
 
 /// What a listed object is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     File,
@@ -28,7 +28,7 @@ impl From<Kind> for EntryKind {
 }
 
 /// One entry of a listed directory.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: String,
     pub kind: EntryKind,
@@ -37,7 +37,7 @@ pub struct Entry {
 }
 
 /// What a path names on the volume.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Listing {
     /// A directory's entries, directories first, each group by name.
@@ -50,8 +50,10 @@ pub enum Listing {
 }
 
 /// What recovery found when the volume was mounted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountStatus {
+    /// Format version of the recovered root, supplied by Kore's engine.
+    pub format_version: u32,
     /// The root generation the mount reads.
     pub generation: u64,
     /// Recovery took the fallback root: Kore itself keeps this volume
@@ -60,7 +62,7 @@ pub struct MountStatus {
 }
 
 /// One object beneath a walked directory.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Walked {
     /// Its `/`-separated path below the walked directory.
     pub path: String,
@@ -88,6 +90,7 @@ pub struct Browser {
     /// Released after the worker has joined, so only once the engine has
     /// closed the disk (fields drop after `Drop::drop`).
     _claim: Claim,
+    remote: Option<crate::privileged::Remote>,
 }
 
 impl Browser {
@@ -104,6 +107,7 @@ impl Browser {
                     let status = mount.status();
                     // A browser that stopped waiting is no reason to fail.
                     let _ = ready.send(MountStatus {
+                        format_version: status.format_version,
                         generation: status.generation,
                         used_fallback_root: status.used_fallback_root,
                     });
@@ -121,6 +125,7 @@ impl Browser {
                 jobs: Some(jobs),
                 worker: Some(worker),
                 _claim: claim,
+                remote: None,
             }),
             // The mount never reached its session: the engine's refusal is
             // what the worker answered.
@@ -132,6 +137,36 @@ impl Browser {
                 }
             }
         }
+    }
+
+    /// Browse a Linux block device, requesting desktop authorization only
+    /// when an ordinary read is denied. The privileged session cannot write.
+    pub fn open_with_authorization(disk: &Disk) -> Result<Self, Error> {
+        #[cfg(target_os = "linux")]
+        if disk.kind() == crate::DiskKind::Device {
+            return match Self::open(disk) {
+                Err(error) if error.needs_read_authorization() => {
+                    let claim = Claim::take(disk)?;
+                    let (remote, status) = crate::privileged::Remote::authorize(disk)?;
+                    Ok(Self {
+                        disk: disk.clone(),
+                        status,
+                        jobs: None,
+                        worker: None,
+                        _claim: claim,
+                        remote: Some(remote),
+                    })
+                }
+                result => result,
+            };
+        }
+        Self::open(disk)
+    }
+
+    /// Elevated physical disks are deliberately read-only. Host exports still
+    /// run as the desktop user; no host destination is sent to the helper.
+    pub fn is_authorized_read_only(&self) -> bool {
+        self.remote.is_some()
     }
 
     pub fn disk(&self) -> &Disk {
@@ -160,6 +195,9 @@ impl Browser {
     /// What `path` names: a directory's entries (directories first, each
     /// group by name), a file's length, or a home not yet created.
     pub fn list(&self, path: &VolPath) -> Result<Listing, Error> {
+        if let Some(remote) = &self.remote {
+            return remote.list(path);
+        }
         let face = path.face();
         let engine_path = path.engine_path();
         let listing = self.call(move |mount| mount.list(face, engine_path.as_deref()))??;
@@ -187,6 +225,9 @@ impl Browser {
     /// A file's bytes, refusing one longer than `limit` without reading
     /// past it.
     pub fn read(&self, path: &VolPath, limit: u64) -> Result<Vec<u8>, Error> {
+        if let Some(remote) = &self.remote {
+            return remote.read(path, limit);
+        }
         let (face, engine_path) = file_path(path)?;
         let shown = path.to_string();
         let mut sink = Bounded {
@@ -210,6 +251,9 @@ impl Browser {
     /// Up to `limit` leading bytes of the file at `path`. Reading stops at
     /// the limit: a preview of a large file costs what it shows.
     pub fn head(&self, path: &VolPath, limit: usize) -> Result<Vec<u8>, Error> {
+        if let Some(remote) = &self.remote {
+            return remote.head(path, limit);
+        }
         let (face, engine_path) = file_path(path)?;
         let mut sink = Head {
             bytes: Vec::with_capacity(limit.min(64 << 10)),
@@ -246,6 +290,9 @@ impl Browser {
         path: &VolPath,
         sink: W,
     ) -> Result<(u64, blake3::Hash, W), Error> {
+        if let Some(remote) = &self.remote {
+            return remote.copy_to(path, sink);
+        }
         let (face, engine_path) = file_path(path)?;
         let mut sink = Hashing {
             sink,
@@ -263,6 +310,9 @@ impl Browser {
     /// directory before what it holds. Bounded by the volume itself: it
     /// holds at most [`crate::bounds::MAX_OBJECTS`] objects.
     pub fn walk(&self, path: &VolPath) -> Result<Vec<Walked>, Error> {
+        if let Some(remote) = &self.remote {
+            return remote.walk(path);
+        }
         let face = path.face();
         let engine_path = path.engine_path();
         self.call(move |mount| {
@@ -301,6 +351,9 @@ impl Browser {
     }
 
     fn shutdown(&mut self) -> Result<(), Error> {
+        if let Some(remote) = self.remote.take() {
+            return remote.close();
+        }
         drop(self.jobs.take());
         match self.worker.take().map(thread::JoinHandle::join) {
             Some(Ok(Ok(()))) | None => Ok(()),

@@ -10,6 +10,8 @@ mod account;
 mod console;
 mod fonts;
 mod google_sign_in;
+#[cfg(feature = "gpu-canvas")]
+mod gpu_canvas;
 mod hardware;
 mod logo;
 mod machines;
@@ -95,11 +97,15 @@ pub enum Page {
     Machines,
     Settings,
     Account,
+    #[cfg(feature = "gpu-canvas")]
+    GpuCanvas,
 }
 
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    #[cfg(feature = "gpu-canvas")]
+    CanvasReady,
     Account(account::Reply),
     SystemTheme(Option<bool>),
     Volume(volumes::Reply),
@@ -108,6 +114,8 @@ pub enum UserEvent {
 
 struct Model {
     page: Page,
+    #[cfg(feature = "gpu-canvas")]
+    canvas: Option<gpu_canvas::Pane>,
     navigation_collapsed: bool,
     appearance: theme::Appearance,
     system_dark: Option<bool>,
@@ -145,6 +153,10 @@ impl Model {
             Message::Show(page) => {
                 self.machines.unfocus_console();
                 self.page = page;
+                #[cfg(feature = "gpu-canvas")]
+                if let Some(canvas) = &self.canvas {
+                    canvas.set_visible(page == Page::GpuCanvas);
+                }
                 if page == Page::Machines {
                     self.machines.refresh();
                 }
@@ -180,6 +192,12 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            #[cfg(feature = "gpu-canvas")]
+            UserEvent::CanvasReady => {
+                if let Some(canvas) = &mut self.canvas {
+                    canvas.receive();
+                }
+            }
             UserEvent::Account(reply) => {
                 if self.settings.account.reply(reply) {
                     self.machines.refresh_images(self.proxy.clone());
@@ -233,6 +251,18 @@ impl Model {
             ),
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
             Page::Account => account::page(&self.settings.account, ty),
+            #[cfg(feature = "gpu-canvas")]
+            Page::GpuCanvas => self.canvas.as_ref().map_or_else(
+                || {
+                    gpu_canvas::view(
+                        ty,
+                        None,
+                        "Launch with --gpu-canvas PATH to load a component.",
+                        false,
+                    )
+                },
+                |canvas| canvas.view(ty),
+            ),
         };
         let base: UiElement<'_> = row![
             navigation::view(
@@ -520,6 +550,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // still shutting down. Wait for them to finish; a second
                 // close leaves at once.
                 self.model.settings.stop();
+                #[cfg(feature = "gpu-canvas")]
+                self.model.canvas.take();
                 self.model.pending_start = None;
                 self.model.reopen = None;
                 if self.model.machines.request_close() {
@@ -611,6 +643,8 @@ struct LaunchOptions {
     appearance: Option<theme::Appearance>,
     state: Option<PathBuf>,
     disk: Option<String>,
+    #[cfg(feature = "gpu-canvas")]
+    gpu_canvas: Option<PathBuf>,
 }
 
 fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
@@ -618,6 +652,8 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
         appearance: None,
         state: None,
         disk: None,
+        #[cfg(feature = "gpu-canvas")]
+        gpu_canvas: None,
     };
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -631,11 +667,20 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
                 )?)
             }
             "--open" => options.disk = Some(args.next().ok_or("--open needs a disk")?),
-            _ => {
-                return Err(
-                    "usage: vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]"
+            #[cfg(feature = "gpu-canvas")]
+            "--gpu-canvas" => {
+                options.gpu_canvas = Some(
+                    args.next()
+                        .ok_or("--gpu-canvas needs a component path")?
                         .into(),
                 );
+            }
+            _ => {
+                const USAGE: &str = "usage: vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]";
+                #[cfg(feature = "gpu-canvas")]
+                return Err(format!("{USAGE} [--gpu-canvas COMPONENT.wasm]"));
+                #[cfg(not(feature = "gpu-canvas"))]
+                return Err(USAGE.into());
             }
         }
     }
@@ -702,6 +747,8 @@ fn main() {
     let settings = settings::State::new(state_root.clone());
     let mut model = Model {
         page: Page::Volumes,
+        #[cfg(feature = "gpu-canvas")]
+        canvas: None,
         navigation_collapsed: false,
         appearance: options.appearance.unwrap_or(settings.saved_appearance),
         system_dark,
@@ -714,6 +761,11 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
+    #[cfg(feature = "gpu-canvas")]
+    if let Some(path) = options.gpu_canvas {
+        model.page = Page::GpuCanvas;
+        model.canvas = Some(gpu_canvas::Pane::open(path, model.proxy.clone()));
+    }
     let account = vkored::account::Account::for_state(&state);
     model.settings.account.account = account.clone();
     model.machines.account = account;
@@ -1250,6 +1302,8 @@ mod tests {
             let appearance = theme::appearance_theme(choice, system_dark);
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
+                    #[cfg(feature = "gpu-canvas")]
+                    Page::GpuCanvas => unreachable!("canvas has a separate GPU test"),
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())
@@ -1742,6 +1796,8 @@ mod tests {
                     for appearance in [Theme::Light, Theme::Dark] {
                         for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                             let content = match page {
+                                #[cfg(feature = "gpu-canvas")]
+                                Page::GpuCanvas => unreachable!("canvas has a separate GPU test"),
                                 Page::Machines => machines::view(&machines, ty, appearance.clone()),
                                 Page::Volumes => volumes::view(&volumes, &[], ty),
                                 Page::Account => account::page(&settings.account, ty),
@@ -1775,6 +1831,45 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gpu-canvas")]
+    #[test]
+    fn gpu_component_frames_render_in_the_native_canvas_pane() {
+        use vkored::gpu_canvas::{Canvas, HEIGHT, WIDTH};
+
+        let Some(component) = std::env::var_os("VKORE_TEST_GPU_CANVAS") else {
+            return;
+        };
+        let mut canvas =
+            Canvas::open(std::path::Path::new(&component)).expect("open GPU component");
+        eprintln!("GPU adapter: {}", canvas.adapter());
+        let first = canvas.frame(Duration::ZERO).expect("first GPU frame");
+        let next = canvas
+            .frame(Duration::from_secs(1))
+            .expect("second GPU frame");
+        assert_eq!(first.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert!(first.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+        assert_ne!(first, next, "the component must animate the GPU output");
+
+        let ty = Typography::default();
+        for (index, (pixels, appearance)) in [(first, Theme::Dark), (next, Theme::Light)]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = iced_core::image::Handle::from_rgba(WIDTH, HEIGHT, pixels);
+            let pane = gpu_canvas::view(ty, Some(&frame), canvas.adapter(), false);
+            let shell = row![sidebar(Page::GpuCanvas, 0, "", ty), pane].height(Length::Fill);
+            let snapshot = format!("gpu-canvas-{index}");
+            let (_, refused) = draw_at_scale(
+                shell.into(),
+                Size::new(1280., 800.),
+                &appearance,
+                1.,
+                Some(&snapshot),
+            );
+            assert!(refused.is_empty(), "{refused:?}");
+        }
+    }
+
     #[test]
     fn pages_adapt_across_resolutions_and_display_scales() {
         let root = tempfile::tempdir().unwrap();
@@ -1796,6 +1891,8 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                     let content = match page {
+                        #[cfg(feature = "gpu-canvas")]
+                        Page::GpuCanvas => unreachable!("canvas has a separate GPU test"),
                         Page::Machines => {
                             machines::view(&machines, Typography::default(), appearance.clone())
                         }
@@ -1848,6 +1945,8 @@ mod tests {
         for appearance in [Theme::Dark, Theme::Light] {
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
+                    #[cfg(feature = "gpu-canvas")]
+                    Page::GpuCanvas => unreachable!("canvas has a separate GPU test"),
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())

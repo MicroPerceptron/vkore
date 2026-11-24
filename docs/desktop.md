@@ -69,6 +69,35 @@ Guest inference remains disconnected; starting a machine does not advertise a
 model. See [the API contract](inference.md). The desktop's saved port is separate
 from the CLI's explicit `vkore serve --listen` option.
 
+## Experimental GPU canvas
+
+The optional `gpu-canvas` feature opens a WASI-P2 component in a native pane.
+Build the example and open it from the repository root:
+
+```sh
+rustup target add wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/gpu-canvas/Cargo.toml
+cargo run --locked -p vkore-ui --features gpu-canvas -- \
+  --gpu-canvas examples/gpu-canvas/target/wasm32-wasip2/release/vkore_animated_canvas.wasm
+```
+
+The [canvas WIT world](../crates/vkored/wit/gpu-canvas/canvas.wit) gives the
+component one draw import. The example supplies the WGSL shader and updates
+its animation uniform. vKore opens Metal on macOS or Vulkan on Linux, renders
+a 512×288 texture at up to 15 frames per second, and reads it back for the
+existing Axiom compositor. The pane displays the selected adapter and pauses
+rendering when you navigate away.
+
+Use a component you trust for the experiment. The worker limits Wasm memory
+and fuel, and its WASI context has no network access, directory grants or
+inherited process state. The host compiles the supplied shader and submits it
+through the system GPU driver. Browser WebGPU and the proposed `wasi:webgpu`
+interfaces require their own bindings.
+
+To verify animated frames through the desktop renderer, set
+`VKORE_TEST_GPU_CANVAS` to the path of the built component and run
+`cargo test -p vkore-ui --features gpu-canvas gpu_component_frames_render_in_the_native_canvas_pane -- --nocapture`.
+
 ## Volumes
 
 Use **Choose image…** for the system file dialog, or **Choose physical disk…**

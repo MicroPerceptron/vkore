@@ -7,7 +7,14 @@ repository.workspace = true
 publish = false
 description = "vKore's runtime: Kore machines and their volumes on a Linux or macOS host, and the `vkore` command."
 
+[features]
+gpu-canvas = ["dep:pollster", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wgpu"]
+
 [dependencies]
+pollster = { version = "0.4", optional = true }
+wasmtime = { version = "50", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"], optional = true }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "metal", "vulkan"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 vkore-vm = { path = "../vkore-vm" }

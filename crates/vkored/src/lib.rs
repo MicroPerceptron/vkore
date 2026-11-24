@@ -28,3 +28,5 @@ pub use run::{Event, Preflight, RunError, Session};
 pub use state::State;
 
 pub mod account;
+#[cfg(feature = "gpu-canvas")]
+pub mod gpu_canvas;

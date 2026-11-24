@@ -117,6 +117,22 @@ cp examples/gpu-canvas/target/wasm32-wasip2/release/vkore_animated_canvas.wasm \
 To verify frames through the desktop renderer, set `VKORE_TEST_GPU_CANVAS` to
 the bundled file and run `cargo test -p vkore-ui --features gpu-canvas gpu_component_frames_render_in_the_native_canvas_pane -- --nocapture`.
 
+### Boa JavaScript sample
+
+The `javascript-canvas` example compiles the Boa JavaScript engine into a
+WASI-P2 component. Boa evaluates the bundled script to compute the animation
+uniform each frame. The component uses the same canvas interface as the bundled
+sample.
+
+```sh
+cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/javascript-canvas/Cargo.toml
+cargo run --locked -p vkore-ui --features gpu-canvas -- --gpu-canvas \
+  examples/javascript-canvas/target/wasm32-wasip2/release/vkore_javascript_canvas.wasm
+```
+
+The resulting file can also be added to the plugin library and attached to a
+machine. Use `--gpu-canvas` to execute it in the desktop preview.
+
 ## Volumes
 
 Use **Choose image…** for the system file dialog, or **Choose physical disk…**

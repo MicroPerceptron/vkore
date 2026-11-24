@@ -21,9 +21,10 @@ const SIZE: gpu::Extent3d = gpu::Extent3d {
 };
 const BYTES_PER_ROW: u32 = WIDTH * 4;
 const IMAGE_BYTES: u64 = (BYTES_PER_ROW * HEIGHT) as u64;
-const COMPONENT_LIMIT: u64 = 4 * 1024 * 1024;
+const COMPONENT_LIMIT: u64 = 8 * 1024 * 1024;
 const SHADER_LIMIT: usize = 16 * 1024;
-const CALL_FUEL: u64 = 1_000_000;
+const INIT_FUEL: u64 = 10_000_000;
+const FRAME_FUEL: u64 = 1_000_000;
 const GPU_TIMEOUT: Duration = Duration::from_secs(2);
 const FORMAT: gpu::TextureFormat = gpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -65,7 +66,8 @@ impl Canvas {
     pub fn from_bytes(bytes: &[u8]) -> wasmtime::Result<Self> {
         wasmtime::ensure!(
             bytes.len() as u64 <= COMPONENT_LIMIT,
-            "component exceeds 4 MiB"
+            "component exceeds {} MiB",
+            COMPONENT_LIMIT / (1024 * 1024)
         );
 
         let mut config = Config::new();
@@ -102,11 +104,10 @@ impl Canvas {
             },
         );
         store.limiter(|context| &mut context.limits);
-        store.set_fuel(CALL_FUEL)?;
+        store.set_fuel(INIT_FUEL)?;
         let instance = linker.instantiate(&mut store, &component)?;
         let source = instance.get_typed_func::<(), (String,)>(&mut store, "shader-source")?;
         let render = instance.get_typed_func::<(f32,), ()>(&mut store, "render")?;
-        store.set_fuel(CALL_FUEL)?;
         let (shader,) = source.call(&mut store, ())?;
         wasmtime::ensure!(shader.len() <= SHADER_LIMIT, "WGSL source exceeds 16 KiB");
         let gpu = pollster::block_on(Gpu::new(shader))?;
@@ -119,7 +120,7 @@ impl Canvas {
 
     pub fn frame(&mut self, elapsed: Duration) -> wasmtime::Result<Vec<u8>> {
         self.store.data_mut().phase = None;
-        self.store.set_fuel(CALL_FUEL)?;
+        self.store.set_fuel(FRAME_FUEL)?;
         self.render
             .call(&mut self.store, (elapsed.as_secs_f32(),))?;
         let phase = self

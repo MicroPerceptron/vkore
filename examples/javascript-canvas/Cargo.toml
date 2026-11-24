@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "vkore-javascript-canvas"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+boa_engine = { version = "=0.22.0", default-features = false }
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros", "realloc"] }
+
+[profile.release]
+lto = true
+opt-level = "s"
+strip = true

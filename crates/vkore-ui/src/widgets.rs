@@ -1,20 +1,22 @@
 //! MONOLITH control styling.
 //!
-//! Every control in the system is a fill, a one-pixel border, and text. The
-//! kinds below are the complete set the design uses; a screen picks one rather
-//! than assembling colours itself.
+//! The kinds below are the complete set of controls the design uses; a screen
+//! picks one rather than assembling colours itself.
 //!
-//! Two behaviours are shared by all of them and are the reason this is one
-//! module rather than per-screen styling:
+//! Behaviours shared by all of them, which is why this is one module rather
+//! than per-screen styling:
 //!
-//! - Hover moves a border to magenta and muted text to off-white, or fills a
-//!   ghost row. It never fades opacity, never scales, and never floods a fill.
-//! - Disabled is 40% opacity, applied to whatever the kind already resolved.
+//! - The primary action is filled with the accent; nothing else is. A
+//!   selection is a faint tint of the accent with an accent edge; a danger is
+//!   a faint tint of the error colour. Everything else is a surface or bare.
+//! - Hover lifts a fill one step and brightens an edge. It never moves layout
+//!   and never scales.
+//! - Disabled is 40% opacity, applied to whatever the kind already resolved,
+//!   and never hovers.
 //!
 //! Typography and text sizing live in `typography`; its section labels are uppercase. Component-button and navigation labels
-//! preserve the case supplied by the screen, exactly like the published
-//! MONOLITH components, and inherit their colour from the control style so a
-//! disabled control dims its label too.
+//! preserve the case supplied by the screen and inherit their colour from the
+//! control style, so a disabled control dims its label too.
 
 use crate::theme;
 use iced_core::{Background, Border, Color, Length, Theme};
@@ -24,35 +26,52 @@ use std::fmt;
 /// The controls the design defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
-    /// Black fill, magenta border. Open, Create, Start in a window.
+    /// Accent fill, white label. Open, Create, Start.
     Primary,
-    /// Navigation with a neutral selected surface.
+    /// Navigation with a tinted selected surface.
     Navigation(bool),
-    /// Hairline border, secondary text. Refresh, Save, Import, Start headless.
+    /// A raised surface with a hairline edge. Refresh, Save, Import.
     Secondary,
-    /// Hairline border, error text. Remove, Stop.
+    /// A faint error tint, error text. Remove, Stop.
     Danger,
     /// Bare until hover. Close, a breadcrumb.
     Ghost,
-    /// A selectable option: the navigation rail, a volume's places.
+    /// A selectable option: a volume's places.
     Choice(bool),
-    /// A list row: an entry, a machine. Selected carries a magenta border;
-    /// unselected has none.
+    /// A list row: an entry, a machine. Selected is tinted with an accent edge.
     Row(bool),
+}
+
+/// What fills a control.
+#[derive(Clone, Copy)]
+enum Fill {
+    None,
+    /// A surface tone.
+    Tone(theme::Tone),
+    /// A tone at some opacity: a tint.
+    Tint(theme::Tone, f32),
+    /// The accent, lifted toward white (positive) or black (negative).
+    Accent(f32),
 }
 
 /// Resolved colours for one control state, before the disabled dimming.
 struct Face {
-    fill: Option<theme::Tone>,
+    fill: Fill,
     text: theme::Tone,
-    edge: Option<theme::Tone>,
+    edge: Option<(theme::Tone, f32)>,
 }
 
 impl Button {
-    fn face(self, hovered: bool) -> Face {
+    fn face(self, hovered: bool, pressed: bool) -> Face {
         match self {
             Self::Navigation(selected) => Face {
-                fill: (selected || hovered).then_some(theme::HOVER),
+                fill: if selected {
+                    Fill::Tint(theme::MAGENTA, if hovered { 0.20 } else { 0.14 })
+                } else if hovered {
+                    Fill::Tone(theme::HOVER)
+                } else {
+                    Fill::None
+                },
                 text: if selected || hovered {
                     theme::TEXT
                 } else {
@@ -60,35 +79,37 @@ impl Button {
                 },
                 edge: None,
             },
-            // Magenta is never a fill: the primary button is the page black
-            // with a magenta border. It reads off-white and gives the accent
-            // to its label on hover, not the other way round.
             Self::Primary => Face {
-                fill: Some(if hovered {
-                    theme::PANEL
+                fill: Fill::Accent(if pressed {
+                    -0.10
+                } else if hovered {
+                    0.10
                 } else {
-                    theme::BACKGROUND
+                    0.0
                 }),
-                text: if hovered { theme::MAGENTA } else { theme::TEXT },
-                edge: Some(theme::MAGENTA),
+                text: theme::ON_ACCENT,
+                edge: None,
             },
-            // Secondary and danger carry no fill: a border and a label.
             Self::Secondary => Face {
-                fill: None,
+                fill: Fill::Tone(if hovered { theme::HOVER } else { theme::PANEL }),
                 text: theme::TEXT,
                 edge: Some(if hovered {
-                    theme::MAGENTA
+                    (theme::TEXT_MUTED, 0.7)
                 } else {
-                    theme::BORDER
+                    (theme::BORDER, 1.0)
                 }),
             },
             Self::Danger => Face {
-                fill: None,
+                fill: Fill::Tint(theme::ERROR, if hovered { 0.20 } else { 0.10 }),
                 text: theme::ERROR,
-                edge: Some(theme::ERROR),
+                edge: Some((theme::ERROR, if hovered { 0.8 } else { 0.45 })),
             },
             Self::Ghost => Face {
-                fill: hovered.then_some(theme::HOVER),
+                fill: if hovered {
+                    Fill::Tone(theme::HOVER)
+                } else {
+                    Fill::None
+                },
                 text: if hovered {
                     theme::TEXT
                 } else {
@@ -97,38 +118,81 @@ impl Button {
                 edge: None,
             },
             Self::Choice(selected) => Face {
-                fill: None,
+                fill: if selected {
+                    Fill::Tint(theme::MAGENTA, 0.12)
+                } else if hovered {
+                    Fill::Tone(theme::HOVER)
+                } else {
+                    Fill::None
+                },
                 text: if selected || hovered {
                     theme::TEXT
                 } else {
                     theme::TEXT_MUTED
                 },
-                edge: Some(if selected || hovered {
-                    theme::MAGENTA
+                edge: Some(if selected {
+                    (theme::MAGENTA, 1.0)
+                } else if hovered {
+                    (theme::TEXT_MUTED, 0.7)
                 } else {
-                    theme::BORDER
+                    (theme::BORDER, 1.0)
                 }),
             },
-            // Hover only tints a row: in a list longer than the pane, the
-            // selection can scroll out of view, and a hovered row with its
-            // border would pass for it.
+            // In a list longer than the pane the selection can scroll out of
+            // view, so the selected row carries both a tint and an edge, and a
+            // hovered row only a neutral lift: the two never pass for each other.
             Self::Row(selected) => Face {
-                fill: hovered.then_some(theme::HOVER),
+                fill: if selected {
+                    Fill::Tint(theme::MAGENTA, 0.09)
+                } else if hovered {
+                    Fill::Tone(theme::HOVER)
+                } else {
+                    Fill::None
+                },
                 text: if selected {
                     theme::TEXT
                 } else {
                     theme::TEXT_SECONDARY
                 },
-                edge: selected.then_some(theme::MAGENTA),
+                edge: selected.then_some((theme::MAGENTA, 0.6)),
             },
         }
     }
 }
 
-/// Styles a control, applying hover and the disabled dimming.
+impl Button {
+    /// The wash a `motion::Fade` lays over this control on hover: its tone,
+    /// and how opaque it gets at most.
+    pub fn wash(self) -> (theme::Tone, f32) {
+        match self {
+            Self::Primary => (theme::ON_ACCENT, 0.16),
+            Self::Danger => (theme::ERROR, 0.12),
+            Self::Secondary | Self::Navigation(_) | Self::Choice(_) => (theme::TEXT, 0.07),
+            Self::Ghost => (theme::TEXT, 0.08),
+            Self::Row(_) => (theme::TEXT, 0.05),
+        }
+    }
+}
+
+/// Styles a control, applying hover and the disabled dimming. Hover changes
+/// the fill at once; use [`button_style_fading`] under a `motion::Fade`.
 pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
+    styled(kind, false)
+}
+
+/// Styles a control that a `motion::Fade` wraps: the fill stays at rest,
+/// because the wash is what lifts it; the edge and the label still answer the
+/// pointer, which is cheap to do at once.
+pub fn button_style_fading(
+    kind: Button,
+) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
+    styled(kind, true)
+}
+
+fn styled(kind: Button, fading: bool) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
     move |appearance, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let pressed = matches!(status, button::Status::Pressed);
         let disabled = matches!(status, button::Status::Disabled);
         let dim = |mut color: Color| {
             if disabled {
@@ -136,15 +200,32 @@ pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::
             }
             color
         };
-        let face = kind.face(hovered && !disabled);
+        let face = kind.face(hovered && !disabled, pressed && !disabled);
+        let fill = if fading {
+            kind.face(false, pressed && !disabled).fill
+        } else {
+            face.fill
+        };
+        let background = match fill {
+            Fill::None => None,
+            Fill::Tone(tone) => Some(Background::Color(dim(theme::color(appearance, tone)))),
+            Fill::Tint(tone, alpha) => {
+                Some(Background::Color(dim(theme::rgba(appearance, tone, alpha))))
+            }
+            // A gradient cannot be dimmed channel by channel; a disabled
+            // accent is the plain accent at forty percent.
+            Fill::Accent(_) if disabled => Some(Background::Color(dim(theme::color(
+                appearance,
+                theme::MAGENTA,
+            )))),
+            Fill::Accent(lift) => Some(theme::accent_fill(appearance, lift)),
+        };
         button::Style {
-            background: face
-                .fill
-                .map(|fill| Background::Color(dim(theme::color(appearance, fill)))),
+            background,
             text_color: dim(theme::color(appearance, face.text)),
             border: Border {
-                color: face.edge.map_or(Color::TRANSPARENT, |edge| {
-                    dim(theme::color(appearance, edge))
+                color: face.edge.map_or(Color::TRANSPARENT, |(edge, alpha)| {
+                    dim(theme::rgba(appearance, edge, alpha))
                 }),
                 width: face.edge.map_or(0.0, |_| 1.0),
                 radius: theme::RADIUS_MD.into(),
@@ -232,12 +313,36 @@ pub fn page_frame<'a>(content: impl Into<crate::UiElement<'a>>) -> crate::UiElem
     .into()
 }
 
+/// A card resting on the page: lit from above, edged, softly shadowed.
 pub fn card(appearance: &Theme) -> container::Style {
-    theme::panel(
+    theme::surface(
         appearance,
         theme::PANEL,
         Some(theme::SEPARATOR),
         theme::RADIUS_LG,
+        theme::Elevation::Raised,
+    )
+}
+
+/// A recess in a card: a metric, a field's worth of detail. Darker than the
+/// card around it, flat, edged.
+pub fn well(appearance: &Theme) -> container::Style {
+    theme::panel(
+        appearance,
+        theme::PANEL_FILE,
+        Some(theme::SEPARATOR),
+        theme::RADIUS_MD,
+    )
+}
+
+/// A surface over the page: a tooltip, a menu.
+pub fn floating(appearance: &Theme) -> container::Style {
+    theme::surface(
+        appearance,
+        theme::PANEL,
+        Some(theme::BORDER),
+        theme::RADIUS_MD,
+        theme::Elevation::Floating,
     )
 }
 
@@ -275,9 +380,14 @@ pub fn resource_toggle(
         }
         color
     };
-    style.background = color(theme::PANEL).into();
+    // On is the accent; off is a recessed track.
+    style.background = if selected {
+        color(theme::MAGENTA).into()
+    } else {
+        color(theme::PANEL_FILE).into()
+    };
     style.foreground = color(if selected {
-        theme::TEXT
+        theme::ON_ACCENT
     } else {
         theme::TEXT_MUTED
     })
@@ -305,103 +415,157 @@ pub fn download_progress(appearance: &Theme) -> iced_widget::progress_bar::Style
 mod tests {
     use super::*;
 
+    const ALL: [Button; 10] = [
+        Button::Primary,
+        Button::Secondary,
+        Button::Danger,
+        Button::Ghost,
+        Button::Navigation(true),
+        Button::Navigation(false),
+        Button::Choice(true),
+        Button::Choice(false),
+        Button::Row(true),
+        Button::Row(false),
+    ];
+
     fn styled(kind: Button, status: button::Status) -> button::Style {
         button_style(kind)(&Theme::Dark, status)
     }
 
+    fn dark(tone: theme::Tone) -> Color {
+        theme::color(&Theme::Dark, tone)
+    }
+
     #[test]
-    fn magenta_is_never_a_fill() {
-        let magenta = theme::color(&Theme::Dark, theme::MAGENTA);
-        for kind in [
-            Button::Primary,
-            Button::Secondary,
-            Button::Danger,
-            Button::Ghost,
-            Button::Choice(true),
-            Button::Choice(false),
-            Button::Row(true),
-            Button::Row(false),
-        ] {
+    fn only_the_primary_button_is_filled_with_the_accent() {
+        for kind in ALL {
             for status in [
                 button::Status::Active,
                 button::Status::Hovered,
                 button::Status::Pressed,
-                button::Status::Disabled,
             ] {
                 let style = styled(kind, status);
-                assert_ne!(
-                    style.background,
-                    Some(Background::Color(magenta)),
-                    "{kind:?} filled with the accent"
+                let accent_fill = matches!(style.background, Some(Background::Gradient(_)));
+                assert_eq!(
+                    accent_fill,
+                    kind == Button::Primary,
+                    "{kind:?} {status:?}: {:?}",
+                    style.background
                 );
+                // A tint is faint: nothing but the primary reaches half opacity.
+                if let Some(Background::Color(fill)) = style.background
+                    && fill.r > fill.g
+                    && fill.b > fill.g
+                {
+                    assert!(fill.a < 0.5, "{kind:?} fills with a loud accent");
+                }
             }
         }
     }
 
     #[test]
-    fn nothing_casts_a_shadow() {
-        for kind in [Button::Primary, Button::Secondary, Button::Ghost] {
+    fn controls_cast_no_shadow_of_their_own() {
+        for kind in ALL {
             let style = styled(kind, button::Status::Active);
-            assert_eq!(style.shadow.color, Color::TRANSPARENT);
-            assert_eq!(style.shadow.blur_radius, 0.0);
+            assert_eq!(style.shadow.color, Color::TRANSPARENT, "{kind:?}");
+            assert_eq!(style.shadow.blur_radius, 0.0, "{kind:?}");
         }
     }
 
     #[test]
-    fn the_primary_button_is_black_with_a_magenta_border() {
-        let style = styled(Button::Primary, button::Status::Active);
-        assert_eq!(
-            style.background,
-            Some(Background::Color(theme::color(
-                &Theme::Dark,
-                theme::BACKGROUND
-            )))
-        );
-        assert_eq!(
-            style.border.color,
-            theme::color(&Theme::Dark, theme::MAGENTA)
-        );
-        assert_eq!(style.border.width, 1.0);
+    fn the_primary_button_is_accent_filled_with_white_ink_and_lifts_on_hover() {
+        let rest = styled(Button::Primary, button::Status::Active);
+        let hover = styled(Button::Primary, button::Status::Hovered);
+        let pressed = styled(Button::Primary, button::Status::Pressed);
+        assert_eq!(rest.text_color, dark(theme::ON_ACCENT));
+        assert_eq!(rest.border.width, 0.0);
+        assert!(matches!(rest.background, Some(Background::Gradient(_))));
+        // Hover lifts, press sinks: the three fills are three different ones.
+        assert_ne!(rest.background, hover.background);
+        assert_ne!(rest.background, pressed.background);
+        assert_ne!(hover.background, pressed.background);
     }
 
     #[test]
-    fn hover_moves_a_border_to_magenta_rather_than_filling_it() {
+    fn white_ink_reads_on_the_accent_in_both_appearances() {
+        fn luminance(c: Color) -> f32 {
+            let lin = |v: f32| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+        }
+        for appearance in [Theme::Dark, Theme::Light] {
+            let ink = luminance(theme::color(&appearance, theme::ON_ACCENT));
+            let accent = luminance(theme::color(&appearance, theme::MAGENTA));
+            let contrast = (ink + 0.05) / (accent + 0.05);
+            assert!(contrast >= 4.0, "{appearance:?}: {contrast}");
+        }
+    }
+
+    #[test]
+    fn hover_lifts_a_secondary_fill_and_brightens_its_edge() {
         let rest = styled(Button::Secondary, button::Status::Active);
         let hovered = styled(Button::Secondary, button::Status::Hovered);
-
-        assert_eq!(rest.border.color, theme::color(&Theme::Dark, theme::BORDER));
+        assert_eq!(rest.background, Some(Background::Color(dark(theme::PANEL))));
         assert_eq!(
-            hovered.border.color,
-            theme::color(&Theme::Dark, theme::MAGENTA)
+            hovered.background,
+            Some(Background::Color(dark(theme::HOVER)))
         );
-        assert_eq!(rest.background, hovered.background);
-        assert_eq!(hovered.text_color, theme::color(&Theme::Dark, theme::TEXT));
+        assert_eq!(rest.border.color, dark(theme::BORDER));
+        assert_ne!(hovered.border.color, rest.border.color);
+        assert_eq!(hovered.text_color, dark(theme::TEXT));
     }
 
     #[test]
-    fn selection_is_a_magenta_border_with_off_white_text() {
-        let selected = styled(Button::Choice(true), button::Status::Active);
-        assert_eq!(
-            selected.border.color,
-            theme::color(&Theme::Dark, theme::MAGENTA)
-        );
-        assert_eq!(selected.text_color, theme::color(&Theme::Dark, theme::TEXT));
+    fn selection_is_an_accent_edge_with_a_faint_tint_and_off_white_text() {
+        for selected in [
+            styled(Button::Choice(true), button::Status::Active),
+            styled(Button::Row(true), button::Status::Active),
+        ] {
+            assert_eq!(selected.border.width, 1.0);
+            assert_eq!(selected.text_color, dark(theme::TEXT));
+            assert!(matches!(selected.background, Some(Background::Color(c)) if c.a < 0.2));
+        }
+        let choice = styled(Button::Choice(true), button::Status::Active);
+        assert_eq!(choice.border.color, dark(theme::MAGENTA));
     }
 
     #[test]
     fn a_hovered_row_never_passes_for_the_selected_one() {
         let selected = styled(Button::Row(true), button::Status::Active);
         let hovered = styled(Button::Row(false), button::Status::Hovered);
-        assert_eq!(
-            selected.border.color,
-            theme::color(&Theme::Dark, theme::MAGENTA)
-        );
+        assert!(selected.border.width > 0.0 && selected.border.color.a > 0.0);
         assert_eq!(hovered.border.width, 0.0);
         assert_eq!(
             hovered.background,
-            Some(Background::Color(theme::color(&Theme::Dark, theme::HOVER)))
+            Some(Background::Color(dark(theme::HOVER)))
         );
+        assert_ne!(hovered.background, selected.background);
         assert_ne!(hovered.text_color, selected.text_color);
+    }
+
+    #[test]
+    fn under_a_fade_the_fill_stays_at_rest_and_the_label_still_answers() {
+        for kind in ALL {
+            let rest = button_style_fading(kind)(&Theme::Dark, button::Status::Active);
+            let hot = button_style_fading(kind)(&Theme::Dark, button::Status::Hovered);
+            assert_eq!(rest.background, hot.background, "{kind:?} fills at once");
+        }
+        // The wash is what lifts it, so every kind has one, and it is faint.
+        for kind in ALL {
+            let (_, strength) = kind.wash();
+            assert!(
+                (0.0..=0.2).contains(&strength) && strength > 0.0,
+                "{kind:?}"
+            );
+        }
+        let rest = button_style_fading(Button::Secondary)(&Theme::Dark, button::Status::Active);
+        let hot = button_style_fading(Button::Secondary)(&Theme::Dark, button::Status::Hovered);
+        assert_ne!(rest.border.color, hot.border.color);
     }
 
     #[test]
@@ -413,94 +577,75 @@ mod tests {
 
     #[test]
     fn disabled_dims_to_forty_percent_and_does_not_hover() {
-        let disabled = styled(Button::Primary, button::Status::Disabled);
+        let disabled = styled(Button::Secondary, button::Status::Disabled);
         assert!((disabled.text_color.a - 0.4).abs() < f32::EPSILON);
-        assert!((disabled.border.color.a - 0.4).abs() < f32::EPSILON);
-        // A disabled control must resolve to its resting face, not its hover.
-        // Primary rests off-white and takes the accent only on hover.
-        assert_eq!(
-            disabled.text_color.r,
-            theme::color(&Theme::Dark, theme::TEXT).r
-        );
-    }
-
-    /// The published component library's own variant table.
-    ///
-    /// Transcribed from `Button.jsx` in the design system bundle, which is
-    /// what the reference renders. Each row is `(fill, text, border)` at rest
-    /// and on hover. Nothing here is a judgement call.
-    #[test]
-    fn variants_match_the_published_component() {
-        let rest = |kind| styled(kind, button::Status::Active);
-        let hover = |kind| styled(kind, button::Status::Hovered);
-
-        // primary: black fill, off-white label, magenta border; the label
-        // takes the accent on hover, the fill lifts to the panel.
-        let p = rest(Button::Primary);
-        assert_eq!(
-            p.background,
-            Some(Background::Color(theme::color(
-                &Theme::Dark,
-                theme::BACKGROUND
-            )))
-        );
-        assert_eq!(p.text_color, theme::color(&Theme::Dark, theme::TEXT));
-        assert_eq!(p.border.color, theme::color(&Theme::Dark, theme::MAGENTA));
-        let ph = hover(Button::Primary);
-        assert_eq!(ph.text_color, theme::color(&Theme::Dark, theme::MAGENTA));
-        assert_eq!(ph.border.color, theme::color(&Theme::Dark, theme::MAGENTA));
-
-        // secondary: no fill at rest or on hover, only the border moves.
-        let s = rest(Button::Secondary);
-        let sh = hover(Button::Secondary);
-        assert_eq!(s.background, None);
-        assert_eq!(sh.background, None);
-        assert_eq!(s.text_color, theme::color(&Theme::Dark, theme::TEXT));
-        assert_eq!(sh.text_color, theme::color(&Theme::Dark, theme::TEXT));
-        assert_eq!(s.border.color, theme::color(&Theme::Dark, theme::BORDER));
-        assert_eq!(sh.border.color, theme::color(&Theme::Dark, theme::MAGENTA));
-
-        // danger: the error border is present in both states.
-        let d = rest(Button::Danger);
-        let dh = hover(Button::Danger);
-        assert_eq!(d.background, None);
-        assert_eq!(dh.background, None);
-        assert_eq!(d.text_color, theme::color(&Theme::Dark, theme::ERROR));
-        assert_eq!(d.border.color, theme::color(&Theme::Dark, theme::ERROR));
-        assert_eq!(dh.border.color, theme::color(&Theme::Dark, theme::ERROR));
-
-        // ghost: transparent until hover, then the surface-hover fill.
-        let g = rest(Button::Ghost);
-        let gh = hover(Button::Ghost);
-        assert_eq!(g.background, None);
-        assert_eq!(
-            gh.background,
-            Some(Background::Color(theme::color(&Theme::Dark, theme::HOVER)))
-        );
-        assert_eq!(g.text_color, theme::color(&Theme::Dark, theme::TEXT_MUTED));
-        assert_eq!(gh.text_color, theme::color(&Theme::Dark, theme::TEXT));
+        assert!((disabled.border.color.a - 0.4).abs() < 0.001);
+        // A disabled control resolves to its resting face, not its hover.
+        let rest = styled(Button::Secondary, button::Status::Active);
+        assert_eq!(disabled.text_color.r, rest.text_color.r);
+        assert!(matches!(
+            disabled.background,
+            Some(Background::Color(c)) if (c.a - 0.4).abs() < 0.001 && c.r == dark(theme::PANEL).r
+        ));
+        // A disabled accent is the flat accent at forty percent, not a gradient.
+        let primary = styled(Button::Primary, button::Status::Disabled);
+        assert!(matches!(
+            primary.background,
+            Some(Background::Color(c)) if (c.a - 0.4).abs() < 0.001
+        ));
     }
 
     #[test]
-    fn a_focused_field_takes_the_accent_border_and_selects_without_a_fill() {
+    fn a_danger_control_is_a_faint_error_tint_with_error_text() {
+        let rest = styled(Button::Danger, button::Status::Active);
+        let hover = styled(Button::Danger, button::Status::Hovered);
+        assert_eq!(rest.text_color, dark(theme::ERROR));
+        assert!(matches!(rest.background, Some(Background::Color(c)) if c.a < 0.2));
+        assert!(matches!(
+            (rest.background, hover.background),
+            (Some(Background::Color(a)), Some(Background::Color(b))) if b.a > a.a
+        ));
+    }
+
+    #[test]
+    fn a_ghost_is_bare_until_hover() {
+        let rest = styled(Button::Ghost, button::Status::Active);
+        let hover = styled(Button::Ghost, button::Status::Hovered);
+        assert_eq!(rest.background, None);
+        assert_eq!(
+            hover.background,
+            Some(Background::Color(dark(theme::HOVER)))
+        );
+        assert_eq!(rest.text_color, dark(theme::TEXT_MUTED));
+        assert_eq!(hover.text_color, dark(theme::TEXT));
+    }
+
+    #[test]
+    fn a_card_is_raised_lit_and_edged_and_a_tooltip_floats_higher() {
+        for appearance in [Theme::Dark, Theme::Light] {
+            let card = card(&appearance);
+            let floating = floating(&appearance);
+            assert_eq!(card.border.width, 1.0);
+            assert!(matches!(card.background, Some(Background::Gradient(_))));
+            assert!(card.shadow.blur_radius > 0.0 && card.shadow.color.a > 0.0);
+            assert!(floating.shadow.blur_radius > card.shadow.blur_radius);
+            assert!(floating.shadow.offset.y > card.shadow.offset.y);
+        }
+    }
+
+    #[test]
+    fn a_focused_field_takes_the_accent_border_and_selects_with_a_tint() {
         let resting = field(&Theme::Dark, text_input::Status::Active);
         let focused = field(
             &Theme::Dark,
             text_input::Status::Focused { is_hovered: false },
         );
-        assert_eq!(
-            resting.border.color,
-            theme::color(&Theme::Dark, theme::BORDER)
-        );
-        assert_eq!(
-            focused.border.color,
-            theme::color(&Theme::Dark, theme::MAGENTA)
-        );
+        assert_eq!(resting.border.color, dark(theme::BORDER));
+        assert_eq!(focused.border.color, dark(theme::MAGENTA));
         assert_eq!(
             resting.background,
-            Background::Color(theme::color(&Theme::Dark, theme::BACKGROUND))
+            Background::Color(dark(theme::BACKGROUND))
         );
-        // Magenta is never a fill: a selection is a tint, not a block.
         assert!(focused.selection.a < 0.5);
     }
 }

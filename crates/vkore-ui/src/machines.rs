@@ -1205,7 +1205,9 @@ fn library(state: &State, ty: Typography) -> PageColumn<'_> {
         let selected = state.selected.as_deref() == Some(config.name.as_str());
         let status = machine_status(state.running.get(&config.name));
         let plate = ty.size(40.);
-        list = list.push(
+        list = list.push(kit::lift(
+            widgets::Button::Row(selected),
+            true,
             button(
                 row![
                     // The plate takes the machine's state, so a running one
@@ -1253,9 +1255,9 @@ fn library(state: &State, ty: Typography) -> PageColumn<'_> {
             )
             .width(Length::Fill)
             .padding([10, 12])
-            .style(widgets::button_style(widgets::Button::Row(selected)))
+            .style(widgets::button_style_fading(widgets::Button::Row(selected)))
             .on_press(wrap(MachineMessage::Select(config.name.clone()))),
-        );
+        ));
     }
 
     column![
@@ -1643,18 +1645,46 @@ fn instance<'a>(
 
     let running = state.running.get(&config.name);
     let status = machine_status(running);
-    let mut header = row![
-        controls,
-        ty.data(config.name.as_str(), theme::TEXT)
-            .size(ty.size(23.))
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
-        kit::status(ty, status),
-    ];
+    // Who this is, and how it is doing.
+    let mut state_line = row![kit::status(ty, status)]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center);
     if let Some(steps) = status.steps {
-        header = header.push(crate::motion::steps(steps, ty.size(80.), ty.size(6.)));
+        state_line = state_line.push(crate::motion::steps(steps, ty.size(80.), ty.size(6.)));
     }
+    let plate = ty.size(44.);
+    let identity = row![
+        container(crate::visuals::icon(
+            Icon::Machine,
+            if running.is_some() {
+                status.tone
+            } else {
+                theme::TEXT_MUTED
+            },
+            plate * 0.5,
+        ))
+        .center(plate)
+        .style(move |appearance| if running.is_some() {
+            theme::tinted(appearance, status.tone, 0.13, 0.30, theme::RADIUS_MD)
+        } else {
+            widgets::well(appearance)
+        }),
+        column![
+            ty.data(config.name.as_str(), theme::TEXT)
+                .size(ty.size(20.))
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+            state_line,
+        ]
+        .spacing(theme::SPACE_1 + 2.),
+    ]
+    .spacing(theme::SPACE_4 - 2.)
+    .align_y(alignment::Vertical::Center);
+    // What can be done with it, set against the right edge.
+    let mut actions = row![]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center);
     if running.is_some() {
-        header = header.push(action(
+        actions = actions.push(action(
             ty,
             Icon::Stop,
             "Stop",
@@ -1662,7 +1692,7 @@ fn instance<'a>(
             MachineMessage::Stop(config.name.clone()),
         ));
     } else {
-        header = header
+        actions = actions
             .push(kit::icon_button(
                 ty,
                 Icon::Settings,
@@ -1690,15 +1720,21 @@ fn instance<'a>(
                 iced_widget::tooltip::Position::Bottom,
             ));
     }
+    let header: UiElement<'_> = container(
+        row![controls, identity, space::horizontal(), actions]
+            .spacing(theme::SPACE_4)
+            .align_y(alignment::Vertical::Center),
+    )
+    .padding([theme::SPACE_2 + 4., theme::SPACE_4])
+    .width(Length::Fill)
+    .style(widgets::card)
+    .into();
     static DEFAULT: std::sync::LazyLock<tiles::Workspace<Tile>> =
         std::sync::LazyLock::new(workspace);
     let workspace = state.layouts.get(&config.name).unwrap_or(&DEFAULT);
     let terminal = crate::console::Presentation::tile(ty, appearance);
     column![
-        header
-            .spacing(theme::SPACE_2)
-            .align_y(alignment::Vertical::Center)
-            .wrap(),
+        header,
         container(workspace.view(
             ty,
             |tile| {
@@ -1728,13 +1764,17 @@ fn instance<'a>(
     ]
 }
 
-/// A machine at a glance: what it holds of the host, as rings and tiles; what
-/// it boots and what it can do, as glyphs; the paths and hashes that must be
-/// read stay as text, under a heading that says what they are.
+/// A machine at a glance: what it holds of the host, as three metric cards;
+/// what it boots, as detail wells whose long values truncate (the whole of one
+/// is a tooltip away); and what it can do, as glyph chips.
 fn overview<'a>(state: &'a State, config: &'a MachineConfig, ty: Typography) -> UiElement<'a> {
-    let data = |value| {
-        ty.data(value, theme::TEXT_SECONDARY)
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph)
+    let metric = |content: UiElement<'a>| -> UiElement<'a> {
+        container(content)
+            .padding([theme::SPACE_4, theme::SPACE_2])
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .style(widgets::well)
+            .into()
     };
     let host = state.host.as_ref().ok();
     let memory_gib = f64::from(config.memory_mib) / 1024.;
@@ -1746,10 +1786,11 @@ fn overview<'a>(state: &'a State, config: &'a MachineConfig, ty: Typography) -> 
             Icon::Cpu,
             share(f64::from(config.cpus), host.logical_cpus as f64),
             load_tone(f64::from(config.cpus), host.logical_cpus as f64),
-            format!("{} of {}", config.cpus, host.logical_cpus),
+            config.cpus.to_string(),
             "CPUs",
+            format!("of {}", host.logical_cpus),
         ),
-        None => kit::stat(ty, Icon::Cpu, config.cpus.to_string(), "CPUs"),
+        None => kit::tile_stat(ty, Icon::Cpu, config.cpus.to_string(), "CPUs", "allocated"),
     };
     let memory = match host.filter(|host| host.memory_mib > 0) {
         Some(host) => {
@@ -1759,13 +1800,53 @@ fn overview<'a>(state: &'a State, config: &'a MachineConfig, ty: Typography) -> 
                 Icon::Memory,
                 share(f64::from(config.memory_mib), total),
                 load_tone(f64::from(config.memory_mib), total),
-                format!("{memory_gib:.1} of {:.0} GiB", total / 1024.),
+                format!("{memory_gib:.1} GiB"),
                 "Memory",
+                format!("of {:.0} GiB", total / 1024.),
             )
         }
-        None => kit::stat(ty, Icon::Memory, format!("{memory_gib:.1} GiB"), "Memory"),
+        None => kit::tile_stat(
+            ty,
+            Icon::Memory,
+            format!("{memory_gib:.1} GiB"),
+            "Memory",
+            "allocated",
+        ),
     };
-    let disk = kit::stat(ty, Icon::Volume, format!("{disk_gib:.1} GiB"), "Disk");
+    let disk = kit::tile_stat(
+        ty,
+        Icon::Volume,
+        format!("{disk_gib:.1} GiB"),
+        "Disk",
+        "allocated",
+    );
+
+    // A detail: its glyph and name, then its value on one line, cut in the
+    // middle when it does not fit, with the whole of it as a tooltip.
+    let detail = |icon, title, value: String| -> UiElement<'a> {
+        let shown = ty
+            .data(value.clone(), theme::TEXT_SECONDARY)
+            .width(Length::Fill)
+            .wrapping(iced_core::text::Wrapping::None)
+            .ellipsis(iced_core::text::Ellipsis::Middle);
+        container(
+            column![
+                kit::heading(ty, icon, title),
+                kit::tip(
+                    shown,
+                    ty.data(value, theme::TEXT)
+                        .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                    iced_widget::tooltip::Position::Top,
+                ),
+            ]
+            .spacing(theme::SPACE_1 + 2.),
+        )
+        .padding(theme::SPACE_2 + 4.)
+        .width(Length::Fill)
+        .style(widgets::well)
+        .into()
+    };
+
     let resources = &config.resources;
     let mut features = row![
         kit::feature(ty, Icon::Cpu, "CPU pinning", resources.pin_cpus),
@@ -1781,36 +1862,44 @@ fn overview<'a>(state: &'a State, config: &'a MachineConfig, ty: Typography) -> 
     for (icon, label) in topology(resources) {
         features = features.push(kit::figure(ty, icon, label));
     }
-    let features = features.wrap();
+    let hardware: UiElement<'a> = container(
+        column![
+            kit::heading(ty, Icon::Settings, "Hardware"),
+            features.wrap().vertical_spacing(theme::SPACE_2),
+        ]
+        .spacing(theme::SPACE_2),
+    )
+    .padding(theme::SPACE_2 + 4.)
+    .width(Length::Fill)
+    .style(widgets::well)
+    .into();
+
     let mut details = column![
-        row![cpu, memory, disk]
-            .spacing(theme::SPACE_6)
-            .align_y(alignment::Vertical::Center)
-            .wrap(),
-        kit::heading(ty, Icon::File, "Boot image"),
-        data(config.iso.display().to_string()),
-        kit::heading(ty, Icon::Hash, "SHA-256"),
-        data(
+        row![metric(cpu), metric(memory), metric(disk)].spacing(theme::SPACE_2),
+        detail(Icon::File, "Boot image", config.iso.display().to_string()),
+        detail(
+            Icon::Hash,
+            "SHA-256",
             config
                 .iso_sha256
-                .as_deref()
-                .unwrap_or("Recorded after the first boot")
-                .to_owned()
+                .clone()
+                .unwrap_or_else(|| "Recorded after the first boot".to_owned()),
         ),
-        kit::heading(ty, Icon::Settings, "Hardware"),
-        features,
+        hardware,
     ]
     .spacing(theme::SPACE_2);
     if let Some(workspace) = &config.workspace {
-        details = details
-            .push(kit::heading(ty, Icon::Folder, "Project folder"))
-            .push(data(format!(
+        details = details.push(detail(
+            Icon::Folder,
+            "Project folder",
+            format!(
                 "{} → ~{}/{} ({:?})",
                 workspace.root.display(),
                 workspace.face,
                 workspace.name,
                 workspace.writeback
-            )));
+            ),
+        ));
     }
     widgets::scroll(details).height(Length::Fill).into()
 }

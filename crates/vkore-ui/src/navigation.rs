@@ -104,13 +104,17 @@ pub fn view<'a>(
                 .align_y(alignment::Vertical::Center)
                 .into()
         };
-        let control = button(content)
-            .height(44)
-            .padding([0, 12])
-            .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Navigation(active)))
-            .on_press(Message::Show(page))
-            .into();
+        let kind = widgets::Button::Navigation(active);
+        let control = kit::lift(
+            kind,
+            true,
+            button(content)
+                .height(44)
+                .padding([0, 12])
+                .width(Length::Fill)
+                .style(widgets::button_style_fading(kind))
+                .on_press(Message::Show(page)),
+        );
         if collapsed {
             tip(control, ty.body(label, 12., theme::TEXT).into())
         } else {

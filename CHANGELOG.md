@@ -6,7 +6,8 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ## [0.10.1] - 2026-11-25
 
 ### Changed
-- Begin the desktop's move from words to marks. The icon set grows to 38 glyphs; machine state is a beacon that spins while booting and pulses while running, with a five-segment boot track; commands are glyph buttons with tooltips; machine resources show as rings and figures; tile controls, page headers, the sidebar, Plugins, browser tabs and Account use the same marks. Animated marks request frames only while they move.
+- Give the desktop depth and lead it with marks instead of words. Cards are lit from above and cast soft shadows, higher for what floats; the primary action is filled with the accent, selections and danger controls are faint tints, and state chips wash in their own colour. Hovers ease in and out instead of snapping.
+- The icon set grows to 38 glyphs. Machine state is a beacon that spins while booting and pulses while running, with a five-segment boot track; commands are glyph buttons with tooltips; a machine's resources show as metric cards with rings, and long paths and hashes truncate with the whole value in a tooltip. Tile controls, page headers, the sidebar, Plugins, browser tabs and Account use the same marks. Animated marks request frames only while they move.
 
 ## [0.10.0] - 2026-11-24
 

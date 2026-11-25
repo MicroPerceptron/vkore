@@ -4,15 +4,16 @@
 //! radius, and spacing step. Widgets read semantic colors instead of carrying
 //! literals so a token change lands everywhere at once.
 //!
-//! Two rules the system treats as non-negotiable, enforced by the helpers
-//! below rather than by convention:
-//!
-//! - Magenta is never a fill. It appears as text, one-pixel borders, and small
-//!   marks. Selection and primary buttons use a magenta border with
-//!   theme-appropriate text and surfaces.
-//! - Nothing casts a shadow. Every edge in the system is a border.
+//! The system has depth. A surface is lit from above (a gentle vertical
+//! sheen), sits at one of two [`Elevation`]s above the page (raised, floating) that
+//! cast a soft shadow, and keeps a one-pixel edge so it still reads where a
+//! shadow cannot (a light page, a screenshot). The accent is a colour to use:
+//! the primary action is filled with it, a selection is tinted with it, and a
+//! state is a tint of its own tone. What stays fixed is its meaning: magenta
+//! is the user's own action and selection, never a state; green, amber and red
+//! are states and never decoration.
 
-use iced_core::{Background, Border, Color, Shadow};
+use iced_core::{Background, Border, Color, Gradient, Radians, Shadow, gradient};
 
 /// A semantic color, resolved at draw time from the active Iced theme.
 /// Keeping the role typed prevents literal logo colors from being remapped.
@@ -63,6 +64,12 @@ pub const MAGENTA: Tone = Tone {
     dark: 0xCE15C4,
     light: 0xA30D9A,
 };
+/// Text and glyphs set on an accent fill. White in both appearances: the
+/// accent is the same hue family in each, so one ink serves.
+pub const ON_ACCENT: Tone = Tone {
+    dark: 0xFFFFFF,
+    light: 0xFFFFFF,
+};
 pub const SUCCESS: Tone = Tone {
     dark: 0x3FCB6E,
     light: 0x176D38,
@@ -104,9 +111,9 @@ pub fn text(tone: Tone) -> impl Fn(&iced_core::Theme) -> iced_widget::text::Styl
 }
 
 /// Radius for buttons and fields.
-pub const RADIUS_MD: f32 = 6.0;
+pub const RADIUS_MD: f32 = 8.0;
 /// Radius for panels and cards.
-pub const RADIUS_LG: f32 = 10.0;
+pub const RADIUS_LG: f32 = 12.0;
 
 /// Spacing scale. The unit is 8px; 4 is the one permitted half step.
 pub const SPACE_1: f32 = 4.0;
@@ -179,7 +186,127 @@ pub fn border(appearance: &iced_core::Theme, tone: Tone, radius: f32) -> Border 
     }
 }
 
-/// The system casts no shadows; every edge is a border.
+/// How far a surface stands off the page. A surface on the page itself is
+/// flat and has no level: it is a [`panel`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Elevation {
+    /// A card resting on the page.
+    Raised,
+    /// Over the page and what is on it: a tooltip, a menu, a dragged tile.
+    Floating,
+}
+
+/// The shadow at `level`. Dark pages need a heavier one to show at all; a
+/// light page needs only a whisper.
+pub fn shadow(appearance: &iced_core::Theme, level: Elevation) -> Shadow {
+    let dark = !matches!(appearance, iced_core::Theme::Light);
+    let (alpha, y, blur) = match (level, dark) {
+        (Elevation::Raised, true) => (0.40, 2.0, 8.0),
+        (Elevation::Raised, false) => (0.09, 1.0, 6.0),
+        (Elevation::Floating, true) => (0.55, 8.0, 20.0),
+        (Elevation::Floating, false) => (0.16, 6.0, 16.0),
+    };
+    Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, alpha),
+        offset: iced_core::Vector::new(0.0, y),
+        blur_radius: blur,
+    }
+}
+
+/// `a` moved `t` of the way to `b`, channel by channel.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+/// A fill lit from above: a little lighter at the top on a dark page, a little
+/// shaded at the foot on a light one. Subtle by design; it should be felt, not
+/// seen.
+pub fn lit(appearance: &iced_core::Theme, base: Color) -> Background {
+    let (top, bottom) = if matches!(appearance, iced_core::Theme::Light) {
+        (base, mix(base, Color::BLACK, 0.025))
+    } else {
+        (mix(base, Color::WHITE, 0.045), base)
+    };
+    vertical(top, bottom)
+}
+
+/// A top-to-bottom gradient.
+pub fn vertical(top: Color, bottom: Color) -> Background {
+    Background::Gradient(Gradient::Linear(
+        gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2))
+            .add_stop(0.0, top)
+            .add_stop(1.0, bottom),
+    ))
+}
+
+/// The accent as a fill: brighter at the top, deeper at the foot. `lift` moves
+/// it toward white (hover) or black (pressed) by that much.
+pub fn accent_fill(appearance: &iced_core::Theme, lift: f32) -> Background {
+    let base = color(appearance, MAGENTA);
+    let toward = |c: Color| {
+        if lift >= 0.0 {
+            mix(c, Color::WHITE, lift)
+        } else {
+            mix(c, Color::BLACK, -lift)
+        }
+    };
+    vertical(
+        toward(mix(base, Color::WHITE, 0.10)),
+        toward(mix(base, Color::BLACK, 0.06)),
+    )
+}
+
+/// A raised or floating surface: lit from above, edged, and shadowed.
+pub fn surface(
+    appearance: &iced_core::Theme,
+    fill: Tone,
+    edge: Option<Tone>,
+    radius: f32,
+    level: Elevation,
+) -> iced_widget::container::Style {
+    iced_widget::container::Style {
+        background: Some(lit(appearance, color(appearance, fill))),
+        border: match edge {
+            Some(edge) => border(appearance, edge, radius),
+            None => Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: radius.into(),
+            },
+        },
+        shadow: shadow(appearance, level),
+        ..Default::default()
+    }
+}
+
+/// A surface that is a faint wash of `tone`, with a finer edge of the same: a
+/// state chip, an accent plate. `wash` and `edge` are opacities.
+pub fn tinted(
+    appearance: &iced_core::Theme,
+    tone: Tone,
+    wash: f32,
+    edge: f32,
+    radius: f32,
+) -> iced_widget::container::Style {
+    iced_widget::container::Style {
+        background: Some(Background::Color(rgba(appearance, tone, wash))),
+        border: Border {
+            color: rgba(appearance, tone, edge),
+            width: if edge > 0.0 { 1.0 } else { 0.0 },
+            radius: radius.into(),
+        },
+        shadow: no_shadow(),
+        ..Default::default()
+    }
+}
+
+/// A flat surface has no shadow.
 pub const fn no_shadow() -> Shadow {
     Shadow {
         color: Color::TRANSPARENT,
@@ -294,11 +421,65 @@ mod tests {
     }
 
     #[test]
-    fn panels_carry_a_border_and_never_a_shadow() {
+    fn a_flat_panel_carries_a_border_and_no_shadow() {
         let styled = panel(&iced_core::Theme::Dark, PANEL, Some(BORDER), RADIUS_LG);
         assert_eq!(styled.border.width, 1.0);
         assert_eq!(styled.border.color, color(&iced_core::Theme::Dark, BORDER));
         assert_eq!(styled.shadow.color, Color::TRANSPARENT);
         assert_eq!(styled.shadow.blur_radius, 0.0);
+    }
+
+    #[test]
+    fn elevation_steps_up_in_both_appearances() {
+        for appearance in [iced_core::Theme::Dark, iced_core::Theme::Light] {
+            let raised = shadow(&appearance, Elevation::Raised);
+            let floating = shadow(&appearance, Elevation::Floating);
+            assert!(raised.blur_radius > 0.0);
+            assert!(floating.blur_radius > raised.blur_radius);
+            assert!(floating.offset.y > raised.offset.y);
+            assert!(floating.color.a > raised.color.a);
+        }
+        // A dark page needs the heavier shadow to show at all.
+        assert!(
+            shadow(&iced_core::Theme::Dark, Elevation::Raised).color.a
+                > shadow(&iced_core::Theme::Light, Elevation::Raised).color.a
+        );
+    }
+
+    #[test]
+    fn mixing_runs_from_one_colour_to_the_other_and_clamps() {
+        let (a, b) = (Color::BLACK, Color::WHITE);
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 1.0), b);
+        assert_eq!(mix(a, b, 9.0), b);
+        assert_eq!(mix(a, b, -9.0), a);
+        assert!((mix(a, b, 0.5).g - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_surface_is_lit_edged_and_shadowed_at_its_level() {
+        let styled = surface(
+            &iced_core::Theme::Dark,
+            PANEL,
+            Some(SEPARATOR),
+            RADIUS_LG,
+            Elevation::Raised,
+        );
+        assert!(matches!(styled.background, Some(Background::Gradient(_))));
+        assert_eq!(styled.border.width, 1.0);
+        assert!(styled.shadow.blur_radius > 0.0);
+    }
+
+    #[test]
+    fn the_accent_fill_lifts_and_sinks_around_its_resting_colour() {
+        let stops = |lift| match accent_fill(&iced_core::Theme::Dark, lift) {
+            Background::Gradient(Gradient::Linear(linear)) => {
+                let top = linear.stops[0].unwrap().color;
+                top.r + top.g + top.b
+            }
+            other => panic!("expected a gradient, got {other:?}"),
+        };
+        assert!(stops(0.1) > stops(0.0));
+        assert!(stops(0.0) > stops(-0.1));
     }
 }

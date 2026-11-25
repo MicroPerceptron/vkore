@@ -47,7 +47,7 @@ pub fn tip<'a>(
         // finite, as Axiom's display-list contract requires.
         container(label)
             .padding(theme::SPACE_2)
-            .style(widgets::card)
+            .style(widgets::floating)
             .clip(true),
         position,
     )
@@ -81,8 +81,8 @@ pub fn status_as<'a>(ty: Typography, status: Status, label: impl Into<String>) -
         .spacing(em / 2.)
         .align_y(alignment::Vertical::Center),
     )
-    .padding([em / 4., em * 0.75])
-    .style(move |appearance| theme::panel(appearance, theme::PANEL_FILE, None, em * 2.))
+    .padding([em / 3., em * 0.8])
+    .style(move |appearance| theme::tinted(appearance, status.tone, 0.13, 0.28, em * 2.))
     .into()
 }
 
@@ -102,14 +102,14 @@ pub fn status_mark<'a>(ty: Typography, status: Status) -> UiElement<'a> {
 /// The tone a glyph takes inside a control of this kind.
 ///
 /// A canvas cannot follow its button's hover, so the glyph takes the colour
-/// the control's label rests in. The accent is a small mark, which it may be;
-/// a disabled control's glyph drops to the muted tone.
+/// the control's label rests in: white on the accent fill, the error colour on
+/// a danger. A disabled control's glyph drops to the muted tone.
 fn glyph_tone(kind: widgets::Button, enabled: bool) -> theme::Tone {
     if !enabled {
         return theme::TEXT_MUTED;
     }
     match kind {
-        widgets::Button::Primary => theme::MAGENTA,
+        widgets::Button::Primary => theme::ON_ACCENT,
         widgets::Button::Danger => theme::ERROR,
         widgets::Button::Ghost => theme::TEXT_MUTED,
         widgets::Button::Secondary
@@ -117,6 +117,17 @@ fn glyph_tone(kind: widgets::Button, enabled: bool) -> theme::Tone {
         | widgets::Button::Choice(_)
         | widgets::Button::Row(_) => theme::TEXT_SECONDARY,
     }
+}
+
+/// A control that eases up under the pointer instead of snapping: wraps a
+/// button styled with [`widgets::button_style_fading`] in its kind's wash.
+pub fn lift<'a>(
+    kind: widgets::Button,
+    enabled: bool,
+    content: impl Into<UiElement<'a>>,
+) -> UiElement<'a> {
+    let (tone, strength) = kind.wash();
+    motion::fade(content, tone, strength, theme::RADIUS_MD, enabled)
 }
 
 /// A square control that is only a glyph, named by its tooltip.
@@ -128,6 +139,7 @@ pub fn icon_button<'a>(
     message: Option<Message>,
 ) -> UiElement<'a> {
     let side = ty.control_height();
+    let enabled = message.is_some();
     let control = button(
         container(visuals::icon(
             icon,
@@ -139,9 +151,14 @@ pub fn icon_button<'a>(
     .width(side)
     .height(side)
     .padding(0)
-    .style(widgets::button_style(kind))
+    .style(widgets::button_style_fading(kind))
     .on_press_maybe(message);
-    tip_text(ty, control, label, tooltip::Position::Bottom)
+    tip_text(
+        ty,
+        lift(kind, enabled, control),
+        label,
+        tooltip::Position::Bottom,
+    )
 }
 
 /// A control that is a glyph and a short word: for the commands a person
@@ -153,19 +170,23 @@ pub fn icon_label<'a>(
     kind: widgets::Button,
     message: Option<Message>,
 ) -> UiElement<'a> {
-    button(
-        row![
-            visuals::icon(icon, glyph_tone(kind, message.is_some()), ty.size(16.)),
-            ty.control(label),
-        ]
-        .spacing(theme::SPACE_2)
-        .align_y(alignment::Vertical::Center),
+    let enabled = message.is_some();
+    lift(
+        kind,
+        enabled,
+        button(
+            row![
+                visuals::icon(icon, glyph_tone(kind, enabled), ty.size(16.)),
+                ty.control(label),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center),
+        )
+        .height(ty.control_height())
+        .padding([0, 12])
+        .style(widgets::button_style_fading(kind))
+        .on_press_maybe(message),
     )
-    .height(ty.control_height())
-    .padding([0, 12])
-    .style(widgets::button_style(kind))
-    .on_press_maybe(message)
-    .into()
 }
 
 /// A heading that leads with its glyph: a section of a page, a tile.
@@ -190,35 +211,6 @@ pub fn figure<'a>(ty: Typography, icon: Icon, value: impl Into<String>) -> UiEle
     .into()
 }
 
-/// A figure with its glyph and a name: "4" beside a processor, "8 GiB" beside
-/// memory. The name is small and muted; the figure is what the eye lands on.
-pub fn stat<'a>(
-    ty: Typography,
-    icon: Icon,
-    value: impl Into<String>,
-    label: &'static str,
-) -> UiElement<'a> {
-    let plate = ty.size(36.);
-    row![
-        container(visuals::icon(icon, theme::TEXT_SECONDARY, ty.size(18.)))
-            .center(plate)
-            .style(|appearance| theme::panel(
-                appearance,
-                theme::PANEL_FILE,
-                Some(theme::SEPARATOR),
-                theme::RADIUS_MD
-            )),
-        column![
-            ty.body(value.into(), 16., theme::TEXT),
-            ty.label(label, theme::TEXT_MUTED),
-        ]
-        .spacing(2),
-    ]
-    .spacing(theme::SPACE_2 + 2.0)
-    .align_y(alignment::Vertical::Center)
-    .into()
-}
-
 /// A share of something, as a ring with its glyph at the centre and its
 /// figure and name beneath.
 pub fn gauge<'a>(
@@ -228,6 +220,7 @@ pub fn gauge<'a>(
     tone: theme::Tone,
     value: impl Into<String>,
     label: &'static str,
+    of: impl Into<String>,
 ) -> UiElement<'a> {
     let size = ty.size(64.);
     column![
@@ -239,6 +232,37 @@ pub fn gauge<'a>(
         .height(size),
         ty.body(value.into(), 14., theme::TEXT),
         ty.label(label, theme::TEXT_MUTED),
+        ty.body(of.into(), 11., theme::TEXT_MUTED),
+    ]
+    .spacing(theme::SPACE_1)
+    .align_x(alignment::Horizontal::Center)
+    .into()
+}
+
+/// A quantity with no share to show, in the same footprint as a [`gauge`]: a
+/// plate with its glyph, then the figure and its name, so the two sit side by
+/// side as equals.
+pub fn tile_stat<'a>(
+    ty: Typography,
+    icon: Icon,
+    value: impl Into<String>,
+    label: &'static str,
+    of: impl Into<String>,
+) -> UiElement<'a> {
+    let size = ty.size(64.);
+    column![
+        container(visuals::icon(icon, theme::TEXT_SECONDARY, size * 0.42))
+            .center(size)
+            .style(move |appearance| theme::surface(
+                appearance,
+                theme::PANEL,
+                Some(theme::SEPARATOR),
+                size / 2.,
+                theme::Elevation::Raised,
+            )),
+        ty.body(value.into(), 14., theme::TEXT),
+        ty.label(label, theme::TEXT_MUTED),
+        ty.body(of.into(), 11., theme::TEXT_MUTED),
     ]
     .spacing(theme::SPACE_1)
     .align_x(alignment::Horizontal::Center)
@@ -269,12 +293,16 @@ pub fn feature<'a>(ty: Typography, icon: Icon, label: &'static str, on: bool) ->
     )
     .padding([em / 3., em * 0.75])
     .style(move |appearance| {
-        theme::panel(
-            appearance,
-            theme::PANEL_FILE,
-            Some(if on { theme::BORDER } else { theme::SEPARATOR }),
-            em * 2.,
-        )
+        if on {
+            theme::tinted(appearance, theme::SUCCESS, 0.10, 0.30, em * 2.)
+        } else {
+            theme::panel(
+                appearance,
+                theme::PANEL_FILE,
+                Some(theme::SEPARATOR),
+                em * 2.,
+            )
+        }
     })
     .into()
 }
@@ -285,7 +313,7 @@ mod tests {
 
     #[test]
     fn a_glyph_takes_the_tone_its_control_rests_in() {
-        assert_eq!(glyph_tone(widgets::Button::Primary, true), theme::MAGENTA);
+        assert_eq!(glyph_tone(widgets::Button::Primary, true), theme::ON_ACCENT);
         assert_eq!(glyph_tone(widgets::Button::Danger, true), theme::ERROR);
         assert_eq!(
             glyph_tone(widgets::Button::Secondary, true),

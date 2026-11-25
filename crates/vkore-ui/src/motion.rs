@@ -249,7 +249,7 @@ impl canvas::Program<Message, Theme, AxUi> for StepsProgram {
             bounds.size(),
             self.0,
             theme::color(appearance, self.0.tone),
-            theme::color(appearance, theme::BORDER),
+            theme::rgba(appearance, theme::TEXT_MUTED, 0.28),
             if self.0.working { seconds() } else { 0.0 },
         );
         vec![frame.into_geometry()]
@@ -368,7 +368,7 @@ impl canvas::Program<Message, Theme, AxUi> for Ring {
             self.fraction,
             state.progress(),
             theme::color(appearance, self.tone),
-            theme::color(appearance, theme::BORDER),
+            theme::rgba(appearance, theme::TEXT_MUTED, 0.28),
         );
         vec![frame.into_geometry()]
     }
@@ -380,6 +380,227 @@ pub fn ring<'a>(fraction: f32, tone: theme::Tone, size: f32) -> UiElement<'a> {
         .width(size)
         .height(size)
         .into()
+}
+
+/// How long a hover takes to arrive or leave.
+const GLIDE: Duration = Duration::from_millis(140);
+
+/// A value that eases toward zero or one, remembering where it was when it
+/// was told to turn round so a quick in-and-out never jumps.
+#[derive(Default)]
+struct Glide {
+    from: Cell<f32>,
+    to: Cell<f32>,
+    since: Cell<Option<Instant>>,
+}
+
+impl Glide {
+    fn level(&self, now: Instant) -> f32 {
+        let Some(since) = self.since.get() else {
+            return self.to.get();
+        };
+        let progress = now.saturating_duration_since(since).as_secs_f32() / GLIDE.as_secs_f32();
+        self.from.get() + (self.to.get() - self.from.get()) * ease_out(progress)
+    }
+
+    /// Whether it has arrived.
+    fn settled(&self, now: Instant) -> bool {
+        self.since
+            .get()
+            .is_none_or(|since| now.saturating_duration_since(since) >= GLIDE)
+    }
+
+    /// Head for one (`on`) or zero.
+    fn aim(&self, on: bool, now: Instant) {
+        let target = f32::from(u8::from(on));
+        if (self.to.get() - target).abs() > f32::EPSILON {
+            self.from.set(self.level(now));
+            self.to.set(target);
+            self.since.set(Some(now));
+        }
+    }
+}
+
+/// A hover that eases in and out.
+///
+/// Wraps a control and, after it draws, lays a faint wash of one tone over it
+/// that fades in as the pointer arrives and out as it leaves: the control
+/// lifts instead of snapping. The wash goes on top, so it works on any fill
+/// (a surface, an accent, nothing at all) and the control's own style carries
+/// only what does not animate. Asks for frames only while it is moving.
+pub struct Fade<'a> {
+    content: UiElement<'a>,
+    tone: theme::Tone,
+    strength: f32,
+    radius: f32,
+    enabled: bool,
+}
+
+/// Wraps `content` so a wash of `tone`, up to `strength` opaque, eases over it
+/// while the pointer is on it. A disabled control never washes.
+pub fn fade<'a>(
+    content: impl Into<UiElement<'a>>,
+    tone: theme::Tone,
+    strength: f32,
+    radius: f32,
+    enabled: bool,
+) -> UiElement<'a> {
+    UiElement::new(Fade {
+        content: content.into(),
+        tone,
+        strength,
+        radius,
+        enabled,
+    })
+}
+
+impl iced_core::Widget<Message, Theme, AxUi> for Fade<'_> {
+    fn tag(&self) -> iced_core::widget::tree::Tag {
+        iced_core::widget::tree::Tag::of::<Glide>()
+    }
+
+    fn state(&self) -> iced_core::widget::tree::State {
+        iced_core::widget::tree::State::new(Glide::default())
+    }
+
+    fn diff(&mut self, tree: &mut iced_core::widget::Tree) {
+        tree.diff_children(std::slice::from_mut(&mut self.content));
+    }
+
+    fn size(&self) -> iced_core::Size<iced_core::Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced_core::widget::Tree,
+        renderer: &AxUi,
+        limits: &iced_core::layout::Limits,
+    ) -> iced_core::layout::Node {
+        if tree.children.is_empty() {
+            tree.children
+                .push(iced_core::widget::Tree::new(&self.content));
+        }
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced_core::widget::Tree,
+        layout: iced_core::Layout<'_>,
+        renderer: &AxUi,
+        operation: &mut dyn iced_core::widget::Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced_core::widget::Tree,
+        event: &iced_core::Event,
+        layout: iced_core::Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &AxUi,
+        shell: &mut iced_core::Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            shell,
+            viewport,
+        );
+        let glide = tree.state.downcast_ref::<Glide>();
+        let now = Instant::now();
+        glide.aim(
+            self.enabled && cursor.is_over(layout.bounds()) && cursor.is_over(*viewport),
+            now,
+        );
+        if !glide.settled(now) {
+            shell.request_redraw();
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &iced_core::widget::Tree,
+        renderer: &mut AxUi,
+        appearance: &Theme,
+        style: &iced_core::renderer::Style,
+        layout: iced_core::Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use iced_core::Renderer as _;
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            appearance,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+        let level = tree
+            .state
+            .downcast_ref::<Glide>()
+            .level(Instant::now())
+            .clamp(0.0, 1.0);
+        if level > 0.0 {
+            renderer.fill_quad(
+                iced_core::renderer::Quad {
+                    bounds: layout.bounds(),
+                    border: iced_core::Border {
+                        radius: self.radius.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                theme::rgba(appearance, self.tone, self.strength * level),
+            );
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced_core::widget::Tree,
+        layout: iced_core::Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &AxUi,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced_core::widget::Tree,
+        layout: iced_core::Layout<'b>,
+        renderer: &AxUi,
+        viewport: &Rectangle,
+        translation: iced_core::Vector,
+    ) -> Option<iced_core::overlay::Element<'b, Message, Theme, AxUi>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +635,15 @@ mod tests {
         element: impl Fn() -> UiElement<'static>,
         cache: &mut Option<iced_runtime::user_interface::Cache>,
     ) -> bool {
+        asks_for_the_next_frame_at(element, cache, mouse::Cursor::Unavailable)
+    }
+
+    /// As [`asks_for_the_next_frame`], with the pointer somewhere.
+    fn asks_for_the_next_frame_at(
+        element: impl Fn() -> UiElement<'static>,
+        cache: &mut Option<iced_runtime::user_interface::Cache>,
+        cursor: mouse::Cursor,
+    ) -> bool {
         use iced_core::{Event, Renderer as _, shell};
         use iced_runtime::user_interface::{State, UserInterface};
         let size = Size::new(100., 100.);
@@ -431,7 +661,7 @@ mod tests {
             &[Event::Window(iced_core::window::Event::RedrawRequested(
                 Instant::now(),
             ))],
-            mouse::Cursor::Unavailable,
+            cursor,
             &mut renderer,
             &mut shell::Bus::new(),
         );
@@ -483,6 +713,86 @@ mod tests {
             !asks_for_the_next_frame(ring, &mut cache),
             "a settled ring keeps the window drawing"
         );
+    }
+
+    #[test]
+    fn a_glide_eases_toward_its_target_and_reverses_without_a_jump() {
+        let glide = Glide::default();
+        let t0 = Instant::now();
+        assert_eq!(glide.level(t0), 0.0);
+        assert!(glide.settled(t0));
+        glide.aim(true, t0);
+        assert!(!glide.settled(t0));
+        let halfway = glide.level(t0 + GLIDE / 2);
+        assert!(
+            halfway > 0.5 && halfway < 1.0,
+            "ease-out is fast first: {halfway}"
+        );
+        assert!(glide.settled(t0 + GLIDE));
+        assert_eq!(glide.level(t0 + GLIDE * 3), 1.0);
+        // Turning round mid-flight starts from where it is, not from an end.
+        let turn = t0 + GLIDE / 2;
+        let at_turn = glide.level(turn);
+        glide.aim(false, turn);
+        assert!((glide.level(turn) - at_turn).abs() < 1e-6);
+        assert_eq!(glide.level(turn + GLIDE * 3), 0.0);
+        // Aiming where it already is changes nothing.
+        let before = glide.level(turn + GLIDE * 3);
+        glide.aim(false, turn + GLIDE * 4);
+        assert_eq!(glide.level(turn + GLIDE * 4), before);
+        assert!(glide.settled(turn + GLIDE * 4));
+    }
+
+    #[test]
+    fn a_hover_eases_in_asks_for_frames_while_it_moves_then_goes_quiet() {
+        let button = || {
+            fade(
+                iced_widget::container(iced_widget::space::vertical())
+                    .width(60)
+                    .height(30),
+                theme::TEXT,
+                0.1,
+                8.,
+                true,
+            )
+        };
+        let mut cache = None;
+        let over = mouse::Cursor::Available(Point::new(10., 10.));
+        let away = mouse::Cursor::Available(Point::new(90., 90.));
+        assert!(
+            !asks_for_the_next_frame_at(button, &mut cache, away),
+            "an untouched control is still"
+        );
+        assert!(
+            asks_for_the_next_frame_at(button, &mut cache, over),
+            "arriving"
+        );
+        std::thread::sleep(GLIDE + Duration::from_millis(60));
+        assert!(
+            !asks_for_the_next_frame_at(button, &mut cache, over),
+            "a hovered control at rest keeps the window drawing"
+        );
+        assert!(
+            asks_for_the_next_frame_at(button, &mut cache, away),
+            "leaving"
+        );
+    }
+
+    #[test]
+    fn a_disabled_control_never_washes() {
+        let button = || {
+            fade(
+                iced_widget::container(iced_widget::space::vertical())
+                    .width(60)
+                    .height(30),
+                theme::TEXT,
+                0.1,
+                8.,
+                false,
+            )
+        };
+        let over = mouse::Cursor::Available(Point::new(10., 10.));
+        assert!(!asks_for_the_next_frame_at(button, &mut None, over));
     }
 
     #[test]

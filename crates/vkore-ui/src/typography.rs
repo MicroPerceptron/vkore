@@ -143,10 +143,11 @@ impl Typography {
         row![
             container(crate::visuals::icon(icon, theme::MAGENTA, plate * 0.5))
                 .center(plate)
-                .style(|appearance| theme::panel(
+                .style(|appearance| theme::tinted(
                     appearance,
-                    theme::PANEL,
-                    Some(theme::SEPARATOR),
+                    theme::MAGENTA,
+                    0.13,
+                    0.35,
                     theme::RADIUS_LG
                 )),
             column![

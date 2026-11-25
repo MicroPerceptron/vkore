@@ -2,3 +2,8 @@
 # The desktop's renderer, Axiom, is not public yet: Cargo fetches it with the
 # user's authenticated Git client. Every other dependency is public.
 git-fetch-with-cli = true
+
+[env]
+# Stylo reads this at compile time. Its standalone 512 KiB default overflows
+# on ordinary search results with the native Servo helper's debug build.
+SERVO_STYLE_THREAD_STACK_SIZE_KB = "8192"

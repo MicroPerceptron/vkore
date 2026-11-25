@@ -29,9 +29,10 @@ struct Test {
     messages: mpsc::Receiver<io::Result<Reply>>,
     window: Option<Rc<Window>>,
     start: Instant,
+    url: String,
     navigated: bool,
     loaded: bool,
-    target: bool,
+    location: String,
     painted: bool,
     passed: bool,
     frames: u32,
@@ -61,13 +62,21 @@ impl Test {
                 Reply::Notice(Event::Changed(_)) => self.dirty = true,
                 Reply::Notice(Event::Loading(_, false)) if !self.navigated => {
                     self.navigated = true;
-                    self.send(Input::Resize(0, 640, 360, 1.));
-                    self.send(Input::Navigate(0, "https://example.org".into()));
+                    let scale = self.window.as_ref().unwrap().scale_factor() as f32;
+                    self.send(Input::Resize(
+                        0,
+                        (640. * scale) as u32,
+                        (360. * scale) as u32,
+                        scale,
+                    ));
+                    self.send(Input::Navigate(0, self.url.clone()));
                 }
                 Reply::Notice(Event::Location(_, url, _)) => {
-                    self.target = url.starts_with("https://example.org/")
+                    self.location = url;
                 }
-                Reply::Notice(Event::Loading(_, false)) if self.target => {
+                Reply::Notice(Event::Loading(_, false))
+                    if self.location.starts_with("https://") =>
+                {
                     self.loaded = true;
                     self.dirty = true;
                 }
@@ -96,7 +105,7 @@ impl Test {
             self.native
                 .place(
                     self.window.as_ref().unwrap(),
-                    1.,
+                    self.window.as_ref().unwrap().scale_factor(),
                     Some(TileRect {
                         x: 12.,
                         y: 18.,
@@ -203,9 +212,12 @@ fn main() {
         messages: rx,
         window: None,
         start: Instant::now(),
+        url: std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "https://example.org/".into()),
         navigated: false,
         loaded: false,
-        target: false,
+        location: String::new(),
         painted: false,
         passed: false,
         frames: 0,
@@ -218,7 +230,8 @@ fn main() {
         "no completed webpage frame reached the compositor"
     );
     println!(
-        "Presented {} frames, including the loaded page.",
-        test.frames
+        "Presented {} frames, including the loaded page at {}.",
+        test.frames,
+        test.location.split(['?', '#']).next().unwrap_or_default()
     );
 }

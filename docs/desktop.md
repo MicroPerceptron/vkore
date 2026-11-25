@@ -169,7 +169,11 @@ display scale determine the viewport, up to 16 megapixels.
 An unsupported driver or compositor produces a visible error. To check the
 installed helper against a real desktop compositor, set `VKORE_SERVO` to its
 absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
-The smoke test opens a test window and loads example.org.
+The smoke test opens a test window and loads example.org. Append
+`-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.
+The smoke test reports the final page, including redirects. The repo’s Cargo
+configuration sets an 8 MiB stack per Stylo
+worker at build time so the development helper can lay out complex pages.
 
 ### Kitesurf browser sample
 

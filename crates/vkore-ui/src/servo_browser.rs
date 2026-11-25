@@ -44,7 +44,7 @@ enum Reply {
     #[cfg(target_os = "linux")]
     Dma(u64, wire::DmaBuffer, std::os::fd::OwnedFd),
     Notice(Event),
-    End(String),
+    End(io::Error),
 }
 
 struct Helper(Child);
@@ -132,7 +132,7 @@ impl Pane {
                         }
                         result => result.map(Reply::Notice),
                     }
-                    .unwrap_or_else(|e| Reply::End(e.to_string()));
+                    .unwrap_or_else(Reply::End);
                     let end = matches!(reply, Reply::End(_));
                     if replies.send(reply).is_err()
                         || proxy.send_event(UserEvent::BrowserFrame).is_err()
@@ -244,7 +244,11 @@ impl Pane {
             Reply::Notice(Event::Error(e)) => self.status = e,
             Reply::End(e) => {
                 if self.status.is_empty() || self.status == "Starting Servo…" {
-                    self.status = format!("Servo stopped ({e}).");
+                    self.status = if e.kind() == io::ErrorKind::UnexpectedEof {
+                        "The browser helper disconnected. Close this tile and reopen Servo to try again.".into()
+                    } else {
+                        format!("Servo stopped ({e}).")
+                    };
                 }
                 self.ready = false;
             }
@@ -457,7 +461,7 @@ impl Pane {
         })
         .width(Length::Fill)
         .height(Length::Fill);
-        let footer = if tab.loading {
+        let footer = if self.ready && tab.loading {
             format!("Loading… · {}", self.renderer)
         } else {
             self.renderer.clone()

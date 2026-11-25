@@ -10,6 +10,7 @@ mod account;
 #[cfg(feature = "browser-preview")]
 mod browser;
 mod console;
+mod damage;
 mod fonts;
 mod google_sign_in;
 #[cfg(feature = "gpu-canvas")]
@@ -65,7 +66,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::render_backend::NativeBackend;
+use crate::render_backend::{NativeBackend, Painted};
 
 /// The renderer every widget in this binary is generic over.
 pub(crate) type AxUi = AxRenderer<System>;
@@ -499,6 +500,21 @@ impl App {
             self.last_frame = Some(Instant::now());
             return Ok(());
         }
+        let extent =
+            Extent2d::new(physical.width, physical.height).map_err(|error| format!("{error:?}"))?;
+        // Repaint only what changed, into the backend's own framebuffer.
+        let (_, painted) = self
+            .backend
+            .render_incremental(&frame, extent)
+            .map_err(|error| format!("{error:?}"))?;
+        if painted == Painted::Unchanged {
+            // A different display list that draws the same pixels: there is
+            // nothing to present.
+            self.backend.mark_visible(frame);
+            self.redraw = again;
+            self.last_frame = Some(Instant::now());
+            return Ok(());
+        }
         let surface = self.surface.as_mut().ok_or("surface unavailable")?;
         surface
             .resize(
@@ -507,13 +523,39 @@ impl App {
             )
             .map_err(|error| error.to_string())?;
         let mut buffer = surface.buffer_mut().map_err(|error| error.to_string())?;
-        let extent =
-            Extent2d::new(physical.width, physical.height).map_err(|error| format!("{error:?}"))?;
-        self.backend
-            .render_changed(&frame, &mut buffer, extent, physical.width as usize)
+        // A platform buffer that still holds the last frame needs only the
+        // changed rectangles; one that does not (the CoreGraphics buffer is
+        // new and empty each time, age 0) needs all of it.
+        let keeps_previous = buffer.age() == 1;
+        let partial = self
+            .backend
+            .copy_to(
+                &mut buffer,
+                physical.width as usize,
+                &painted,
+                keeps_previous,
+            )
             .map_err(|error| format!("{error:?}"))?;
         window.pre_present_notify();
-        buffer.present().map_err(|error| error.to_string())?;
+        match &painted {
+            Painted::Rects(rects) if partial => {
+                let damage: Vec<softbuffer::Rect> = rects
+                    .iter()
+                    .filter_map(|rect| {
+                        Some(softbuffer::Rect {
+                            x: rect.x(),
+                            y: rect.y(),
+                            width: NonZeroU32::new(rect.width())?,
+                            height: NonZeroU32::new(rect.height())?,
+                        })
+                    })
+                    .collect();
+                buffer
+                    .present_with_damage(&damage)
+                    .map_err(|error| error.to_string())?;
+            }
+            _ => buffer.present().map_err(|error| error.to_string())?,
+        }
         self.backend.mark_visible(frame);
         self.redraw = again;
         self.last_frame = Some(Instant::now());
@@ -2461,6 +2503,362 @@ mod tests {
                 );
                 assert_eq!(refused, [], "{stage:?}");
             }
+        }
+    }
+
+    /// A frame and the raster resources it names.
+    type Captured = (axui_core::Frame<System>, Vec<axui_iced::PublishedImage>);
+
+    /// One window's renderer and widget cache, kept across frames as the app does.
+    struct Session {
+        renderer: AxRenderer<System>,
+        cache: Option<user_interface::Cache>,
+        size: Size,
+    }
+
+    impl Session {
+        fn new(size: Size, scale: f32) -> Self {
+            fonts::register().expect("faces register");
+            let mut renderer = native_renderer();
+            renderer.hint(Scale {
+                window: scale,
+                application: 1.,
+            });
+            renderer.reset(iced_core::Rectangle::with_size(size));
+            Self {
+                renderer,
+                cache: Some(user_interface::Cache::new()),
+                size,
+            }
+        }
+
+        /// Builds, lays out and draws `element`, as the app does each redraw, and
+        /// returns the display list with the raster resources it names.
+        fn frame(
+            &mut self,
+            element: UiElement<'_>,
+            appearance: &Theme,
+            cursor: mouse::Cursor,
+            events: &[iced_core::Event],
+        ) -> Captured {
+            let mut interface = UserInterface::build(
+                element,
+                self.size,
+                self.cache.take().unwrap_or_default(),
+                &mut self.renderer,
+            );
+            let mut events = events.to_vec();
+            events.push(iced_core::Event::Window(
+                iced_core::window::Event::RedrawRequested(Instant::now()),
+            ));
+            let _ = interface.update(
+                &iced_core::window::Headless,
+                &shell::Waker::noop(),
+                &events,
+                cursor,
+                &mut self.renderer,
+                &mut shell::Bus::new(),
+            );
+            interface.draw(
+                &mut self.renderer,
+                appearance,
+                &renderer::Style {
+                    text_color: theme::color(appearance, theme::TEXT),
+                },
+                cursor,
+            );
+            self.cache = Some(interface.into_cache());
+            let frame = self.renderer.take_frame().expect("a frame");
+            (frame, self.renderer.take_images())
+        }
+    }
+
+    /// The pages the damage tests and measurements draw: the machine page with
+    /// a machine mid-boot (a spinner, a boot track, a pulse in the sidebar), and
+    /// Settings.
+    struct Pages {
+        _root: tempfile::TempDir,
+        machines: machines::State,
+        settings: settings::State,
+    }
+
+    impl Pages {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+            store
+                .create(&vkored::MachineConfig::new("demo", "/isos/kore.iso"))
+                .unwrap();
+            let mut machines = machines::State::new(root.path().to_owned());
+            machines.selected = Some("demo".into());
+            let (stop, _stopped) = mpsc::channel();
+            let mut running = machines::Running::new(stop);
+            running.stage = Some(vkore_vm::Stage::Services);
+            machines.running.insert("demo".into(), running);
+            let settings = settings::State::new(root.path().to_owned());
+            Self {
+                _root: root,
+                machines,
+                settings,
+            }
+        }
+
+        fn machine(&self) -> UiElement<'_> {
+            container(row![
+                sidebar(Page::Machines, 1, "", Typography::default()),
+                machines::view(&self.machines, Typography::default(), Theme::Dark)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+            .into()
+        }
+
+        fn settings(&self, ty: Typography) -> UiElement<'_> {
+            container(row![
+                sidebar(Page::Settings, 0, "", ty),
+                settings::view(theme::Appearance::Dark, Some(true), &self.settings)
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+            .into()
+        }
+    }
+
+    /// Painting only what changed must give the very pixels of painting it all,
+    /// on the real interface: text, icons, shadows, a spinner, a hover fade.
+    #[test]
+    fn painting_only_what_changed_matches_a_full_repaint_on_real_pages() {
+        use axgfx::Extent2d;
+        use render_backend::Painted;
+        let pages = Pages::new();
+        let (size, scale) = (Size::new(900., 560.), 1.0_f32);
+        let extent = Extent2d::new(size.width as u32, size.height as u32).unwrap();
+        let mut session = Session::new(size, scale);
+        let mut incremental = render_backend::NativeBackend::new().unwrap();
+        let mut reference = render_backend::NativeBackend::new().unwrap();
+        let dark = Theme::Dark;
+        let nowhere = mouse::Cursor::Unavailable;
+        let over_navigation = iced_core::Point::new(110., 200.);
+        let hover = [iced_core::Event::Mouse(mouse::Event::CursorMoved {
+            position: over_navigation,
+        })];
+
+        // (what changed, the frame, whether only a small part may repaint)
+        let mut steps: Vec<(&str, Captured, bool)> = vec![];
+        steps.push((
+            "first frame",
+            session.frame(pages.machine(), &dark, nowhere, &[]),
+            false,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        steps.push((
+            "a spinner turns",
+            session.frame(pages.machine(), &dark, nowhere, &[]),
+            true,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        steps.push((
+            "the spinner turns again",
+            session.frame(pages.machine(), &dark, nowhere, &[]),
+            true,
+        ));
+        steps.push((
+            "the pointer arrives on a control",
+            session.frame(
+                pages.machine(),
+                &dark,
+                mouse::Cursor::Available(over_navigation),
+                &hover,
+            ),
+            true,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(70));
+        steps.push((
+            "the hover fades in",
+            session.frame(
+                pages.machine(),
+                &dark,
+                mouse::Cursor::Available(over_navigation),
+                &[],
+            ),
+            true,
+        ));
+        steps.push((
+            "another page",
+            session.frame(pages.settings(Typography::default()), &dark, nowhere, &[]),
+            false,
+        ));
+        steps.push((
+            "larger text",
+            session.frame(
+                pages.settings(Typography {
+                    text_size: typography::TextSize::Large,
+                    ..Typography::default()
+                }),
+                &dark,
+                nowhere,
+                &[],
+            ),
+            false,
+        ));
+        let mut small = 0;
+        for (what, (frame, images), expect_small) in steps {
+            incremental.set_images(images.clone());
+            let (_, painted) = incremental.render_incremental(&frame, extent).unwrap();
+            incremental.mark_visible(frame.clone());
+            reference.invalidate_for_measurement();
+            reference.set_images(images);
+            reference.render_incremental(&frame, extent).unwrap();
+            let width = extent.width() as usize;
+            if let Some(at) = incremental
+                .canvas()
+                .iter()
+                .zip(reference.canvas())
+                .position(|(a, b)| a != b)
+            {
+                panic!(
+                    "{what}: pixel ({}, {}) differs from a full repaint (painted {painted:?})",
+                    at % width,
+                    at / width
+                );
+            }
+            if let Painted::Rects(rects) = &painted {
+                let share: f64 = rects
+                    .iter()
+                    .map(|r| f64::from(r.width()) * f64::from(r.height()))
+                    .sum::<f64>()
+                    / (f64::from(extent.width()) * f64::from(extent.height()));
+                println!(
+                    "{what}: repainted {:.1}% in {} rectangle(s)",
+                    share * 100.,
+                    rects.len()
+                );
+                if expect_small {
+                    assert!(share < 0.25, "{what}: repainted {:.0}%", share * 100.);
+                    small += 1;
+                }
+            } else {
+                println!("{what}: {painted:?}");
+                assert!(
+                    !expect_small || painted == Painted::Unchanged,
+                    "{what}: expected a small repaint, got {painted:?}"
+                );
+            }
+        }
+        assert!(small >= 2, "only {small} frames repainted a small part");
+    }
+
+    /// What an animation frame costs with and without damage rectangles, at a
+    /// Retina window's real size, copy-out to a fresh platform buffer included.
+    ///
+    /// cargo test --release -p vkore-ui animation_frame_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement; run it in release"]
+    fn animation_frame_cost() {
+        use axgfx::Extent2d;
+        use std::time::Duration;
+        let pages = Pages::new();
+        let (size, scale) = (Size::new(1440., 900.), 2.0_f32);
+        let (width, height) = ((size.width * scale) as u32, (size.height * scale) as u32);
+        let extent = Extent2d::new(width, height).unwrap();
+        let median = |mut samples: Vec<Duration>| {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1e3
+        };
+        {
+            // What the differ alone costs on two successive frames.
+            let mut session = Session::new(size, scale);
+            let (a, a_images) = session.frame(
+                pages.machine(),
+                &Theme::Dark,
+                mouse::Cursor::Unavailable,
+                &[],
+            );
+            std::thread::sleep(Duration::from_millis(40));
+            let (b, b_images) = session.frame(
+                pages.machine(),
+                &Theme::Dark,
+                mouse::Cursor::Unavailable,
+                &[],
+            );
+            let mut samples = vec![];
+            for _ in 0..200 {
+                let started = Instant::now();
+                std::hint::black_box(damage::diff(
+                    damage::Snapshot {
+                        frame: &a,
+                        images: &a_images,
+                    },
+                    damage::Snapshot {
+                        frame: &b,
+                        images: &b_images,
+                    },
+                    extent,
+                ));
+                samples.push(started.elapsed());
+            }
+            println!(
+                "\nthe differ alone, {} drawings: {:.3} ms",
+                b.commands().len(),
+                median(samples)
+            );
+        }
+        println!("\n{width}x{height}, a spinner frame; milliseconds, median of 30");
+        println!(
+            "{:<14} {:>9} {:>9} {:>9} {:>9} {:>9}  painted",
+            "repaint", "widgets", "raster", "copy out", "total", "scalar"
+        );
+        for damage in [false, true] {
+            let mut session = Session::new(size, scale);
+            let mut backend = render_backend::NativeBackend::new().unwrap();
+            let (mut widgets, mut raster, mut copy) = (vec![], vec![], vec![]);
+            let mut painted_label = String::new();
+            let mut scalar = 0;
+            for round in 0..40 {
+                std::thread::sleep(Duration::from_millis(16));
+                let started = Instant::now();
+                let (frame, images) = session.frame(
+                    pages.machine(),
+                    &Theme::Dark,
+                    mouse::Cursor::Unavailable,
+                    &[],
+                );
+                let drawn = Instant::now();
+                backend.set_images(images);
+                if !damage {
+                    backend.invalidate_for_measurement();
+                }
+                let (profile, painted) = backend.render_incremental(&frame, extent).unwrap();
+                let rastered = Instant::now();
+                // The platform's buffer is new and empty each frame.
+                let mut platform = vec![0_u32; (width * height) as usize];
+                if painted != render_backend::Painted::Unchanged {
+                    backend
+                        .copy_to(&mut platform, width as usize, &painted, false)
+                        .unwrap();
+                }
+                let copied = Instant::now();
+                std::hint::black_box(&platform);
+                backend.mark_visible(frame);
+                scalar = profile.scalar_items;
+                painted_label = match &painted {
+                    render_backend::Painted::Rects(r) => format!("{} rect(s)", r.len()),
+                    other => format!("{other:?}"),
+                };
+                if round >= 8 {
+                    widgets.push(drawn - started);
+                    raster.push(rastered - drawn);
+                    copy.push(copied - rastered);
+                }
+            }
+            let (w, r, c) = (median(widgets), median(raster), median(copy));
+            println!(
+                "{:<14} {w:>8.2}  {r:>8.2}  {c:>8.2}  {:>8.2}  {scalar:>8}  {painted_label}",
+                if damage { "damage rects" } else { "full" },
+                w + r + c
+            );
         }
     }
 

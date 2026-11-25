@@ -1,5 +1,6 @@
+use crate::damage::{self, Change, Snapshot};
 use axcomp::LayerScratch;
-use axgfx::{Damage, Extent2d};
+use axgfx::{Damage, Extent2d, PixelRect};
 use axui_core::{
     Command, Frame, FrameLimits, ResourceFormat, ResourceGeneration, ResourceId, ResourceKind,
     ResourceMutability, ResourceRef, validate_frame,
@@ -49,11 +50,25 @@ pub(crate) struct RetainedProfile {
     pub(crate) unchanged_frames: u64,
 }
 
+/// What a call to [`NativeBackend::render_incremental`] repainted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Painted {
+    /// Nothing visible changed: the framebuffer already shows the frame.
+    Unchanged,
+    /// All of it.
+    Full,
+    /// Exactly these disjoint rectangles.
+    Rects(Vec<PixelRect>),
+}
+
 /// vKore's CPU-linear Axiom backend.
 ///
-/// The Iced frontend remains above `Frame<System>`. This owner keeps only
-/// bounded backend state and the last accepted display list; the platform's
-/// mapped XRGB buffer remains the render target and is never mirrored here.
+/// The Iced frontend remains above `Frame<System>`. This owner keeps bounded
+/// backend state and the last accepted display list. `render_changed` draws
+/// straight into a caller's buffer and repaints all of it. `render_incremental`
+/// draws into a framebuffer the backend keeps, which is what lets it repaint
+/// only what changed: a platform's buffer may not keep the last frame (the
+/// CoreGraphics one is new and empty each time), so the backend does.
 pub(crate) struct NativeBackend {
     structure: StructureRenderer<64>,
     glyph_atlas: GlyphAtlas<System>,
@@ -63,6 +78,11 @@ pub(crate) struct NativeBackend {
     published: Vec<axui_iced::PublishedImage>,
     layer_scratch: LayerScratch<System>,
     accepted: Option<Frame<System>>,
+    /// The raster resources `accepted` named.
+    accepted_images: Vec<axui_iced::PublishedImage>,
+    /// The persistent framebuffer, and the extent it shows a frame at.
+    canvas: Vec<u32>,
+    canvas_extent: Option<Extent2d>,
     profile: RetainedProfile,
 }
 
@@ -114,6 +134,9 @@ impl NativeBackend {
             layer_scratch: LayerScratch::new_in(MAX_LAYERS, MAX_LAYER_PIXELS, System)
                 .map_err(|_| RenderError::ResourceSetup)?,
             accepted: None,
+            accepted_images: Vec::new(),
+            canvas: Vec::new(),
+            canvas_extent: None,
             profile: RetainedProfile::default(),
         })
     }
@@ -143,11 +166,14 @@ impl NativeBackend {
         }
     }
 
-    /// Renders a changed structure frame into the exact platform target.
+    /// Renders a changed structure frame in full into a caller's buffer. The
+    /// app paints incrementally (see [`Self::render_incremental`]); this is the
+    /// whole-frame reference the tests compare it to.
     ///
     /// Fields are preflighted and refused before the target is cleared. vKore
     /// does not currently emit field materials, so admitting one without a
     /// provider would be a silent and unsafe approximation.
+    #[cfg(test)]
     pub(crate) fn render_changed(
         &mut self,
         frame: &Frame<System>,
@@ -232,9 +258,128 @@ impl NativeBackend {
         ))
     }
 
+    /// Repaints only what `frame` changed against the frame on screen, into
+    /// the backend's own framebuffer (see [`Self::canvas`]).
+    ///
+    /// Whatever it cannot be sure of, it repaints in full: no frame on screen
+    /// yet, a different extent, a frame the differ cannot reason about, or a
+    /// change that is most of the target. The result is always the same pixels
+    /// a full repaint would give; only the work differs.
+    ///
+    /// The frame on screen is forgotten here and remembered again by
+    /// [`Self::mark_visible`], so a frame that was drawn but never presented
+    /// cannot be diffed against.
+    pub(crate) fn render_incremental(
+        &mut self,
+        frame: &Frame<System>,
+        extent: Extent2d,
+    ) -> Result<(RenderProfile, Painted), RenderError> {
+        let width = extent.width() as usize;
+        let length = width
+            .checked_mul(extent.height() as usize)
+            .ok_or(RenderError::ResourceLimit)?;
+        let shown = self.accepted.take();
+        let change = match (&shown, self.canvas_extent) {
+            (Some(old), Some(at)) if at == extent && self.canvas.len() == length => damage::diff(
+                Snapshot {
+                    frame: old,
+                    images: &self.accepted_images,
+                },
+                Snapshot {
+                    frame,
+                    images: &self.published,
+                },
+                extent,
+            ),
+            _ => Change::Full,
+        };
+        if change == Change::Unchanged {
+            self.accepted = shown;
+            return Ok((RenderProfile::default(), Painted::Unchanged));
+        }
+        // From here the framebuffer is not a known frame until this succeeds.
+        self.canvas_extent = None;
+        let change = if self.canvas.len() == length {
+            change
+        } else {
+            self.canvas = vec![0; length];
+            Change::Full
+        };
+        let mut canvas = std::mem::take(&mut self.canvas);
+        let rendered = match &change {
+            Change::Rects(rects) => {
+                self.render_damaged(frame, &mut canvas, extent, width, Damage::Rects(rects))
+            }
+            _ => self.render_damaged(frame, &mut canvas, extent, width, Damage::Full),
+        };
+        self.canvas = canvas;
+        let profile = rendered?;
+        self.canvas_extent = Some(extent);
+        Ok((
+            profile,
+            match change {
+                Change::Rects(rects) => Painted::Rects(rects),
+                _ => Painted::Full,
+            },
+        ))
+    }
+
+    /// Copies what [`Self::render_incremental`] painted into a platform buffer
+    /// of `stride` pixels per row. When the buffer still holds the previous
+    /// frame (`keeps_previous`), only the painted rectangles are copied;
+    /// otherwise all of it. Returns whether only rectangles were.
+    pub(crate) fn copy_to(
+        &self,
+        target: &mut [u32],
+        stride: usize,
+        painted: &Painted,
+        keeps_previous: bool,
+    ) -> Result<bool, RenderError> {
+        let Some(extent) = self.canvas_extent else {
+            return Err(RenderError::InvalidTarget);
+        };
+        let (width, height) = (extent.width() as usize, extent.height() as usize);
+        if stride < width || target.len() < stride * height {
+            return Err(RenderError::InvalidTarget);
+        }
+        match painted {
+            Painted::Rects(rects) if keeps_previous => {
+                for rect in rects {
+                    if !rect.fits(extent) {
+                        return Err(RenderError::InvalidTarget);
+                    }
+                    let (x, w) = (rect.x() as usize, rect.width() as usize);
+                    for y in rect.y() as usize..(rect.y() + rect.height()) as usize {
+                        target[y * stride + x..y * stride + x + w]
+                            .copy_from_slice(&self.canvas[y * width + x..y * width + x + w]);
+                    }
+                }
+                Ok(true)
+            }
+            _ => {
+                if stride == width {
+                    target[..width * height].copy_from_slice(&self.canvas);
+                } else {
+                    for y in 0..height {
+                        target[y * stride..y * stride + width]
+                            .copy_from_slice(&self.canvas[y * width..(y + 1) * width]);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// The framebuffer [`Self::render_incremental`] paints.
+    #[cfg(test)]
+    pub(crate) fn canvas(&self) -> &[u32] {
+        &self.canvas
+    }
+
     /// Commits the exact frame only after platform presentation succeeds.
     pub(crate) fn mark_visible(&mut self, frame: Frame<System>) {
         self.accepted = Some(frame);
+        self.accepted_images = self.published.clone();
     }
 
     #[cfg(test)]

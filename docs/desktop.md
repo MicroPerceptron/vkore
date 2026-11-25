@@ -1,8 +1,8 @@
 # The desktop
 
 `vkore-ui` is vKore's desktop: Kore machines, and their volumes browsed from the
-host through Kore's own engine. It runs in-process (no daemon, no browser, no
-login) and shares its state with the `vkore` command line.
+host through Kore's own engine. The desktop shares its local machine state with
+the `vkore` command line. Signing in is optional for local use.
 
 ```sh
 vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]
@@ -19,7 +19,7 @@ visible scroll thumbs show when more controls are below the fold.
 Pages share a centered content area up to 1440 logical pixels wide, with
 24-pixel gutters. Settings stacks its cards on compact windows and places them
 side by side when its content area reaches 1240 pixels. The machine creation
-column grows only up to 360 pixels. Window sizes and breakpoints use logical
+form grows up to 800 logical pixels. Window sizes and breakpoints use logical
 pixels: the initial window is 1280×800 and the minimum is 900×560, independent
 of display density.
 
@@ -68,6 +68,162 @@ the API and its requests. The settings page scrolls on smaller windows.
 Guest inference remains disconnected; starting a machine does not advertise a
 model. See [the API contract](inference.md). The desktop's saved port is separate
 from the CLI's explicit `vkore serve --listen` option.
+
+## Plugins
+
+Open **Plugins → Add plugin** and choose a local `.wasm` file. The library
+accepts validated WebAssembly components, including WASI-P2 bundles, and core
+Wasm modules, including WASI-P1 binaries. Open a machine and use its
+**Plugins** tile to load a bundle. **Reload** replaces that machine's copy
+from the source file after validation. If a reload fails, the previous copy
+remains loaded. **Unload** releases the attachment.
+
+The library and attachments are scoped to the current desktop session.
+Loading validates the format and keeps the bundle available in the host
+workspace. The machine integration ABI and guest execution are future work.
+
+### Animated canvas sample
+
+The library includes a bundled WASI-P2 sample. In a desktop built with
+`gpu-canvas`, click **Preview** to run it in the Plugins page. From the
+repository root:
+
+```sh
+cargo run --locked -p vkore-ui --features gpu-canvas
+```
+
+The [canvas WIT world](../crates/vkored/wit/gpu-canvas/canvas.wit) gives the
+component one draw import. The example supplies the WGSL shader and updates
+its animation uniform. vKore opens Metal on macOS or Vulkan on Linux, renders
+a 512×288 texture at up to 15 frames per second, and reads it back for the
+existing Axiom compositor. The pane displays the selected adapter and pauses
+rendering when you navigate away.
+
+Use a component you trust for the experiment. The worker limits Wasm memory
+and fuel, and its WASI context has no network access, directory grants or
+inherited process state. The host compiles the supplied shader and submits it
+through the system GPU driver. Browser WebGPU and the proposed `wasi:webgpu`
+interfaces require their own bindings.
+
+To rebuild the bundled example after changing its source:
+
+```sh
+rustup target add wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/gpu-canvas/Cargo.toml
+cp examples/gpu-canvas/target/wasm32-wasip2/release/vkore_animated_canvas.wasm \
+  crates/vkore-ui/assets/plugins/animated-canvas.wasm
+```
+
+To verify frames through the desktop renderer, set `VKORE_TEST_GPU_CANVAS` to
+the bundled file and run `cargo test -p vkore-ui --features gpu-canvas gpu_component_frames_render_in_the_native_canvas_pane -- --nocapture`.
+
+### Boa JavaScript sample
+
+The `javascript-canvas` example compiles the Boa JavaScript engine into a
+WASI-P2 component. Boa evaluates the bundled script to compute the animation
+uniform each frame. The component uses the same canvas interface as the bundled
+sample.
+
+```sh
+cargo build --locked --release --target wasm32-wasip2 --manifest-path examples/javascript-canvas/Cargo.toml
+cargo run --locked -p vkore-ui --features gpu-canvas -- --gpu-canvas \
+  examples/javascript-canvas/target/wasm32-wasip2/release/vkore_javascript_canvas.wasm
+```
+
+The resulting file can also be added to the plugin library and attached to a
+machine. Use `--gpu-canvas` to execute it in the desktop preview.
+
+### Native Servo browser
+
+In a machine workspace, open **Plugins → Open Servo browser**. The tile works
+with a stopped machine. Enter an HTTPS address, click inside the page to type,
+or open a second tab. Each tab keeps its own page, history and form contents.
+The renderer name below the page comes from Servo’s active graphics context.
+
+Build the companion executable once and launch the desktop from the repo root:
+
+```sh
+cargo build --locked --manifest-path tools/servo-browser/Cargo.toml
+VKORE_SERVO="$PWD/tools/servo-browser/target/debug/vkore-servo" cargo run --locked --release -p vkore-ui
+```
+
+For distribution, place `vkore-servo` beside `vkore-ui`. The standard desktop
+starts the helper only when the browser tile opens. The helper uses the host's
+network and runs under the desktop user's account. It embeds native Servo 0.8
+and uses its own SQLite dependency. The machine's guest OS, network adapter,
+accelerator assignment and vKore download credentials are independent of it.
+
+One helper owns up to four WebViews. Navigation, input and presentation
+acknowledgments travel over private pipes. The OS composites the browser
+surface into the tile. The desktop's Axiom renderer continues to draw its
+controls. Page pixels stay on the graphics path. The physical tile size and
+display scale determine the viewport, up to 16 megapixels.
+
+| Desktop | Presentation |
+| --- | --- |
+| macOS | The helper copies each rendered frame to an IOSurface on the GPU. A private Mach port delivers the surface to the tile’s Core Animation layer. |
+| Linux, X11 or XWayland | An embedded graphics window has an empty input region. vKore handles keyboard and mouse input. |
+| Linux, native Wayland | EGL exports a GPU snapshot via DMA-BUF. A private socket carries the descriptor and the compositor imports it into a subsurface. Requires the driver’s single-plane export, Linux DMA-BUF v3 and viewporter. |
+| Windows (experimental) | Desktop Window Manager composites the helper's live client area. Windows desktop integration still needs a runtime test. |
+
+An unsupported driver or compositor produces a visible error. To check the
+installed helper against a real desktop compositor, set `VKORE_SERVO` to its
+absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
+The smoke test opens a test window and loads example.org. Append
+`-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.
+On macOS the test also checks the tile for visible page pixels. The smoke test reports the final page, including redirects. The repo’s Cargo
+configuration sets an 8 MiB stack per Stylo
+worker at build time so the development helper can lay out complex pages.
+
+### Kitesurf browser sample
+
+Kitesurf lays out and renders webpages inside a WASI-P2 component. The
+desktop sends pointer input and displays the returned frames. The preview
+uses a 720×420 viewport that scales with the tile.
+
+Build the component from the pinned Kitesurf source with Node.js, Git, and the
+vKore Rust toolchain installed.
+
+```sh
+rustup target add wasm32-wasip2
+examples/kitesurf-browser/build.sh
+cargo run --release --locked -p vkore-ui
+```
+
+Add `artifacts/kitesurf-browser.wasm` through **Plugins → Add plugin**, then
+open a machine and use **Load → Open browser** in its **Plugins** tile. The
+browser opens alongside the other machine tiles. Move it by dragging the
+title bar, resize it with the divider, or expand it with **+**.
+
+Enter a public HTTPS address or a domain such as `example.com` and press
+**Go** or Enter. Follow links by clicking the page and scroll with a wheel
+or trackpad. **Back** returns to the preceding page. **New tab** opens
+another WASI instance with independent page state, up to four tabs. The
+bundled pages remain available at `index.html` and `about.html`. Rebuild the
+bundle from this checkout to enable web navigation in an existing setup.
+
+The preview renders HTML, CSS, and common raster images. Websites that
+require JavaScript, forms, cookies, or sign-in can load incompletely. The
+bundled demo still runs its script through the Boa DOM bridge.
+
+The tile runs on the host with the machine stopped or running. The desktop
+allows one browser preview at a time. The standard desktop build includes
+browser preview. A build with `--no-default-features` can store the bundle
+and shows that preview is disabled. The debug build can take about two
+minutes to compile the component on first open.
+
+The [browser WIT world](../crates/vkored/wit/browser/browser.wit) exchanges
+input and bounded RGBA frames. A host import fetches HTTPS documents and
+supported resources with download limits and public-address checks on each
+connection. The component has no direct socket or filesystem access. A
+future native Kore host can implement the same fetch and presentation
+interfaces.
+
+To exercise the real component without a window, set `VKORE_TEST_BROWSER`
+to the component path and run
+`cargo test -p vkored --features browser-preview bundled_kitesurf_runs_script_and_follows_links`.
+Set `VKORE_TEST_BROWSER_WEBSITE` to a public HTTPS page address and run the
+`kitesurf_opens_a_public_https_page` test for a live navigation check.
 
 ## Volumes
 
@@ -147,6 +303,17 @@ backend, or Zenity fallback), without adding a GTK development-library dependenc
 The chooser does not infer a volume format or bypass Kore's validation.
 
 ## Machines
+
+The **Machines** page lists your machines. Choose **New machine** to open
+the creation form, or select a machine to open its workspace. **All machines**
+returns to the list from either view.
+
+Each workspace has Console, Overview, Boot activity, and Plugins tiles.
+Drag the empty part of a tile's title bar onto another tile to swap them.
+Drag the dividers to resize the neighboring tiles. The tile header controls
+collapse a tile or expand it to fill the workspace. Use **Show …** to reopen
+a collapsed tile and the restore control to return an expanded tile to the
+grid. Each machine keeps its layout for the current desktop session.
 
 Under **Configure hardware → Networking**, choose **Isolated** (the default)
 or **Shared (e1000e)**. Shared mode uses QEMU’s IPv4 NAT and applies at the next

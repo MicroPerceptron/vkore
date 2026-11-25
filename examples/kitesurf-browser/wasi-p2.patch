@@ -1,0 +1,482 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 5147497..ea3709f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -29,6 +29,12 @@ version = "0.2.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
++[[package]]
++name = "anyhow"
++version = "1.0.105"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
++
+ [[package]]
+ name = "anyrender"
+ version = "0.14.0"
+@@ -273,7 +279,6 @@ dependencies = [
+  "fast-float2",
+  "futures-concurrency",
+  "futures-lite",
+- "getrandom 0.4.3",
+  "hashbrown 0.17.1",
+  "icu_normalizer",
+  "indexmap",
+@@ -299,7 +304,6 @@ dependencies = [
+  "thin-vec",
+  "thiserror 2.0.21",
+  "time",
+- "web-time",
+ ]
+
+ [[package]]
+@@ -1108,11 +1112,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+ dependencies = [
+  "cfg-if",
+- "js-sys",
+  "libc",
+  "r-efi 6.0.0",
+  "rand_core 0.10.1",
+- "wasm-bindgen",
+ ]
+
+ [[package]]
+@@ -1379,6 +1381,12 @@ version = "0.1.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ccc0a9c4770bc47b0a933256a496cfb8b6531f753ea9bccb19c6dff0ff7273fc"
+
++[[package]]
++name = "id-arena"
++version = "2.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
++
+ [[package]]
+ name = "ident_case"
+ version = "1.0.1"
+@@ -1453,6 +1461,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+ dependencies = [
+  "equivalent",
+  "hashbrown 0.17.1",
++ "serde",
++ "serde_core",
+ ]
+
+ [[package]]
+@@ -1652,6 +1662,12 @@ version = "1.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
++[[package]]
++name = "leb128fmt"
++version = "0.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
++
+ [[package]]
+ name = "libc"
+ version = "0.2.186"
+@@ -2196,6 +2212,16 @@ version = "0.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
++[[package]]
++name = "prettyplease"
++version = "0.2.37"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
++dependencies = [
++ "proc-macro2",
++ "syn 2.0.118",
++]
++
+ [[package]]
+ name = "proc-macro-crate"
+ version = "3.5.0"
+@@ -3146,7 +3172,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
+ dependencies = [
+  "deranged",
+- "js-sys",
+  "libc",
+  "num-conv",
+  "num_threads",
+@@ -3430,6 +3455,12 @@ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
+
++[[package]]
++name = "unicode-xid"
++version = "0.2.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
++
+ [[package]]
+ name = "url"
+ version = "2.5.8"
+@@ -3529,6 +3560,15 @@ version = "0.9.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
++[[package]]
++name = "vkore-kitesurf-browser"
++version = "0.1.0"
++dependencies = [
++ "boa_engine",
++ "kitesurf-core",
++ "wit-bindgen",
++]
++
+ [[package]]
+ name = "void"
+ version = "1.0.2"
+@@ -3621,6 +3661,40 @@ dependencies = [
+  "unicode-ident",
+ ]
+
++[[package]]
++name = "wasm-encoder"
++version = "0.247.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "30b6733b8b91d010a6ac5b0fb237dc46a19650bc4c67db66857e2e787d437204"
++dependencies = [
++ "leb128fmt",
++ "wasmparser",
++]
++
++[[package]]
++name = "wasm-metadata"
++version = "0.247.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "665fe59e56cc9b419ca6fcca56673e3421d1a5011e3b65caf6b726fd9e041d10"
++dependencies = [
++ "anyhow",
++ "indexmap",
++ "wasm-encoder",
++ "wasmparser",
++]
++
++[[package]]
++name = "wasmparser"
++version = "0.247.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e6fb4c2bee46c5ea4d40f8cdb5c131725cd976718ec56f1c8e82fbde5fa2a80"
++dependencies = [
++ "bitflags 2.13.2",
++ "hashbrown 0.17.1",
++ "indexmap",
++ "semver",
++]
++
+ [[package]]
+ name = "web-time"
+ version = "1.1.0"
+@@ -3687,6 +3761,89 @@ name = "wit-bindgen"
+ version = "0.57.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
++dependencies = [
++ "wit-bindgen-rust-macro",
++]
++
++[[package]]
++name = "wit-bindgen-core"
++version = "0.57.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "02dee27a2dc20d1008016c742ec9fc6ea498492994ba3750be7454cbc97ff04c"
++dependencies = [
++ "anyhow",
++ "heck",
++ "wit-parser",
++]
++
++[[package]]
++name = "wit-bindgen-rust"
++version = "0.57.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b5007dae772945b7a5003d69d90a3a4a78929d41f19d004e980c4259a6af4484"
++dependencies = [
++ "anyhow",
++ "heck",
++ "indexmap",
++ "prettyplease",
++ "syn 2.0.118",
++ "wasm-metadata",
++ "wit-bindgen-core",
++ "wit-component",
++]
++
++[[package]]
++name = "wit-bindgen-rust-macro"
++version = "0.57.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "af9237d678e3513ad24e96fe98beacdc0db6405284ba2a2400418cf0d42caa89"
++dependencies = [
++ "anyhow",
++ "prettyplease",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.118",
++ "wit-bindgen-core",
++ "wit-bindgen-rust",
++]
++
++[[package]]
++name = "wit-component"
++version = "0.247.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9d567162a6b9843080e5e0053f696623ff694bae8ae017c9ec536d1873bbe3d8"
++dependencies = [
++ "anyhow",
++ "bitflags 2.13.2",
++ "indexmap",
++ "log",
++ "serde",
++ "serde_derive",
++ "serde_json",
++ "wasm-encoder",
++ "wasm-metadata",
++ "wasmparser",
++ "wit-parser",
++]
++
++[[package]]
++name = "wit-parser"
++version = "0.247.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8ffe4064318cdf3c08cb99343b44c039fcefe61ccdf58aa9975285f13d74d1fc"
++dependencies = [
++ "anyhow",
++ "hashbrown 0.17.1",
++ "id-arena",
++ "indexmap",
++ "log",
++ "semver",
++ "serde",
++ "serde_derive",
++ "serde_json",
++ "unicode-xid",
++ "wasmparser",
++]
+
+ [[package]]
+ name = "write-fonts"
+diff --git a/Cargo.toml b/Cargo.toml
+index ad15305..d13b8bd 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -14,7 +14,7 @@
+ # table into each tree so the walk-up never reaches this manifest.
+ [workspace]
+ resolver = "2"
+-members = ["packages/core", "packages/renderer-core", "packages/scene-host-wasm"]
++members = ["packages/core", "packages/renderer-core", "packages/scene-host-wasm", "packages/vkore-kitesurf-browser"]
+ exclude = ["scripts/memprof-rewriter", "vendor/wasm-memprof/instrumentor"]
+
+ # A module with submodules is `foo.rs` beside `foo/`, never `foo/mod.rs`.
+@@ -57,7 +57,7 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
+ getrandom = { version = "0.2", features = ["js"] }
+ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+ # Annex B supplies legacy builtins used by real pages, without Intl/ICU.
+-boa_engine = { version = "0.22", default-features = false, features = ["annex-b", "js"] }
++boa_engine = { version = "0.22", default-features = false, features = ["annex-b"] }
+
+ [patch.crates-io]
+ # Patched to replace the blurred-rounded-rect powf with a polynomial fit,
+@@ -116,3 +116,10 @@ opt-level = 0
+ inherits = "release"
+ lto = "off"
+ codegen-units = 16
++
++[profile.vkore-component]
++inherits = "release"
++opt-level = "s"
++lto = "thin"
++codegen-units = 8
++strip = true
+diff --git a/packages/core/src/js.rs b/packages/core/src/js.rs
+index 15a94a0..05c442a 100644
+--- a/packages/core/src/js.rs
++++ b/packages/core/src/js.rs
+@@ -4,19 +4,19 @@
+
+ //! Boa evaluation of page expressions and its bridge to the V8 page isolate.
+
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod boa_eval;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod boa_bridge;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod boa_rejections;
+ pub(crate) mod boa_cc_graph;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod dom_fastpath;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod exports;
+ // Only the wasm-only boa bridge and the wasm clock read it.
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub(crate) mod internals;
+
+ #[cfg(test)]
+diff --git a/packages/core/src/lib.rs b/packages/core/src/lib.rs
+index 9ddb8c4..726e3eb 100644
+--- a/packages/core/src/lib.rs
++++ b/packages/core/src/lib.rs
+@@ -25,16 +25,16 @@ use style::transitions::{
+
+ mod dom;
+ mod js;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ mod boa_code_store;
+-#[cfg(any(target_arch = "wasm32", test))]
++#[cfg(any(all(target_arch = "wasm32", not(target_os = "wasi")), test))]
+ mod small_alloc;
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ mod swap_alloc;
+
+ // The counting allocator: it is what lets the store know when wasm memory is under pressure,
+ // so the store's own paths are the only callers of its hook.
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ #[global_allocator]
+ static ALLOCATOR: swap_alloc::SwapAlloc = swap_alloc::SwapAlloc;
+ mod ks_tracing;
+@@ -48,6 +48,8 @@ mod test_assets;
+ mod test_support;
+ mod text_encoding;
+ mod tty;
++#[cfg(target_os = "wasi")]
++pub mod wasi;
+
+ type HandleMap<K, V> = rustc_hash::FxHashMap<K, V>;
+
+@@ -423,9 +425,9 @@ extern "C" {
+ }
+
+ pub(crate) fn console_warn_str(msg: &str) {
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+     console_warn(msg);
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+     eprintln!("{msg}");
+ }
+
+@@ -551,13 +553,13 @@ pub(crate) fn renderer_mode() -> bool {
+     DIMS_ONLY_IMAGES.load(Ordering::Relaxed)
+ }
+
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ thread_local! {
+     static ANIMATION_CLOCK: Cell<Option<f64>> = const { Cell::new(None) };
+ }
+
+ fn now_for_animations() -> f64 {
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+     {
+         if let Some(now) = ANIMATION_CLOCK.get() {
+             return now;
+@@ -580,7 +582,7 @@ fn now_for_animations() -> f64 {
+         ANIMATION_CLOCK.set(Some(now));
+         now
+     }
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+     {
+         std::time::SystemTime::now()
+             .duration_since(std::time::UNIX_EPOCH)
+diff --git a/packages/core/src/paint/screenshot.rs b/packages/core/src/paint/screenshot.rs
+index 8c9c9e1..49ecfb7 100644
+--- a/packages/core/src/paint/screenshot.rs
++++ b/packages/core/src/paint/screenshot.rs
+@@ -108,7 +108,7 @@ pub(crate) fn paint_document_to_image_scrolled(
+         ImageFormat::Png => encode_png(&buffer, render_w, render_h),
+         ImageFormat::Jpeg => encode_jpeg(&mut buffer, render_w, render_h, quality),
+         ImageFormat::Webp => encode_webp(&buffer, render_w, render_h),
+-        ImageFormat::Rgba => encode_png(&buffer, render_w, render_h),
++        ImageFormat::Rgba => Ok(buffer),
+     }
+ }
+
+@@ -133,7 +133,11 @@ pub fn ks_render_html_to_image(
+     format: &str,
+     quality: u32,
+ ) -> Vec<u8> {
+-    let fmt = ImageFormat::from_str(format);
++    let fmt = if format.eq_ignore_ascii_case("rgba") {
++        ImageFormat::Png
++    } else {
++        ImageFormat::from_str(format)
++    };
+     let q = quality.clamp(1, 100) as u8;
+     try_render(html, base_url, width, height, fmt, q).unwrap_or_default()
+ }
+diff --git a/packages/core/src/resources/net.rs b/packages/core/src/resources/net.rs
+index 9292f0a..27af4a8 100644
+--- a/packages/core/src/resources/net.rs
++++ b/packages/core/src/resources/net.rs
+@@ -72,7 +72,7 @@ impl NetProvider for KitesurfNetProvider {
+             return;
+         }
+
+-        if !(url.starts_with("http://") || url.starts_with("https://")) {
++        if cfg!(target_os = "wasi") || !(url.starts_with("http://") || url.starts_with("https://")) {
+             settle_unfetchable(handler, url, infer_resource_kind(&request));
+             return;
+         }
+diff --git a/packages/core/src/wasi.rs b/packages/core/src/wasi.rs
+new file mode 100644
+index 0000000..0460d0a
+--- /dev/null
++++ b/packages/core/src/wasi.rs
+@@ -0,0 +1,38 @@
++// Copyright (c) 2026 Cloudflare, Inc.
++// Licensed under the Apache 2.0 license found in the LICENSE file or at:
++// https://opensource.org/licenses/Apache-2.0
++
++//! Host-independent access to Kitesurf's document and rasterizer.
++
++use crate::{DomHandle, NodeData, paint::screenshot};
++pub use crate::resources::fonts::register_ua_fonts;
++
++impl DomHandle {
++    pub fn element_attribute(&self, node_id: u32, tag: Option<&str>, name: &str) -> Option<String> {
++        let id = self.resolve_node_id(node_id)?;
++        let doc = self.doc.borrow();
++        let NodeData::Element(element) = &doc.get_node(id)?.data else {
++            return None;
++        };
++        if tag.is_some_and(|tag| &*element.name.local != tag) {
++            return None;
++        }
++        element
++            .attrs
++            .iter()
++            .find(|attr| attr.prefix().is_none() && &*attr.name.local == name)
++            .map(|attr| attr.value.to_string())
++    }
++
++    pub fn paint_rgba(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
++        self.prepare_for_paint(width, height);
++        self.resolve_layout();
++        screenshot::paint_document_to_image(
++            self.doc.borrow_mut().as_mut(),
++            width,
++            height,
++            screenshot::ImageFormat::Rgba,
++            80,
++        )
++    }
++}

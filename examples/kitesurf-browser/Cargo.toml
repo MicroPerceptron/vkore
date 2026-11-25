@@ -1,0 +1,14 @@
+# The build script stages this crate beside the pinned Kitesurf core.
+[package]
+name = "vkore-kitesurf-browser"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kitesurf-core = { path = "../core", default-features = false, features = ["blitz"] }
+boa_engine = { version = "=0.22.0", default-features = false }
+wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc"] }

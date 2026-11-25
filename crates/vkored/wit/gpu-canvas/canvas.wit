@@ -1,0 +1,9 @@
+package vkore:gpu-canvas@0.1.0;
+
+world canvas {
+    /// Submit one draw using the component's shader and the supplied uniform.
+    import draw: func(phase: f32);
+    /// WGSL with vs_main, fs_main and one vec4<f32> uniform at group 0, binding 0.
+    export shader-source: func() -> string;
+    export render: func(elapsed-seconds: f32);
+}

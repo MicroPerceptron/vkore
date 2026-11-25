@@ -20,6 +20,7 @@ pub mod console;
 pub mod hardware;
 pub mod images;
 pub mod inference;
+pub mod plugins;
 pub mod run;
 pub mod state;
 
@@ -28,3 +29,8 @@ pub use run::{Event, Preflight, RunError, Session};
 pub use state::State;
 
 pub mod account;
+#[cfg(feature = "gpu-canvas")]
+pub mod gpu_canvas;
+
+#[cfg(feature = "browser-preview")]
+pub mod browser;

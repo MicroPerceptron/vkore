@@ -7,14 +7,23 @@
 mod build_support;
 
 mod account;
+#[cfg(feature = "browser-preview")]
+mod browser;
 mod console;
 mod fonts;
 mod google_sign_in;
+#[cfg(feature = "gpu-canvas")]
+mod gpu_canvas;
 mod hardware;
 mod logo;
 mod machines;
 mod navigation;
+#[cfg(feature = "browser-preview")]
+mod plugin_view;
+mod plugins;
 mod render_backend;
+#[cfg(feature = "browser-preview")]
+mod servo_browser;
 mod settings;
 mod splash;
 mod theme;
@@ -83,6 +92,7 @@ pub enum Message {
     ToggleNavigation,
     Appearance(theme::Appearance),
     Settings(settings::SettingsMessage),
+    Plugin(plugins::Action),
     Account(account::Action),
     Volume(volumes::VolumeMessage),
     Machine(machines::MachineMessage),
@@ -95,11 +105,17 @@ pub enum Page {
     Machines,
     Settings,
     Account,
+    Plugins,
 }
 
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    #[cfg(feature = "browser-preview")]
+    BrowserFrame,
+    #[cfg(feature = "gpu-canvas")]
+    CanvasReady,
+    Plugin(plugins::Reply),
     Account(account::Reply),
     SystemTheme(Option<bool>),
     Volume(volumes::Reply),
@@ -135,6 +151,26 @@ impl Model {
             Message::ToggleNavigation => self.navigation_collapsed = !self.navigation_collapsed,
             Message::Account(action) => self.settings.account.update(action, &self.proxy),
             Message::Settings(message) => self.settings.update(message),
+            Message::Plugin(action) => {
+                use plugins::Action;
+                let on_expected_page = match &action {
+                    #[cfg(feature = "browser-preview")]
+                    Action::OpenBrowser(name, _)
+                    | Action::Browser(name, _, _)
+                    | Action::OpenServo(name)
+                    | Action::Servo(name, _, _) => {
+                        self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
+                    }
+                    Action::Load(name, _) | Action::Reload(name, _) | Action::Unload(name, _) => {
+                        self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
+                    }
+                    _ => self.page == Page::Plugins,
+                };
+                if on_expected_page {
+                    self.machines.update_plugin(action, &self.proxy);
+                }
+            }
+
             Message::Appearance(appearance) => {
                 self.appearance = appearance;
                 if let Err(error) = self.settings.save_appearance(appearance) {
@@ -145,6 +181,10 @@ impl Model {
             Message::Show(page) => {
                 self.machines.unfocus_console();
                 self.page = page;
+                #[cfg(feature = "gpu-canvas")]
+                if let Some(canvas) = &self.machines.plugins.canvas {
+                    canvas.set_visible(page == Page::Plugins);
+                }
                 if page == Page::Machines {
                     self.machines.refresh();
                 }
@@ -180,6 +220,15 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            #[cfg(feature = "browser-preview")]
+            UserEvent::BrowserFrame => self.machines.plugins.receive_browser(),
+            #[cfg(feature = "gpu-canvas")]
+            UserEvent::CanvasReady => {
+                if let Some(canvas) = &mut self.machines.plugins.canvas {
+                    canvas.receive();
+                }
+            }
+            UserEvent::Plugin(reply) => self.machines.plugin_reply(reply),
             UserEvent::Account(reply) => {
                 if self.settings.account.reply(reply) {
                     self.machines.refresh_images(self.proxy.clone());
@@ -233,6 +282,7 @@ impl Model {
             ),
             Page::Settings => settings::view(self.appearance, self.system_dark, &self.settings),
             Page::Account => account::page(&self.settings.account, ty),
+            Page::Plugins => self.machines.plugins.view(ty),
         };
         let base: UiElement<'_> = row![
             navigation::view(
@@ -308,6 +358,8 @@ impl App {
             )
         }) {
             self.model.machines.unfocus_console();
+            #[cfg(feature = "browser-preview")]
+            self.model.machines.plugins.blur_browser();
         }
         let size = logical_size(window);
         let mut interface = UserInterface::build(
@@ -359,6 +411,10 @@ impl App {
             window: scale,
             application: 1.0,
         });
+        #[cfg(feature = "browser-preview")]
+        if let Some(pane) = self.model.machines.plugins.servo_mut() {
+            pane.bounds.set(None);
+        }
         let mut interface = UserInterface::build(
             self.model.view(logical_size(window)),
             logical_size(window),
@@ -395,6 +451,15 @@ impl App {
             self.cursor,
         );
         self.cache = interface.into_cache();
+        #[cfg(feature = "browser-preview")]
+        let surface_changed = self
+            .model
+            .machines
+            .plugins
+            .servo_mut()
+            .is_some_and(|pane| pane.present(window));
+        #[cfg(not(feature = "browser-preview"))]
+        let surface_changed = false;
         let mut model_changed = false;
         for message in messages {
             self.model.update(message);
@@ -402,7 +467,7 @@ impl App {
         }
         // The splash runs on the clock, not on events: keep drawing until it
         // is done. The frame that finds it done draws without it.
-        let again = animate || model_changed || self.model.splashing();
+        let again = surface_changed || animate || model_changed || self.model.splashing();
         let frame = self
             .renderer
             .take_frame()
@@ -520,6 +585,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // still shutting down. Wait for them to finish; a second
                 // close leaves at once.
                 self.model.settings.stop();
+                #[cfg(feature = "gpu-canvas")]
+                self.model.machines.plugins.canvas.take();
                 self.model.pending_start = None;
                 self.model.reopen = None;
                 if self.model.machines.request_close() {
@@ -611,6 +678,8 @@ struct LaunchOptions {
     appearance: Option<theme::Appearance>,
     state: Option<PathBuf>,
     disk: Option<String>,
+    #[cfg(feature = "gpu-canvas")]
+    gpu_canvas: Option<PathBuf>,
 }
 
 fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<LaunchOptions, String> {
@@ -618,6 +687,8 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
         appearance: None,
         state: None,
         disk: None,
+        #[cfg(feature = "gpu-canvas")]
+        gpu_canvas: None,
     };
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -631,11 +702,20 @@ fn parse_launch_options(args: impl IntoIterator<Item = String>) -> Result<Launch
                 )?)
             }
             "--open" => options.disk = Some(args.next().ok_or("--open needs a disk")?),
-            _ => {
-                return Err(
-                    "usage: vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]"
+            #[cfg(feature = "gpu-canvas")]
+            "--gpu-canvas" => {
+                options.gpu_canvas = Some(
+                    args.next()
+                        .ok_or("--gpu-canvas needs a component path")?
                         .into(),
                 );
+            }
+            _ => {
+                const USAGE: &str = "usage: vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]";
+                #[cfg(feature = "gpu-canvas")]
+                return Err(format!("{USAGE} [--gpu-canvas COMPONENT.wasm]"));
+                #[cfg(not(feature = "gpu-canvas"))]
+                return Err(USAGE.into());
             }
         }
     }
@@ -714,6 +794,12 @@ fn main() {
         pending_start: None,
         reopen: None,
     };
+    #[cfg(feature = "gpu-canvas")]
+    if let Some(path) = options.gpu_canvas {
+        model.page = Page::Plugins;
+        model.machines.plugins.canvas =
+            Some(gpu_canvas::Pane::open(Some(path), model.proxy.clone()));
+    }
     let account = vkored::account::Account::for_state(&state);
     model.settings.account.account = account.clone();
     model.machines.account = account;
@@ -839,22 +925,15 @@ mod tests {
                         "memory panel overflows: {memory:?}, page: {content:?}"
                     );
                 }
-                if let (Some(list), Some(detail)) =
-                    (self.get("machine-list"), self.get("machine-detail"))
-                {
-                    assert!(
-                        list.width <= 360.,
-                        "creation panel must not stretch on wide screens"
-                    );
-                    assert!(
-                        (detail.x - (list.x + list.width + 16.)).abs() < 1.,
-                        "panes must remain adjacent"
-                    );
-                    assert!(
-                        (detail.x + detail.width - (content.x + content.width)).abs() < 1.,
-                        "detail should use the remaining width"
-                    );
-                }
+                let machine_views = ["machine-library", "machine-creation", "machine-workspace"];
+                assert!(
+                    machine_views
+                        .into_iter()
+                        .filter(|id| self.get(id).is_some())
+                        .count()
+                        <= 1,
+                    "machine library, creation and workspace are separate views"
+                );
                 if let (Some(appearance), Some(api)) =
                     (self.get("settings-appearance"), self.get("settings-api"))
                 {
@@ -1250,6 +1329,7 @@ mod tests {
             let appearance = theme::appearance_theme(choice, system_dark);
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
+                    Page::Plugins => machines.plugins.view(Typography::default()),
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())
@@ -1742,6 +1822,7 @@ mod tests {
                     for appearance in [Theme::Light, Theme::Dark] {
                         for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                             let content = match page {
+                                Page::Plugins => machines.plugins.view(Typography::default()),
                                 Page::Machines => machines::view(&machines, ty, appearance.clone()),
                                 Page::Volumes => volumes::view(&volumes, &[], ty),
                                 Page::Account => account::page(&settings.account, ty),
@@ -1775,6 +1856,81 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gpu-canvas")]
+    #[test]
+    fn gpu_component_frames_render_in_the_native_canvas_pane() {
+        use vkored::gpu_canvas::{Canvas, HEIGHT, WIDTH};
+
+        let Some(component) = std::env::var_os("VKORE_TEST_GPU_CANVAS") else {
+            return;
+        };
+        let mut canvas =
+            Canvas::open(std::path::Path::new(&component)).expect("open GPU component");
+        eprintln!("GPU adapter: {}", canvas.adapter());
+        let first = canvas.frame(Duration::ZERO).expect("first GPU frame");
+        let next = canvas
+            .frame(Duration::from_secs(1))
+            .expect("second GPU frame");
+        assert_eq!(first.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert!(first.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+        assert_ne!(first, next, "the component must animate the GPU output");
+
+        let ty = Typography::default();
+        for (index, (pixels, appearance)) in [(first, Theme::Dark), (next, Theme::Light)]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = iced_core::image::Handle::from_rgba(WIDTH, HEIGHT, pixels);
+            let pane =
+                widgets::page_frame(gpu_canvas::view(ty, Some(&frame), canvas.adapter(), false));
+            let shell = row![sidebar(Page::Plugins, 0, "", ty), pane].height(Length::Fill);
+            let snapshot = format!("gpu-canvas-{index}");
+            let (_, refused) = draw_at_scale(
+                shell.into(),
+                Size::new(1280., 800.),
+                &appearance,
+                1.,
+                Some(&snapshot),
+            );
+            assert!(refused.is_empty(), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn machine_library_workspace_and_plugins_render_at_compact_and_wide_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+        store
+            .create(&vkored::MachineConfig::new("demo", "/images/kore.iso"))
+            .unwrap();
+        let mut machines = machines::State::new(root.path().to_owned());
+        let ty = Typography::default();
+        for (size, appearance) in [
+            (Size::new(900., 560.), Theme::Light),
+            (Size::new(1440., 900.), Theme::Dark),
+        ] {
+            for (page, selected, snapshot) in [
+                (Page::Machines, None, "machine-library"),
+                (Page::Machines, Some("demo"), "machine-workspace"),
+                (Page::Plugins, None, "plugins"),
+            ] {
+                machines.selected = selected.map(str::to_owned);
+                let pane = match page {
+                    Page::Machines => machines::view(&machines, ty, appearance.clone()),
+                    Page::Plugins => machines.plugins.view(ty),
+                    _ => unreachable!(),
+                };
+                let shell = container(row![sidebar(page, 0, "", ty), pane])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.));
+                let (_, refused) =
+                    draw_at_scale(shell.into(), size, &appearance, 1., Some(snapshot));
+                assert!(refused.is_empty(), "{page:?}: {refused:?}");
+            }
+        }
+    }
+
     #[test]
     fn pages_adapt_across_resolutions_and_display_scales() {
         let root = tempfile::tempdir().unwrap();
@@ -1796,6 +1952,7 @@ mod tests {
             for appearance in [Theme::Dark, Theme::Light] {
                 for page in [Page::Machines, Page::Volumes, Page::Settings, Page::Account] {
                     let content = match page {
+                        Page::Plugins => machines.plugins.view(Typography::default()),
                         Page::Machines => {
                             machines::view(&machines, Typography::default(), appearance.clone())
                         }
@@ -1848,6 +2005,7 @@ mod tests {
         for appearance in [Theme::Dark, Theme::Light] {
             for page in [Page::Volumes, Page::Machines, Page::Settings, Page::Account] {
                 let content = match page {
+                    Page::Plugins => machines.plugins.view(Typography::default()),
                     Page::Volumes => volumes::view(&volumes, &[], Typography::default()),
                     Page::Machines => {
                         machines::view(&machines, Typography::default(), appearance.clone())
@@ -2232,6 +2390,7 @@ mod tests {
             .images()
             .to_vec();
         machines.selected_image = Some("test-inference-1".into());
+        machines.creating = true;
         machines.form_name = "inference".into();
         machines.image_menu_open = true;
         for appearance in [Theme::Dark, Theme::Light] {

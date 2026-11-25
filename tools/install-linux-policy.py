@@ -2,7 +2,7 @@
 """Install narrowly scoped polkit prompt descriptions for exact vKore binaries.
 
 Run as the desktop user. pkexec authorizes the root-owned policy installation;
-subsequent hardware/memory prompts use these descriptions. No auth is cached.
+subsequent machine and volume prompts use these descriptions. No auth is cached.
 """
 import argparse
 import hashlib
@@ -21,9 +21,11 @@ def policy(executables):
     ET.SubElement(root, "icon_name").text = "computer"
     for executable in sorted(set(map(str, executables))):
         identity = hashlib.sha256(os.fsencode(executable)).hexdigest()[:16]
-        for mode, description, message in [
-            ("device", "Prepare vKore machine hardware", "Authentication is required to prepare hardware for a vKore machine."),
-            ("memory", "Allow vKore to lock guest memory", "Authentication is required to lock memory for a vKore machine."),
+        for mode, flag, description, message in [
+            ("device", "--vkore-device-helper", "Prepare vKore machine hardware", "Authentication is required to prepare hardware for a vKore machine."),
+            ("memory", "--vkore-memory-helper", "Allow vKore to lock guest memory", "Authentication is required to lock memory for a vKore machine."),
+            ("volume-reader", "--vkore-volume-reader", "Open a vKore disk read-only", "Authentication is required to browse the selected disk read-only in vKore."),
+            ("volume-identify", "--vkore-volume-identify", "Identify vKore volumes", "Authentication is required to identify DagFS on the selected disks in vKore."),
         ]:
             action = ET.SubElement(root, "action", id=f"org.microperceptron.vkore.{identity}.{mode}")
             ET.SubElement(action, "description").text = description
@@ -32,7 +34,7 @@ def policy(executables):
             for key, value in [("allow_any", "no"), ("allow_inactive", "no"), ("allow_active", "auth_admin")]:
                 ET.SubElement(defaults, key).text = value
             ET.SubElement(action, "annotate", key="org.freedesktop.policykit.exec.path").text = executable
-            ET.SubElement(action, "annotate", key="org.freedesktop.policykit.exec.argv1").text = f"--vkore-{mode}-helper"
+            ET.SubElement(action, "annotate", key="org.freedesktop.policykit.exec.argv1").text = flag
     ET.indent(root)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
 

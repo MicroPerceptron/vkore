@@ -9,6 +9,7 @@ pub enum Icon {
     Volume,
     Settings,
     Terminal,
+    Plugin,
     Account,
     Collapse,
     Expand,
@@ -98,6 +99,20 @@ impl canvas::Program<Message, Theme, AxUi> for Glyph {
                 line(&[(3., 4.), (21., 4.), (21., 20.), (3., 20.), (3., 4.)]);
                 line(&[(7., 9.), (10., 12.), (7., 15.)]);
                 line(&[(13., 15.), (17., 15.)]);
+            }
+            Icon::Plugin => {
+                line(&[
+                    (7., 8.),
+                    (17., 8.),
+                    (17., 12.),
+                    (14., 16.),
+                    (10., 16.),
+                    (7., 12.),
+                    (7., 8.),
+                ]);
+                line(&[(9., 8.), (9., 3.)]);
+                line(&[(15., 8.), (15., 3.)]);
+                line(&[(12., 16.), (12., 21.)]);
             }
         }
         vec![frame.into_geometry()]

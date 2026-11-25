@@ -13,13 +13,13 @@ class PolicyTests(unittest.TestCase):
         paths = ["/home/user/a & b/vkore-ui", "/opt/vkore/bin/vkore"]
         root = ET.fromstring(module.policy(paths + paths))
         actions = root.findall("action")
-        self.assertEqual(len(actions), 4)
-        self.assertEqual(len({a.get("id") for a in actions}), 4)
+        self.assertEqual(len(actions), 8)
+        self.assertEqual(len({a.get("id") for a in actions}), 8)
         for action in actions:
             annotations = {a.get("key"): a.text for a in action.findall("annotate")}
             self.assertIn(annotations["org.freedesktop.policykit.exec.path"], paths)
             self.assertIn(annotations["org.freedesktop.policykit.exec.argv1"],
-                          ["--vkore-device-helper", "--vkore-memory-helper"])
+                          ["--vkore-device-helper", "--vkore-memory-helper", "--vkore-volume-reader", "--vkore-volume-identify"])
             self.assertEqual(action.findtext("defaults/allow_active"), "auth_admin")
             self.assertEqual(action.findtext("defaults/allow_inactive"), "no")
             self.assertEqual(action.findtext("defaults/allow_any"), "no")

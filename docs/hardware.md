@@ -198,10 +198,16 @@ python3 tools/install-linux-policy.py --executable target/release/vkore-ui
 
 Repeat `--executable target/release/vkore` in the same command if you also use
 the CLI. The installer asks for administrator authentication once using the
-standard system prompt; the installed policies then say **Authentication is
-required to prepare hardware for a vKore machine** or **Authentication is
-required to lock memory for a vKore machine**. The authentication agent may
-still show the executable under its expandable technical details.
+standard system prompt. Machine hardware, memory locking, read-only disk
+browsing and DagFS identification each have a separate prompt. The desktop's
+polkit agent and the PAM policy for polkit choose the authentication method.
+An enrolled fingerprint can authorize the request when the host permits it for
+the administrator identity being authenticated. vKore leaves enrollment,
+password fallback and cancellation to the OS. Installing these descriptions
+does not enable fingerprint authentication system-wide.
+
+macOS machine setup and ordinary disk-image browsing run as the current user.
+The Linux hardware and physical-disk helpers have no macOS counterpart.
 
 The policy is root-owned in `/usr/share/polkit-1/actions/`, matches each exact
 canonical executable path **and** private helper argument, and uses

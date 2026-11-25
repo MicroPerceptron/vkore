@@ -129,6 +129,7 @@ pub fn view<'a>(
     rail = rail
         .push(nav("Machines", Page::Machines, Icon::Machine))
         .push(nav("Volumes", Page::Volumes, Icon::Volume))
+        .push(nav("Plugins", Page::Plugins, Icon::Plugin))
         .push(iced_widget::space::vertical())
         .push(nav("Settings", Page::Settings, Icon::Settings));
     let running_label = if running == 0 {

@@ -6,7 +6,12 @@ publish = false
 license = "MPL-2.0"
 description = "vKore's native desktop: Kore machines and their DagFS volumes, rendered with Iced over Axiom."
 
+[features]
+default = ["browser-preview"]
+browser-preview = ["vkored/browser-preview", "dep:vkore-servo-wire"]
+gpu-canvas = ["vkored/gpu-canvas"]
 [dependencies]
+vkore-servo-wire = { path = "../vkore-servo-wire", optional = true, features = ["presentation"] }
 axcomp = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }
 axgfx = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }
 axui-core = { git = "https://github.com/MicroPerceptron/axiom.git", rev = "139ddf759e919f391119e9da1be571ac1ab78fd8" }

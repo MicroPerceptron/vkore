@@ -5181,7 +5181,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-servo-wire"
-version = "0.1.0"
+version = "0.10.1"
 dependencies = [
  "cc",
  "objc2-app-kit 0.3.2",

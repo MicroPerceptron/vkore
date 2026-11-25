@@ -9,7 +9,7 @@ use crate::{
     widgets,
 };
 use iced_core::{Length, alignment, clipboard};
-use iced_widget::{button, column, container, row};
+use iced_widget::{column, container, row};
 use iced_winit::winit::event_loop::EventLoopProxy;
 use std::sync::{
     Arc,
@@ -369,11 +369,13 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         .into()
 }
 pub fn download_hint(ty: Typography) -> UiElement<'static> {
-    button(ty.control("Account · Sign in for downloads"))
-        .padding([8, 12])
-        .style(widgets::button_style(widgets::Button::Secondary))
-        .on_press(Message::Show(Page::Account))
-        .into()
+    kit::icon_label(
+        ty,
+        Icon::Account,
+        "Sign in for downloads",
+        widgets::Button::Secondary,
+        Some(Message::Show(Page::Account)),
+    )
 }
 
 #[cfg(test)]

@@ -44,10 +44,12 @@ pub fn view<'a>(
     .width(36)
     .height(36)
     .padding(8)
-    .style(widgets::button_style(widgets::Button::Ghost))
+    .style(widgets::button_style_fading(widgets::Button::Ghost))
     .on_press(Message::ToggleNavigation);
     let toggle = tip(
-        container(toggle).id("navigation-toggle").into(),
+        container(kit::lift(widgets::Button::Ghost, true, toggle))
+            .id("navigation-toggle")
+            .into(),
         ty.body(
             if collapsed {
                 "Expand navigation"
@@ -226,15 +228,16 @@ pub fn view<'a>(
         .align_y(alignment::Vertical::Center)
         .into()
     };
-    let account_button = container(
+    let account_kind = widgets::Button::Choice(current == Page::Account);
+    let account_button = container(kit::lift(
+        account_kind,
+        true,
         button(content)
             .padding(if collapsed { 12 } else { 10 })
             .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Choice(
-                current == Page::Account,
-            )))
+            .style(widgets::button_style_fading(account_kind))
             .on_press(Message::Show(Page::Account)),
-    )
+    ))
     .id("navigation-account")
     .into();
     rail = rail.push(tip(

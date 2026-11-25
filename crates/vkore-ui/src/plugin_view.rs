@@ -22,15 +22,19 @@ pub fn tabs<'a, Id: Copy + Eq>(
         };
         strip = strip.push(
             row![
-                button(
-                    ty.data(label, theme::TEXT)
-                        .height(Length::Fill)
-                        .align_y(iced_core::alignment::Vertical::Center),
-                )
-                .height(ty.control_height())
-                .padding([0., theme::SPACE_2])
-                .style(widgets::button_style(style))
-                .on_press(select(id)),
+                kit::lift(
+                    style,
+                    true,
+                    button(
+                        ty.data(label, theme::TEXT)
+                            .height(Length::Fill)
+                            .align_y(iced_core::alignment::Vertical::Center),
+                    )
+                    .height(ty.control_height())
+                    .padding([0., theme::SPACE_2])
+                    .style(widgets::button_style_fading(style))
+                    .on_press(select(id)),
+                ),
                 control(ty, Icon::Close, "Close tab", close(id)),
             ]
             .spacing(theme::SPACE_1),

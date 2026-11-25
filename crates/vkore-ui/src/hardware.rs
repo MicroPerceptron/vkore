@@ -3,6 +3,7 @@
 use crate::typography::Typography;
 use crate::{
     Message, UiElement, kit,
+    kit::{caution, caution_data, note, problem},
     machines::MachineMessage,
     theme,
     visuals::{self, Icon},
@@ -308,67 +309,6 @@ fn action(
             .padding([7, 10])
             .style(widgets::button_style_fading(kind))
             .on_press_maybe(message),
-    )
-}
-/// A block that calls something out: a glyph, then its text, on a faint wash
-/// of the tone it speaks in.
-fn callout<'a>(
-    ty: Typography,
-    icon: Icon,
-    tone: theme::Tone,
-    content: impl Into<UiElement<'a>>,
-) -> UiElement<'a> {
-    container(
-        row![
-            container(visuals::icon(icon, tone, ty.size(14.))).padding([2, 0]),
-            container(content).width(Length::Fill),
-        ]
-        .spacing(theme::SPACE_2)
-        .align_y(alignment::Vertical::Top),
-    )
-    .padding([theme::SPACE_2, theme::SPACE_2 + 2.])
-    .width(Length::Fill)
-    .style(move |appearance| theme::tinted(appearance, tone, 0.09, 0.22, theme::RADIUS_MD))
-    .into()
-}
-/// An explanation: small, muted, led by an info glyph.
-fn note(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
-    row![
-        container(visuals::icon(Icon::Info, theme::TEXT_MUTED, ty.size(13.))).padding([2, 0]),
-        ty.body(text.into(), 12., theme::TEXT_MUTED)
-            .width(Length::Fill),
-    ]
-    .spacing(theme::SPACE_2)
-    .align_y(alignment::Vertical::Top)
-    .into()
-}
-/// Something to be careful about.
-fn caution(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
-    callout(
-        ty,
-        Icon::Alert,
-        theme::WARNING,
-        ty.body(text.into(), 12., theme::WARNING),
-    )
-}
-/// Something that has to be fixed.
-fn problem(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
-    callout(
-        ty,
-        Icon::Alert,
-        theme::ERROR,
-        ty.body(text.into(), 12., theme::ERROR),
-    )
-}
-/// A caution whose words come from outside (the host, a driver): they go
-/// through the data face.
-fn caution_data<'a>(ty: Typography, text: impl Into<std::borrow::Cow<'a, str>>) -> UiElement<'a> {
-    callout(
-        ty,
-        Icon::Alert,
-        theme::WARNING,
-        ty.data(text, theme::WARNING)
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
     )
 }
 fn switch(

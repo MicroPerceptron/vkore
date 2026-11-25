@@ -33,6 +33,7 @@ pub enum Icon {
     Minus,
     Close,
     Copy,
+    Text,
     Back,
     Forward,
     Globe,
@@ -81,7 +82,7 @@ use Part::{Arc, Circle, Dot, Line, Loop};
 impl Icon {
     /// Every glyph, for the tests and for any gallery that wants the set.
     #[cfg(test)]
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::Machine,
         Self::Volume,
         Self::Settings,
@@ -97,6 +98,7 @@ impl Icon {
         Self::Minus,
         Self::Close,
         Self::Copy,
+        Self::Text,
         Self::Back,
         Self::Forward,
         Self::Globe,
@@ -209,6 +211,11 @@ impl Icon {
             Self::Copy => &[
                 Loop(&[(9., 9.), (20., 9.), (20., 20.), (9., 20.)]),
                 Line(&[(5., 15.), (4., 15.), (4., 4.), (15., 4.), (15., 5.)]),
+            ],
+            Self::Text => &[
+                Line(&[(4., 20.), (11., 4.), (18., 20.)]),
+                Line(&[(6.5, 14.), (15.5, 14.)]),
+                Line(&[(19., 12.), (21., 12.)]),
             ],
             Self::Back => &[
                 Line(&[(19., 12.), (5., 12.)]),

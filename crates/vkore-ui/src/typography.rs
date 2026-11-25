@@ -161,24 +161,6 @@ impl Typography {
         .into()
     }
 
-    pub fn badge<'a>(
-        self,
-        label: impl text::IntoFragment<'a>,
-        tone: theme::Tone,
-    ) -> crate::UiElement<'a> {
-        // Size to the content. Decoration and spacing follow the resolved
-        // label size, so changing fonts or text scale needs no pixel offsets.
-        let em = self.size(12.);
-        container(
-            row![self.body("·", 12., tone), self.body(label, 12., tone)]
-                .spacing(em / 3.)
-                .align_y(alignment::Vertical::Center),
-        )
-        .padding([em / 4., em * 0.75])
-        .style(move |appearance| theme::panel(appearance, theme::PANEL_FILE, None, em * 2.))
-        .into()
-    }
-
     pub fn empty_state<'a>(
         self,
         icon: crate::visuals::Icon,

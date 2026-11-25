@@ -1325,7 +1325,11 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
     );
     // Compose the dropdown from the same paragraph-backed controls as the
     // rest of the UI: Axiom's immediate-text path does not honor menu alignment.
-    let mut images = column![
+    let mut images = column![kit::lift(
+        widgets::Button::Secondary,
+        !state.official_images.is_empty()
+            && state.importing.is_none()
+            && state.catalog_cancel.is_none(),
         button(
             row![
                 ty.data(label, theme::TEXT).width(Length::Fill),
@@ -1344,27 +1348,28 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
         )
         .width(Length::Fill)
         .padding([7, 10])
-        .style(widgets::button_style(widgets::Button::Secondary))
+        .style(widgets::button_style_fading(widgets::Button::Secondary))
         .on_press_maybe(
             (!state.official_images.is_empty()
                 && state.importing.is_none()
                 && state.catalog_cancel.is_none())
             .then(|| wrap(MachineMessage::ToggleImageMenu))
         )
-    ]
+    )]
     .spacing(theme::SPACE_1);
     if state.image_menu_open && state.importing.is_none() {
         let mut options = column![].spacing(theme::SPACE_1);
         for image in &state.official_images {
-            options = options.push(
+            let kind = widgets::Button::Row(Some(&image.id) == state.selected_image.as_ref());
+            options = options.push(kit::lift(
+                kind,
+                true,
                 button(ty.data(format!("{} ({})", image.name, image.version), theme::TEXT))
                     .width(Length::Fill)
                     .padding([7, 10])
-                    .style(widgets::button_style(widgets::Button::Row(
-                        Some(&image.id) == state.selected_image.as_ref(),
-                    )))
+                    .style(widgets::button_style_fading(kind))
                     .on_press(wrap(MachineMessage::SelectImage(image.id.clone()))),
-            );
+            ));
         }
         images = images.push(
             container(widgets::scroll(options).height(Length::Shrink.max(160)))

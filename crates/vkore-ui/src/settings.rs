@@ -14,7 +14,14 @@ use vkored::{
     state::desktop::{Appearance, DATABASE_NAME, Preference, Preferences, Store, parse_port},
 };
 
-use crate::{Message, Page, UiElement, account, fonts, theme, visuals, widgets};
+use crate::{
+    Message, Page, UiElement, account, fonts, kit,
+    kit::Status,
+    motion::Beat,
+    theme,
+    visuals::{self, Icon},
+    widgets,
+};
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
@@ -205,37 +212,52 @@ fn panels(
     wide: bool,
 ) -> UiElement<'_> {
     let ty = state.typography;
-    let choice = |label, caption, value| {
+    // A theme to pick: its preview, its name, and a tick when it is the one.
+    let choice = |label: &'static str, caption: &'static str, value| {
         let selected = appearance == value;
-        button(
-            column![
-                crate::visuals::appearance_preview(value),
-                row![
-                    ty.body(label, 14., theme::TEXT),
-                    iced_widget::space::horizontal(),
-                    ty.mono(if selected { "Selected" } else { "" }, theme::MAGENTA)
-                ],
-                ty.body(caption, 12., theme::TEXT_MUTED),
-            ]
-            .spacing(10),
+        let kind = widgets::Button::Row(selected);
+        kit::lift(
+            kind,
+            true,
+            button(
+                column![
+                    crate::visuals::appearance_preview(value),
+                    row![
+                        ty.body(label, 14., theme::TEXT),
+                        iced_widget::space::horizontal(),
+                        if selected {
+                            visuals::icon(Icon::Check, theme::MAGENTA, ty.size(16.))
+                        } else {
+                            iced_widget::space::horizontal().width(0).into()
+                        },
+                    ]
+                    .align_y(alignment::Vertical::Center),
+                    ty.body(caption, 12., theme::TEXT_MUTED),
+                ]
+                .spacing(10),
+            )
+            .width(Length::Fill)
+            .padding(12)
+            .style(widgets::button_style_fading(kind))
+            .on_press(Message::Appearance(value)),
         )
-        .width(Length::Fill)
-        .padding(12)
-        .style(widgets::button_style(widgets::Button::Row(selected)))
-        .on_press(Message::Appearance(value))
+    };
+    let appearance_note = if appearance == theme::Appearance::System {
+        match system_dark {
+            Some(true) => "Following your system · Dark",
+            Some(false) => "Following your system · Light",
+            None => "No system preference reported · Using dark mode",
+        }
+    } else {
+        "Your appearance preference is saved automatically."
     };
     let appearance = container(
         column![
-            row![
-                crate::visuals::icon(crate::visuals::Icon::Settings, theme::TEXT_SECONDARY, 22.),
-                ty.body("Appearance", 18., theme::TEXT)
-            ]
-            .spacing(10)
-            .align_y(alignment::Vertical::Center),
-            ty.body(
-                "Make this workspace feel at home.",
-                theme::SIZE_SM,
-                theme::TEXT_MUTED
+            kit::lead(
+                ty,
+                Icon::Dashboard,
+                ty.body("Appearance", 20., theme::TEXT),
+                Some("Make this workspace feel at home."),
             ),
             row![
                 choice("System", "Follow your device", theme::Appearance::System),
@@ -243,22 +265,10 @@ fn panels(
                 choice("Dark", "Keep things subdued", theme::Appearance::Dark)
             ]
             .spacing(12),
+            kit::note(ty, appearance_note),
             typography_controls(state),
-            ty.body(
-                if appearance == theme::Appearance::System {
-                    match system_dark {
-                        Some(true) => "Following your system · Dark",
-                        Some(false) => "Following your system · Light",
-                        None => "No system preference reported · Using dark mode",
-                    }
-                } else {
-                    "Your appearance preference is saved automatically."
-                },
-                12.,
-                theme::TEXT_MUTED
-            ),
         ]
-        .spacing(16),
+        .spacing(theme::SPACE_4),
     )
     .padding(24)
     .id("settings-appearance")
@@ -286,36 +296,42 @@ fn panels(
             state.port
         )
     };
+    // Running is alive, so the mark pulses; stopped is an outline.
+    let running = state.api.is_some();
+    let api_state = Status {
+        beat: if running { Beat::Pulse } else { Beat::Hollow },
+        tone: if running {
+            theme::SUCCESS
+        } else {
+            theme::TEXT_MUTED
+        },
+        label: if running { "running" } else { "stopped" },
+        steps: None,
+    };
     let mut api = column![
         row![
-            crate::visuals::icon(crate::visuals::Icon::Terminal, theme::TEXT_SECONDARY, 22.),
-            ty.body("Local API", 18., theme::TEXT),
-            iced_widget::space::horizontal(),
-            ty.badge(
-                if state.api.is_some() {
-                    "Running"
-                } else {
-                    "Stopped"
-                },
-                if state.api.is_some() {
-                    theme::SUCCESS
-                } else {
-                    theme::TEXT_MUTED
-                }
-            ),
+            container(kit::lead(
+                ty,
+                Icon::Terminal,
+                ty.body("Local API", 20., theme::TEXT),
+                Some("Connect an OpenAI-compatible client on this computer."),
+            ))
+            .width(Length::Fill),
+            kit::status(ty, api_state),
         ]
-        .spacing(10)
-        .align_y(alignment::Vertical::Center),
-        ty.body(
-            "Connect an OpenAI-compatible client on this computer.",
-            theme::SIZE_SM,
-            theme::TEXT_SECONDARY
-        ),
-        ty.label("Connection", theme::TEXT_MUTED),
-        container(ty.data(address, theme::TEXT))
-            .padding(14)
-            .width(Length::Fill)
-            .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 6.)),
+        .spacing(theme::SPACE_4)
+        .align_y(alignment::Vertical::Top),
+        container(
+            column![
+                kit::heading(ty, Icon::Globe, "Connection"),
+                ty.data(address, theme::TEXT)
+                    .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+            ]
+            .spacing(theme::SPACE_1 + 2.),
+        )
+        .padding(theme::SPACE_2 + 4.)
+        .width(Length::Fill)
+        .style(widgets::well),
         row![
             ty.body("Port", 14., theme::TEXT_SECONDARY),
             text_input("8080", &state.port_input)
@@ -326,38 +342,43 @@ fn panels(
                 .padding([7, 10])
                 .width(100)
                 .style(widgets::field),
-            button(ty.control("Save port"))
-                .height(ty.control_height())
-                .padding([0, 14])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press(wrap(SettingsMessage::SavePort)),
-            button(ty.control(if state.api.is_some() {
-                "Stop API"
+            kit::icon_label(
+                ty,
+                Icon::Check,
+                "Save port",
+                widgets::Button::Secondary,
+                Some(wrap(SettingsMessage::SavePort)),
+            ),
+            if running {
+                kit::icon_label(
+                    ty,
+                    Icon::Stop,
+                    "Stop API",
+                    widgets::Button::Danger,
+                    Some(wrap(SettingsMessage::ToggleApi)),
+                )
             } else {
-                "Start API"
-            }))
-            .height(ty.control_height())
-            .padding([0, 14])
-            .style(widgets::button_style(if state.api.is_some() {
-                widgets::Button::Danger
-            } else {
-                widgets::Button::Primary
-            }))
-            .on_press(wrap(SettingsMessage::ToggleApi)),
+                kit::icon_label(
+                    ty,
+                    Icon::Play,
+                    "Start API",
+                    widgets::Button::Primary,
+                    Some(wrap(SettingsMessage::ToggleApi)),
+                )
+            },
         ]
         .spacing(theme::SPACE_2)
         .align_y(alignment::Vertical::Center)
         .wrap(),
-        ty.data(port_status, theme::TEXT_MUTED),
-        ty.body(
+        kit::note(ty, port_status),
+        kit::note(
+            ty,
             "The server is local to this computer. Guest inference is not connected yet.",
-            theme::SIZE_SM,
-            theme::TEXT_MUTED
         ),
     ]
     .spacing(theme::SPACE_4);
     if !state.error.is_empty() {
-        api = api.push(ty.data(state.error.as_str(), theme::ERROR));
+        api = api.push(kit::error_data(ty, state.error.as_str()));
     }
     let api = container(api)
         .id("settings-api")
@@ -388,79 +409,97 @@ fn device_settings(state: &State) -> UiElement<'_> {
     let account = &state.account.account;
     let checking = state.account.checking_storage();
     let persistence = account.persistence();
-    let (label, tone) = if checking {
-        ("Checking…", theme::TEXT_MUTED)
+    // Where the saved sign-in stands, as a glyph and a tone with its words.
+    let (label, icon, tone) = if checking {
+        ("Checking…", Icon::Info, theme::TEXT_MUTED)
     } else {
         match persistence {
-            CredentialPersistence::NotChecked => ("Unchecked", theme::TEXT_MUTED),
-            CredentialPersistence::NoSavedSignIn => ("No saved sign-in", theme::TEXT_MUTED),
-            CredentialPersistence::Saved => ("Saved locally", theme::SUCCESS),
-            CredentialPersistence::Temporary => ("Temporary sign-in", theme::WARNING),
-            CredentialPersistence::Expired => ("Sign-in expired", theme::TEXT_MUTED),
-            CredentialPersistence::StoreUnavailable => ("Store unavailable", theme::WARNING),
-            CredentialPersistence::Invalid => ("Invalid saved sign-in", theme::WARNING),
-            CredentialPersistence::SignOutIncomplete => ("Sign-out incomplete", theme::WARNING),
+            CredentialPersistence::NotChecked => ("Unchecked", Icon::Info, theme::TEXT_MUTED),
+            CredentialPersistence::NoSavedSignIn => {
+                ("No saved sign-in", Icon::Info, theme::TEXT_MUTED)
+            }
+            CredentialPersistence::Saved => ("Saved locally", Icon::Check, theme::SUCCESS),
+            CredentialPersistence::Temporary => ("Temporary sign-in", Icon::Alert, theme::WARNING),
+            CredentialPersistence::Expired => ("Sign-in expired", Icon::Info, theme::TEXT_MUTED),
+            CredentialPersistence::StoreUnavailable => {
+                ("Store unavailable", Icon::Alert, theme::WARNING)
+            }
+            CredentialPersistence::Invalid => {
+                ("Invalid saved sign-in", Icon::Alert, theme::WARNING)
+            }
+            CredentialPersistence::SignOutIncomplete => {
+                ("Sign-out incomplete", Icon::Alert, theme::WARNING)
+            }
         }
     };
-    let mut storage = column![
-        row![
-            visuals::icon(visuals::Icon::Machine, theme::TEXT_SECONDARY, 22.),
-            ty.body("This device", 18., theme::TEXT),
-        ]
-        .spacing(theme::SPACE_2)
-        .align_y(alignment::Vertical::Center),
-        ty.label("State directory", theme::TEXT_MUTED),
-        container(
-            ty.data(state.root.display().to_string(), theme::TEXT)
-                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, None, 6.)),
-        ty.body(
-            format!("Desktop preferences database · {DATABASE_NAME}"),
-            theme::SIZE_SM,
-            theme::TEXT_MUTED,
+    let mut content = column![
+        kit::lead(
+            ty,
+            Icon::Machine,
+            ty.body("This device", 20., theme::TEXT),
+            Some("Where vKore keeps your workspace."),
         ),
+        container(
+            column![
+                kit::heading(ty, Icon::Folder, "State directory"),
+                ty.data(state.root.display().to_string(), theme::TEXT)
+                    .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                kit::figure(
+                    ty,
+                    Icon::Volume,
+                    format!("Preferences database · {DATABASE_NAME}"),
+                ),
+            ]
+            .spacing(theme::SPACE_1 + 2.),
+        )
+        .padding(theme::SPACE_2 + 4.)
+        .width(Length::Fill)
+        .style(widgets::well),
     ]
     .spacing(theme::SPACE_4);
     for warning in &state.storage_warnings {
-        storage = storage.push(
-            ty.data(warning, theme::WARNING)
-                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
-        );
+        content = content.push(kit::caution_data(ty, warning.as_str()));
     }
-    let mut content = storage
-        .push(ty.label("Credential store", theme::TEXT_MUTED))
-        .push(
-            row![
-                ty.body(account.storage_provider(), 14., theme::TEXT),
-                ty.badge(label, tone),
+    content = content.push(
+        container(
+            column![
+                kit::heading(ty, Icon::Lock, "Credential store"),
+                row![
+                    ty.body(account.storage_provider(), 14., theme::TEXT),
+                    kit::chip(ty, icon, label, tone),
+                ]
+                .spacing(theme::SPACE_2)
+                .align_y(alignment::Vertical::Center)
+                .wrap(),
             ]
-            .spacing(theme::SPACE_2)
-            .align_y(alignment::Vertical::Center)
-            .wrap(),
-        );
+            .spacing(theme::SPACE_1 + 2.),
+        )
+        .padding(theme::SPACE_2 + 4.)
+        .width(Length::Fill)
+        .style(widgets::well),
+    );
     if !checking && let Some(warning) = persistence.warning() {
-        content = content.push(ty.body(warning, theme::SIZE_SM, theme::WARNING));
+        content = content.push(kit::caution(ty, warning));
     }
     content = content.push(
         row![
-            button(ty.control("Refresh status"))
-                .height(ty.control_height())
-                .padding([0, 14])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press_maybe(
-                    state
-                        .account
-                        .can_check_storage()
-                        .then_some(Message::Account(account::Action::CheckPersistence),)
-                ),
-            button(ty.control("Manage account"))
-                .height(ty.control_height())
-                .padding([0, 14])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press(Message::Show(Page::Account)),
+            kit::icon_label(
+                ty,
+                Icon::Refresh,
+                "Refresh status",
+                widgets::Button::Secondary,
+                state
+                    .account
+                    .can_check_storage()
+                    .then_some(Message::Account(account::Action::CheckPersistence)),
+            ),
+            kit::icon_label(
+                ty,
+                Icon::Account,
+                "Manage account",
+                widgets::Button::Secondary,
+                Some(Message::Show(Page::Account)),
+            ),
         ]
         .spacing(theme::SPACE_2)
         .wrap(),
@@ -475,47 +514,75 @@ fn device_settings(state: &State) -> UiElement<'_> {
 
 fn typography_controls(state: &State) -> UiElement<'_> {
     let ty = state.typography;
+    let choice = |label: UiElement<'static>,
+                  selected: bool,
+                  message: SettingsMessage|
+     -> UiElement<'static> {
+        let kind = widgets::Button::Choice(selected);
+        kit::lift(
+            kind,
+            true,
+            button(label)
+                .padding([8, 10])
+                .style(widgets::button_style_fading(kind))
+                .on_press(wrap(message)),
+        )
+    };
     let mut sizes = row![].spacing(6);
     for size in TextSize::ALL {
-        sizes = sizes.push(
-            button(ty.body(text_size_label(size), 13., theme::TEXT))
-                .padding([8, 10])
-                .style(widgets::button_style(widgets::Button::Choice(
-                    ty.text_size == size,
-                )))
-                .on_press(wrap(SettingsMessage::TextSize(size))),
-        );
+        sizes = sizes.push(choice(
+            ty.body(text_size_label(size), 13., theme::TEXT).into(),
+            ty.text_size == size,
+            SettingsMessage::TextSize(size),
+        ));
     }
     let mut presets = row![].spacing(6);
     for preset in FontPreset::ALL {
-        presets = presets.push(
-            button(
-                ty.body(font_preset_label(preset), 13., theme::TEXT)
-                    .font(Typography { preset, ..ty }.font()),
-            )
-            .padding([8, 10])
-            .style(widgets::button_style(widgets::Button::Choice(
-                ty.preset == preset,
-            )))
-            .on_press(wrap(SettingsMessage::Font(preset))),
-        );
+        presets = presets.push(choice(
+            ty.body(font_preset_label(preset), 13., theme::TEXT)
+                .font(Typography { preset, ..ty }.font())
+                .into(),
+            ty.preset == preset,
+            SettingsMessage::Font(preset),
+        ));
     }
     let mut content = column![
-        ty.body("Text", 18., theme::TEXT),
-        ty.label("Size", theme::TEXT_MUTED), sizes.wrap(),
-        ty.label("Interface font", theme::TEXT_MUTED), presets.wrap(),
-        container(column![
-            ty.body("Your workspace, your way.", 16., theme::TEXT),
-            ty.data("Kore / models / inference.log", theme::TEXT_SECONDARY),
-        ].spacing(8)).padding(14).width(Length::Fill)
-            .style(|appearance| theme::panel(appearance, theme::PANEL_FILE, Some(theme::SEPARATOR), 8.)),
-        ty.body("Changes apply immediately and are saved automatically. Page titles keep their display face; paths and logs stay monospace.", 12., theme::TEXT_MUTED),
-        button(ty.body("Reset text settings", 13., theme::TEXT)).padding([7, 10])
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press(wrap(SettingsMessage::ResetTypography)),
-    ].spacing(12);
+        row![
+            visuals::icon(Icon::Text, theme::MAGENTA, ty.size(18.)),
+            ty.body("Text", 17., theme::TEXT),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center),
+        kit::heading(ty, Icon::Maximize, "Size"),
+        sizes.wrap(),
+        kit::heading(ty, Icon::Text, "Interface font"),
+        presets.wrap(),
+        // A sample set in what is chosen, so a change is seen where it is made.
+        container(
+            column![
+                ty.body("Your workspace, your way.", 16., theme::TEXT),
+                ty.data("Kore / models / inference.log", theme::TEXT_SECONDARY),
+            ]
+            .spacing(8)
+        )
+        .padding(14)
+        .width(Length::Fill)
+        .style(widgets::well),
+        kit::note(
+            ty,
+            "Changes apply immediately and are saved automatically. Page titles keep their display face; paths and logs stay monospace.",
+        ),
+        kit::icon_label(
+            ty,
+            Icon::Refresh,
+            "Reset text settings",
+            widgets::Button::Secondary,
+            Some(wrap(SettingsMessage::ResetTypography)),
+        ),
+    ]
+    .spacing(12);
     if !state.typography_error.is_empty() {
-        content = content.push(ty.data(state.typography_error.as_str(), theme::ERROR));
+        content = content.push(kit::error_data(ty, state.typography_error.as_str()));
     }
     container(content)
         .padding(iced_core::Padding::default().top(12))

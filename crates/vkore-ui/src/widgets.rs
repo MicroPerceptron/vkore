@@ -174,8 +174,10 @@ impl Button {
     }
 }
 
-/// Styles a control, applying hover and the disabled dimming. Hover changes
-/// the fill at once; use [`button_style_fading`] under a `motion::Fade`.
+/// Styles a control with hover changing its fill at once. Every control in the
+/// app is wrapped in a `motion::Fade` and uses [`button_style_fading`]; this is
+/// the un-faded face, kept to pin what each kind looks like in each state.
+#[cfg(test)]
 pub fn button_style(kind: Button) -> impl Fn(&Theme, button::Status) -> button::Style + Copy {
     styled(kind, false)
 }

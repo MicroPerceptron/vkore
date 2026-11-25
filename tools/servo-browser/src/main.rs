@@ -177,6 +177,21 @@ impl WebViewDelegate for Observer {
                 .collect(),
         ));
     }
+    /// With `VKORE_SERVO_CONSOLE` set, the page's console messages go to
+    /// stderr: the way to see why a page does not work. The text is the
+    /// page's own, so it is cut and its control characters are replaced
+    /// before it reaches a terminal.
+    fn show_console_message(&self, _: WebView, level: servo::ConsoleLogLevel, message: String) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("VKORE_SERVO_CONSOLE").is_some()) {
+            let message: String = message
+                .chars()
+                .take(wire::MAX_STATUS)
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect();
+            eprintln!("[page {level:?}] {message}");
+        }
+    }
     fn notify_cursor_changed(&self, _: WebView, shape: servo::Cursor) {
         let shape = cursor(shape);
         if self.cursor.replace(shape) != shape {
@@ -257,11 +272,22 @@ impl Browser {
             .make_current()
             .map_err(|e| format!("Could not activate Servo GL: {e:?}"))?;
         let renderer = context.gleam_gl_api().get_string(gleam::gl::RENDERER);
+        // `VKORE_SERVO_WEBGL=off` makes WebGL unavailable, so pages that test for
+        // it fall back instead of running Servo's WebGL, which can still crash
+        // the helper on heavy scenes (see docs/desktop.md).
+        let webgl_off = std::env::var("VKORE_SERVO_WEBGL").is_ok_and(|value| value == "off");
+        let webgl = !webgl_off;
         let preferences = servo::Preferences {
             dom_webgpu_enabled: true,
-            dom_webgl2_enabled: true,
+            dom_webgl2_enabled: webgl,
+            // Servo's switch for "context creation fails"; it is how WebGL1 is
+            // made unavailable, as it has no preference of its own.
+            webgl_testing_context_creation_error: !webgl,
             dom_web_animations_enabled: true,
             dom_intersection_observer_enabled: true,
+            // Constructable stylesheets: GitHub's web components read
+            // `adoptedStyleSheets` and throw without it, so the page never loads.
+            dom_adoptedstylesheet_enabled: true,
             ..Default::default()
         };
         let servo = ServoBuilder::default()

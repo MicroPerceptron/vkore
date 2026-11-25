@@ -188,6 +188,15 @@ with `VKORE_SERVO` set the same way. It reports the paint round trip and the
 time to get through a burst of 600 pointer moves, on the blank tab the helper
 opens with. Setting `VKORE_LIVE_URL` to an HTTPS address also loads it and prints
 each event the page produces with its timing; that one uses the network.
+Two environment variables help when a page misbehaves. `VKORE_SERVO_CONSOLE=1`
+forwards the page's console messages to the helper's stderr (cut, and with
+control characters replaced), which shows a script error directly.
+`VKORE_SERVO_WEBGL=off` makes WebGL unavailable: Servo's WebGL can still crash
+the helper on heavy scenes, and a page that tests for WebGL then falls back.
+For example, github.com throws without constructable stylesheets (enabled in
+the helper) and, with WebGL on, crashes Servo's WebGL on its 3D hero; with it
+off it finishes loading in about five seconds. The OpenGL "texture unloadable"
+line Apple's driver prints once comes from page painting, not from either.
 The smoke test opens a test window and loads example.org. Append
 `-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.
 On macOS the test also checks the tile for visible page pixels. The smoke test reports the final page, including redirects. The repo’s Cargo

@@ -62,6 +62,8 @@ struct Test {
     burst: Vec<f64>,
     live: Option<Instant>,
     finished: Option<Instant>,
+    /// A paint request is in flight (live mode paints, as the desktop does).
+    waiting: bool,
 }
 
 impl Test {
@@ -103,6 +105,7 @@ impl Test {
                     self.paint_now();
                 }
                 Event::Presented(_) => {
+                    self.waiting = false;
                     #[cfg(target_os = "macos")]
                     self.native.receive_frame().expect("import browser surface");
                     let ms = self.sent.take().map(|t| t.elapsed().as_secs_f64() * 1e3);
@@ -146,6 +149,14 @@ impl Test {
                     }
                 }
                 Event::Error(reason) => panic!("{reason}"),
+                // A page can wait on animation frames to make progress, so a
+                // live load paints whenever the helper has one, one at a time.
+                Event::Changed(_) if self.phase == Phase::Live => {
+                    if !self.waiting {
+                        self.waiting = true;
+                        self.send(Input::Paint(0));
+                    }
+                }
                 event if self.phase == Phase::Live => {
                     let ms = self.live.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
                     let line = match &event {
@@ -279,6 +290,7 @@ fn main() {
             burst: Vec::new(),
             live: None,
             finished: None,
+            waiting: false,
         })
         .unwrap();
 }

@@ -8,13 +8,15 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 ### Added
 - The native Servo browser tile shows what each page says about itself. Tabs carry the page's icon and title, with a turning mark while it loads and the full title and address as a tooltip. The toolbar adds forward and reload, the address bar shows a lock for a secure page, a line under the toolbar follows the load, the link under the pointer is shown under the page, and the pointer takes the shape the page asks for.
 - The helper and desktop speak browser protocol 4: title, icon, pointer shape, link status, load phase, forward and reload. Titles, icons and link text are bounded before they are read, and icons are reduced to 32 by 32 pixels in the helper.
-- `servo_latency`, an opt-in measurement of the helper's paint round trip and its handling of a burst of pointer input, with no network unless `VKORE_LIVE_URL` is set.
+- `VKORE_SERVO_CONSOLE=1` forwards a page's console messages to the helper's stderr, and `VKORE_SERVO_WEBGL=off` makes WebGL unavailable so pages fall back instead of running Servo's WebGL, which can crash the helper on heavy scenes such as GitHub's 3D hero.
+- `servo_latency`, an opt-in measurement of the helper's paint round trip and its handling of a burst of pointer input, with no network unless `VKORE_LIVE_URL` is set, in which case it loads that address, paints as the desktop does, and prints each event with its timing.
 
 ### Changed
 - The helper reads the commands already waiting and merges consecutive pointer moves, wheel deltas and resizes, so a burst of 600 pointer moves followed by a paint takes about 2 ms instead of about 31 ms on a blank tab.
 - The desktop paints the browser tile as soon as the helper reports a new frame and redraws its interface only when something it shows has changed, rather than waiting for the interface's next paced redraw.
 
 ### Fixed
+- Enable constructable stylesheets (`adoptedStyleSheets`) in the Servo helper. GitHub's web components throw without it, so github.com never finished loading.
 - Build `vkore-servo-wire` on macOS with the system archiver, so a GNU `ar` earlier on `PATH` no longer produces an archive the linker rejects.
 
 ## [0.10.1] - 2026-11-25

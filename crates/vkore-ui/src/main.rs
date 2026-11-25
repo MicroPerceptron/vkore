@@ -2462,6 +2462,132 @@ mod tests {
         }
     }
 
+    /// How long a frame takes, phase by phase, at a Retina window's real size.
+    ///
+    /// A measurement, not a check, so it is ignored by default. It mimics the
+    /// app's frame loop: one renderer and one widget cache reused across frames.
+    ///
+    /// cargo test --release -p vkore-ui frame_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement; run it in release"]
+    fn frame_cost() {
+        use axgfx::Extent2d;
+        use std::time::Duration;
+        fonts::register().expect("faces register");
+        let root = tempfile::tempdir().unwrap();
+        let store = vkored::MachineStore::new(vkored::State::open(root.path()).unwrap());
+        store
+            .create(&vkored::MachineConfig::new("demo", "/isos/kore.iso"))
+            .unwrap();
+        let mut machines = machines::State::new(root.path().to_owned());
+        machines.selected = Some("demo".into());
+        let (stop, _stopped) = mpsc::channel();
+        let mut running = machines::Running::new(stop);
+        running.stage = Some(vkore_vm::Stage::Services);
+        machines.running.insert("demo".into(), running);
+        let settings = settings::State::new(root.path().to_owned());
+        let ty = Typography::default();
+        let appearance = Theme::Dark;
+        let (scale, size) = (2.0_f32, Size::new(1440., 900.));
+        let (width, height) = ((size.width * scale) as u32, (size.height * scale) as u32);
+        let median = |mut samples: Vec<Duration>| {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1e3
+        };
+        println!(
+            "\n{width}x{height} physical pixels, scale {scale}, {} threads available",
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        );
+        println!(
+            "{:<10} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8}",
+            "page", "widgets", "prepare", "raster", "total", "commands", "kernel", "scalar"
+        );
+        for page in ["machine", "settings"] {
+            let mut renderer = native_renderer();
+            renderer.hint(Scale {
+                window: scale,
+                application: 1.,
+            });
+            renderer.reset(iced_core::Rectangle::with_size(size));
+            let mut backend = render_backend::NativeBackend::new().unwrap();
+            let mut pixels = vec![0_u32; width as usize * height as usize];
+            let mut cache = user_interface::Cache::new();
+            let (mut widgets_t, mut prepare_t, mut raster_t) = (vec![], vec![], vec![]);
+            let mut commands = 0;
+            let mut profile = render_backend::RenderProfile::default();
+            for round in 0..24 {
+                let started = Instant::now();
+                let element: UiElement<'_> = if page == "machine" {
+                    container(row![
+                        sidebar(Page::Machines, 1, "", ty),
+                        machines::view(&machines, ty, appearance.clone())
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                    .into()
+                } else {
+                    container(row![
+                        sidebar(Page::Settings, 0, "", ty),
+                        settings::view(theme::Appearance::Dark, Some(true), &settings)
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                    .into()
+                };
+                let mut interface = UserInterface::build(element, size, cache, &mut renderer);
+                let _ = interface.update(
+                    &iced_core::window::Headless,
+                    &shell::Waker::noop(),
+                    &[iced_core::Event::Window(
+                        iced_core::window::Event::RedrawRequested(Instant::now()),
+                    )],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut shell::Bus::new(),
+                );
+                interface.draw(
+                    &mut renderer,
+                    &appearance,
+                    &renderer::Style {
+                        text_color: theme::color(&appearance, theme::TEXT),
+                    },
+                    mouse::Cursor::Unavailable,
+                );
+                cache = interface.into_cache();
+                let widgets_done = Instant::now();
+                let frame = renderer.take_frame().expect("a frame");
+                axgfx::frame_requirements(frame.view()).expect("an acceptable list");
+                backend.set_images(renderer.take_images());
+                let prepared = Instant::now();
+                profile = backend
+                    .render_changed(
+                        &frame,
+                        &mut pixels,
+                        Extent2d::new(width, height).unwrap(),
+                        width as usize,
+                    )
+                    .expect("renders");
+                let rastered = Instant::now();
+                commands = frame.commands().len();
+                // The first rounds fill caches (text shaping, glyphs, masks).
+                if round >= 4 {
+                    widgets_t.push(widgets_done - started);
+                    prepare_t.push(prepared - widgets_done);
+                    raster_t.push(rastered - prepared);
+                }
+            }
+            let (w, p, r) = (median(widgets_t), median(prepare_t), median(raster_t));
+            println!(
+                "{page:<10} {w:>7.2}ms {p:>7.2}ms {r:>7.2}ms {:>7.2}ms {commands:>8} {:>8} {:>8}",
+                w + p + r,
+                profile.kernel_items,
+                profile.scalar_items
+            );
+        }
+    }
+
     #[test]
     fn the_machine_page_and_the_rail_draw() {
         let root = tempfile::tempdir().expect("a state directory");

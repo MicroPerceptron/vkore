@@ -8382,7 +8382,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vkore-servo"
 version = "0.1.0"
 dependencies = [
+ "euclid",
  "gleam",
+ "khronos-egl",
  "rustls",
  "servo",
  "url",
@@ -8394,8 +8396,11 @@ dependencies = [
 name = "vkore-servo-wire"
 version = "0.1.0"
 dependencies = [
+ "cc",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -5183,8 +5183,17 @@ dependencies = [
 name = "vkore-servo-wire"
 version = "0.1.0"
 dependencies = [
+ "cc",
+ "raw-window-handle",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
+ "softbuffer",
+ "wayland-client",
+ "wayland-protocols",
+ "windows-sys 0.61.2",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]

@@ -411,6 +411,10 @@ impl App {
             window: scale,
             application: 1.0,
         });
+        #[cfg(feature = "browser-preview")]
+        if let Some(pane) = self.model.machines.plugins.servo_mut() {
+            pane.bounds.set(None);
+        }
         let mut interface = UserInterface::build(
             self.model.view(logical_size(window)),
             logical_size(window),
@@ -447,6 +451,15 @@ impl App {
             self.cursor,
         );
         self.cache = interface.into_cache();
+        #[cfg(feature = "browser-preview")]
+        let surface_changed = self
+            .model
+            .machines
+            .plugins
+            .servo_mut()
+            .is_some_and(|pane| pane.present(window));
+        #[cfg(not(feature = "browser-preview"))]
+        let surface_changed = false;
         let mut model_changed = false;
         for message in messages {
             self.model.update(message);
@@ -454,7 +467,7 @@ impl App {
         }
         // The splash runs on the clock, not on events: keep drawing until it
         // is done. The frame that finds it done draws without it.
-        let again = animate || model_changed || self.model.splashing();
+        let again = surface_changed || animate || model_changed || self.model.splashing();
         let frame = self
             .renderer
             .take_frame()

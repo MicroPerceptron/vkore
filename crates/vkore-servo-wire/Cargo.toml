@@ -5,6 +5,30 @@ edition = "2024"
 license = "MPL-2.0"
 publish = false
 
+[features]
+presentation = ["dep:raw-window-handle", "dep:wayland-client", "dep:wayland-protocols", "dep:x11rb"]
+
 [dependencies]
+raw-window-handle = { version = "0.6", features = ["std"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31", optional = true, features = ["system"] }
+wayland-protocols = { version = "0.32", optional = true, features = ["client"] }
+x11rb = { version = "0.13", optional = true, features = ["shape"] }
+rustix = { version = "1", features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
+
+[dev-dependencies]
+softbuffer = "0.4.8"
+winit = { git = "https://github.com/iced-rs/winit.git", rev = "05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed" }
+
+[[example]]
+name = "servo_surface_smoke"
+required-features = ["presentation"]

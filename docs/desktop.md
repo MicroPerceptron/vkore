@@ -153,11 +153,23 @@ network and runs under the desktop user's account. It embeds native Servo 0.8
 and uses its own SQLite dependency. The machine's guest OS, network adapter,
 accelerator assignment and vKore download credentials are independent of it.
 
-One helper owns up to four WebViews. Navigation, input and frame notifications
-travel over private pipes. When a visible page changes, WebRender paints into
-an offscreen GL context and the desktop reads an RGBA frame for its Axiom tile.
-Frames follow the tile dimensions up to 1920 × 1080. Servo also enables the
-page-facing WebGPU API. Direct GPU texture sharing with Axiom is future work.
+One helper owns up to four WebViews. Navigation, input and presentation
+acknowledgments travel over private pipes. The OS composites the browser
+surface into the tile. The desktop's Axiom renderer continues to draw its
+controls. Page pixels stay on the graphics path. The physical tile size and
+display scale determine the viewport, up to 16 megapixels.
+
+| Desktop | Presentation |
+| --- | --- |
+| macOS | Core Animation imports the helper's remote layer. |
+| Linux, X11 or XWayland | An embedded graphics window has an empty input region. vKore handles keyboard and mouse input. |
+| Linux, native Wayland | EGL exports a GPU snapshot via DMA-BUF. A private socket carries the descriptor and the compositor imports it into a subsurface. Requires the driver’s single-plane export, Linux DMA-BUF v3 and viewporter. |
+| Windows (experimental) | Desktop Window Manager composites the helper's live client area. Windows desktop integration still needs a runtime test. |
+
+An unsupported driver or compositor produces a visible error. To check the
+installed helper against a real desktop compositor, set `VKORE_SERVO` to its
+absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
+The smoke test opens a test window and loads example.org.
 
 ### Kitesurf browser sample
 

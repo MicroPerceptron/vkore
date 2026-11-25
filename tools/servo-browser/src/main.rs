@@ -1,4 +1,6 @@
 //! One native Servo engine per desktop browser tile. No listening sockets.
+#[cfg(target_os = "linux")]
+mod dmabuf;
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -12,10 +14,10 @@ use std::{
 };
 
 use servo::{
-    DeviceIntPoint, DeviceIntRect, DevicePoint, EventLoopWaker, InputEvent, Key, KeyState,
-    KeyboardEvent, Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
-    NavigationRequest, RenderingContext, Servo, ServoBuilder, WebView, WebViewBuilder,
-    WebViewDelegate, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+    DevicePoint, EventLoopWaker, InputEvent, Key, KeyState, KeyboardEvent, Modifiers, MouseButton,
+    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NavigationRequest, RenderingContext,
+    Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WheelDelta, WheelEvent,
+    WheelMode, WindowRenderingContext,
 };
 use url::Url;
 use vkore_servo_wire::{self as wire, Command, Event, Pointer};
@@ -24,7 +26,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
-    raw_window_handle::{HasDisplayHandle, HasWindowHandle},
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle},
     window::{Window, WindowId},
 };
 
@@ -142,7 +144,11 @@ struct Browser {
     servo: Servo,
     context: Rc<WindowRenderingContext>,
     // The native surface must outlive every offscreen context.
-    _window: Window,
+    #[cfg(target_os = "macos")]
+    _export: wire::macos::Export,
+    #[cfg(target_os = "linux")]
+    dma: Option<dmabuf::Exporter>,
+    window: Window,
 }
 
 impl Browser {
@@ -172,13 +178,40 @@ impl Browser {
             .preferences(preferences)
             .event_loop_waker(Box::new(wake))
             .build();
-        send(Event::Ready(wire::VERSION, renderer));
+        let handle = window.window_handle()?.as_raw();
+        #[cfg(target_os = "macos")]
+        let (export, surface) = {
+            let RawWindowHandle::AppKit(handle) = handle else {
+                return Err("Missing AppKit window".into());
+            };
+            let name = std::ffi::CString::new(std::env::var("VKORE_CA_SERVER")?)?;
+            // The hidden window and its Surfman view outlive the exported layer.
+            let (export, id) = unsafe { wire::macos::Export::new(&name, handle.ns_view)? };
+            (export, wire::Surface::CoreAnimation(id))
+        };
+        #[cfg(not(target_os = "macos"))]
+        let surface = match handle {
+            RawWindowHandle::Wayland(_) => wire::Surface::Wayland,
+            RawWindowHandle::Xlib(h) => wire::Surface::X11(h.window.try_into()?),
+            RawWindowHandle::Xcb(h) => wire::Surface::X11(h.window.get()),
+            RawWindowHandle::Win32(h) => wire::Surface::Win32(h.hwnd.get()),
+            _ => return Err("This display server does not support embedded Servo surfaces. On Linux start vKore with an X11 or XWayland display.".into()),
+        };
+        #[cfg(target_os = "linux")]
+        let dma = matches!(surface, wire::Surface::Wayland)
+            .then(dmabuf::Exporter::new)
+            .transpose()?;
+        send(Event::Ready(wire::VERSION, renderer, surface));
         Ok(Self {
             tabs: BTreeMap::new(),
             active: None,
             servo,
             context,
-            _window: window,
+            #[cfg(target_os = "macos")]
+            _export: export,
+            #[cfg(target_os = "linux")]
+            dma,
+            window,
         })
     }
 
@@ -199,10 +232,24 @@ impl Browser {
 
     fn input(&mut self, command: Command) -> io::Result<()> {
         match command {
+            Command::ShowSurface(show) => {
+                if matches!(
+                    self.window.window_handle().map(|h| h.as_raw()),
+                    Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_))
+                ) {
+                    self.window.set_visible(show);
+                }
+            }
             Command::Open(id)
                 if self.tabs.len() < wire::MAX_TABS && !self.tabs.contains_key(&id) =>
             {
-                let context = Rc::new(self.context.offscreen_context(PhysicalSize::new(640, 360)));
+                let context: Rc<dyn RenderingContext> = self.context.clone();
+                #[cfg(target_os = "linux")]
+                let context: Rc<dyn RenderingContext> = if self.dma.is_some() {
+                    Rc::new(self.context.offscreen_context(PhysicalSize::new(640, 360)))
+                } else {
+                    context
+                };
                 let observer = Rc::new(Observer {
                     id,
                     dirty: Cell::new(false),
@@ -236,28 +283,33 @@ impl Browser {
                     Command::Back(target) if id == target => {
                         view.go_back(1);
                     }
-                    Command::Resize(target, w, h) if id == target => {
-                        wire::pixel_bytes(w, h)?;
-                        view.resize(PhysicalSize::new(w, h));
+                    Command::Resize(target, w, h, scale) if id == target => {
+                        wire::check_size(w, h)?;
+                        if !(0.25..=8.).contains(&scale) {
+                            return Err(io::Error::other("Invalid display scale"));
+                        }
+                        view.set_hidpi_scale_factor(euclid::Scale::new(scale));
+                        let size = PhysicalSize::new(w, h);
+                        let _ = self.window.request_inner_size(size);
+                        view.resize(size);
                         tab.observer.invalidate();
                     }
                     Command::Paint(target) if id == target => {
                         tab.observer.dirty.set(false);
-                        let context = view.rendering_context();
-                        let size = context.size();
-                        wire::pixel_bytes(size.width, size.height)?;
                         view.paint();
-                        let rect = DeviceIntRect::new(
-                            DeviceIntPoint::zero(),
-                            DeviceIntPoint::new(size.width as i32, size.height as i32),
-                        );
-                        let image = context
-                            .read_to_image(rect)
-                            .ok_or_else(|| io::Error::other("Servo frame readback failed"))?;
-                        let mut out = io::stdout().lock();
-                        wire::write(&mut out, &Event::Frame(id, size.width, size.height))?;
-                        out.write_all(image.as_raw())?;
-                        out.flush()?;
+                        #[cfg(target_os = "linux")]
+                        if let Some(dma) = &self.dma {
+                            let ctx = view.rendering_context();
+                            ctx.prepare_for_rendering();
+                            let size = ctx.size();
+                            let (fd, frame) =
+                                dma.snapshot(ctx.gleam_gl_api().as_ref(), size.width, size.height)?;
+                            wire::linux::send_buffer(io::stdin(), fd)?;
+                            send(Event::DmaFrame(id, frame));
+                            return Ok(());
+                        }
+                        self.context.present();
+                        send(Event::Presented(id));
                     }
                     Command::Pointer(target, x, y, pointer) if id == target => {
                         let point = DevicePoint::new(x as f32, y as f32).into();

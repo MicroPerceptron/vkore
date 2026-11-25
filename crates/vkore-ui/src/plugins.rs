@@ -335,6 +335,14 @@ impl State {
     }
 
     #[cfg(feature = "browser-preview")]
+    pub fn servo_mut(&mut self) -> Option<&mut crate::servo_browser::Pane> {
+        match &mut self.browser.as_mut()?.content {
+            BrowserContent::Servo(pane) => Some(pane),
+            BrowserContent::Wasm(..) => None,
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
     pub fn blur_browser(&mut self) {
         if let Some(BrowserTile {
             content: BrowserContent::Servo(pane),

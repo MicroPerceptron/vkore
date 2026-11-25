@@ -3,21 +3,33 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const VERSION: u8 = 1;
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(windows)]
+pub mod windows;
+
+#[cfg(feature = "presentation")]
+pub mod presentation;
+
+pub const VERSION: u8 = 2;
 pub const MAX_TABS: usize = 4;
 pub const MAX_ADDRESS: usize = 2048;
-pub const MAX_WIDTH: u32 = 1920;
-pub const MAX_HEIGHT: u32 = 1080;
+pub const MAX_WIDTH: u32 = 8192;
+pub const MAX_HEIGHT: u32 = 8192;
 const MAX_HEADER: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
+    ShowSurface(bool),
     Open(u64),
     Select(u64),
     Close(u64),
     Navigate(u64, String),
     Back(u64),
-    Resize(u64, u32, u32),
+    Resize(u64, u32, u32, f32),
     Pointer(u64, u32, u32, Pointer),
     Key(u64, String, bool, u8),
     // The helper paints only the selected tab, on demand, at most one frame in flight.
@@ -34,23 +46,46 @@ pub enum Pointer {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Event {
-    Ready(u8, String),
+    Ready(u8, String, Surface),
     Changed(u64),
     Location(u64, String, bool),
     Loading(u64, bool),
     Error(String),
-    // Followed immediately by width * height * 4 RGBA bytes.
-    Frame(u64, u32, u32),
+    // The helper has presented this tab to its native surface.
+    Presented(u64),
+    DmaFrame(u64, DmaBuffer),
 }
 
-pub fn pixel_bytes(width: u32, height: u32) -> io::Result<usize> {
-    if !(1..=MAX_WIDTH).contains(&width) || !(1..=MAX_HEIGHT).contains(&height) {
+/// A desktop compositor resource, never an address in the other process.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum Surface {
+    CoreAnimation(u32),
+    X11(u32),
+    Wayland,
+    Win32(isize),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DmaBuffer {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub modifier: u64,
+    pub stride: u32,
+    pub offset: u32,
+}
+
+pub fn check_size(width: u32, height: u32) -> io::Result<()> {
+    if !(1..=MAX_WIDTH).contains(&width)
+        || !(1..=MAX_HEIGHT).contains(&height)
+        || u64::from(width) * u64::from(height) > 16_777_216
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid browser frame dimensions",
         ));
     }
-    Ok((width * height * 4) as usize)
+    Ok(())
 }
 
 pub fn write<T: Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()> {
@@ -85,18 +120,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pixels_and_following_message_stay_separate() {
+    fn presentation_acknowledges_only_the_painted_tab() {
         let mut stream = Vec::new();
-        write(&mut stream, &Event::Frame(7, 2, 1)).unwrap();
-        stream.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        write(&mut stream, &Event::Presented(7)).unwrap();
         write(&mut stream, &Event::Changed(8)).unwrap();
         let mut input = stream.as_slice();
-        let Event::Frame(7, width, height) = read::<Event>(&mut input).unwrap() else {
-            panic!("expected frame");
-        };
-        let mut rgba = vec![0; pixel_bytes(width, height).unwrap()];
-        input.read_exact(&mut rgba).unwrap();
-        assert_eq!(rgba, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert!(matches!(
+            read::<Event>(&mut input).unwrap(),
+            Event::Presented(7)
+        ));
         assert!(matches!(
             read::<Event>(&mut input).unwrap(),
             Event::Changed(8)
@@ -107,8 +139,9 @@ mod tests {
     #[test]
     fn rejects_large_headers_and_invalid_frames_before_allocation() {
         assert!(read::<Event>(&mut &u32::MAX.to_le_bytes()[..]).is_err());
-        assert!(pixel_bytes(MAX_WIDTH, u32::MAX).is_err());
-        assert!(pixel_bytes(0, 1).is_err());
-        assert_eq!(pixel_bytes(960, 540).unwrap(), 960 * 540 * 4);
+        assert!(check_size(MAX_WIDTH, u32::MAX).is_err());
+        assert!(check_size(0, 1).is_err());
+        assert!(check_size(MAX_WIDTH, MAX_HEIGHT).is_err());
+        assert!(check_size(960, 540).is_ok());
     }
 }

@@ -1,15 +1,16 @@
 //! Host chrome for the optional native Servo helper. All browser IO is off the UI thread.
 use std::{
+    cell::Cell,
     collections::BTreeMap,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::mpsc,
     thread,
 };
 
-use iced_core::{ContentFit, Length, Rectangle, Theme, alignment, image::Handle, keyboard, mouse};
-use iced_widget::{canvas, column, image, row, stack, text_input};
+use iced_core::{Length, Rectangle, Theme, alignment, keyboard, mouse};
+use iced_widget::{canvas, column, row, text_input};
 use iced_winit::winit::event_loop::EventLoopProxy;
 use vkore_servo_wire::{self as wire, Command, Event, Pointer};
 
@@ -34,15 +35,15 @@ struct Tab {
     location: String,
     back: bool,
     loading: bool,
-    frame: Option<Handle>,
     dirty: bool,
     waiting: bool,
     size: (u32, u32),
 }
 
 enum Reply {
+    #[cfg(target_os = "linux")]
+    Dma(u64, wire::DmaBuffer, std::os::fd::OwnedFd),
     Notice(Event),
-    Frame(u64, Handle),
     End(String),
 }
 
@@ -55,6 +56,12 @@ impl Drop for Helper {
 }
 
 pub struct Pane {
+    presentation: wire::presentation::Presentation,
+    pub bounds: Cell<Option<Rectangle>>,
+    presented: Option<u64>,
+    visible: bool,
+    #[cfg(target_os = "linux")]
+    importing: Option<u64>,
     _helper: Helper,
     input: mpsc::SyncSender<Command>,
     output: mpsc::Receiver<Reply>,
@@ -83,8 +90,20 @@ fn helper_path() -> io::Result<PathBuf> {
 
 impl Pane {
     pub fn open(proxy: EventLoopProxy<UserEvent>) -> io::Result<Self> {
-        let mut helper = Helper(Process::new(helper_path()?).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("Could not start the native Servo helper ({e}). Install vkore-servo beside vkore-ui or set VKORE_SERVO.")))?);
+        let mut command = Process::new(helper_path()?);
+        let presentation = wire::presentation::Presentation::prepare(&mut command)?;
+        #[cfg(target_os = "linux")]
+        let (mut stdin, received_fds) = {
+            let (host, child) = std::os::unix::net::UnixStream::pair()?;
+            command.stdin(Stdio::from(std::os::fd::OwnedFd::from(child)));
+            (host.try_clone()?, host)
+        };
+        #[cfg(not(target_os = "linux"))]
+        command.stdin(Stdio::piped());
+        let mut helper = Helper(command.stdout(Stdio::piped()).spawn().map_err(|e| {
+            io::Error::new(e.kind(), format!("Could not start the native Servo helper ({e}). Install vkore-servo beside vkore-ui or set VKORE_SERVO."))
+        })?);
+        #[cfg(not(target_os = "linux"))]
         let mut stdin = helper.0.stdin.take().expect("piped");
         let mut stdout = io::BufReader::new(helper.0.stdout.take().expect("piped"));
         let (input, commands) = mpsc::sync_channel::<Command>(64);
@@ -104,18 +123,16 @@ impl Pane {
         thread::Builder::new()
             .name("vkore-servo-output".into())
             .spawn(move || {
-                let mut read = || -> io::Result<Reply> {
-                    let event = wire::read(&mut stdout)?;
-                    if let Event::Frame(id, w, h) = event {
-                        let mut pixels = vec![0; wire::pixel_bytes(w, h)?];
-                        stdout.read_exact(&mut pixels)?;
-                        Ok(Reply::Frame(id, Handle::from_rgba(w, h, pixels)))
-                    } else {
-                        Ok(Reply::Notice(event))
-                    }
-                };
                 loop {
-                    let reply = read().unwrap_or_else(|e| Reply::End(e.to_string()));
+                    let reply = match wire::read(&mut stdout) {
+                        #[cfg(target_os = "linux")]
+                        Ok(Event::DmaFrame(id, frame)) => {
+                            wire::linux::receive_buffer(&received_fds)
+                                .map(|fd| Reply::Dma(id, frame, fd))
+                        }
+                        result => result.map(Reply::Notice),
+                    }
+                    .unwrap_or_else(|e| Reply::End(e.to_string()));
                     let end = matches!(reply, Reply::End(_));
                     if replies.send(reply).is_err()
                         || proxy.send_event(UserEvent::BrowserFrame).is_err()
@@ -126,6 +143,12 @@ impl Pane {
                 }
             })?;
         Ok(Self {
+            presentation,
+            bounds: Cell::default(),
+            presented: None,
+            visible: false,
+            #[cfg(target_os = "linux")]
+            importing: None,
             _helper: helper,
             input,
             output,
@@ -159,13 +182,37 @@ impl Pane {
             return;
         };
         match reply {
-            Reply::Notice(Event::Ready(wire::VERSION, renderer)) => {
+            #[cfg(target_os = "linux")]
+            Reply::Dma(id, frame, fd) => {
+                if self.active != id {
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        tab.waiting = false;
+                    }
+                    return;
+                }
+                match self.presentation.import(fd, frame) {
+                    Ok(()) => self.importing = Some(id),
+                    Err(err) => {
+                        self.ready = false;
+                        self.status = err.to_string();
+                    }
+                }
+            }
+            Reply::Notice(Event::DmaFrame(..)) => {
+                self.ready = false;
+                self.status = "Unexpected GPU buffer transport.".into();
+            }
+            Reply::Notice(Event::Ready(wire::VERSION, renderer, surface)) => {
+                if let Err(e) = self.presentation.attach(surface) {
+                    self.status = e.to_string();
+                    return;
+                }
                 self.renderer = renderer;
                 self.ready = true;
                 self.status.clear();
                 self.send(Command::Open(0));
             }
-            Reply::Notice(Event::Ready(_, _)) => {
+            Reply::Notice(Event::Ready(..)) => {
                 self.status = "The Servo helper uses an incompatible protocol.".into();
             }
             Reply::Notice(Event::Changed(id)) => {
@@ -188,9 +235,9 @@ impl Pane {
                     tab.back = back;
                 }
             }
-            Reply::Frame(id, image) => {
+            Reply::Notice(Event::Presented(id)) => {
+                self.presented = Some(id);
                 if let Some(tab) = self.tabs.get_mut(&id) {
-                    tab.frame = Some(image);
                     tab.waiting = false;
                 }
             }
@@ -201,7 +248,6 @@ impl Pane {
                 }
                 self.ready = false;
             }
-            Reply::Notice(Event::Frame(..)) => unreachable!(),
         }
     }
 
@@ -211,6 +257,7 @@ impl Pane {
                 let id = self.next;
                 if self.send(Command::Open(id)) {
                     self.tabs.insert(id, Tab::default());
+                    self.presented = None;
                     self.active = id;
                     self.next += 1;
                 }
@@ -218,7 +265,9 @@ impl Pane {
             Action::Select(id)
                 if self.ready && self.tabs.contains_key(&id) && self.send(Command::Select(id)) =>
             {
-                self.active = id
+                self.presented = None;
+                self.active = id;
+                self.tabs.get_mut(&id).unwrap().size = (0, 0);
             }
             Action::Close(id) if self.tabs.contains_key(&id) => {
                 if self.tabs.len() == 1 {
@@ -228,6 +277,8 @@ impl Pane {
                     self.tabs.remove(&id);
                     if id == self.active {
                         self.active = *self.tabs.first_key_value().expect("remaining tab").0;
+                        self.presented = None;
+                        self.tabs.get_mut(&self.active).unwrap().size = (0, 0);
                         self.send(Command::Select(self.active));
                     }
                 }
@@ -242,9 +293,10 @@ impl Pane {
                 self.status.clear();
                 self.send(Command::Navigate(id, self.tabs[&id].address.clone()));
             }
+            Action::Send(Command::Paint(id)) if id != self.active => {}
             Action::Send(command) if self.ready && self.send(command.clone()) => match command {
                 Command::Pointer(_, _, _, Pointer::Down) => self.focused = true,
-                Command::Resize(id, w, h) => {
+                Command::Resize(id, w, h, _) => {
                     if let Some(tab) = self.tabs.get_mut(&id) {
                         tab.size = (w, h);
                     }
@@ -260,6 +312,83 @@ impl Pane {
             _ => {}
         }
         false
+    }
+
+    pub fn present(&mut self, window: &std::rc::Rc<crate::winit::window::Window>) -> bool {
+        let mut redraw = false;
+        #[cfg(target_os = "linux")]
+        match self.presentation.poll() {
+            Ok(progress) => {
+                redraw |= progress.pending && self.bounds.get().is_some();
+                if progress.imported
+                    && let Some(id) = self.importing.take()
+                {
+                    self.presented = Some(id);
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        tab.waiting = false;
+                    }
+                    redraw = true;
+                }
+            }
+            Err(e) => {
+                redraw |= self.ready;
+                self.ready = false;
+                self.status = e.to_string();
+            }
+        }
+        const SIZE_LIMIT: &str = "The browser surface exceeds its display limit.";
+        let mut bounds = self
+            .bounds
+            .get()
+            .filter(|r| r.width >= 1. && r.height >= 1.);
+        if let Some(r) = bounds
+            && self.ready
+        {
+            let scale = window.scale_factor() as f32;
+            let size = (
+                (r.width * scale).round() as u32,
+                (r.height * scale).round() as u32,
+            );
+            if wire::check_size(size.0, size.1).is_err() {
+                redraw |= self.status != SIZE_LIMIT;
+                self.status = SIZE_LIMIT.into();
+                bounds = None;
+            } else {
+                if self.status == SIZE_LIMIT {
+                    self.status.clear();
+                    redraw = true;
+                }
+                if self.tabs[&self.active].size != size {
+                    redraw = true;
+                    self.update(Action::Send(Command::Resize(
+                        self.active,
+                        size.0,
+                        size.1,
+                        scale,
+                    )));
+                }
+            }
+        }
+        let visible = bounds.filter(|_| self.ready && self.presented == Some(self.active));
+        if let Err(error) = self.presentation.place(
+            window,
+            window.scale_factor(),
+            visible.map(|r| wire::presentation::TileRect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            }),
+        ) {
+            redraw |= self.ready;
+            self.status = error.to_string();
+            self.ready = false;
+        } else if self.visible != visible.is_some()
+            && self.send(Command::ShowSurface(visible.is_some()))
+        {
+            self.visible = visible.is_some();
+        }
+        redraw
     }
 
     pub fn view<'a>(&'a self, machine: &'a str, tile: u64, ty: Typography) -> UiElement<'a> {
@@ -310,28 +439,24 @@ impl Pane {
         if !self.status.is_empty() {
             content = content.push(ty.data(&self.status, theme::TEXT_MUTED));
         }
-        let mut surface = stack![].width(Length::Fill).height(Length::Fill);
-        if let Some(frame) = &tab.frame {
-            surface = surface.push(
-                image(frame.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(ContentFit::Fill),
-            );
-        }
-        if self.ready {
-            surface = surface.push(
-                canvas(Target {
-                    id,
-                    size: tab.size,
-                    focused: self.focused,
-                    paint: tab.dirty && !tab.waiting,
-                    emit,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
-            );
-        }
+        #[cfg(target_os = "linux")]
+        let importing = self.importing.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let importing = false;
+        let surface = canvas(Target {
+            id,
+            size: tab.size,
+            bounds: &self.bounds,
+            focused: self.focused,
+            paint: self.ready
+                && !importing
+                && tab.dirty
+                && !self.tabs.values().any(|tab| tab.waiting)
+                && tab.size != (0, 0),
+            emit,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
         let footer = if tab.loading {
             format!("Loading… · {}", self.renderer)
         } else {
@@ -344,14 +469,15 @@ impl Pane {
     }
 }
 
-struct Target<F> {
+struct Target<'a, F> {
+    bounds: &'a Cell<Option<Rectangle>>,
     id: u64,
     size: (u32, u32),
     focused: bool,
     paint: bool,
     emit: F,
 }
-impl<F: Fn(Action) -> Message> canvas::Program<Message, Theme, AxUi> for Target<F> {
+impl<F: Fn(Action) -> Message> canvas::Program<Message, Theme, AxUi> for Target<'_, F> {
     type State = ();
     fn update(
         &self,
@@ -364,16 +490,7 @@ impl<F: Fn(Action) -> Message> canvas::Program<Message, Theme, AxUi> for Target<
         let point = cursor.position_in(bounds);
         let command = match event {
             canvas::Event::Window(iced_core::window::Event::RedrawRequested(_)) => {
-                let scale = (wire::MAX_WIDTH as f32 / bounds.width.max(1.))
-                    .min(wire::MAX_HEIGHT as f32 / bounds.height.max(1.))
-                    .min(1.);
-                let size = (
-                    ((bounds.width * scale).round() as u32).max(1),
-                    ((bounds.height * scale).round() as u32).max(1),
-                );
-                if size != self.size {
-                    Command::Resize(id, size.0, size.1)
-                } else if self.paint {
+                if self.paint {
                     Command::Paint(id)
                 } else {
                     return None;
@@ -430,9 +547,10 @@ impl<F: Fn(Action) -> Message> canvas::Program<Message, Theme, AxUi> for Target<
         _: &(),
         _: &AxUi,
         _: &Theme,
-        _: Rectangle,
+        bounds: Rectangle,
         _: mouse::Cursor,
     ) -> Vec<canvas::Geometry<AxUi>> {
+        self.bounds.set(Some(bounds));
         Vec::new()
     }
 }

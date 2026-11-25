@@ -3,11 +3,13 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, thread};
 
 use iced_core::{Length, alignment};
-use iced_widget::{button, column, container, row};
+use iced_widget::{column, container, row};
 use iced_winit::winit::event_loop::EventLoopProxy;
 use vkored::plugins::Bundle;
 
-use crate::{Message, UiElement, UserEvent, theme, typography::Typography, widgets};
+use crate::{
+    Message, UiElement, UserEvent, kit, theme, typography::Typography, visuals::Icon, widgets,
+};
 
 pub const DEMO_WASM: &[u8] = include_bytes!("../assets/plugins/animated-canvas.wasm");
 const MAX_LIBRARY_ENTRIES: usize = 16;
@@ -410,7 +412,12 @@ impl State {
         if let Some(canvas) = &self.canvas {
             return widgets::page_frame(
                 column![
-                    control(ty, "Back to plugins", Some(Action::Preview(false))),
+                    control(
+                        ty,
+                        Icon::Back,
+                        "Back to plugins",
+                        Some(Action::Preview(false))
+                    ),
                     canvas.view(ty),
                 ]
                 .spacing(theme::SPACE_4)
@@ -430,6 +437,7 @@ impl State {
         {
             demo = demo.push(control(
                 ty,
+                Icon::Play,
                 "Preview",
                 (!self.busy).then_some(Action::Preview(true)),
             ));
@@ -469,11 +477,17 @@ impl State {
             column![
                 row![
                     ty.page_header(
+                        crate::visuals::Icon::Plugin,
                         "Plugins",
                         "Add local WebAssembly bundles to use with machines."
                     ),
                     iced_widget::space::horizontal(),
-                    control(ty, "Add plugin", (!self.busy).then_some(Action::Import)),
+                    control(
+                        ty,
+                        Icon::Plus,
+                        "Add plugin",
+                        (!self.busy).then_some(Action::Import)
+                    ),
                 ]
                 .align_y(alignment::Vertical::Center)
                 .spacing(theme::SPACE_2),
@@ -494,6 +508,7 @@ impl State {
         {
             entries = entries.push(control(
                 ty,
+                Icon::Globe,
                 "Open Servo browser",
                 (!self.busy && self.browser.is_none()).then(|| Action::OpenServo(machine.into())),
             ));
@@ -503,11 +518,13 @@ impl State {
                 let controls = row![
                     control(
                         ty,
+                        Icon::Refresh,
                         "Reload",
                         (!self.busy).then(|| Action::Reload(machine.into(), source.clone()))
                     ),
                     control(
                         ty,
+                        Icon::Close,
                         "Unload",
                         (!self.busy).then(|| Action::Unload(machine.into(), source.clone()))
                     ),
@@ -516,6 +533,7 @@ impl State {
                 let controls = if bundle.supports_browser() {
                     controls.push(control(
                         ty,
+                        Icon::Globe,
                         "Open browser",
                         (!self.busy && self.browser.is_none())
                             .then(|| Action::OpenBrowser(machine.into(), source.clone())),
@@ -560,6 +578,7 @@ impl State {
                         .wrapping(iced_core::text::Wrapping::WordOrGlyph),
                     control(
                         ty,
+                        Icon::Plus,
                         "Load",
                         (!self.busy).then(|| Action::Load(machine.into(), source.clone()))
                     ),
@@ -570,13 +589,13 @@ impl State {
             );
         }
         entries = entries
-            .push(
-                button(ty.control("Plugin library"))
-                    .height(ty.control_height())
-                    .padding([0, 10])
-                    .style(widgets::button_style(widgets::Button::Ghost))
-                    .on_press(Message::Show(crate::Page::Plugins)),
-            )
+            .push(kit::icon_label(
+                ty,
+                Icon::Plugin,
+                "Plugin library",
+                widgets::Button::Ghost,
+                Some(Message::Show(crate::Page::Plugins)),
+            ))
             .push(self.status(ty, Some(machine)));
         widgets::scroll(entries)
             .width(Length::Fill)
@@ -599,15 +618,17 @@ impl State {
 
 pub(super) fn control<'a>(
     ty: Typography,
+    icon: Icon,
     label: &'static str,
     action: Option<Action>,
 ) -> UiElement<'a> {
-    button(ty.control(label))
-        .height(ty.control_height())
-        .padding([0, 10])
-        .style(widgets::button_style(widgets::Button::Secondary))
-        .on_press_maybe(action.map(Message::Plugin))
-        .into()
+    kit::icon_label(
+        ty,
+        icon,
+        label,
+        widgets::Button::Secondary,
+        action.map(Message::Plugin),
+    )
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use iced_core::{ContentFit, Length, Rectangle, Size, Theme, image::Handle, mouse};
 use iced_widget::{button, canvas, image, row, stack};
 
-use crate::{AxUi, Message, UiElement, theme, typography::Typography, widgets};
+use crate::{AxUi, Message, UiElement, kit, theme, typography::Typography, visuals::Icon, widgets};
 
 pub fn tabs<'a, Id: Copy + Eq>(
     ty: Typography,
@@ -31,21 +31,25 @@ pub fn tabs<'a, Id: Copy + Eq>(
                 .padding([0., theme::SPACE_2])
                 .style(widgets::button_style(style))
                 .on_press(select(id)),
-                control(ty, "×", close(id)),
+                control(ty, Icon::Close, "Close tab", close(id)),
             ]
             .spacing(theme::SPACE_1),
         );
     }
-    strip.push(control(ty, "New tab", add)).wrap().into()
+    strip
+        .push(control(ty, Icon::Plus, "New tab", add))
+        .wrap()
+        .into()
 }
 
-pub fn control<'a>(ty: Typography, label: &'static str, action: Option<Message>) -> UiElement<'a> {
-    button(ty.control(label))
-        .height(ty.control_height())
-        .padding([0, 10])
-        .style(widgets::button_style(widgets::Button::Secondary))
-        .on_press_maybe(action)
-        .into()
+/// A browser control: a glyph, named by its tooltip.
+pub fn control<'a>(
+    ty: Typography,
+    icon: Icon,
+    label: &'static str,
+    action: Option<Message>,
+) -> UiElement<'a> {
+    kit::icon_button(ty, icon, label, widgets::Button::Secondary, action)
 }
 
 pub struct Frame {

@@ -1,5 +1,13 @@
 //! Account controls are a view over vkored's optional download authorization.
-use crate::{Message, Page, UiElement, UserEvent, theme, typography::Typography, widgets};
+use crate::{
+    Message, Page, UiElement, UserEvent,
+    kit::{self, Status},
+    motion::{self, Beat},
+    theme,
+    typography::Typography,
+    visuals::{self, Icon},
+    widgets,
+};
 use iced_core::{Length, alignment, clipboard};
 use iced_widget::{button, column, container, row};
 use iced_winit::winit::event_loop::EventLoopProxy;
@@ -226,6 +234,7 @@ pub fn page(state: &State, ty: Typography) -> UiElement<'_> {
     widgets::page_frame(
         column![
             ty.page_header(
+                crate::visuals::Icon::Account,
                 "Account",
                 "Manage your sign-in and image download agreement."
             ),
@@ -236,11 +245,24 @@ pub fn page(state: &State, ty: Typography) -> UiElement<'_> {
 }
 
 pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
-    let control = |label, action| {
-        button(ty.control(label))
-            .padding([8, 14])
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press(Message::Account(action))
+    let control = |icon, label, action| {
+        kit::icon_label(
+            ty,
+            icon,
+            label,
+            widgets::Button::Secondary,
+            Some(Message::Account(action)),
+        )
+    };
+    // Something is being waited on: a turning mark, then what for.
+    let waiting = |label: &'static str| -> UiElement<'_> {
+        row![
+            motion::beacon(Beat::Spin, theme::TEXT_MUTED, ty.size(16.)),
+            ty.body(label, 14., theme::TEXT_MUTED),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center)
+        .into()
     };
     let mut content = column![
         ty.body("Image downloads", 18., theme::TEXT),
@@ -252,14 +274,21 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
     ]
     .spacing(14);
     if let Some(status) = state.account.status() {
-        content = content.push(ty.data(format!("Signed in · {}", status.email), theme::SUCCESS))
+        content = content.push(
+            row![
+                visuals::icon(Icon::Check, theme::SUCCESS, ty.size(16.)),
+                ty.data(status.email.clone(), theme::SUCCESS),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center),
+        )
             .push(ty.data(format!("Agreement accepted · {} · {}", status.receipt.version, status.receipt.accepted_at), theme::TEXT_MUTED))
             .push(ty.body("Downloads check authorization each time. Sign in again when the one-hour session expires.", 12., theme::TEXT_MUTED));
         if state.can_check_storage() {
             content = content.push(
                 row![
-                    control("Review agreement", Action::Review),
-                    control("Sign out", Action::SignOut)
+                    control(Icon::File, "Review agreement", Action::Review),
+                    control(Icon::Lock, "Sign out", Action::SignOut)
                 ]
                 .spacing(8)
                 .wrap(),
@@ -267,10 +296,18 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
         }
     } else if state.can_check_storage() {
         content = content
-            .push(ty.badge("Not signed in", theme::TEXT_MUTED))
+            .push(kit::status(
+                ty,
+                Status {
+                    beat: Beat::Hollow,
+                    tone: theme::TEXT_MUTED,
+                    label: "not signed in",
+                    steps: None,
+                },
+            ))
             .push(crate::google_sign_in::button(ty));
         if state.account.sign_out_incomplete() {
-            content = content.push(control("Retry sign-out", Action::SignOut));
+            content = content.push(control(Icon::Refresh, "Retry sign-out", Action::SignOut));
         }
     }
     if let Some(challenge) = &state.challenge {
@@ -285,14 +322,11 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
                     container(ty.data(&challenge.code, theme::MAGENTA).size(ty.size(22.)))
                         .padding(16)
                         .style(widgets::card),
-                    control(
-                        if matches!(state.copy_result, Some(Ok(()))) {
-                            "Copied"
-                        } else {
-                            "Copy code"
-                        },
-                        Action::CopyCode,
-                    ),
+                    if matches!(state.copy_result, Some(Ok(()))) {
+                        control(Icon::Check, "Copied", Action::CopyCode)
+                    } else {
+                        control(Icon::Copy, "Copy code", Action::CopyCode)
+                    },
                 ]
                 .align_y(alignment::Vertical::Center)
                 .spacing(8)
@@ -300,8 +334,8 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             )
             .push(
                 row![
-                    control("Open browser", Action::OpenBrowser),
-                    control("Cancel", Action::Cancel)
+                    control(Icon::Globe, "Open browser", Action::OpenBrowser),
+                    control(Icon::Close, "Cancel", Action::Cancel)
                 ]
                 .spacing(8)
                 .wrap(),
@@ -314,9 +348,9 @@ pub fn view(state: &State, ty: Typography) -> UiElement<'_> {
             ));
         }
     } else if state.checking_storage() {
-        content = content.push(ty.body("Checking saved sign-in…", 14., theme::TEXT_MUTED));
+        content = content.push(waiting("Checking saved sign-in…"));
     } else if state.busy {
-        content = content.push(ty.body("Contacting the account service…", 14., theme::TEXT_MUTED));
+        content = content.push(waiting("Contacting the account service…"));
     }
     if !state.error.is_empty() {
         content = content.push(ty.data(&state.error, theme::ERROR));

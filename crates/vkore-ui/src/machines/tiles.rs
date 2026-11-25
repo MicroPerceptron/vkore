@@ -1,13 +1,20 @@
 //! Layout for machine tiles. The caller supplies tile identities and contents.
 
 use iced_core::{Length, alignment};
-use iced_widget::{PaneGrid, button, column, container, pane_grid, row, tooltip};
+use iced_widget::{PaneGrid, column, container, pane_grid, row};
 use pane_grid::{Axis, Configuration, Node, Split};
 
-use crate::{Message, UiElement, theme, typography::Typography, widgets};
+use crate::{
+    Message, UiElement, kit, theme,
+    typography::Typography,
+    visuals::{self, Icon},
+    widgets,
+};
 
 pub(super) struct TileInfo {
     pub title: &'static str,
+    /// What kind of thing the tile is, shown before its title.
+    pub icon: Icon,
     pub closable: bool,
 }
 
@@ -264,29 +271,45 @@ impl<T: Copy + Eq> Workspace<T> {
         }
         let mut reveal = row![].spacing(theme::SPACE_2);
         for tile in &hidden {
-            reveal = reveal.push(
-                button(ty.control(format!("Show {}", describe(*tile).title)))
-                    .height(ty.control_height())
-                    .padding([0, 10])
-                    .style(widgets::button_style(widgets::Button::Secondary))
-                    .on_press(message(Change::Show(*tile))),
-            );
+            let info = describe(*tile);
+            reveal = reveal.push(kit::icon_label(
+                ty,
+                info.icon,
+                info.title,
+                widgets::Button::Secondary,
+                Some(message(Change::Show(*tile))),
+            ));
         }
         let board: UiElement<'_> = match &self.grid {
             Some(grid) => PaneGrid::new(grid, |_, tile, maximized| {
                 let info = describe(*tile);
                 let mut controls = row![
-                    tile_button(ty, "-", "Collapse tile", message(Change::Collapse(*tile))),
+                    tile_button(
+                        ty,
+                        Icon::Minus,
+                        "Collapse tile",
+                        message(Change::Collapse(*tile))
+                    ),
                     if maximized {
-                        tile_button(ty, "=", "Restore tile layout", message(Change::Restore))
+                        tile_button(
+                            ty,
+                            Icon::Restore,
+                            "Restore tile layout",
+                            message(Change::Restore),
+                        )
                     } else {
-                        tile_button(ty, "+", "Expand tile", message(Change::Expand(*tile)))
+                        tile_button(
+                            ty,
+                            Icon::Maximize,
+                            "Expand tile",
+                            message(Change::Expand(*tile)),
+                        )
                     },
                 ];
                 if info.closable {
                     controls = controls.push(tile_button(
                         ty,
-                        "×",
+                        Icon::Close,
                         "Close tile",
                         message(Change::Close(*tile)),
                     ));
@@ -297,7 +320,17 @@ impl<T: Copy + Eq> Workspace<T> {
                 // The drag preview gives the title bar an infinite viewport.
                 // Bound its text just as we do the body before recording it.
                 let title = pane_grid::TitleBar::new(
-                    container(ty.body(info.title, 14., theme::TEXT)).clip(true),
+                    container(
+                        row![
+                            // The grip says the bar can be dragged to swap tiles.
+                            visuals::icon(Icon::Grip, theme::TEXT_MUTED, ty.size(14.)),
+                            visuals::icon(info.icon, theme::TEXT_SECONDARY, ty.size(16.)),
+                            ty.body(info.title, 14., theme::TEXT),
+                        ]
+                        .spacing(theme::SPACE_2)
+                        .align_y(alignment::Vertical::Center),
+                    )
+                    .clip(true),
                 )
                 .padding([theme::SPACE_1, theme::SPACE_2])
                 .controls(UiElement::from(container(controls).clip(true)))
@@ -341,25 +374,14 @@ impl<T: Copy + Eq> Workspace<T> {
     }
 }
 
+/// A control in a tile's title bar: a glyph, named by its tooltip.
 fn tile_button<'a>(
     ty: Typography,
-    glyph: &'static str,
+    icon: Icon,
     label: &'static str,
     message: Message,
 ) -> UiElement<'a> {
-    tooltip(
-        button(ty.control(glyph))
-            .height(ty.control_height())
-            .padding([0, 7])
-            .style(widgets::button_style(widgets::Button::Ghost))
-            .on_press(message),
-        container(ty.body(label, 12., theme::TEXT))
-            .padding(8)
-            .style(widgets::card)
-            .clip(true),
-        tooltip::Position::Bottom,
-    )
-    .into()
+    kit::icon_button(ty, icon, label, widgets::Button::Ghost, Some(message))
 }
 
 #[cfg(test)]

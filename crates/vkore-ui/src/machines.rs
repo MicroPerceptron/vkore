@@ -28,7 +28,14 @@ use vkored::{
     run::Session,
 };
 
-use crate::{Message, UiElement, UserEvent, fonts, theme, widgets};
+use crate::{
+    Message, UiElement, UserEvent, fonts,
+    kit::{self, Status},
+    motion::{Beat, Steps},
+    theme,
+    visuals::Icon,
+    widgets,
+};
 
 mod tiles;
 
@@ -67,7 +74,7 @@ impl Running {
     /// The most lines the log keeps.
     const LINES: usize = 400;
 
-    fn new(stop: mpsc::Sender<()>) -> Self {
+    pub(crate) fn new(stop: mpsc::Sender<()>) -> Self {
         Self {
             stop,
             stage: None,
@@ -164,15 +171,19 @@ impl Tile {
     ];
 
     fn info(self) -> tiles::TileInfo {
-        let (title, closable) = match self {
-            Self::Console => ("Console", false),
-            Self::Overview => ("Overview", false),
-            Self::BootActivity => ("Boot activity", false),
-            Self::Plugins => ("Plugins", false),
+        let (title, icon, closable) = match self {
+            Self::Console => ("Console", Icon::Terminal, false),
+            Self::Overview => ("Overview", Icon::Dashboard, false),
+            Self::BootActivity => ("Boot activity", Icon::Activity, false),
+            Self::Plugins => ("Plugins", Icon::Plugin, false),
             #[cfg(feature = "browser-preview")]
-            Self::Plugin(_) => ("Plugin", true),
+            Self::Plugin(_) => ("Plugin", Icon::Plugin, true),
         };
-        tiles::TileInfo { title, closable }
+        tiles::TileInfo {
+            title,
+            icon,
+            closable,
+        }
     }
 }
 
@@ -866,7 +877,7 @@ impl State {
                 if let Some(running) = self.running.get_mut(&name) {
                     running.stage = Some(stage);
                     if !self.closing {
-                        self.status = format!("{name}: {}", stage_label(Some(stage)).0);
+                        self.status = format!("{name}: {}", stage_status(Some(stage)).label);
                     }
                 }
             }
@@ -1085,16 +1096,76 @@ fn wrap(message: MachineMessage) -> Message {
     Message::Machine(message)
 }
 
-fn stage_label(stage: Option<Stage>) -> (&'static str, theme::Tone) {
+/// How far a boot has come, as a status: five stops from firmware to ready.
+///
+/// A boot in flight turns, a usable machine pulses (it is alive), and a
+/// machine that stopped short holds still in the colour of how it stopped.
+fn stage_status(stage: Option<Stage>) -> Status {
+    const STOPS: u8 = 5;
+    let along = |done, working, tone| {
+        Some(Steps {
+            total: STOPS,
+            done,
+            working,
+            tone,
+        })
+    };
     match stage {
-        None | Some(Stage::Firmware) => ("starting", theme::TEXT_MUTED),
-        Some(Stage::Kernel) => ("kernel up", theme::TEXT_SECONDARY),
-        Some(Stage::Services) => ("services", theme::TEXT_SECONDARY),
-        Some(Stage::Shell) => ("shell ready", theme::SUCCESS),
-        Some(Stage::Ready) => ("ready", theme::SUCCESS),
-        Some(Stage::Degraded) => ("degraded", theme::WARNING),
-        Some(Stage::Failed) => ("failed", theme::ERROR),
+        None | Some(Stage::Firmware) => Status {
+            beat: Beat::Spin,
+            tone: theme::TEXT_SECONDARY,
+            label: "starting",
+            steps: along(0, true, theme::TEXT_SECONDARY),
+        },
+        Some(Stage::Kernel) => Status {
+            beat: Beat::Spin,
+            tone: theme::TEXT_SECONDARY,
+            label: "kernel up",
+            steps: along(1, true, theme::TEXT_SECONDARY),
+        },
+        Some(Stage::Services) => Status {
+            beat: Beat::Spin,
+            tone: theme::TEXT_SECONDARY,
+            label: "services",
+            steps: along(2, true, theme::TEXT_SECONDARY),
+        },
+        Some(Stage::Shell) => Status {
+            beat: Beat::Pulse,
+            tone: theme::SUCCESS,
+            label: "shell ready",
+            steps: along(4, true, theme::SUCCESS),
+        },
+        Some(Stage::Ready) => Status {
+            beat: Beat::Pulse,
+            tone: theme::SUCCESS,
+            label: "ready",
+            steps: along(STOPS, false, theme::SUCCESS),
+        },
+        Some(Stage::Degraded) => Status {
+            beat: Beat::Solid,
+            tone: theme::WARNING,
+            label: "degraded",
+            steps: along(STOPS - 1, false, theme::WARNING),
+        },
+        Some(Stage::Failed) => Status {
+            beat: Beat::Solid,
+            tone: theme::ERROR,
+            label: "failed",
+            steps: None,
+        },
     }
+}
+
+/// A machine that is not running.
+const STOPPED: Status = Status {
+    beat: Beat::Hollow,
+    tone: theme::TEXT_MUTED,
+    label: "stopped",
+    steps: None,
+};
+
+fn machine_status(running: Option<&Running>) -> Status {
+    running.map_or(STOPPED, |run| stage_status(run.stage))
 }
 
 /// The machine library, creation flow, or selected instance.
@@ -1122,45 +1193,80 @@ pub fn view(state: &State, ty: Typography, appearance: iced_core::Theme) -> UiEl
 type PageColumn<'a> = iced_widget::Column<'a, Message, iced_core::Theme, crate::AxUi>;
 
 fn library(state: &State, ty: Typography) -> PageColumn<'_> {
-    let mut list = column![ty.label("Your machines", theme::TEXT_MUTED)].spacing(10);
+    let mut list = column![kit::heading(ty, Icon::Machine, "Your machines")].spacing(10);
     if state.configs.is_empty() {
-        list = list
-            .push(ty.body("No machines yet", 15., theme::TEXT))
-            .push(ty.body(
-                "Create a machine from an official Kore image.",
-                13.,
-                theme::TEXT_MUTED,
-            ));
+        list = list.push(ty.empty_state(
+            Icon::Machine,
+            "No machines yet",
+            "Create a machine from an official Kore image.",
+        ));
     }
     for config in &state.configs {
         let selected = state.selected.as_deref() == Some(config.name.as_str());
-        let (label, color) = match state.running.get(&config.name) {
-            Some(running) => stage_label(running.stage),
-            None => ("stopped", theme::TEXT_MUTED),
-        };
-        list = list.push(
+        let status = machine_status(state.running.get(&config.name));
+        let plate = ty.size(40.);
+        list = list.push(kit::lift(
+            widgets::Button::Row(selected),
+            true,
             button(
                 row![
-                    ty.data(config.name.as_str(), theme::TEXT)
-                        .size(ty.size(theme::SIZE_SM)),
-                    space::horizontal(),
-                    ty.badge(label, color),
+                    // The plate takes the machine's state, so a running one
+                    // stands out of the list before a word is read.
+                    container(crate::visuals::icon(
+                        Icon::Machine,
+                        if state.running.contains_key(&config.name) {
+                            status.tone
+                        } else {
+                            theme::TEXT_MUTED
+                        },
+                        plate * 0.5,
+                    ))
+                    .center(plate)
+                    .style(|appearance| theme::panel(
+                        appearance,
+                        theme::PANEL_FILE,
+                        Some(theme::SEPARATOR),
+                        theme::RADIUS_MD
+                    )),
+                    column![
+                        ty.data(config.name.as_str(), theme::TEXT)
+                            .size(ty.size(theme::SIZE_SM)),
+                        row![
+                            kit::figure(ty, Icon::Cpu, config.cpus.to_string()),
+                            kit::figure(
+                                ty,
+                                Icon::Memory,
+                                format!("{:.1} GiB", f64::from(config.memory_mib) / 1024.)
+                            ),
+                            kit::figure(
+                                ty,
+                                Icon::Volume,
+                                format!("{:.0} GiB", config.disk_mib as f64 / 1024.)
+                            ),
+                        ]
+                        .spacing(theme::SPACE_4),
+                    ]
+                    .spacing(theme::SPACE_1)
+                    .width(Length::Fill),
+                    kit::status_mark(ty, status),
                 ]
+                .spacing(theme::SPACE_4 - 2.)
                 .align_y(alignment::Vertical::Center),
             )
             .width(Length::Fill)
             .padding([10, 12])
-            .style(widgets::button_style(widgets::Button::Row(selected)))
+            .style(widgets::button_style_fading(widgets::Button::Row(selected)))
             .on_press(wrap(MachineMessage::Select(config.name.clone()))),
-        );
+        ));
     }
 
     column![
         row![
-            ty.page_header("Machines", "Create or open a Kore machine."),
+            ty.page_header(Icon::Machine, "Machines", "Create or open a Kore machine."),
             space::horizontal(),
             action(
                 ty,
+                Icon::Plus,
                 "New machine",
                 widgets::Button::Primary,
                 MachineMessage::OpenCreate
@@ -1188,12 +1294,7 @@ fn creation(state: &State, ty: Typography) -> PageColumn<'_> {
             .into()
     };
     column![
-        action(
-            ty,
-            "All machines",
-            widgets::Button::Secondary,
-            MachineMessage::OpenLibrary
-        ),
+        back(ty),
         container(content)
             .id("machine-creation")
             .width(Length::Fill.max(800))
@@ -1228,9 +1329,14 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
         button(
             row![
                 ty.data(label, theme::TEXT).width(Length::Fill),
-                ty.mono(
-                    if state.image_menu_open { "^" } else { "v" },
-                    theme::TEXT_MUTED
+                crate::visuals::icon(
+                    if state.image_menu_open {
+                        Icon::ChevronUp
+                    } else {
+                        Icon::ChevronDown
+                    },
+                    theme::TEXT_MUTED,
+                    ty.size(14.),
                 ),
             ]
             .spacing(theme::SPACE_1)
@@ -1274,17 +1380,21 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
         );
     }
     if let Some(image) = selected_image {
-        images = images.push(ty.data(
-            format!(
-                "{:.1} MiB download · {}",
-                image.bytes() as f64 / (1024. * 1024.),
-                match image.profile {
-                    vkored::catalog::Profile::Inference => "Headless inference",
-                    vkored::catalog::Profile::Desktop => "Desktop",
-                }
-            ),
-            theme::TEXT_SECONDARY,
-        ));
+        let (profile, icon) = match image.profile {
+            vkored::catalog::Profile::Inference => ("Headless inference", Icon::Terminal),
+            vkored::catalog::Profile::Desktop => ("Desktop", Icon::Window),
+        };
+        images = images.push(
+            row![
+                kit::figure(
+                    ty,
+                    Icon::Download,
+                    format!("{:.1} MiB", image.bytes() as f64 / (1024. * 1024.))
+                ),
+                kit::figure(ty, icon, profile),
+            ]
+            .spacing(theme::SPACE_4),
+        );
     }
     if state.importing.is_some() {
         images = images.push(ty.data(state.status.as_str(), theme::TEXT_SECONDARY));
@@ -1302,13 +1412,13 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
         }
     }
     if state.importing.is_some() {
-        images = images.push(
-            button(ty.control("Cancel import"))
-                .height(ty.control_height())
-                .padding([7, 10])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press(wrap(MachineMessage::CancelImport)),
-        );
+        images = images.push(kit::icon_label(
+            ty,
+            Icon::Close,
+            "Cancel import",
+            widgets::Button::Secondary,
+            Some(wrap(MachineMessage::CancelImport)),
+        ));
     }
     let create_action = if state.catalog_cancel.is_none()
         && selected_image.is_some()
@@ -1343,16 +1453,16 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
         row![
             ty.label("Official image", theme::TEXT_MUTED),
             space::horizontal(),
-            button(ty.control("Refresh"))
-                .height(ty.control_height())
-                .padding([4, 8])
-                .style(widgets::button_style(widgets::Button::Secondary))
-                .on_press_maybe(
-                    (state.catalog_cancel.is_none()
-                        && state.importing.is_none()
-                        && !state.hardware_busy)
-                        .then_some(wrap(MachineMessage::RefreshImages))
-                )
+            kit::icon_button(
+                ty,
+                Icon::Refresh,
+                "Refresh images",
+                widgets::Button::Secondary,
+                (state.catalog_cancel.is_none()
+                    && state.importing.is_none()
+                    && !state.hardware_busy)
+                    .then_some(wrap(MachineMessage::RefreshImages))
+            )
         ]
         .align_y(alignment::Vertical::Center),
         images,
@@ -1369,33 +1479,59 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
                 }),
             theme::TEXT_MUTED
         ),
-        ty.label("Hardware", theme::TEXT_MUTED),
-        ty.data(
-            format!(
-                "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk · {}",
-                state.form_hardware.cpus,
-                f64::from(state.form_hardware.memory_mib) / 1024.,
-                state.form_hardware.disk_mib as f64 / 1024.,
-                state.form_hardware.resources.network.label(),
+        kit::heading(ty, Icon::Cpu, "Hardware"),
+        row![
+            kit::figure(ty, Icon::Cpu, state.form_hardware.cpus.to_string()),
+            kit::figure(
+                ty,
+                Icon::Memory,
+                format!(
+                    "{:.1} GiB",
+                    f64::from(state.form_hardware.memory_mib) / 1024.
+                )
             ),
-            theme::TEXT_SECONDARY
+            kit::figure(
+                ty,
+                Icon::Volume,
+                format!("{:.1} GiB", state.form_hardware.disk_mib as f64 / 1024.)
+            ),
+            kit::figure(
+                ty,
+                Icon::Network,
+                state.form_hardware.resources.network.label().to_string()
+            ),
+        ]
+        .spacing(theme::SPACE_4),
+        kit::tip_text(
+            ty,
+            row![
+                kit::figure(ty, Icon::Info, "Image minimum"),
+                kit::figure(ty, Icon::Cpu, state.form_hardware.minimum.cpus.to_string()),
+                kit::figure(
+                    ty,
+                    Icon::Memory,
+                    format!("{} MiB", state.form_hardware.minimum.memory_mib)
+                ),
+                kit::figure(
+                    ty,
+                    Icon::Volume,
+                    format!("{} MiB", state.form_hardware.minimum.disk_mib)
+                ),
+            ]
+            .spacing(theme::SPACE_4),
+            "The smallest machine this image will boot",
+            iced_widget::tooltip::Position::Bottom,
         ),
-        ty.data(
-            format!(
-                "Image minimum: {} CPUs · {} MiB RAM · {} MiB disk",
-                state.form_hardware.minimum.cpus,
-                state.form_hardware.minimum.memory_mib,
-                state.form_hardware.minimum.disk_mib
-            ),
-            theme::TEXT_MUTED
+        kit::icon_label(
+            ty,
+            Icon::Settings,
+            "Configure hardware",
+            widgets::Button::Secondary,
+            state
+                .importing
+                .is_none()
+                .then_some(wrap(MachineMessage::ConfigureNew(true))),
         ),
-        button(ty.control("Configure hardware"))
-            .height(ty.control_height())
-            .padding([8, 14])
-            .style(widgets::button_style(widgets::Button::Secondary))
-            .on_press_maybe(
-                (state.importing.is_none()).then_some(wrap(MachineMessage::ConfigureNew(true)))
-            ),
         ty.label("Project folder · optional", theme::TEXT_MUTED),
         text_input("/path/to/project", &state.form_workspace)
             .on_input_maybe(
@@ -1411,26 +1547,24 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
     ]
     .spacing(12);
     if state.importing.is_none() {
-        form = form.push(
-            button(ty.control("Create machine"))
-                .height(ty.control_height())
-                .padding([8, 14])
-                .style(widgets::button_style(widgets::Button::Primary))
-                .on_press_maybe(create_action),
-        );
+        form = form.push(kit::icon_label(
+            ty,
+            Icon::Plus,
+            "Create machine",
+            widgets::Button::Primary,
+            create_action,
+        ));
     }
     form
 }
 
 fn new_hardware(state: &State, ty: Typography) -> UiElement<'_> {
     widgets::scroll(column![
-            ty.body("New machine hardware",23.,theme::TEXT),
-            ty.body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
+            kit::lead(ty, Icon::Cpu, ty.body("New machine hardware", 21., theme::TEXT),
+                Some("Start with half your physical cores and memory. Adjust the allocation to suit this image.")),
             crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some(),ty),
-            button(ty.control("Done"))
-                .height(ty.control_height()).padding([8,14])
-                .style(widgets::button_style(widgets::Button::Primary))
-                .on_press_maybe((!state.hardware_busy && state.importing.is_none())
+            kit::icon_label(ty, Icon::Check, "Done", widgets::Button::Primary,
+                (!state.hardware_busy && state.importing.is_none())
                     .then_some(wrap(MachineMessage::FinishHardware))),
         ].spacing(18)).height(Length::Fill).into()
 }
@@ -1439,24 +1573,29 @@ fn edit_hardware<'a>(state: &'a State, config: &MachineConfig, ty: Typography) -
     let (_, draft) = state.edit_hardware.as_ref().unwrap();
     widgets::scroll(
         column![
-            ty.data(format!("Configure {}", config.name), theme::TEXT)
-                .size(ty.size(23.)),
+            kit::lead(
+                ty,
+                Icon::Cpu,
+                ty.data(format!("Configure {}", config.name), theme::TEXT)
+                    .size(ty.size(21.)),
+                None,
+            ),
             crate::hardware::view(draft, &state.host, true, state.hardware_busy, ty),
             row![
-                button(ty.control("Save hardware"))
-                    .height(ty.control_height())
-                    .padding([8, 14])
-                    .style(widgets::button_style(widgets::Button::Primary))
-                    .on_press_maybe(
-                        (!state.hardware_busy).then_some(wrap(MachineMessage::SaveHardware))
-                    ),
-                button(ty.control("Cancel"))
-                    .height(ty.control_height())
-                    .padding([8, 14])
-                    .style(widgets::button_style(widgets::Button::Secondary))
-                    .on_press_maybe(
-                        (!state.hardware_busy).then_some(wrap(MachineMessage::CancelHardware))
-                    ),
+                kit::icon_label(
+                    ty,
+                    Icon::Check,
+                    "Save hardware",
+                    widgets::Button::Primary,
+                    (!state.hardware_busy).then_some(wrap(MachineMessage::SaveHardware)),
+                ),
+                kit::icon_label(
+                    ty,
+                    Icon::Close,
+                    "Cancel",
+                    widgets::Button::Secondary,
+                    (!state.hardware_busy).then_some(wrap(MachineMessage::CancelHardware)),
+                ),
             ]
             .spacing(8),
         ]
@@ -1466,17 +1605,25 @@ fn edit_hardware<'a>(state: &'a State, config: &MachineConfig, ty: Typography) -
     .into()
 }
 
+/// The way back to the machine library: a glyph, named by its tooltip.
+fn back<'a>(ty: Typography) -> UiElement<'a> {
+    kit::icon_button(
+        ty,
+        Icon::Back,
+        "All machines",
+        widgets::Button::Secondary,
+        Some(wrap(MachineMessage::OpenLibrary)),
+    )
+}
+
 fn action<'a>(
     ty: Typography,
+    icon: Icon,
     label: &'static str,
     style: widgets::Button,
     message: MachineMessage,
-) -> iced_widget::Button<'a, Message, iced_core::Theme, crate::AxUi> {
-    button(ty.control(label))
-        .height(ty.control_height())
-        .padding([0, 12])
-        .style(widgets::button_style(style))
-        .on_press(wrap(message))
+) -> UiElement<'a> {
+    kit::icon_label(ty, icon, label, style, Some(wrap(message)))
 }
 
 fn instance<'a>(
@@ -1485,12 +1632,7 @@ fn instance<'a>(
     ty: Typography,
     appearance: &iced_core::Theme,
 ) -> PageColumn<'a> {
-    let controls = action(
-        ty,
-        "All machines",
-        widgets::Button::Secondary,
-        MachineMessage::OpenLibrary,
-    );
+    let controls = back(ty);
     if state
         .edit_hardware
         .as_ref()
@@ -1507,52 +1649,97 @@ fn instance<'a>(
     }
 
     let running = state.running.get(&config.name);
-    let (status, tone) =
-        running.map_or(("Stopped", theme::TEXT_MUTED), |run| stage_label(run.stage));
-    let mut header = row![
-        controls,
-        ty.data(config.name.as_str(), theme::TEXT)
-            .size(ty.size(23.))
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
-        ty.badge(status, tone),
-    ];
+    let status = machine_status(running);
+    // Who this is, and how it is doing.
+    let mut state_line = row![kit::status(ty, status)]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center);
+    if let Some(steps) = status.steps {
+        state_line = state_line.push(crate::motion::steps(steps, ty.size(80.), ty.size(6.)));
+    }
+    let plate = ty.size(44.);
+    let identity = row![
+        container(crate::visuals::icon(
+            Icon::Machine,
+            if running.is_some() {
+                status.tone
+            } else {
+                theme::TEXT_MUTED
+            },
+            plate * 0.5,
+        ))
+        .center(plate)
+        .style(move |appearance| if running.is_some() {
+            theme::tinted(appearance, status.tone, 0.13, 0.30, theme::RADIUS_MD)
+        } else {
+            widgets::well(appearance)
+        }),
+        column![
+            ty.data(config.name.as_str(), theme::TEXT)
+                .size(ty.size(20.))
+                .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+            state_line,
+        ]
+        .spacing(theme::SPACE_1 + 2.),
+    ]
+    .spacing(theme::SPACE_4 - 2.)
+    .align_y(alignment::Vertical::Center);
+    // What can be done with it, set against the right edge.
+    let mut actions = row![]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Center);
     if running.is_some() {
-        header = header.push(action(
+        actions = actions.push(action(
             ty,
+            Icon::Stop,
             "Stop",
             widgets::Button::Danger,
             MachineMessage::Stop(config.name.clone()),
         ));
     } else {
-        header = header
-            .push(action(
+        actions = actions
+            .push(kit::icon_button(
                 ty,
+                Icon::Settings,
                 "Hardware",
                 widgets::Button::Secondary,
-                MachineMessage::EditHardware(config.name.clone()),
+                Some(wrap(MachineMessage::EditHardware(config.name.clone()))),
             ))
-            .push(action(
+            .push(kit::icon_button(
                 ty,
+                Icon::Window,
                 "Start in a window",
                 widgets::Button::Secondary,
-                MachineMessage::Start(config.name.clone(), true),
+                Some(wrap(MachineMessage::Start(config.name.clone(), true))),
             ))
-            .push(action(
+            .push(kit::tip_text(
                 ty,
-                "Start headless",
-                widgets::Button::Primary,
-                MachineMessage::Start(config.name.clone(), false),
+                action(
+                    ty,
+                    Icon::Play,
+                    "Start",
+                    widgets::Button::Primary,
+                    MachineMessage::Start(config.name.clone(), false),
+                ),
+                "Start headless, without a display window",
+                iced_widget::tooltip::Position::Bottom,
             ));
     }
+    let header: UiElement<'_> = container(
+        row![controls, identity, space::horizontal(), actions]
+            .spacing(theme::SPACE_4)
+            .align_y(alignment::Vertical::Center),
+    )
+    .padding([theme::SPACE_2 + 4., theme::SPACE_4])
+    .width(Length::Fill)
+    .style(widgets::card)
+    .into();
     static DEFAULT: std::sync::LazyLock<tiles::Workspace<Tile>> =
         std::sync::LazyLock::new(workspace);
     let workspace = state.layouts.get(&config.name).unwrap_or(&DEFAULT);
     let terminal = crate::console::Presentation::tile(ty, appearance);
     column![
-        header
-            .spacing(theme::SPACE_2)
-            .align_y(alignment::Vertical::Center)
-            .wrap(),
+        header,
         container(workspace.view(
             ty,
             |tile| {
@@ -1567,7 +1754,7 @@ fn instance<'a>(
                 info
             },
             |tile| match tile {
-                Tile::Overview => overview(config, ty),
+                Tile::Overview => overview(state, config, ty),
                 Tile::BootActivity => boot_activity(state, &config.name, ty),
                 Tile::Console => console_tile(state, &config.name, terminal),
                 Tile::Plugins => state.plugins.machine(&config.name, ty),
@@ -1582,64 +1769,165 @@ fn instance<'a>(
     ]
 }
 
-fn overview(config: &MachineConfig, ty: Typography) -> UiElement<'_> {
-    let data = |value| {
-        ty.data(value, theme::TEXT_SECONDARY)
-            .wrapping(iced_core::text::Wrapping::WordOrGlyph)
+/// A machine at a glance: what it holds of the host, as three metric cards;
+/// what it boots, as detail wells whose long values truncate (the whole of one
+/// is a tooltip away); and what it can do, as glyph chips.
+fn overview<'a>(state: &'a State, config: &'a MachineConfig, ty: Typography) -> UiElement<'a> {
+    let metric = |content: UiElement<'a>| -> UiElement<'a> {
+        container(content)
+            .padding([theme::SPACE_4, theme::SPACE_2])
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .style(widgets::well)
+            .into()
     };
+    let host = state.host.as_ref().ok();
+    let memory_gib = f64::from(config.memory_mib) / 1024.;
+    let disk_gib = config.disk_mib as f64 / 1024.;
+    // A share of the host's, when the host is known; the figure alone when not.
+    let cpu = match host.filter(|host| host.logical_cpus > 0) {
+        Some(host) => kit::gauge(
+            ty,
+            Icon::Cpu,
+            share(f64::from(config.cpus), host.logical_cpus as f64),
+            load_tone(f64::from(config.cpus), host.logical_cpus as f64),
+            config.cpus.to_string(),
+            "CPUs",
+            format!("of {}", host.logical_cpus),
+        ),
+        None => kit::tile_stat(ty, Icon::Cpu, config.cpus.to_string(), "CPUs", "allocated"),
+    };
+    let memory = match host.filter(|host| host.memory_mib > 0) {
+        Some(host) => {
+            let total = host.memory_mib as f64;
+            kit::gauge(
+                ty,
+                Icon::Memory,
+                share(f64::from(config.memory_mib), total),
+                load_tone(f64::from(config.memory_mib), total),
+                format!("{memory_gib:.1} GiB"),
+                "Memory",
+                format!("of {:.0} GiB", total / 1024.),
+            )
+        }
+        None => kit::tile_stat(
+            ty,
+            Icon::Memory,
+            format!("{memory_gib:.1} GiB"),
+            "Memory",
+            "allocated",
+        ),
+    };
+    let disk = kit::tile_stat(
+        ty,
+        Icon::Volume,
+        format!("{disk_gib:.1} GiB"),
+        "Disk",
+        "allocated",
+    );
+
+    // A detail: its glyph and name, then its value on one line, cut in the
+    // middle when it does not fit, with the whole of it as a tooltip.
+    let detail = |icon, title, value: String| -> UiElement<'a> {
+        let shown = ty
+            .data(value.clone(), theme::TEXT_SECONDARY)
+            .width(Length::Fill)
+            .wrapping(iced_core::text::Wrapping::None)
+            .ellipsis(iced_core::text::Ellipsis::Middle);
+        container(
+            column![
+                kit::heading(ty, icon, title),
+                kit::tip(
+                    shown,
+                    ty.data(value, theme::TEXT)
+                        .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                    iced_widget::tooltip::Position::Top,
+                ),
+            ]
+            .spacing(theme::SPACE_1 + 2.),
+        )
+        .padding(theme::SPACE_2 + 4.)
+        .width(Length::Fill)
+        .style(widgets::well)
+        .into()
+    };
+
+    let resources = &config.resources;
+    let mut features = row![
+        kit::feature(ty, Icon::Cpu, "CPU pinning", resources.pin_cpus),
+        kit::feature(
+            ty,
+            Icon::Activity,
+            "Native waits",
+            resources.cpu_power_management
+        ),
+        kit::feature(ty, Icon::Lock, "Memory pinning", resources.pin_memory),
+    ]
+    .spacing(theme::SPACE_2);
+    for (icon, label) in topology(resources) {
+        features = features.push(kit::figure(ty, icon, label));
+    }
+    let hardware: UiElement<'a> = container(
+        column![
+            kit::heading(ty, Icon::Settings, "Hardware"),
+            features.wrap().vertical_spacing(theme::SPACE_2),
+        ]
+        .spacing(theme::SPACE_2),
+    )
+    .padding(theme::SPACE_2 + 4.)
+    .width(Length::Fill)
+    .style(widgets::well)
+    .into();
+
     let mut details = column![
-        data(format!(
-            "{} CPUs · {:.1} GiB RAM · {:.1} GiB disk",
-            config.cpus,
-            f64::from(config.memory_mib) / 1024.,
-            config.disk_mib as f64 / 1024.
-        )),
-        ty.label("Boot image", theme::TEXT_MUTED),
-        data(config.iso.display().to_string()),
-        ty.label("SHA-256", theme::TEXT_MUTED),
-        data(
+        row![metric(cpu), metric(memory), metric(disk)].spacing(theme::SPACE_2),
+        detail(Icon::File, "Boot image", config.iso.display().to_string()),
+        detail(
+            Icon::Hash,
+            "SHA-256",
             config
                 .iso_sha256
-                .as_deref()
-                .unwrap_or("Recorded after the first boot")
-                .to_owned()
+                .clone()
+                .unwrap_or_else(|| "Recorded after the first boot".to_owned()),
         ),
-        ty.label("Hardware", theme::TEXT_MUTED),
-        data(
-            format!(
-                "CPU pinning: {} · native waits: {} · memory pinning: {} · preferred pages: {}",
-                if config.resources.pin_cpus {
-                    "on"
-                } else {
-                    "off"
-                },
-                if config.resources.cpu_power_management {
-                    "on"
-                } else {
-                    "off"
-                },
-                if config.resources.pin_memory {
-                    "on"
-                } else {
-                    "off"
-                },
-                config.resources.pages.label()
-            ) + &topology_summary(&config.resources)
-        ),
+        hardware,
     ]
     .spacing(theme::SPACE_2);
     if let Some(workspace) = &config.workspace {
-        details = details
-            .push(ty.label("Project folder", theme::TEXT_MUTED))
-            .push(data(format!(
+        details = details.push(detail(
+            Icon::Folder,
+            "Project folder",
+            format!(
                 "{} → ~{}/{} ({:?})",
                 workspace.root.display(),
                 workspace.face,
                 workspace.name,
                 workspace.writeback
-            )));
+            ),
+        ));
     }
     widgets::scroll(details).height(Length::Fill).into()
+}
+
+/// What share `used` is of `total`, for a ring: never outside zero to one,
+/// and zero for a total that is not a quantity.
+fn share(used: f64, total: f64) -> f32 {
+    if total > 0.0 && used.is_finite() {
+        (used / total).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
+}
+
+/// A ring is the accent while there is room, and warns when the machine
+/// claims most of the host: that is the point at which a second machine, or
+/// the host itself, starts to feel it.
+fn load_tone(used: f64, total: f64) -> theme::Tone {
+    if share(used, total) > 0.75 {
+        theme::WARNING
+    } else {
+        theme::MAGENTA
+    }
 }
 
 fn boot_activity<'a>(state: &'a State, name: &str, ty: Typography) -> UiElement<'a> {
@@ -1655,11 +1943,18 @@ fn boot_activity<'a>(state: &'a State, name: &str, ty: Typography) -> UiElement<
         contents = contents.push(ty.data(finished.summary.as_str(), theme::TEXT_MUTED));
     }
     if log.is_empty() {
-        contents = contents.push(ty.body(
-            "Boot activity appears after you start the machine.",
-            13.,
-            theme::TEXT_MUTED,
-        ));
+        contents = contents.push(
+            row![
+                crate::visuals::icon(Icon::Activity, theme::TEXT_MUTED, ty.size(16.)),
+                ty.body(
+                    "Boot activity appears after you start the machine.",
+                    13.,
+                    theme::TEXT_MUTED,
+                ),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_y(alignment::Vertical::Center),
+        );
     } else {
         // Log lines were escaped when the worker recorded them.
         contents = contents.push(
@@ -1703,17 +1998,24 @@ fn console_tile<'a>(
     {
         return crate::console::view(transcript, terminal);
     }
-    container(ty.body(
-        if state.running.contains_key(name) {
-            "Waiting for the guest console…"
-        } else {
-            "Start the machine to connect to its console."
-        },
-        14.,
-        theme::TEXT_MUTED,
-    ))
-    .center(Length::Fill)
-    .into()
+    if state.running.contains_key(name) {
+        // Something is on its way: a turning mark, not a sentence.
+        return container(
+            column![
+                crate::motion::beacon(Beat::Spin, theme::TEXT_SECONDARY, ty.size(28.)),
+                ty.body("Waiting for the guest console…", 14., theme::TEXT_MUTED),
+            ]
+            .spacing(theme::SPACE_2)
+            .align_x(alignment::Horizontal::Center),
+        )
+        .center(Length::Fill)
+        .into();
+    }
+    ty.empty_state(
+        Icon::Terminal,
+        "No console yet",
+        "Start the machine to connect to its console.",
+    )
 }
 
 fn console_pane<'a>(
@@ -1726,31 +2028,45 @@ fn console_pane<'a>(
 ) -> UiElement<'a> {
     let ty = terminal.ty;
     let enabled = !closing && console.connected();
-    let mut pane =
-        column![
-            row![
-                ty.badge(
-                    if console.connected() {
-                        "Connected"
-                    } else {
-                        "Disconnected"
-                    },
-                    if console.connected() {
-                        theme::SUCCESS
-                    } else {
-                        theme::TEXT_MUTED
-                    }
-                )
-            ]
-            .align_y(alignment::Vertical::Center),
-            crate::console::interactive(console.output(), name, enabled, focused, terminal),
-            ty.body(
-                format!("Click to type · Ctrl+Shift+V / Cmd+V to paste · Ctrl+Shift+Esc releases the keyboard · {} × {}", console.output().cols, console.output().rows),
-                12.,
-                theme::TEXT_MUTED
+    let connection = if console.connected() {
+        Status {
+            beat: Beat::Pulse,
+            tone: theme::SUCCESS,
+            label: "connected",
+            steps: None,
+        }
+    } else {
+        Status {
+            beat: Beat::Hollow,
+            tone: theme::TEXT_MUTED,
+            label: "disconnected",
+            steps: None,
+        }
+    };
+    let output = console.output();
+    // One line of what to do now; the whole of it is a tooltip away.
+    let hint = if focused {
+        "Ctrl+Shift+Esc releases the keyboard"
+    } else {
+        "Click the terminal to type"
+    };
+    let mut pane = column![
+        row![
+            kit::status(ty, connection),
+            space::horizontal(),
+            kit::tip_text(
+                ty,
+                kit::figure(ty, Icon::Keyboard, hint),
+                "Click to type · Ctrl+Shift+V / Cmd+V pastes · Ctrl+Shift+Esc releases the keyboard",
+                iced_widget::tooltip::Position::Top,
             ),
+            kit::figure(ty, Icon::Terminal, format!("{} × {}", output.cols, output.rows)),
         ]
-        .spacing(12);
+        .spacing(theme::SPACE_4)
+        .align_y(alignment::Vertical::Center),
+        crate::console::interactive(output, name, enabled, focused, terminal),
+    ]
+    .spacing(12);
     if let Some(error) = console
         .error()
         .or_else(|| (!running.console_error.is_empty()).then_some(running.console_error.as_str()))
@@ -1764,29 +2080,31 @@ fn console_pane<'a>(
         .into()
 }
 
-/// The guest layout, network mode, and accelerator assignments.
-fn topology_summary(resources: &vkore_vm::hardware::Resources) -> String {
-    let mut devices: Vec<_> = resources
-        .passthrough
-        .iter()
-        .map(|s| format!("NPU {}", s.address))
-        .collect();
-    devices.extend(
-        resources
-            .gpu_vfs
-            .iter()
-            .map(|s| format!("GPU {} VF {}", s.physical_function, s.index + 1)),
-    );
+/// The guest's page size, layout, network and accelerator assignments, each
+/// with the glyph that says what kind of thing it is.
+fn topology(resources: &vkore_vm::hardware::Resources) -> Vec<(Icon, String)> {
     let layout = match resources.guest_numa {
         vkore_vm::hardware::GuestNuma::Single => "1 NUMA node",
         vkore_vm::hardware::GuestNuma::Split => "2 NUMA nodes",
     };
-    let network = resources.network.label();
-    if devices.is_empty() {
-        format!(" · {layout} · {network}")
-    } else {
-        format!(" · {layout} · {network} · {}", devices.join(", "))
-    }
+    let mut parts = vec![
+        (Icon::Memory, resources.pages.label().to_owned()),
+        (Icon::Dashboard, layout.to_owned()),
+        (Icon::Network, resources.network.label().to_owned()),
+    ];
+    parts.extend(
+        resources
+            .passthrough
+            .iter()
+            .map(|s| (Icon::Plugin, format!("NPU {}", s.address))),
+    );
+    parts.extend(resources.gpu_vfs.iter().map(|s| {
+        (
+            Icon::Plugin,
+            format!("GPU {} VF {}", s.physical_function, s.index + 1),
+        )
+    }));
+    parts
 }
 
 #[cfg(test)]

@@ -183,6 +183,7 @@ pub fn view(
     widgets::page_frame(
         column![
             ty.page_header(
+                crate::visuals::Icon::Settings,
                 "Settings",
                 "Personalize your workspace and connect your tools."
             ),

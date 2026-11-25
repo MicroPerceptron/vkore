@@ -1,6 +1,9 @@
 //! A collapsible navigation rail with an always-reachable account summary.
 use crate::{
-    Message, Page, UiElement, account, fonts, splash, theme,
+    Message, Page, UiElement, account, fonts,
+    kit::{self, Status},
+    motion::{self, Beat},
+    splash, theme,
     typography::Typography,
     visuals::{self, Icon},
     widgets,
@@ -27,15 +30,7 @@ pub fn view<'a>(
     ty: Typography,
 ) -> UiElement<'a> {
     let tip = |content: UiElement<'a>, label: UiElement<'a>| -> UiElement<'a> {
-        tooltip(
-            content,
-            // Iced supplies an unbounded viewport to tooltip contents. Keep
-            // text clips finite, as required by Axiom's display-list contract.
-            container(label).padding(8).style(widgets::card).clip(true),
-            tooltip::Position::Right,
-        )
-        .gap(10)
-        .into()
+        kit::tip(content, label, tooltip::Position::Right)
     };
     let toggle = button(visuals::icon(
         if collapsed {
@@ -109,13 +104,17 @@ pub fn view<'a>(
                 .align_y(alignment::Vertical::Center)
                 .into()
         };
-        let control = button(content)
-            .height(44)
-            .padding([0, 12])
-            .width(Length::Fill)
-            .style(widgets::button_style(widgets::Button::Navigation(active)))
-            .on_press(Message::Show(page))
-            .into();
+        let kind = widgets::Button::Navigation(active);
+        let control = kit::lift(
+            kind,
+            true,
+            button(content)
+                .height(44)
+                .padding([0, 12])
+                .width(Length::Fill)
+                .style(widgets::button_style_fading(kind))
+                .on_press(Message::Show(page)),
+        );
         if collapsed {
             tip(control, ty.body(label, 12., theme::TEXT).into())
         } else {
@@ -132,26 +131,55 @@ pub fn view<'a>(
         .push(nav("Plugins", Page::Plugins, Icon::Plugin))
         .push(iced_widget::space::vertical())
         .push(nav("Settings", Page::Settings, Icon::Settings));
+    // Machines running are alive, so the mark pulses; none running is an
+    // outline that holds still.
+    let fleet = Status {
+        beat: if running == 0 {
+            Beat::Hollow
+        } else {
+            Beat::Pulse
+        },
+        tone: if running == 0 {
+            theme::TEXT_MUTED
+        } else {
+            theme::SUCCESS
+        },
+        label: if running == 0 { "idle" } else { "running" },
+        steps: None,
+    };
     let running_label = if running == 0 {
         "No machines running".to_owned()
     } else {
         format!("{running} running")
     };
-    let running_tone = if running == 0 {
-        theme::TEXT_MUTED
-    } else {
-        theme::SUCCESS
-    };
     if collapsed {
         rail = rail.push(tip(
-            container(ty.badge(format!("{running}"), running_tone))
-                .center_x(Length::Fill)
-                .padding([8, 0])
-                .into(),
+            container(
+                column![
+                    motion::beacon(fleet.beat, fleet.tone, ty.size(14.)),
+                    ty.body(format!("{running}"), 11., fleet.tone),
+                ]
+                .spacing(theme::SPACE_1)
+                .align_x(alignment::Horizontal::Center),
+            )
+            .center_x(Length::Fill)
+            .padding([8, 0])
+            .into(),
             ty.body(running_label, 12., theme::TEXT).into(),
         ));
     } else {
-        rail = rail.push(container(ty.badge(running_label, running_tone)).padding([10, 0]));
+        rail = rail.push(
+            container(kit::status_as(
+                ty,
+                fleet,
+                if running == 0 {
+                    "idle".to_owned()
+                } else {
+                    format!("{running} running")
+                },
+            ))
+            .padding([10, 0]),
+        );
     }
     let signed_in = account.email.is_some();
     let label = if account.pending {
@@ -219,13 +247,16 @@ pub fn view<'a>(
         .into(),
     ));
     if !status.is_empty() {
+        let alert = visuals::icon(Icon::Alert, theme::ERROR, ty.size(18.));
         rail = rail.push(if collapsed {
             tip(
-                ty.badge("!", theme::ERROR),
+                container(alert).center_x(Length::Fill).into(),
                 ty.data(status, theme::ERROR).into(),
             )
         } else {
-            ty.data(status, theme::ERROR).into()
+            row![alert, ty.data(status, theme::ERROR).width(Length::Fill)]
+                .spacing(theme::SPACE_2)
+                .into()
         });
     }
     let version = ty.body(

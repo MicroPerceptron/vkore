@@ -131,16 +131,33 @@ impl Typography {
             .style(theme::text(theme::TEXT))
     }
 
+    /// A page's title, led by the glyph that is also its place in the
+    /// navigation, so the page and its entry read as one thing.
     pub fn page_header<'a>(
         self,
+        icon: crate::visuals::Icon,
         title: &'static str,
         subtitle: &'static str,
     ) -> crate::UiElement<'a> {
-        column![
-            self.display(title),
-            self.body(subtitle, theme::SIZE_SM, theme::TEXT_MUTED)
+        let plate = self.size(48.);
+        row![
+            container(crate::visuals::icon(icon, theme::MAGENTA, plate * 0.5))
+                .center(plate)
+                .style(|appearance| theme::tinted(
+                    appearance,
+                    theme::MAGENTA,
+                    0.13,
+                    0.35,
+                    theme::RADIUS_LG
+                )),
+            column![
+                self.display(title),
+                self.body(subtitle, theme::SIZE_SM, theme::TEXT_MUTED)
+            ]
+            .spacing(6),
         ]
-        .spacing(6)
+        .spacing(theme::SPACE_4)
+        .align_y(alignment::Vertical::Center)
         .into()
     }
 

@@ -1,7 +1,13 @@
 //! Hardware form. Admission and defaults live in vkored; this module only
 //! edits a draft and presents the current host snapshot.
 use crate::typography::Typography;
-use crate::{Message, UiElement, machines::MachineMessage, theme, widgets};
+use crate::{
+    Message, UiElement, kit,
+    machines::MachineMessage,
+    theme,
+    visuals::{self, Icon},
+    widgets,
+};
 use iced_core::{Length, alignment};
 use iced_widget::{button, column, container, row, slider, space, text_input, toggler};
 use vkore_vm::hardware::{GuestNuma, HostResources, NetworkMode, PageSize, Resources};
@@ -287,17 +293,83 @@ fn placement(host: &HostResources, kind: Option<&str>, count: u16) -> Vec<u32> {
         .take(usize::from(count))
         .collect()
 }
+/// A choice among alternatives, lifted on hover; the chosen one is tinted.
 fn action(
     ty: Typography,
     label: &str,
     message: Option<Message>,
     selected: bool,
 ) -> UiElement<'static> {
-    button(ty.body(label.to_owned(), 13., theme::TEXT))
-        .padding([7, 10])
-        .style(widgets::button_style(widgets::Button::Choice(selected)))
-        .on_press_maybe(message)
-        .into()
+    let kind = widgets::Button::Choice(selected);
+    kit::lift(
+        kind,
+        message.is_some(),
+        button(ty.body(label.to_owned(), 13., theme::TEXT))
+            .padding([7, 10])
+            .style(widgets::button_style_fading(kind))
+            .on_press_maybe(message),
+    )
+}
+/// A block that calls something out: a glyph, then its text, on a faint wash
+/// of the tone it speaks in.
+fn callout<'a>(
+    ty: Typography,
+    icon: Icon,
+    tone: theme::Tone,
+    content: impl Into<UiElement<'a>>,
+) -> UiElement<'a> {
+    container(
+        row![
+            container(visuals::icon(icon, tone, ty.size(14.))).padding([2, 0]),
+            container(content).width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_2)
+        .align_y(alignment::Vertical::Top),
+    )
+    .padding([theme::SPACE_2, theme::SPACE_2 + 2.])
+    .width(Length::Fill)
+    .style(move |appearance| theme::tinted(appearance, tone, 0.09, 0.22, theme::RADIUS_MD))
+    .into()
+}
+/// An explanation: small, muted, led by an info glyph.
+fn note(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
+    row![
+        container(visuals::icon(Icon::Info, theme::TEXT_MUTED, ty.size(13.))).padding([2, 0]),
+        ty.body(text.into(), 12., theme::TEXT_MUTED)
+            .width(Length::Fill),
+    ]
+    .spacing(theme::SPACE_2)
+    .align_y(alignment::Vertical::Top)
+    .into()
+}
+/// Something to be careful about.
+fn caution(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
+    callout(
+        ty,
+        Icon::Alert,
+        theme::WARNING,
+        ty.body(text.into(), 12., theme::WARNING),
+    )
+}
+/// Something that has to be fixed.
+fn problem(ty: Typography, text: impl Into<String>) -> UiElement<'static> {
+    callout(
+        ty,
+        Icon::Alert,
+        theme::ERROR,
+        ty.body(text.into(), 12., theme::ERROR),
+    )
+}
+/// A caution whose words come from outside (the host, a driver): they go
+/// through the data face.
+fn caution_data<'a>(ty: Typography, text: impl Into<std::borrow::Cow<'a, str>>) -> UiElement<'a> {
+    callout(
+        ty,
+        Icon::Alert,
+        theme::WARNING,
+        ty.data(text, theme::WARNING)
+            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+    )
 }
 fn switch(
     ty: Typography,
@@ -316,20 +388,57 @@ fn switch(
         .on_toggle_maybe(available.then_some(move |_| message.clone()))
         .into()
 }
+/// A section's surface: a recess in the editor's card.
+fn section_style(appearance: &iced_core::Theme) -> iced_widget::container::Style {
+    theme::panel(
+        appearance,
+        theme::PANEL_FILE,
+        Some(theme::SEPARATOR),
+        theme::RADIUS_LG,
+    )
+}
 fn section<'a>(content: impl Into<UiElement<'a>>) -> UiElement<'a> {
     container(content)
         .padding(16)
         .width(Length::Fill)
-        .style(|appearance| {
-            theme::panel(appearance, theme::PANEL_FILE, Some(theme::SEPARATOR), 10.)
-        })
+        .style(section_style)
         .into()
 }
-fn heading(ty: Typography, title: &'static str, value: String) -> UiElement<'static> {
+/// What a section is about, as the glyph that leads its title.
+fn section_icon(title: &str) -> Icon {
+    match title {
+        "Networking" => Icon::Network,
+        "Processors" => Icon::Cpu,
+        "Memory" => Icon::Memory,
+        "Storage" => Icon::Volume,
+        _ => Icon::Plugin,
+    }
+}
+/// A section's title with its glyph on an accent plate.
+fn title(ty: Typography, text: &'static str) -> UiElement<'static> {
+    let plate = ty.size(30.);
     row![
-        ty.body(title, 18., theme::TEXT),
+        container(visuals::icon(
+            section_icon(text),
+            theme::MAGENTA,
+            plate * 0.55
+        ))
+        .center(plate)
+        .style(|appearance| {
+            theme::tinted(appearance, theme::MAGENTA, 0.13, 0.30, theme::RADIUS_MD)
+        }),
+        ty.body(text, 17., theme::TEXT),
+    ]
+    .spacing(theme::SPACE_2 + 2.)
+    .align_y(alignment::Vertical::Center)
+    .into()
+}
+/// A section's title and its current value, as a chip at the far edge.
+fn heading(ty: Typography, text: &'static str, value: String) -> UiElement<'static> {
+    row![
+        title(ty, text),
         space::horizontal(),
-        ty.badge(value, theme::TEXT),
+        kit::chip(ty, section_icon(text), value, theme::TEXT),
     ]
     .align_y(alignment::Vertical::Center)
     .spacing(12)
@@ -350,13 +459,22 @@ pub fn view<'a>(
     let mut cpu = column![
         heading(ty, "Processors", format!("{} guest CPUs", draft.cpus)),
         ty.data(&host.cpu_name, theme::TEXT_SECONDARY),
-        ty.data(
-            format!(
-                "{} physical cores · {} logical CPUs",
-                host.physical_cores, host.logical_cpus
+        row![
+            kit::chip(
+                ty,
+                Icon::Cpu,
+                format!("{} physical cores", host.physical_cores),
+                theme::TEXT_SECONDARY
             ),
-            theme::TEXT_MUTED
-        ),
+            kit::chip(
+                ty,
+                Icon::Activity,
+                format!("{} logical CPUs", host.logical_cpus),
+                theme::TEXT_SECONDARY
+            ),
+        ]
+        .spacing(theme::SPACE_2)
+        .wrap(),
     ]
     .spacing(12);
     if !host.core_summary.is_empty() {
@@ -365,24 +483,26 @@ pub fn view<'a>(
     cpu = cpu
         .push(
             row![
-                action(
+                kit::icon_button(
                     ty,
-                    "−",
+                    Icon::Minus,
+                    "Fewer CPUs",
+                    widgets::Button::Secondary,
                     (!busy && draft.cpus > draft.minimum.cpus)
                         .then(|| send(Change::Cpus(draft.cpus.saturating_sub(1)))),
-                    false
                 ),
                 slider(draft.minimum.cpus..=max_cpu, draft.cpus, move |n| send(
                     Change::Cpus(n)
                 ))
                 .step(1u16)
                 .style(widgets::resource_slider),
-                action(
+                kit::icon_button(
                     ty,
-                    "+",
+                    Icon::Plus,
+                    "More CPUs",
+                    widgets::Button::Secondary,
                     (!busy && draft.cpus < max_cpu)
                         .then(|| send(Change::Cpus(draft.cpus.saturating_add(1)))),
-                    false
                 ),
             ]
             .spacing(14)
@@ -413,12 +533,12 @@ pub fn view<'a>(
         !busy && (draft.resources.cpu_power_management
             || draft.recommended_cpu_waits(host)),
         send(Change::CpuPowerManagement),
-    )).push(ty.body("Enabled automatically with KVM and CPU pinning when supported. Also lets the guest manage idle states; other work sharing these cores may see higher latency.", 12., theme::TEXT_MUTED));
+    )).push(note(ty, "Enabled automatically with KVM and CPU pinning when supported. Also lets the guest manage idle states; other work sharing these cores may see higher latency."));
     if let Err(reason) = &host.cpu_power_management {
         cpu = cpu.push(ty.data(reason, theme::TEXT_MUTED));
     }
     if host.cpu_pinning {
-        cpu = cpu.push(ty.body("Keep each guest CPU on a chosen host thread. Pinning does not reserve the core exclusively.", 12., theme::TEXT_MUTED));
+        cpu = cpu.push(note(ty, "Keep each guest CPU on a chosen host thread. Pinning does not reserve the core exclusively."));
         if draft.resources.pin_cpus {
             cpu = cpu.push(action(
                 ty,
@@ -455,7 +575,7 @@ pub fn view<'a>(
                     }
                 }
                 cpu = cpu.push(presets.wrap())
-                    .push(ty.body(format!("Select threads to adjust the CPU count. Keep at least {} selected. Siblings share one physical core.", draft.minimum.cpus), 12., theme::TEXT_MUTED));
+                    .push(note(ty, format!("Select threads to adjust the CPU count. Keep at least {} selected. Siblings share one physical core.", draft.minimum.cpus)));
                 let mut groups = std::collections::BTreeMap::new();
                 for core in &host.cores {
                     groups
@@ -515,16 +635,22 @@ pub fn view<'a>(
                             .padding(10)
                             .width(158)
                             .style(move |appearance| {
-                                theme::panel(
-                                    appearance,
-                                    theme::PANEL,
-                                    Some(if selected > 0 {
-                                        theme::BORDER
-                                    } else {
-                                        theme::SEPARATOR
-                                    }),
-                                    8.,
-                                )
+                                if selected > 0 {
+                                    theme::tinted(
+                                        appearance,
+                                        theme::MAGENTA,
+                                        0.08,
+                                        0.35,
+                                        theme::RADIUS_MD,
+                                    )
+                                } else {
+                                    theme::panel(
+                                        appearance,
+                                        theme::PANEL,
+                                        Some(theme::SEPARATOR),
+                                        theme::RADIUS_MD,
+                                    )
+                                }
                             }),
                         );
                     }
@@ -545,48 +671,50 @@ pub fn view<'a>(
                 );
             }
             if draft.resources.host_cpus.len() != usize::from(draft.cpus) {
-                cpu = cpu.push(ty.body("This saved selection no longer matches the CPU count. Choose a placement preset or adjust the count.", 12., theme::WARNING));
+                cpu = cpu.push(caution(ty, "This saved selection no longer matches the CPU count. Choose a placement preset or adjust the count."));
             }
         }
     } else {
-        cpu = cpu.push(ty.body("macOS manages core placement. You can adjust the CPU count; exact pinning is unavailable.", 12., theme::TEXT_MUTED));
+        cpu = cpu.push(note(ty, "macOS manages core placement. You can adjust the CPU count; exact pinning is unavailable."));
     }
     container(
         column![
             row![
-                action(
+                kit::icon_label(
                     ty,
+                    Icon::Check,
                     "Use recommended settings",
+                    widgets::Button::Secondary,
                     (!busy).then(|| send(Change::Defaults)),
-                    false
                 ),
-                action(
+                kit::icon_label(
                     ty,
+                    Icon::Refresh,
                     "Refresh host",
+                    widgets::Button::Secondary,
                     (!busy).then_some(Message::Machine(MachineMessage::RefreshHardware)),
-                    false
-                )
+                ),
             ]
             .spacing(8)
             .wrap(),
             section(column![
-                ty.body("Networking", 18., theme::TEXT),
-                row([NetworkMode::Isolated, NetworkMode::E1000e].map(|mode| action(
+                title(ty, "Networking"),
+                row([NetworkMode::Isolated, NetworkMode::E1000e].map(|mode| kit::icon_label(
                     ty,
+                    match mode {
+                        NetworkMode::Isolated => Icon::Lock,
+                        NetworkMode::E1000e => Icon::Network,
+                    },
                     mode.label(),
+                    widgets::Button::Choice(draft.resources.network == mode),
                     (!busy).then(|| send(Change::Network(mode))),
-                    draft.resources.network == mode,
                 )))
                 .spacing(6)
                 .wrap(),
-                ty.body(
-                    match draft.resources.network {
+                note(ty, match draft.resources.network {
                         NetworkMode::Isolated => "Guest traffic stays inside the virtual network.",
                         NetworkMode::E1000e => "Uses the host network for outbound IPv4. The guest image needs IPv4 support.",
-                    },
-                    12.,
-                    theme::TEXT_MUTED,
-                ),
+                    }),
             ].spacing(12)),
             section(cpu),
             memory_view(draft, host, editing, busy, ty),
@@ -657,21 +785,31 @@ pub(crate) fn memory_view<'a>(
         )
         .step(ram_step)
         .style(widgets::resource_slider),
-        ty.data(
-            format!(
-                "{:.1} GiB physical · {:.1} GiB free",
-                host.memory_mib as f64 / 1024.,
-                host.free_memory_mib as f64 / 1024.
+        row![
+            kit::chip(
+                ty,
+                Icon::Memory,
+                format!("{:.1} GiB physical", host.memory_mib as f64 / 1024.),
+                theme::TEXT_SECONDARY
             ),
-            theme::TEXT_MUTED
-        ),
-        ty.data(
-            format!(
-                "{:.1} GiB free or reclaimable (OS estimate)",
-                host.available_memory_mib as f64 / 1024.
+            kit::chip(
+                ty,
+                Icon::Check,
+                format!("{:.1} GiB free", host.free_memory_mib as f64 / 1024.),
+                theme::TEXT_SECONDARY
             ),
-            theme::TEXT_MUTED
-        ),
+            kit::chip(
+                ty,
+                Icon::Info,
+                format!(
+                    "{:.1} GiB reclaimable (OS estimate)",
+                    host.available_memory_mib as f64 / 1024.
+                ),
+                theme::TEXT_SECONDARY
+            ),
+        ]
+        .spacing(theme::SPACE_2)
+        .wrap(),
         switch(
             ty,
             "Pin memory in RAM",
@@ -685,34 +823,31 @@ pub(crate) fn memory_view<'a>(
     if draft.memory_mib < draft.minimum.memory_mib
         || u64::from(draft.memory_mib) > host.memory_mib.min(1 << 20)
     {
-        memory = memory.push(ty.body(
+        memory = memory.push(problem(
+            ty,
             format!(
                 "Enter {:.2}–{:.2} GiB, within the image minimum and host RAM.",
                 f64::from(draft.minimum.memory_mib) / 1024.,
                 host.memory_mib.min(1 << 20) as f64 / 1024.
             ),
-            12.,
-            theme::ERROR,
         ));
     } else if !draft.memory_mib.is_multiple_of(ram_step) {
-        memory = memory.push(ty.body(
+        memory = memory.push(problem(
+            ty,
             format!("This page size and memory layout require multiples of {ram_step} MiB."),
-            12.,
-            theme::ERROR,
         ));
     }
     if draft.resources.pages == PageSize::System
         && u64::from(draft.memory_mib) > host.available_memory_mib
     {
-        memory = memory.push(ty.body(if draft.resources.pin_memory {
+        memory = memory.push(caution(ty, if draft.resources.pin_memory {
             "Not enough available RAM to pin this allocation. Reduce it or close other workloads."
-        } else { "This exceeds currently available RAM. The host may swap; reduce the allocation or close other workloads." }, 12., theme::WARNING));
+        } else { "This exceeds currently available RAM. The host may swap; reduce the allocation or close other workloads." }));
     }
     if !host.memory_pinning {
-        memory = memory.push(ty.body(
+        memory = memory.push(note(
+            ty,
             "Memory locking is unavailable in QEMU on this host.",
-            12.,
-            theme::TEXT_MUTED,
         ));
     } else if (!draft.resources.passthrough.is_empty()
         || !draft.resources.gpu_vfs.is_empty()
@@ -725,19 +860,18 @@ pub(crate) fn memory_view<'a>(
             .is_ok_and(|budget| n < budget)
         })
     {
-        memory = memory.push(ty.body(
+        memory = memory.push(note(
+            ty,
             "Permissions are checked when you finish. System authorization appears only if needed.",
-            12.,
-            theme::TEXT_MUTED,
         ));
     }
-    memory = memory.push(ty.label("Guest memory layout", theme::TEXT_MUTED))
+    memory = memory.push(kit::heading(ty, Icon::Dashboard, "Guest memory layout"))
         .push(row![
             action(ty, "Single node", (!busy).then(|| send(Change::GuestNuma(GuestNuma::Single))), draft.resources.guest_numa == GuestNuma::Single),
             action(ty, "Two nodes", (!busy).then(|| send(Change::GuestNuma(GuestNuma::Split))), draft.resources.guest_numa == GuestNuma::Split),
         ].spacing(6).wrap())
-        .push(ty.body("Single node keeps all guest RAM together for inference. Two nodes preserves the Kore gate topology and divides RAM equally.", 12., theme::TEXT_MUTED));
-    memory = memory.push(ty.label("Preferred host pages", theme::TEXT_MUTED));
+        .push(note(ty, "Single node keeps all guest RAM together for inference. Two nodes preserves the Kore gate topology and divides RAM equally."));
+    memory = memory.push(kit::heading(ty, Icon::Memory, "Preferred host pages"));
     let mut pages = row![action(
         ty,
         &format!("Automatic · {} KiB", host.system_page_bytes / 1024),
@@ -754,10 +888,7 @@ pub(crate) fn memory_view<'a>(
                 draft.resources.pages == page,
             ));
         }
-        memory = memory.push(pages.wrap()).push(ty.body(
-            "At launch, vKore compacts memory and tries this page size. If full coverage is unavailable, it uses 2 MiB transparent hugepages where possible and system pages for the rest. Your RAM size and guest layout stay unchanged; boot activity reports the result.",
-            12., theme::TEXT_MUTED,
-        ));
+        memory = memory.push(pages.wrap()).push(note(ty, "At launch, vKore compacts memory and tries this page size. If full coverage is unavailable, it uses 2 MiB transparent hugepages where possible and system pages for the rest. Your RAM size and guest layout stay unchanged; boot activity reports the result."));
         for page in [PageSize::Huge2M, PageSize::Huge1G] {
             if !host.huge_available(page, draft.memory_mib) {
                 let reason = match host.hugepages.iter().find(|pool| pool.page == page) {
@@ -769,29 +900,24 @@ pub(crate) fn memory_view<'a>(
                     ),
                     None => format!("{}: not supported by this host kernel.", page.label()),
                 };
-                memory = memory.push(ty.body(reason, 12., theme::TEXT_MUTED));
+                memory = memory.push(note(ty, reason));
             }
         }
     } else {
-        memory = memory.push(pages.wrap()).push(ty.body(
-            "Automatic uses this host's native pages. QEMU's explicit 2 MiB and 1 GiB hugepage backing requires Linux; it is unavailable on this host.",
-            12., theme::TEXT_MUTED,
-        ));
+        memory = memory.push(pages.wrap()).push(note(ty, "Automatic uses this host's native pages. QEMU's explicit 2 MiB and 1 GiB hugepage backing requires Linux; it is unavailable on this host."));
         if draft.resources.pages != PageSize::System {
-            memory = memory.push(ty.body(
+            memory = memory.push(caution(
+                ty,
                 format!(
                     "Saved choice: {}. Choose Automatic to use this machine on this host.",
                     draft.resources.pages.label()
                 ),
-                12.,
-                theme::WARNING,
             ));
         }
     }
-    memory = memory.push(ty.body(
+    memory = memory.push(note(
+        ty,
         "This controls host memory backing, not page sizes inside Kore.",
-        12.,
-        theme::TEXT_MUTED,
     ));
     for node in &host.memory_nodes {
         memory = memory.push(ty.data(
@@ -808,9 +934,7 @@ pub(crate) fn memory_view<'a>(
         .id("hardware-memory")
         .padding(16)
         .width(Length::Fill)
-        .style(|appearance| {
-            theme::panel(appearance, theme::PANEL_FILE, Some(theme::SEPARATOR), 10.)
-        })
+        .style(section_style)
         .into()
 }
 
@@ -831,10 +955,9 @@ pub(crate) fn storage_view<'a>(
     )]
     .spacing(12);
     if draft.storage_fixed {
-        storage = storage.push(ty.body(
+        storage = storage.push(note(
+            ty,
             "Disk size and reservation are fixed after first launch.",
-            12.,
-            theme::TEXT_MUTED,
         ));
     } else {
         let minimum = draft.minimum.disk_mib as u32;
@@ -873,43 +996,43 @@ pub(crate) fn storage_view<'a>(
                 ty.body(format!("Up to {:.1} GiB", f64::from(max_disk) / 1024.), 12., theme::TEXT_MUTED),
             ])
             .push(presets.wrap())
-            .push(ty.body("Allow room for model weights and working files. Size can be changed until first launch.", 12., theme::TEXT_MUTED))
+            .push(note(ty, "Allow room for model weights and working files. Size can be changed until first launch."))
             .push(switch(ty, "Reserve disk space", draft.resources.reserve_storage, !busy, send(Change::Reserve)));
         if draft.disk_mib < draft.minimum.disk_mib
             || draft.disk_mib > vkored::hardware::MAX_DISK_MIB
         {
-            storage = storage.push(ty.body(
+            storage = storage.push(problem(
+                ty,
                 format!(
                     "Enter a capacity from {:.1} to 4096 GiB.",
                     draft.minimum.disk_mib as f64 / 1024.
                 ),
-                12.,
-                theme::ERROR,
             ));
         } else if draft.disk_mib > host.storage_available_mib {
-            storage = storage.push(ty.body(if draft.resources.reserve_storage {
+            storage = storage.push(caution(ty, if draft.resources.reserve_storage {
                 "Not enough free space to reserve this disk. Reduce its size, free space, or turn off reservation."
             } else {
                 "This sparse disk can grow beyond currently free space. Free more space before filling it; guest writes can fail if the host runs out."
-            }, 12., theme::WARNING));
+            }));
         }
     }
     storage = storage
-        .push(ty.data(
+        .push(kit::chip(
+            ty,
+            Icon::Check,
             format!(
                 "{:.1} GiB free on the storage filesystem",
                 host.storage_available_mib as f64 / 1024.
             ),
-            theme::TEXT_MUTED,
+            theme::TEXT_SECONDARY,
         ))
-        .push(ty.body(
+        .push(note(
+            ty,
             if draft.resources.reserve_storage {
                 "Reserves space at first launch and requests contiguous placement where supported."
             } else {
                 "Sparse allocation uses space as data is written; capacity is not reserved."
             },
-            12.,
-            theme::TEXT_MUTED,
         ))
         .push(action(
             ty,
@@ -958,10 +1081,10 @@ pub(crate) fn gpu_inventory<'a>(
             Change::Gpu(selection, enabled),
         ))
     };
-    let mut content = column![ty.body("Graphics processors", 18., theme::TEXT),
-        ty.body("Give this guest a GPU virtual function while the host keeps its display. Managed SR-IOV currently supports Linux Intel xe GPUs.", 12., theme::TEXT_MUTED)].spacing(12);
+    let mut content = column![title(ty, "Graphics processors"),
+        note(ty, "Give this guest a GPU virtual function while the host keeps its display. Managed SR-IOV currently supports Linux Intel xe GPUs.")].spacing(12);
     for warning in &host.gpus.warnings {
-        content = content.push(ty.data(warning, theme::WARNING));
+        content = content.push(caution_data(ty, warning));
     }
     let parents: Vec<_> = host
         .gpus
@@ -970,14 +1093,13 @@ pub(crate) fn gpu_inventory<'a>(
         .filter(|g| g.pci.physical_function.is_none())
         .collect();
     if parents.is_empty() {
-        content = content.push(ty.body(
+        content = content.push(note(
+            ty,
             if cfg!(target_os = "linux") {
                 "No PCI GPUs were reported. Refresh the host after configuring its GPU driver."
             } else {
                 "GPU SR-IOV assignment is available on Linux."
             },
-            12.,
-            theme::TEXT_MUTED,
         ));
     }
     for gpu in parents {
@@ -1018,22 +1140,24 @@ pub(crate) fn gpu_inventory<'a>(
             next.index += 1;
             card = card.push(
                 row![
-                    action(
+                    kit::icon_button(
                         ty,
-                        "−",
+                        Icon::Minus,
+                        "Previous virtual function",
+                        widgets::Button::Secondary,
                         (!busy && selection.index > 0).then(|| send(previous, true)),
-                        false
                     ),
                     ty.body(
                         format!("Virtual function {}", selection.index + 1),
                         13.,
                         theme::TEXT
                     ),
-                    action(
+                    kit::icon_button(
                         ty,
-                        "+",
+                        Icon::Plus,
+                        "Next virtual function",
+                        widgets::Button::Secondary,
                         (!busy && selection.index + 1 < limit).then(|| send(next, true)),
-                        false
                     )
                 ]
                 .spacing(10)
@@ -1052,10 +1176,10 @@ pub(crate) fn gpu_inventory<'a>(
                             theme::TEXT_SECONDARY,
                         ))
                     }
-                    Err(reason) => card = card.push(ty.data(reason, theme::WARNING)),
+                    Err(reason) => card = card.push(caution_data(ty, reason)),
                 }
             }
-            card = card.push(ty.body("Permissions are requested on Done/Save and launch. Created VFs remain on the host until reboot; finish setup again to recreate them. Existing pools are never resized or removed.", 12., theme::TEXT_MUTED));
+            card = card.push(note(ty, "Permissions are requested on Done/Save and launch. Created VFs remain on the host until reboot; finish setup again to recreate them. Existing pools are never resized or removed."));
         }
         if let Err(reason) = eligible {
             card = card.push(ty.data(reason, theme::TEXT_MUTED));
@@ -1076,9 +1200,9 @@ pub(crate) fn gpu_inventory<'a>(
         {
             content = content.push(
                 column![
-                    ty.data(
-                        format!("Saved GPU {} is missing.", saved.physical_function),
-                        theme::WARNING
+                    caution_data(
+                        ty,
+                        format!("Saved GPU {} is missing.", saved.physical_function)
                     ),
                     switch(
                         ty,
@@ -1105,24 +1229,26 @@ pub(crate) fn npu_inventory<'a>(
     use vkore_vm::devices::DiscoveryStatus;
     let mut content = column![
         row![
-            ty.body("Neural processors", 18., theme::TEXT),
+            title(ty, "Neural processors"),
             space::horizontal(),
-            ty.badge(
+            kit::chip(
+                ty,
+                match inventory.status {
+                    DiscoveryStatus::Complete => Icon::Check,
+                    DiscoveryStatus::Partial => Icon::Alert,
+                    DiscoveryStatus::Unavailable => Icon::Info,
+                },
                 match inventory.status {
                     DiscoveryStatus::Complete => format!("{} detected", inventory.devices.len()),
                     DiscoveryStatus::Partial =>
                         format!("{} reported · incomplete", inventory.devices.len()),
                     DiscoveryStatus::Unavailable => "Discovery unavailable".into(),
                 },
-                theme::TEXT_MUTED
+                theme::TEXT_SECONDARY
             )
         ]
         .align_y(alignment::Vertical::Center),
-        ty.body(
-            "Assign a Linux NPU exclusively to this guest. Shared accelerator connections are not available yet.",
-            12.,
-            theme::TEXT_MUTED
-        ),
+        note(ty, "Assign a Linux NPU exclusively to this guest. Shared accelerator connections are not available yet."),
     ]
     .spacing(12);
     if inventory.devices.is_empty() {
@@ -1134,7 +1260,7 @@ pub(crate) fn npu_inventory<'a>(
             }, 13., theme::TEXT_SECONDARY));
     }
     for warning in &inventory.warnings {
-        content = content.push(ty.data(warning, theme::WARNING));
+        content = content.push(caution_data(ty, warning));
     }
     for device in &inventory.devices {
         let mut card = column![
@@ -1161,11 +1287,9 @@ pub(crate) fn npu_inventory<'a>(
                     Change::Passthrough(selection),
                 )),
             ));
-            card = card.push(ty.body(
-                "While the guest runs, this NPU is unavailable to host apps. vKore restores its host driver after shutdown. Passthrough locks guest RAM for DMA even when memory pinning is off. Setup and launch may request system authentication.",
-                12., theme::TEXT_MUTED));
+            card = card.push(note(ty, "While the guest runs, this NPU is unavailable to host apps. vKore restores its host driver after shutdown. Passthrough locks guest RAM for DMA even when memory pinning is off. Setup and launch may request system authentication."));
             if let Err(reason) = eligibility {
-                card = card.push(ty.data(reason, theme::WARNING));
+                card = card.push(caution_data(ty, reason));
             }
         }
         if let Some(cores) = device.core_count {
@@ -1210,14 +1334,21 @@ pub(crate) fn npu_inventory<'a>(
         for route in vkored::hardware::npu_routes(device) {
             card = card.push(
                 column![
-                    row![
-                        ty.body(route.name, 13., theme::TEXT_SECONDARY),
-                        ty.badge(route.status.label(), theme::TEXT_MUTED)
-                    ]
+                    row![ty.body(route.name, 13., theme::TEXT_SECONDARY), {
+                        use vkored::hardware::AccessStatus::*;
+                        let (icon, tone) = match route.status {
+                            Configurable => (Icon::Check, theme::SUCCESS),
+                            Pending => (Icon::Info, theme::TEXT_SECONDARY),
+                            NeedsSetup => (Icon::Alert, theme::WARNING),
+                            Unavailable => (Icon::Close, theme::TEXT_MUTED),
+                            Unknown => (Icon::Info, theme::TEXT_MUTED),
+                        };
+                        kit::chip(ty, icon, route.status.label(), tone)
+                    }]
                     .align_y(alignment::Vertical::Center)
                     .spacing(ty.size(theme::SPACE_2))
                     .wrap(),
-                    ty.body(route.detail, 12., theme::TEXT_MUTED),
+                    note(ty, route.detail),
                 ]
                 .spacing(4),
             );
@@ -1236,7 +1367,7 @@ pub(crate) fn npu_inventory<'a>(
             .any(|d| vkore_vm::passthrough::Selection::from_device(d).as_ref() == Some(*s))
     }) {
         content = content.push(column![
-            ty.data(format!("Saved NPU {} is missing or changed. Disable it to use this configuration on the current host.",selection.address), theme::WARNING),
+            caution_data(ty, format!("Saved NPU {} is missing or changed. Disable it to use this configuration on the current host.",selection.address)),
             switch(ty, "Full passthrough", true, !busy, Message::Machine(MachineMessage::Hardware(editing, Change::Passthrough(selection.clone())))),
         ].spacing(8));
     }

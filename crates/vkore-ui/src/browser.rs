@@ -334,12 +334,14 @@ impl Pane {
                 row![
                     plugin_view::control(
                         ty,
+                        crate::visuals::Icon::Back,
                         "Back",
                         (page.can_go_back && !self.pending).then(|| emit(Action::Back(id)))
                     ),
                     address,
                     plugin_view::control(
                         ty,
+                        crate::visuals::Icon::Forward,
                         "Go",
                         (page.controls.navigate && !self.pending)
                             .then(|| emit(Action::Navigate(id)))

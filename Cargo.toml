@@ -9,6 +9,7 @@ members = [
     "crates/vkored",
     "crates/iced-renderer-compat",
     "crates/vkore-ui",
+    "crates/vkore-servo-wire",
     "crates/vkore-vm",
     "crates/vkore-devices",
     "crates/vkore-volume",

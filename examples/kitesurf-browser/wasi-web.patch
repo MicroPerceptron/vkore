@@ -1,0 +1,148 @@
+--- a/packages/core/src/wasi.rs
++++ b/packages/core/src/wasi.rs
+@@ -5,7 +5,8 @@
+ //! Host-independent access to Kitesurf's document and rasterizer.
+
+ use crate::{DomHandle, NodeData, paint::screenshot};
+-pub use crate::resources::fonts::register_ua_fonts;
++pub use crate::resources::{fonts::register_ua_fonts, net::set_wasi_fetcher};
++pub use url::Url;
+
+ impl DomHandle {
+     pub fn element_attribute(&self, node_id: u32, tag: Option<&str>, name: &str) -> Option<String> {
+@@ -24,15 +25,31 @@
+             .map(|attr| attr.value.to_string())
+     }
+
+-    pub fn paint_rgba(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
++    pub fn paint_rgba(
++        &self,
++        width: u32,
++        height: u32,
++        scroll_y: f64,
++    ) -> Result<(Vec<u8>, u32), String> {
+         self.prepare_for_paint(width, height);
+         self.resolve_layout();
+-        screenshot::paint_document_to_image(
++        let max_scroll = u32::try_from(self.query_selector("html").unwrap_or(-1))
++            .ok()
++            .and_then(|root| self.read_scroll_info(root))
++            .map_or(0.0, |info| {
++                (info.client_height + info.scroll_height - f64::from(height)).max(0.0)
++            });
++        let scroll_y = scroll_y.clamp(0.0, max_scroll).round() as u32;
++        self.set_page_scroll(0.0, f64::from(scroll_y));
++        screenshot::paint_document_to_image_scrolled(
+             self.doc.borrow_mut().as_mut(),
+             width,
+             height,
+             screenshot::ImageFormat::Rgba,
+             80,
++            (0, scroll_y),
++            false,
+         )
++        .map(|pixels| (pixels, scroll_y))
+     }
+ }
+--- a/packages/core/src/resources/net.rs
++++ b/packages/core/src/resources/net.rs
+@@ -12,6 +12,19 @@
+ use wasm_bindgen::prelude::*;
+
+ use crate::resources::fonts::strip_fetched_font_for_session;
++
++#[cfg(target_os = "wasi")]
++type WasiFetcher = fn(&str, &str) -> Option<Vec<u8>>;
++
++#[cfg(target_os = "wasi")]
++thread_local! {
++    static WASI_FETCHER: std::cell::Cell<Option<WasiFetcher>> = const { std::cell::Cell::new(None) };
++}
++
++#[cfg(target_os = "wasi")]
++pub fn set_wasi_fetcher(fetch: WasiFetcher) {
++    WASI_FETCHER.set(Some(fetch));
++}
+
+ const MAX_RESOURCE_EXTENSION_BYTES: usize = 8;
+
+@@ -72,32 +85,46 @@
+             return;
+         }
+
+-        if cfg!(target_os = "wasi") || !(url.starts_with("http://") || url.starts_with("https://")) {
+-            settle_unfetchable(handler, url, infer_resource_kind(&request));
++        #[cfg(target_os = "wasi")]
++        {
++            let kind = infer_resource_kind(&request);
++            if let Some(bytes) = WASI_FETCHER.get().and_then(|fetch| fetch(&url, kind)) {
++                handler.bytes(url, Bytes::from(bytes));
++            } else {
++                settle_unfetchable(handler, url, kind);
++            }
+             return;
+         }
+
+-        let id = {
+-            let mut next = self.next_id.lock().expect("net_provider next_id");
+-            let id = *next;
+-            *next = next.wrapping_add(1).max(1);
+-            id
+-        };
+-        let kind = infer_resource_kind(&request);
++        #[cfg(not(target_os = "wasi"))]
+         {
+-            let mut pending = self.pending.lock().expect("net_provider pending");
+-            pending.insert(
+-                id,
+-                PendingRequest {
+-                    handler,
+-                    url: url.clone(),
+-                    kind,
+-                },
+-            );
+-        }
+-
+-        let cors_mode = cors_mode_from_content_type(&request);
+-        js_fetch_resource(id, &url, kind, cors_mode);
++            if !(url.starts_with("http://") || url.starts_with("https://")) {
++                settle_unfetchable(handler, url, infer_resource_kind(&request));
++                return;
++            }
++
++            let id = {
++                let mut next = self.next_id.lock().expect("net_provider next_id");
++                let id = *next;
++                *next = next.wrapping_add(1).max(1);
++                id
++            };
++            let kind = infer_resource_kind(&request);
++            {
++                let mut pending = self.pending.lock().expect("net_provider pending");
++                pending.insert(
++                    id,
++                    PendingRequest {
++                        handler,
++                        url: url.clone(),
++                        kind,
++                    },
++                );
++            }
++
++            let cors_mode = cors_mode_from_content_type(&request);
++            js_fetch_resource(id, &url, kind, cors_mode);
++        }
+     }
+ }
+
+--- a/packages/core/src/layout/scroll.rs
++++ b/packages/core/src/layout/scroll.rs
+@@ -69,7 +69,7 @@
+     scroll_width: f64,
+     pub(crate) scroll_height: f64,
+     client_width: f64,
+-    client_height: f64,
++    pub(crate) client_height: f64,
+     client_top: f64,
+     client_left: f64,
+     content_width: f64,

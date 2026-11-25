@@ -22,6 +22,8 @@ mod navigation;
 mod plugin_view;
 mod plugins;
 mod render_backend;
+#[cfg(feature = "browser-preview")]
+mod servo_browser;
 mod settings;
 mod splash;
 mod theme;
@@ -153,7 +155,10 @@ impl Model {
                 use plugins::Action;
                 let on_expected_page = match &action {
                     #[cfg(feature = "browser-preview")]
-                    Action::OpenBrowser(name, _) | Action::Browser(name, _, _) => {
+                    Action::OpenBrowser(name, _)
+                    | Action::Browser(name, _, _)
+                    | Action::OpenServo(name)
+                    | Action::Servo(name, _, _) => {
                         self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
                     }
                     Action::Load(name, _) | Action::Reload(name, _) | Action::Unload(name, _) => {
@@ -353,6 +358,8 @@ impl App {
             )
         }) {
             self.model.machines.unfocus_console();
+            #[cfg(feature = "browser-preview")]
+            self.model.machines.plugins.blur_browser();
         }
         let size = logical_size(window);
         let mut interface = UserInterface::build(

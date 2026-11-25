@@ -45,6 +45,10 @@ pub enum Action {
     OpenBrowser(String, Source),
     #[cfg(feature = "browser-preview")]
     Browser(String, TileId, crate::browser::Action),
+    #[cfg(feature = "browser-preview")]
+    OpenServo(String),
+    #[cfg(feature = "browser-preview")]
+    Servo(String, TileId, crate::servo_browser::Action),
 }
 
 #[derive(Debug)]
@@ -59,9 +63,14 @@ pub type TileId = u64;
 #[cfg(feature = "browser-preview")]
 struct BrowserTile {
     machine: String,
-    source: Source,
     id: TileId,
-    content: crate::browser::Pane,
+    content: BrowserContent,
+}
+
+#[cfg(feature = "browser-preview")]
+enum BrowserContent {
+    Wasm(Source, crate::browser::Pane),
+    Servo(crate::servo_browser::Pane),
 }
 
 #[derive(Default)]
@@ -86,9 +95,10 @@ impl State {
         }
         self.status_machine = match &action {
             #[cfg(feature = "browser-preview")]
-            Action::OpenBrowser(machine, _) | Action::Browser(machine, _, _) => {
-                Some(machine.clone())
-            }
+            Action::OpenBrowser(machine, _)
+            | Action::Browser(machine, _, _)
+            | Action::OpenServo(machine)
+            | Action::Servo(machine, _, _) => Some(machine.clone()),
             Action::Load(machine, _) | Action::Reload(machine, _) | Action::Unload(machine, _) => {
                 Some(machine.clone())
             }
@@ -147,9 +157,8 @@ impl State {
                         Ok(content) => {
                             self.browser = Some(BrowserTile {
                                 machine,
-                                source,
                                 id: self.next_tile,
-                                content,
+                                content: BrowserContent::Wasm(source, content),
                             });
                             self.next_tile += 1;
                         }
@@ -162,7 +171,35 @@ impl State {
                 if let Some(tile) = &mut self.browser
                     && tile.machine == machine
                     && tile.id == id
-                    && tile.content.update(action)
+                    && let BrowserContent::Wasm(_, content) = &mut tile.content
+                    && content.update(action)
+                {
+                    self.browser = None;
+                }
+            }
+            #[cfg(feature = "browser-preview")]
+            Action::OpenServo(machine) => {
+                if self.browser.is_none() {
+                    match crate::servo_browser::Pane::open(proxy.clone()) {
+                        Ok(content) => {
+                            self.browser = Some(BrowserTile {
+                                machine,
+                                id: self.next_tile,
+                                content: BrowserContent::Servo(content),
+                            });
+                            self.next_tile += 1;
+                        }
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
+            }
+            #[cfg(feature = "browser-preview")]
+            Action::Servo(machine, id, action) => {
+                if let Some(tile) = &mut self.browser
+                    && tile.machine == machine
+                    && tile.id == id
+                    && let BrowserContent::Servo(content) = &mut tile.content
+                    && content.update(action)
                 {
                     self.browser = None;
                 }
@@ -289,19 +326,32 @@ impl State {
 
     #[cfg(feature = "browser-preview")]
     fn close_browser_for(&mut self, machine: &str, source: &Source) {
-        if self
-            .browser
-            .as_ref()
-            .is_some_and(|tile| tile.machine == machine && &tile.source == source)
-        {
+        if self.browser.as_ref().is_some_and(|tile| {
+            tile.machine == machine
+                && matches!(&tile.content, BrowserContent::Wasm(s, _) if s == source)
+        }) {
             self.browser = None;
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn blur_browser(&mut self) {
+        if let Some(BrowserTile {
+            content: BrowserContent::Servo(pane),
+            ..
+        }) = &mut self.browser
+        {
+            pane.blur();
         }
     }
 
     #[cfg(feature = "browser-preview")]
     pub fn receive_browser(&mut self) {
         if let Some(tile) = &mut self.browser {
-            tile.content.receive();
+            match &mut tile.content {
+                BrowserContent::Wasm(_, pane) => pane.receive(),
+                BrowserContent::Servo(pane) => pane.receive(),
+            }
         }
     }
 
@@ -339,9 +389,10 @@ impl State {
     #[cfg(feature = "browser-preview")]
     pub fn tile<'a>(&'a self, machine: &'a str, id: TileId, ty: Typography) -> UiElement<'a> {
         match &self.browser {
-            Some(tile) if tile.machine == machine && tile.id == id => {
-                tile.content.view(machine, id, ty)
-            }
+            Some(tile) if tile.machine == machine && tile.id == id => match &tile.content {
+                BrowserContent::Wasm(_, pane) => pane.view(machine, id, ty),
+                BrowserContent::Servo(pane) => pane.view(machine, id, ty),
+            },
             _ => iced_widget::space::vertical().into(),
         }
     }
@@ -431,6 +482,14 @@ impl State {
     pub fn machine<'a>(&'a self, machine: &'a str, ty: Typography) -> UiElement<'a> {
         let attached = self.attached.get(machine);
         let mut entries = column![].width(Length::Fill).spacing(theme::SPACE_2);
+        #[cfg(feature = "browser-preview")]
+        {
+            entries = entries.push(control(
+                ty,
+                "Open Servo browser",
+                (!self.busy && self.browser.is_none()).then(|| Action::OpenServo(machine.into())),
+            ));
+        }
         if let Some(attached) = attached {
             for (source, bundle) in attached {
                 let controls = row![

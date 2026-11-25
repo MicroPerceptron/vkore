@@ -1,0 +1,22 @@
+[package]
+name = "vkore-servo"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+# Servo and vkored require different native SQLite versions. The two programs
+# exchange only framed stdin/stdout messages, and resolve independently.
+[workspace]
+
+[dependencies]
+servo = { version = "=0.8.0", default-features = false, features = ["bundled", "js_jit", "webgl", "webgpu"] }
+gleam = "0.15"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+url = "2"
+winit = "0.30.13"
+vkore-servo-wire = { path = "../../crates/vkore-servo-wire" }
+
+[profile.dev]
+debug = 0
+incremental = false

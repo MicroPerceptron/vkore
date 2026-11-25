@@ -1,8 +1,8 @@
 # The desktop
 
 `vkore-ui` is vKore's desktop: Kore machines, and their volumes browsed from the
-host through Kore's own engine. It runs in-process (no daemon, no browser, no
-login) and shares its state with the `vkore` command line.
+host through Kore's own engine. The desktop shares its local machine state with
+the `vkore` command line. Signing in is optional for local use.
 
 ```sh
 vkore-ui [--state DIR] [--open DISK|@MACHINE] [--theme system|light|dark]
@@ -133,13 +133,37 @@ cargo run --locked -p vkore-ui --features gpu-canvas -- --gpu-canvas \
 The resulting file can also be added to the plugin library and attached to a
 machine. Use `--gpu-canvas` to execute it in the desktop preview.
 
+### Native Servo browser
+
+In a machine workspace, open **Plugins → Open Servo browser**. The tile works
+with a stopped machine. Enter an HTTPS address, click inside the page to type,
+or open a second tab. Each tab keeps its own page, history and form contents.
+The renderer name below the page comes from Servo’s active graphics context.
+
+Build the companion executable once and launch the desktop from the repo root:
+
+```sh
+cargo build --locked --manifest-path tools/servo-browser/Cargo.toml
+VKORE_SERVO="$PWD/tools/servo-browser/target/debug/vkore-servo" cargo run --locked --release -p vkore-ui
+```
+
+For distribution, place `vkore-servo` beside `vkore-ui`. The standard desktop
+starts the helper only when the browser tile opens. The helper uses the host's
+network and runs under the desktop user's account. It embeds native Servo 0.8
+and uses its own SQLite dependency. The machine's guest OS, network adapter,
+accelerator assignment and vKore download credentials are independent of it.
+
+One helper owns up to four WebViews. Navigation, input and frame notifications
+travel over private pipes. When a visible page changes, WebRender paints into
+an offscreen GL context and the desktop reads an RGBA frame for its Axiom tile.
+Frames follow the tile dimensions up to 1920 × 1080. Servo also enables the
+page-facing WebGPU API. Direct GPU texture sharing with Axiom is future work.
+
 ### Kitesurf browser sample
 
-The offline sample runs Kitesurf's HTML, CSS, layout, and rasterizer with a
-small Boa DOM bridge inside a WASI-P2 component. The desktop passes click
-coordinates to the component and displays the returned frames. The experiment
-uses two bundled pages, one-step back navigation, and a fixed 720×420 browser
-viewport that scales with the tile.
+Kitesurf lays out and renders webpages inside a WASI-P2 component. The
+desktop sends pointer input and displays the returned frames. The preview
+uses a 720×420 viewport that scales with the tile.
 
 Build the component from the pinned Kitesurf source with Node.js, Git, and the
 vKore Rust toolchain installed.
@@ -155,12 +179,16 @@ open a machine and use **Load → Open browser** in its **Plugins** tile. The
 browser opens alongside the other machine tiles. Move it by dragging the
 title bar, resize it with the divider, or expand it with **+**.
 
-Enter `index.html` or `about.html` in the address bar and press **Go** or
-Enter. **Update page** runs the page script, **About this demo** follows a
-link, and **Back** returns to the preceding page. **New tab** opens another
-WASI instance with independent page state. The preview allows up to four
-tabs that share the compiled browser. Older bundles still open and follow
-links. Rebuild the bundle from this checkout to enable the address bar.
+Enter a public HTTPS address or a domain such as `example.com` and press
+**Go** or Enter. Follow links by clicking the page and scroll with a wheel
+or trackpad. **Back** returns to the preceding page. **New tab** opens
+another WASI instance with independent page state, up to four tabs. The
+bundled pages remain available at `index.html` and `about.html`. Rebuild the
+bundle from this checkout to enable web navigation in an existing setup.
+
+The preview renders HTML, CSS, and common raster images. Websites that
+require JavaScript, forms, cookies, or sign-in can load incompletely. The
+bundled demo still runs its script through the Boa DOM bridge.
 
 The tile runs on the host with the machine stopped or running. The desktop
 allows one browser preview at a time. The standard desktop build includes
@@ -169,14 +197,17 @@ and shows that preview is disabled. The debug build can take about two
 minutes to compile the component on first open.
 
 The [browser WIT world](../crates/vkored/wit/browser/browser.wit) exchanges
-input and bounded RGBA frames. vKore grants the component no network or
-directories. The Kitesurf build uses WASI clocks and ships its fonts. A
-future native Kore host would need to implement the same presentation and
-input integration.
+input and bounded RGBA frames. A host import fetches HTTPS documents and
+supported resources with download limits and public-address checks on each
+connection. The component has no direct socket or filesystem access. A
+future native Kore host can implement the same fetch and presentation
+interfaces.
 
 To exercise the real component without a window, set `VKORE_TEST_BROWSER`
 to the component path and run
 `cargo test -p vkored --features browser-preview bundled_kitesurf_runs_script_and_follows_links`.
+Set `VKORE_TEST_BROWSER_WEBSITE` to a public HTTPS page address and run the
+`kitesurf_opens_a_public_https_page` test for a live navigation check.
 
 ## Volumes
 

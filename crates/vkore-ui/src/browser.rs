@@ -13,7 +13,7 @@ use iced_core::{Length, alignment};
 use iced_widget::{column, row, text_input};
 use iced_winit::winit::event_loop::EventLoopProxy;
 use vkored::{
-    browser::{BrowserFrame, Compiled, Operation, Session},
+    browser::{BrowserFrame, Compiled, MAX_ADDRESS, Operation, Session},
     plugins::Bundle,
 };
 
@@ -33,6 +33,7 @@ pub enum Action {
     Edit(TabId, String),
     Navigate(TabId),
     Click(TabId, u32, u32),
+    Scroll(TabId, i32),
     Back(TabId),
 }
 
@@ -41,20 +42,35 @@ enum Request {
     Close(TabId),
     Navigate(TabId, String),
     Click(TabId, u32, u32),
+    Scroll(TabId, i32),
     Back(TabId),
 }
 
 enum Reply {
-    Frame(TabId, BrowserFrame, bool),
+    Frame(TabId, BrowserFrame, Controls),
     Error(TabId, String, bool),
     Closed,
+}
+
+struct Controls {
+    navigate: bool,
+    scroll: bool,
+}
+
+impl Controls {
+    fn for_session(session: &Session) -> Self {
+        Self {
+            navigate: session.can_navigate(),
+            scroll: session.can_scroll(),
+        }
+    }
 }
 
 struct Page {
     image: plugin_view::Frame,
     location: String,
     can_go_back: bool,
-    can_navigate: bool,
+    controls: Controls,
 }
 
 #[derive(Default)]
@@ -115,9 +131,9 @@ impl Pane {
                                 });
                             match result {
                                 Ok((session, first)) => {
-                                    let can_navigate = session.can_navigate();
+                                    let controls = Controls::for_session(&session);
                                     sessions.insert(id, session);
-                                    Reply::Frame(id, first, can_navigate)
+                                    Reply::Frame(id, first, controls)
                                 }
                                 Err(error) => Reply::Error(id, error, true),
                             }
@@ -131,6 +147,9 @@ impl Pane {
                         }
                         Request::Click(id, x, y) => {
                             run(&mut sessions, id, |session| session.click(x, y))
+                        }
+                        Request::Scroll(id, dy) => {
+                            run(&mut sessions, id, |session| session.scroll(dy))
                         }
                         Request::Back(id) => run(&mut sessions, id, Session::back),
                     };
@@ -184,11 +203,11 @@ impl Pane {
         };
         self.pending = false;
         match reply {
-            Reply::Frame(id, frame, can_navigate) => {
+            Reply::Frame(id, frame, controls) => {
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     tab.address = fonts::shown(fonts::MONO, &frame.location, fonts::Breaks::Escape)
                         .into_owned();
-                    tab.status = if can_navigate {
+                    tab.status = if controls.navigate {
                         String::new()
                     } else {
                         "Rebuild this browser bundle to enable typed navigation.".into()
@@ -197,7 +216,7 @@ impl Pane {
                         image: plugin_view::Frame::rgba(frame.width, frame.height, frame.rgba),
                         location: frame.location,
                         can_go_back: frame.can_go_back,
-                        can_navigate,
+                        controls,
                     });
                 }
             }
@@ -241,7 +260,7 @@ impl Pane {
                     }
                 }
             }
-            Action::Edit(id, value) if self.active == id && value.len() <= 256 => {
+            Action::Edit(id, value) if self.active == id && value.len() <= MAX_ADDRESS => {
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     tab.address =
                         fonts::shown(fonts::MONO, &value, fonts::Breaks::Escape).into_owned();
@@ -249,13 +268,17 @@ impl Pane {
             }
             Action::Navigate(id) if self.active == id => {
                 if let Some(tab) = self.tabs.get(&id)
-                    && tab.page.as_ref().is_some_and(|page| page.can_navigate)
+                    && tab.page.as_ref().is_some_and(|page| page.controls.navigate)
+                    && self.send(Request::Navigate(id, tab.address.clone()))
                 {
-                    self.send(Request::Navigate(id, tab.address.clone()));
+                    self.tabs.get_mut(&id).expect("active tab").status = "Loading page…".into();
                 }
             }
             Action::Click(id, x, y) if self.active == id => {
                 self.send(Request::Click(id, x, y));
+            }
+            Action::Scroll(id, dy) if self.active == id => {
+                self.send(Request::Scroll(id, dy));
             }
             Action::Back(id) if self.active == id => {
                 self.send(Request::Back(id));
@@ -277,7 +300,12 @@ impl Pane {
         let strip = plugin_view::tabs(
             ty,
             self.tabs.iter().map(|(&id, tab)| {
-                let label = tab.page.as_ref().map_or("New tab", |page| &page.location);
+                let label = tab.page.as_ref().map_or("New tab", |page| {
+                    page.location
+                        .strip_prefix("https://")
+                        .and_then(|address| address.split(['/', '?', '#']).next())
+                        .unwrap_or(&page.location)
+                });
                 (id, label)
             }),
             id,
@@ -288,14 +316,14 @@ impl Pane {
         let tab = &self.tabs[&id];
         let mut content = column![strip].spacing(theme::SPACE_2).height(Length::Fill);
         if let Some(page) = &tab.page {
-            let address = text_input("Bundled page path", &tab.address)
+            let address = text_input("Website address", &tab.address)
                 .id(format!("browser-{tile}-{id}"))
                 .font(fonts::MONO)
                 .size(ty.size(theme::SIZE_SM))
                 .padding([7, 10])
                 .width(Length::Fill)
                 .style(widgets::field);
-            let address = if page.can_navigate {
+            let address = if page.controls.navigate {
                 address
                     .on_input(move |value| emit(Action::Edit(id, value)))
                     .on_submit(emit(Action::Navigate(id)))
@@ -313,7 +341,8 @@ impl Pane {
                     plugin_view::control(
                         ty,
                         "Go",
-                        (page.can_navigate && !self.pending).then(|| emit(Action::Navigate(id)))
+                        (page.controls.navigate && !self.pending)
+                            .then(|| emit(Action::Navigate(id)))
                     ),
                 ]
                 .align_y(alignment::Vertical::Center)
@@ -327,11 +356,19 @@ impl Pane {
             );
         }
         if let Some(page) = &tab.page {
-            content =
-                content
-                    .push(page.image.view(
-                        (!self.pending).then_some(move |x, y| emit(Action::Click(id, x, y))),
-                    ));
+            content = content.push(page.image.view(move |input| {
+                if self.pending {
+                    return None;
+                }
+                let action = match input {
+                    plugin_view::SurfaceInput::Click(x, y) => Action::Click(id, x, y),
+                    plugin_view::SurfaceInput::Scroll(dy) if page.controls.scroll => {
+                        Action::Scroll(id, dy)
+                    }
+                    plugin_view::SurfaceInput::Scroll(_) => return None,
+                };
+                Some(emit(action))
+            }));
         }
         content.into()
     }
@@ -346,11 +383,15 @@ fn run(
         return Reply::Error(id, "This tab has no active page.".into(), true);
     };
     match call(session) {
-        Ok(Ok(frame)) => Reply::Frame(id, frame, session.can_navigate()),
+        Ok(Ok(frame)) => Reply::Frame(id, frame, Controls::for_session(session)),
         Ok(Err(error)) => Reply::Error(id, error, false),
         Err(error) => {
             sessions.remove(&id);
-            Reply::Error(id, format!("{error:#}"), true)
+            Reply::Error(
+                id,
+                format!("The browser tab stopped. {}", error.root_cause()),
+                true,
+            )
         }
     }
 }

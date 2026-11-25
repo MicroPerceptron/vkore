@@ -53,6 +53,11 @@ pub struct Frame {
     size: Size,
 }
 
+pub enum SurfaceInput {
+    Click(u32, u32),
+    Scroll(i32),
+}
+
 impl Frame {
     pub fn rgba(width: u32, height: u32, pixels: Vec<u8>) -> Self {
         Self {
@@ -61,7 +66,10 @@ impl Frame {
         }
     }
 
-    pub fn view<'a>(&self, on_click: Option<impl Fn(u32, u32) -> Message + 'a>) -> UiElement<'a> {
+    pub fn view<'a>(
+        &self,
+        on_input: impl Fn(SurfaceInput) -> Option<Message> + 'a,
+    ) -> UiElement<'a> {
         stack![
             image(self.image.clone())
                 .content_fit(ContentFit::Contain)
@@ -69,7 +77,7 @@ impl Frame {
                 .height(Length::Fill),
             canvas(HitTarget {
                 size: self.size,
-                on_click
+                on_input,
             })
             .width(Length::Fill)
             .height(Length::Fill),
@@ -82,10 +90,12 @@ impl Frame {
 
 struct HitTarget<F> {
     size: Size,
-    on_click: Option<F>,
+    on_input: F,
 }
 
-impl<F: Fn(u32, u32) -> Message> canvas::Program<Message, Theme, AxUi> for HitTarget<F> {
+impl<F: Fn(SurfaceInput) -> Option<Message>> canvas::Program<Message, Theme, AxUi>
+    for HitTarget<F>
+{
     type State = ();
 
     fn update(
@@ -95,13 +105,6 @@ impl<F: Fn(u32, u32) -> Message> canvas::Program<Message, Theme, AxUi> for HitTa
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let on_click = self.on_click.as_ref()?;
-        if !matches!(
-            event,
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-        ) {
-            return None;
-        }
         let fitted = ContentFit::Contain.fit(self.size, bounds.size());
         let page = Rectangle {
             x: bounds.center_x() - fitted.width / 2.,
@@ -110,9 +113,27 @@ impl<F: Fn(u32, u32) -> Message> canvas::Program<Message, Theme, AxUi> for HitTa
             height: fitted.height,
         };
         let point = cursor.position_in(page)?;
-        let x = (point.x / fitted.width * self.size.width) as u32;
-        let y = (point.y / fitted.height * self.size.height) as u32;
-        Some(canvas::Action::publish(on_click(x, y)).and_capture())
+        let input = match event {
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let x = (point.x / fitted.width * self.size.width) as u32;
+                let y = (point.y / fitted.height * self.size.height) as u32;
+                SurfaceInput::Click(x, y)
+            }
+            canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let pixels = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y * 40.,
+                    mouse::ScrollDelta::Pixels { y, .. } => y * self.size.height / fitted.height,
+                };
+                let delta_y = -pixels.round() as i32;
+                if delta_y == 0 {
+                    return None;
+                }
+                SurfaceInput::Scroll(delta_y)
+            }
+            _ => return None,
+        };
+        let message = (self.on_input)(input)?;
+        Some(canvas::Action::publish(message).and_capture())
     }
 
     fn draw(

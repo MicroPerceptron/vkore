@@ -1,6 +1,20 @@
-package vkore:browser@0.2.0;
+package vkore:browser@0.3.0;
 
 world browser {
+    enum resource-kind {
+        document,
+        stylesheet,
+        image,
+    }
+
+    record response {
+        location: string,
+        bytes: list<u8>,
+    }
+
+    /// Fetch a public HTTPS resource through the host's browsing policy.
+    import fetch-https: func(address: string, kind: resource-kind) -> result<response, string>;
+
     record browser-frame {
         location: string,
         width: u32,
@@ -14,6 +28,8 @@ world browser {
     /// Click at a pixel in the most recent frame.
     export browser-click: func(x: u32, y: u32) -> result<browser-frame, string>;
     export browser-back: func() -> result<browser-frame, string>;
-    /// Navigate within the component's bundled pages.
-    export browser-navigate: func(path: string) -> result<browser-frame, string>;
+    /// Navigate to an address entered by the user.
+    export browser-navigate: func(address: string) -> result<browser-frame, string>;
+    /// Scroll vertically by viewport pixels.
+    export browser-scroll: func(delta-y: s32) -> result<browser-frame, string>;
 }

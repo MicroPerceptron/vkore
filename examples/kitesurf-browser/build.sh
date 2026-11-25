@@ -18,8 +18,11 @@ fi
 if [ "$(git -C "$checkout" rev-parse --verify HEAD 2>/dev/null || true)" != "$revision" ]; then
     git -C "$checkout" checkout --detach "$revision"
 fi
-if ! git -C "$checkout" apply --reverse --check "$demo/wasi-p2.patch" 2>/dev/null; then
-    git -C "$checkout" apply "$demo/wasi-p2.patch"
+if ! git -C "$checkout" apply --reverse --check "$demo/wasi-web.patch" 2>/dev/null; then
+    if ! git -C "$checkout" apply --reverse --check "$demo/wasi-p2.patch" 2>/dev/null; then
+        git -C "$checkout" apply "$demo/wasi-p2.patch"
+    fi
+    git -C "$checkout" apply "$demo/wasi-web.patch"
 fi
 
 package="$checkout/packages/vkore-kitesurf-browser"

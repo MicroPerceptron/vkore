@@ -6,6 +6,10 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::plugins::Bundle;
 
+mod web;
+
+pub use web::MAX_ADDRESS;
+
 #[derive(component::ComponentType, component::Lift)]
 #[component(record)]
 pub struct BrowserFrame {
@@ -17,7 +21,8 @@ pub struct BrowserFrame {
     pub can_go_back: bool,
 }
 
-const FUEL: u64 = 250_000_000;
+// Bound each interaction, including layout and painting for an external page.
+const FUEL: u64 = 8_000_000_000;
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
 
@@ -25,6 +30,8 @@ struct Context {
     wasi: WasiCtx,
     resources: component::ResourceTable,
     limits: StoreLimits,
+    web: Result<ureq::Agent, native_tls::Error>,
+    budget: Option<web::Budget>,
 }
 
 impl WasiView for Context {
@@ -50,6 +57,7 @@ pub struct Session {
     click: PageCall<(u32, u32)>,
     back: PageCall<()>,
     navigate: Option<PageCall<(String,)>>,
+    scroll: Option<PageCall<(i32,)>>,
     store: Store<Context>,
 }
 
@@ -68,15 +76,32 @@ impl Compiled {
         let component = component::Component::from_binary(&engine, bundle.bytes())?;
         let mut linker = component::Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        linker.root().func_wrap(
+            "fetch-https",
+            |mut store: wasmtime::StoreContextMut<'_, Context>,
+             (address, kind): (String, web::Resource)| {
+                let context = store.data_mut();
+                let result = match (&context.web, &mut context.budget) {
+                    (Ok(agent), Some(budget)) => web::fetch(agent, budget, &address, kind),
+                    (Err(_), _) => Err("Could not initialize HTTPS for this browser.".into()),
+                    (_, None) => Err("Network access requires a browser interaction.".into()),
+                };
+                Ok((result,))
+            },
+        )?;
         Ok(Self { component, linker })
     }
 
     pub fn open(&self) -> wasmtime::Result<(Session, BrowserFrame)> {
+        let mut wasi = WasiCtx::builder();
+        wasi.allow_tcp(false).allow_udp(false);
         let mut store = Store::new(
             self.component.engine(),
             Context {
-                wasi: WasiCtx::builder().allow_tcp(false).allow_udp(false).build(),
+                wasi: wasi.build(),
                 resources: component::ResourceTable::new(),
+                web: web::agent(),
+                budget: None,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(128 * 1024 * 1024)
                     .table_elements(16384)
@@ -96,6 +121,10 @@ impl Compiled {
             .get_func(&mut store, "browser-navigate")
             .map(|function| function.typed(&store))
             .transpose()?;
+        let scroll = instance
+            .get_func(&mut store, "browser-scroll")
+            .map(|function| function.typed(&store))
+            .transpose()?;
 
         store.set_fuel(FUEL)?;
         let frame = validate_frame(open.call(&mut store, ())?.0)?
@@ -105,6 +134,7 @@ impl Compiled {
                 click,
                 back,
                 navigate,
+                scroll,
                 store,
             },
             frame,
@@ -117,9 +147,12 @@ impl Session {
         self.navigate.is_some()
     }
 
+    pub fn can_scroll(&self) -> bool {
+        self.scroll.is_some()
+    }
+
     pub fn click(&mut self, x: u32, y: u32) -> Operation {
-        self.store.set_fuel(FUEL)?;
-        validate_frame(self.click.call(&mut self.store, (x, y))?.0)
+        self.interact(self.click, (x, y))
     }
 
     pub fn back(&mut self) -> Operation {
@@ -127,17 +160,34 @@ impl Session {
         validate_frame(self.back.call(&mut self.store, ())?.0)
     }
 
-    pub fn navigate(&mut self, path: String) -> Operation {
+    pub fn navigate(&mut self, address: String) -> Operation {
         let Some(navigate) = self.navigate else {
             return Ok(Err(
                 "This browser bundle supports link navigation only.".into()
             ));
         };
-        if path.len() > 256 {
-            return Ok(Err("Enter a path of at most 256 bytes.".into()));
+        if address.len() > MAX_ADDRESS {
+            return Ok(Err("The address is too long.".into()));
         }
+        self.interact(navigate, (address,))
+    }
+
+    pub fn scroll(&mut self, delta_y: i32) -> Operation {
+        let Some(scroll) = self.scroll else {
+            return Ok(Err("This browser bundle does not support scrolling.".into()));
+        };
+        self.interact(scroll, (delta_y,))
+    }
+
+    fn interact<Params>(&mut self, call: PageCall<Params>, params: Params) -> Operation
+    where
+        Params: component::ComponentNamedList + component::Lower,
+    {
         self.store.set_fuel(FUEL)?;
-        validate_frame(navigate.call(&mut self.store, (path,))?.0)
+        self.store.data_mut().budget = Some(web::Budget::new());
+        let result = call.call(&mut self.store, params);
+        self.store.data_mut().budget = None;
+        validate_frame(result?.0)
     }
 }
 
@@ -150,7 +200,7 @@ fn validate_frame(page: Page) -> Operation {
         (1..=MAX_WIDTH).contains(&frame.width)
             && (1..=MAX_HEIGHT).contains(&frame.height)
             && frame.rgba.len() == (frame.width * frame.height * 4) as usize
-            && frame.location.len() <= 256,
+            && frame.location.len() <= MAX_ADDRESS,
         "invalid browser frame"
     );
     Ok(Ok(frame))
@@ -212,7 +262,7 @@ mod tests {
         assert!(second.can_navigate(), "use the current Kitesurf bundle");
         assert!(
             second
-                .navigate("https://example.com/".into())
+                .navigate("http://example.com/".into())
                 .unwrap()
                 .is_err()
         );
@@ -221,5 +271,29 @@ mod tests {
         assert_eq!(second.back().unwrap().unwrap().location, "index.html");
         let twice = browser.click(155, 312).unwrap().unwrap();
         assert!(twice.rgba != changed.rgba, "other tab retains its state");
+    }
+
+    #[test]
+    fn kitesurf_opens_a_public_https_page() {
+        let Some(address) = std::env::var_os("VKORE_TEST_BROWSER_WEBSITE") else {
+            return;
+        };
+        let bundle_path = std::env::var_os("VKORE_TEST_BROWSER").expect("set VKORE_TEST_BROWSER");
+        let bundle = Bundle::open(bundle_path.as_ref()).expect("read Kitesurf component");
+        let compiled = Compiled::new(&bundle).expect("compile Kitesurf");
+        let (mut tab, start) = compiled.open().expect("start Kitesurf");
+        let website = tab
+            .navigate(address.into_string().expect("website address is UTF-8"))
+            .expect("navigate")
+            .expect("receive website frame");
+        assert!(website.location.starts_with("https://"));
+        assert!(website.can_go_back);
+        assert_ne!(website.rgba, start.rgba);
+
+        assert!(tab.navigate("https://127.0.0.1/".into()).unwrap().is_err());
+        assert_eq!(tab.scroll(0).unwrap().unwrap().location, website.location);
+        let (_, other_tab) = compiled.open().expect("open second tab");
+        assert_eq!(other_tab.location, start.location);
+        assert_eq!(tab.back().unwrap().unwrap().location, start.location);
     }
 }

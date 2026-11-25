@@ -1,0 +1,17 @@
+package vkore:browser@0.1.0;
+
+world browser {
+    record browser-frame {
+        location: string,
+        width: u32,
+        height: u32,
+        rgba: list<u8>,
+        can-go-back: bool,
+    }
+
+    /// Open the component's bundled start page.
+    export browser-open: func() -> result<browser-frame, string>;
+    /// Click at a pixel in the most recent frame.
+    export browser-click: func(x: u32, y: u32) -> result<browser-frame, string>;
+    export browser-back: func() -> result<browser-frame, string>;
+}

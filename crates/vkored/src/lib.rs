@@ -31,3 +31,6 @@ pub use state::State;
 pub mod account;
 #[cfg(feature = "gpu-canvas")]
 pub mod gpu_canvas;
+
+#[cfg(feature = "browser-preview")]
+pub mod browser;

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Kitesurf</title>
+  <style>
+    body { margin: 0; padding: 44px; background: #edf1f8; color: #171d2b; font: 18px sans-serif; }
+    main { padding: 34px; border-radius: 18px; background: white; }
+    h1 { margin: 0 0 12px; font-size: 42px; }
+    p { line-height: 1.5; }
+    button, a { display: inline-block; padding: 10px 16px; border-radius: 8px; font: inherit; }
+    button { background: #3829a3; color: white; border: 0; }
+    a { color: #3829a3; }
+    #status { padding: 10px 14px; background: #e9f5f0; border-left: 4px solid #167351; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Kitesurf</h1>
+    <p>HTML, CSS, and JavaScript running in a WASI-P2 browser component.</p>
+    <p id="status">Waiting for a click.</p>
+    <button onclick="increment()">Update page</button>
+    <a href="about.html">About this demo</a>
+  </main>
+  <script>
+    let clicks = 0;
+    function increment() {
+      clicks++;
+      document.getElementById("status").textContent = "JavaScript updated this page " + clicks + " time(s).";
+    }
+  </script>
+</body>
+</html>

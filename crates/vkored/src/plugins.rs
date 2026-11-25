@@ -10,6 +10,7 @@ const MAX_BUNDLE_BYTES: usize = 32 * 1024 * 1024;
 pub struct Bundle {
     bytes: Arc<[u8]>,
     component: bool,
+    browser: bool,
 }
 
 impl Bundle {
@@ -42,7 +43,12 @@ impl Bundle {
         wasmparser::Validator::new()
             .validate_all(&bytes)
             .map_err(|error| error.to_string())?;
-        Ok(Self { bytes, component })
+        let browser = component && browser_exports(&bytes)?;
+        Ok(Self {
+            bytes,
+            component,
+            browser,
+        })
     }
 
     pub fn kind(&self) -> &'static str {
@@ -56,4 +62,35 @@ impl Bundle {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    pub fn supports_browser(&self) -> bool {
+        self.browser
+    }
+}
+
+fn browser_exports(bytes: &[u8]) -> Result<bool, String> {
+    use wasmparser::{ComponentExternalKind, Parser, Payload};
+
+    let mut depth = 0;
+    let mut required = ["browser-open", "browser-click", "browser-back"].map(Some);
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.map_err(|error| error.to_string())? {
+            Payload::Version { .. } => depth += 1,
+            Payload::End(_) => depth -= 1,
+            Payload::ComponentExportSection(exports) if depth == 1 => {
+                for export in exports {
+                    let export = export.map_err(|error| error.to_string())?;
+                    if export.kind == ComponentExternalKind::Func
+                        && let Some(name) = required
+                            .iter_mut()
+                            .find(|name| **name == Some(export.name.name))
+                    {
+                        *name = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(required.iter().all(Option::is_none))
 }

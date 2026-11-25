@@ -7,6 +7,8 @@
 mod build_support;
 
 mod account;
+#[cfg(feature = "browser-preview")]
+mod browser;
 mod console;
 mod fonts;
 mod google_sign_in;
@@ -105,6 +107,8 @@ pub enum Page {
 /// What the workers send the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    #[cfg(feature = "browser-preview")]
+    BrowserFrame,
     #[cfg(feature = "gpu-canvas")]
     CanvasReady,
     Plugin(plugins::Reply),
@@ -146,6 +150,12 @@ impl Model {
             Message::Plugin(action) => {
                 use plugins::Action;
                 let on_expected_page = match &action {
+                    #[cfg(feature = "browser-preview")]
+                    plugins::Action::OpenBrowser(name, _)
+                    | plugins::Action::CloseBrowser(name)
+                    | plugins::Action::BrowserInput(name, _) => {
+                        self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
+                    }
                     Action::Load(name, _) | Action::Reload(name, _) | Action::Unload(name, _) => {
                         self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
                     }
@@ -205,6 +215,8 @@ impl Model {
 
     fn user_event(&mut self, event: UserEvent) {
         match event {
+            #[cfg(feature = "browser-preview")]
+            UserEvent::BrowserFrame => self.machines.plugins.receive_browser(),
             #[cfg(feature = "gpu-canvas")]
             UserEvent::CanvasReady => {
                 if let Some(canvas) = &mut self.machines.plugins.canvas {

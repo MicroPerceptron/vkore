@@ -133,6 +133,41 @@ cargo run --locked -p vkore-ui --features gpu-canvas -- --gpu-canvas \
 The resulting file can also be added to the plugin library and attached to a
 machine. Use `--gpu-canvas` to execute it in the desktop preview.
 
+### Kitesurf browser sample
+
+The offline sample runs Kitesurf's HTML, CSS, layout, and rasterizer with a
+small Boa DOM bridge inside a WASI-P2 component. The desktop passes click
+coordinates to the component and displays the returned frames. The experiment
+uses two bundled pages, one-step back navigation, and a fixed 720×420 browser
+viewport that scales with the tile.
+
+Build the component from the pinned Kitesurf source with Node.js, Git, and the
+vKore Rust toolchain installed.
+
+```sh
+rustup target add wasm32-wasip2
+examples/kitesurf-browser/build.sh
+cargo run --locked -p vkore-ui --features browser-preview
+```
+
+Add `artifacts/kitesurf-browser.wasm` through **Plugins → Add plugin**, then
+open a machine and use **Load → Open browser** in its **Plugins** tile. Use
+**Update page** to run the page script, **About this demo** to follow the
+link, and **Back** to return. The tile runs on the host with the machine
+stopped or running. Expand the tile with **+** for a larger preview. The
+desktop allows one browser preview at a time. The debug build can take
+about two minutes to compile the component on first open.
+
+The [browser WIT world](../crates/vkored/wit/browser/browser.wit) exchanges
+input and bounded RGBA frames. vKore grants the component no network or
+directories. The Kitesurf build uses WASI clocks and ships its fonts. A
+future native Kore host would need to implement the same presentation and
+input integration.
+
+To exercise the real component without a window, set `VKORE_TEST_BROWSER`
+to the component path and run
+`cargo test -p vkored --features browser-preview bundled_kitesurf_runs_script_and_follows_links`.
+
 ## Volumes
 
 Use **Choose image…** for the system file dialog, or **Choose physical disk…**

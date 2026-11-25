@@ -8,6 +8,7 @@ publish = false
 description = "vKore's runtime: Kore machines and their volumes on a Linux or macOS host, and the `vkore` command."
 
 [features]
+browser-preview = ["dep:wasmtime", "dep:wasmtime-wasi"]
 gpu-canvas = ["dep:pollster", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wgpu"]
 
 [dependencies]

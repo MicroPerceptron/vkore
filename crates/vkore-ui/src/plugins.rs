@@ -41,6 +41,12 @@ pub enum Action {
     Unload(String, Source),
     #[cfg(feature = "gpu-canvas")]
     Preview(bool),
+    #[cfg(feature = "browser-preview")]
+    OpenBrowser(String, Source),
+    #[cfg(feature = "browser-preview")]
+    CloseBrowser(String),
+    #[cfg(feature = "browser-preview")]
+    BrowserInput(String, crate::browser::Input),
 }
 
 #[derive(Debug)]
@@ -58,6 +64,8 @@ pub struct State {
     status_machine: Option<String>,
     #[cfg(feature = "gpu-canvas")]
     pub canvas: Option<crate::gpu_canvas::Pane>,
+    #[cfg(feature = "browser-preview")]
+    browser: Option<(String, Source, crate::browser::Pane)>,
 }
 
 impl State {
@@ -66,6 +74,10 @@ impl State {
             return;
         }
         self.status_machine = match &action {
+            #[cfg(feature = "browser-preview")]
+            Action::OpenBrowser(machine, _)
+            | Action::CloseBrowser(machine)
+            | Action::BrowserInput(machine, _) => Some(machine.clone()),
             Action::Load(machine, _) | Action::Reload(machine, _) | Action::Unload(machine, _) => {
                 Some(machine.clone())
             }
@@ -111,6 +123,38 @@ impl State {
                 });
             }
             Action::Unload(machine, source) => self.unload(&machine, &source),
+            #[cfg(feature = "browser-preview")]
+            Action::OpenBrowser(machine, source) => {
+                if let Some(bundle) = self
+                    .attached
+                    .get(&machine)
+                    .and_then(|plugins| plugins.get(&source))
+                    && bundle.supports_browser()
+                {
+                    match crate::browser::Pane::open(bundle.clone(), proxy.clone()) {
+                        Ok(pane) => self.browser = Some((machine, source, pane)),
+                        Err(error) => self.status = format!("Could not open browser. {error}"),
+                    }
+                }
+            }
+            #[cfg(feature = "browser-preview")]
+            Action::CloseBrowser(machine) => {
+                if self
+                    .browser
+                    .as_ref()
+                    .is_some_and(|(name, _, _)| *name == machine)
+                {
+                    self.browser = None;
+                }
+            }
+            #[cfg(feature = "browser-preview")]
+            Action::BrowserInput(machine, input) => {
+                if let Some((name, _, pane)) = &mut self.browser
+                    && *name == machine
+                {
+                    pane.input(input);
+                }
+            }
             #[cfg(feature = "gpu-canvas")]
             Action::Preview(open) => {
                 if open {
@@ -146,8 +190,10 @@ impl State {
         if let Some(plugins) = self.attached.get_mut(machine)
             && plugins.remove(source).is_some()
         {
+            #[cfg(feature = "browser-preview")]
+            self.close_browser_for(machine, source);
             self.status = format!("Unloaded {}.", source.name());
-            if plugins.is_empty() {
+            if self.attached.get(machine).is_some_and(BTreeMap::is_empty) {
                 self.attached.remove(machine);
             }
         }
@@ -203,6 +249,8 @@ impl State {
                     .and_then(|plugins| plugins.get_mut(&source))
                 {
                     *previous = bundle;
+                    #[cfg(feature = "browser-preview")]
+                    self.close_browser_for(&machine, &source);
                     self.status = format!("Reloaded {}.", source.name());
                 }
             }
@@ -217,6 +265,32 @@ impl State {
 
     pub fn retain_machines(&mut self, keep: impl Fn(&str) -> bool) {
         self.attached.retain(|name, _| keep(name));
+        #[cfg(feature = "browser-preview")]
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|(name, _, _)| !keep(name))
+        {
+            self.browser = None;
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    fn close_browser_for(&mut self, machine: &str, source: &Source) {
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|(name, loaded, _)| name == machine && loaded == source)
+        {
+            self.browser = None;
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn receive_browser(&mut self) {
+        if let Some((_, _, pane)) = &mut self.browser {
+            pane.receive();
+        }
     }
 
     pub fn view(&self, ty: Typography) -> UiElement<'_> {
@@ -302,10 +376,39 @@ impl State {
     }
 
     pub fn machine<'a>(&'a self, machine: &'a str, ty: Typography) -> UiElement<'a> {
+        #[cfg(feature = "browser-preview")]
+        if let Some((name, _, pane)) = &self.browser
+            && name == machine
+        {
+            return pane.view(machine, ty);
+        }
         let attached = self.attached.get(machine);
         let mut entries = column![].width(Length::Fill).spacing(theme::SPACE_2);
         if let Some(attached) = attached {
             for (source, bundle) in attached {
+                let controls = row![
+                    control(
+                        ty,
+                        "Reload",
+                        (!self.busy).then(|| Action::Reload(machine.into(), source.clone()))
+                    ),
+                    control(
+                        ty,
+                        "Unload",
+                        (!self.busy).then(|| Action::Unload(machine.into(), source.clone()))
+                    ),
+                ];
+                #[cfg(feature = "browser-preview")]
+                let controls = if bundle.supports_browser() {
+                    controls.push(control(
+                        ty,
+                        "Open browser",
+                        (!self.busy && self.browser.is_none())
+                            .then(|| Action::OpenBrowser(machine.into(), source.clone())),
+                    ))
+                } else {
+                    controls
+                };
                 entries = entries.push(
                     column![
                         ty.data(source.name(), theme::TEXT)
@@ -315,22 +418,7 @@ impl State {
                             12.,
                             theme::TEXT_MUTED
                         ),
-                        row![
-                            control(
-                                ty,
-                                "Reload",
-                                (!self.busy)
-                                    .then(|| Action::Reload(machine.into(), source.clone()))
-                            ),
-                            control(
-                                ty,
-                                "Unload",
-                                (!self.busy)
-                                    .then(|| Action::Unload(machine.into(), source.clone()))
-                            ),
-                        ]
-                        .spacing(theme::SPACE_2)
-                        .wrap(),
+                        controls.spacing(theme::SPACE_2).wrap(),
                     ]
                     .spacing(theme::SPACE_1),
                 );
@@ -384,7 +472,11 @@ impl State {
     }
 }
 
-fn control<'a>(ty: Typography, label: &'static str, action: Option<Action>) -> UiElement<'a> {
+pub(super) fn control<'a>(
+    ty: Typography,
+    label: &'static str,
+    action: Option<Action>,
+) -> UiElement<'a> {
     button(ty.control(label))
         .height(ty.control_height())
         .padding([0, 10])

@@ -8394,7 +8394,7 @@ dependencies = [
 
 [[package]]
 name = "vkore-servo-wire"
-version = "0.1.0"
+version = "0.11.0"
 dependencies = [
  "cc",
  "rustix 1.1.6",

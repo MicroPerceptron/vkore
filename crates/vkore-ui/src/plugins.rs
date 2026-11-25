@@ -356,12 +356,16 @@ impl State {
     }
 
     #[cfg(feature = "browser-preview")]
-    pub fn receive_browser(&mut self) {
-        if let Some(tile) = &mut self.browser {
-            match &mut tile.content {
-                BrowserContent::Wasm(_, pane) => pane.receive(),
-                BrowserContent::Servo(pane) => pane.receive(),
+    /// Takes in what the browser has said. Returns whether the interface has
+    /// anything new to draw.
+    pub fn receive_browser(&mut self) -> bool {
+        match self.browser.as_mut().map(|tile| &mut tile.content) {
+            Some(BrowserContent::Wasm(_, pane)) => {
+                pane.receive();
+                true
             }
+            Some(BrowserContent::Servo(pane)) => pane.receive(),
+            None => false,
         }
     }
 

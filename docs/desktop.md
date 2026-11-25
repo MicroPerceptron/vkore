@@ -138,7 +138,13 @@ machine. Use `--gpu-canvas` to execute it in the desktop preview.
 In a machine workspace, open **Plugins → Open Servo browser**. The tile works
 with a stopped machine. Enter an HTTPS address, click inside the page to type,
 or open a second tab. Each tab keeps its own page, history and form contents.
-The renderer name below the page comes from Servo’s active graphics context.
+
+Tabs carry the page's icon and title, with a turning mark while the page loads;
+the full title and address are a tooltip. The toolbar has back, forward and
+reload, and an address bar that shows a lock for a secure page. A line under the
+toolbar follows the load, the link under the pointer appears under the page, and
+the pointer takes the shape the page asks for. The renderer name at the foot
+comes from Servo’s active graphics context.
 
 Build the companion executable once and launch the desktop from the repo root:
 
@@ -154,7 +160,14 @@ and uses its own SQLite dependency. The machine's guest OS, network adapter,
 accelerator assignment and vKore download credentials are independent of it.
 
 One helper owns up to four WebViews. Navigation, input and presentation
-acknowledgments travel over private pipes. The OS composites the browser
+acknowledgments travel over private pipes, and so does what the page says about
+itself: its title (256 characters at most), its icon (reduced to 32 by 32
+pixels in the helper), the link under the pointer, its pointer shape and its
+load progress. Every one of these is bounded before it is read. The helper
+reads the commands already waiting and merges consecutive pointer moves, wheel
+deltas and resizes, so a burst costs one pass through the engine. The helper
+and the desktop must come from the same release: each checks the protocol
+version (4) and the tile reports an incompatible helper. The OS composites the browser
 surface into the tile. The desktop's Axiom renderer continues to draw its
 controls. Page pixels stay on the graphics path. The physical tile size and
 display scale determine the viewport, up to 16 megapixels.
@@ -169,6 +182,12 @@ display scale determine the viewport, up to 16 megapixels.
 An unsupported driver or compositor produces a visible error. To check the
 installed helper against a real desktop compositor, set `VKORE_SERVO` to its
 absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
+To measure the helper's command handling without any network, run
+`cargo run --release -p vkore-servo-wire --features presentation --example servo_latency`
+with `VKORE_SERVO` set the same way. It reports the paint round trip and the
+time to get through a burst of 600 pointer moves, on the blank tab the helper
+opens with. Setting `VKORE_LIVE_URL` to an HTTPS address also loads it and prints
+each event the page produces with its timing; that one uses the network.
 The smoke test opens a test window and loads example.org. Append
 `-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.
 On macOS the test also checks the tile for visible page pixels. The smoke test reports the final page, including redirects. The repo’s Cargo

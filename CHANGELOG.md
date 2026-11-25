@@ -3,6 +3,11 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.10.1] - 2026-11-25
+
+### Changed
+- Begin the desktop's move from words to marks. The icon set grows to 38 glyphs; machine state is a beacon that spins while booting and pulses while running, with a five-segment boot track; commands are glyph buttons with tooltips; machine resources show as rings and figures; tile controls, page headers, the sidebar, Plugins, browser tabs and Account use the same marks. Animated marks request frames only while they move.
+
 ## [0.10.0] - 2026-11-24
 
 ### Added

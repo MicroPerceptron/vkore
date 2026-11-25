@@ -919,7 +919,11 @@ fn content<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiEleme
         ].spacing(16)).padding(24).width(Length::Fill.max(760)).style(widgets::card);
         return widgets::page_frame(
             column![
-                ty.page_header("Volumes", "Explore the files inside your Kore workspace."),
+                ty.page_header(
+                    crate::visuals::Icon::Volume,
+                    "Volumes",
+                    "Explore the files inside your Kore workspace."
+                ),
                 widgets::scroll(container(connect).center_x(Length::Fill).padding([24, 0]))
                     .height(Length::Fill),
             ]
@@ -1086,7 +1090,11 @@ fn content<'a>(state: &'a State, machines: &[String], ty: Typography) -> UiEleme
     .align_y(alignment::Vertical::Center);
 
     let page = column![
-        ty.page_header("Volumes", "Explore the files inside your Kore workspace."),
+        ty.page_header(
+            crate::visuals::Icon::Volume,
+            "Volumes",
+            "Explore the files inside your Kore workspace."
+        ),
         header,
         places,
         crumbs,

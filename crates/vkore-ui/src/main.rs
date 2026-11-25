@@ -15,8 +15,10 @@ mod google_sign_in;
 #[cfg(feature = "gpu-canvas")]
 mod gpu_canvas;
 mod hardware;
+mod kit;
 mod logo;
 mod machines;
+mod motion;
 mod navigation;
 #[cfg(feature = "browser-preview")]
 mod plugin_view;
@@ -1604,7 +1606,11 @@ mod tests {
             for appearance in [Theme::Light, Theme::Dark] {
                 let content = widgets::page_frame(
                     iced_widget::column![
-                        ty.page_header("Machine hardware", "GPU sharing and provisioning"),
+                        ty.page_header(
+                            visuals::Icon::Cpu,
+                            "Machine hardware",
+                            "GPU sharing and provisioning"
+                        ),
                         widgets::scroll(hardware::gpu_inventory(&draft, &host, false, false, ty))
                             .height(Length::Fill),
                     ]
@@ -1718,6 +1724,7 @@ mod tests {
                     let content = widgets::page_frame(
                         iced_widget::column![
                             ty.page_header(
+                                visuals::Icon::Cpu,
                                 "Machine hardware",
                                 "Neural processors and guest access"
                             ),
@@ -2405,6 +2412,53 @@ mod tests {
                 draw_in_theme(shell.into(), Size::new(1280.0, 800.0), &appearance);
             assert!(refused.is_empty(), "{refused:?}");
             assert!(runs >= 8, "the creation form drew only {runs} runs");
+        }
+    }
+
+    #[test]
+    fn a_running_machine_draws_every_stage_with_its_marks() {
+        use vkore_vm::Stage;
+        let root = tempfile::tempdir().expect("a state directory");
+        let store =
+            vkored::MachineStore::new(vkored::State::open(root.path()).expect("state opens"));
+        store
+            .create(&vkored::MachineConfig::new("demo", "/isos/kore.iso"))
+            .expect("the machine is created");
+        let mut machines = machines::State::new(root.path().to_owned());
+        let stages = [
+            None,
+            Some(Stage::Firmware),
+            Some(Stage::Kernel),
+            Some(Stage::Services),
+            Some(Stage::Shell),
+            Some(Stage::Ready),
+            Some(Stage::Degraded),
+            Some(Stage::Failed),
+        ];
+        for stage in stages {
+            let (stop, _stopped) = std::sync::mpsc::channel();
+            let mut running = machines::Running::new(stop);
+            running.stage = stage;
+            machines.running.insert("demo".into(), running);
+            let name = format!("running-{stage:?}");
+            for page in [None, Some("demo")] {
+                machines.selected = page.map(str::to_owned);
+                let (_, refused) = draw_at_scale(
+                    container(row![
+                        sidebar(Page::Machines, 1, "", Typography::default()),
+                        machines::view(&machines, Typography::default(), Theme::Dark)
+                    ])
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|appearance| theme::panel(appearance, theme::BACKGROUND, None, 0.))
+                    .into(),
+                    Size::new(1440., 900.),
+                    &Theme::Dark,
+                    1.,
+                    Some(&format!("{name}-{}", page.unwrap_or("library"))),
+                );
+                assert_eq!(refused, [], "{stage:?}");
+            }
         }
     }
 

@@ -435,11 +435,17 @@ impl Pane {
             row![
                 plugin_view::control(
                     ty,
+                    crate::visuals::Icon::Back,
                     "Back",
                     (self.ready && tab.back).then(|| emit(Action::Send(Command::Back(id))))
                 ),
                 address,
-                plugin_view::control(ty, "Go", self.ready.then(|| emit(Action::Go(id))))
+                plugin_view::control(
+                    ty,
+                    crate::visuals::Icon::Forward,
+                    "Go",
+                    self.ready.then(|| emit(Action::Go(id)))
+                )
             ]
             .align_y(alignment::Vertical::Center)
             .spacing(theme::SPACE_2)

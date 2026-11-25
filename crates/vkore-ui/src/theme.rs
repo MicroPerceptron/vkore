@@ -4,16 +4,15 @@
 //! radius, and spacing step. Widgets read semantic colors instead of carrying
 //! literals so a token change lands everywhere at once.
 //!
-//! The system has depth. A surface is lit from above (a gentle vertical
-//! sheen), sits at one of two [`Elevation`]s above the page (raised, floating) that
-//! cast a soft shadow, and keeps a one-pixel edge so it still reads where a
+//! The system has depth. A surface sits at one of two [`Elevation`]s above the
+//! page (raised, floating), each casting a soft shadow, and keeps a one-pixel edge so it still reads where a
 //! shadow cannot (a light page, a screenshot). The accent is a colour to use:
 //! the primary action is filled with it, a selection is tinted with it, and a
 //! state is a tint of its own tone. What stays fixed is its meaning: magenta
 //! is the user's own action and selection, never a state; green, amber and red
 //! are states and never decoration.
 
-use iced_core::{Background, Border, Color, Gradient, Radians, Shadow, gradient};
+use iced_core::{Background, Border, Color, Shadow};
 
 /// A semantic color, resolved at draw time from the active Iced theme.
 /// Keeping the role typed prevents literal logo colors from being remapped.
@@ -196,20 +195,34 @@ pub enum Elevation {
     Floating,
 }
 
+/// The most blur, in physical pixels, that Axiom's SIMD raster kernels take.
+///
+/// A shadow past this limit, like a fill that is not a single colour, sends the
+/// quad down the scalar fallback, which on a Retina window turned a 3 ms frame
+/// into a 130 ms one. The limit is Axiom's (`raster.rs`, "blur > 10.0"); the
+/// tests hold every shadow below it at every display scale up to
+/// [`MAX_SCALE`].
+pub const KERNEL_BLUR_LIMIT: f32 = 10.0;
+/// The largest display scale the shadows are designed to stay on the fast path
+/// at. Beyond it a shadow still draws, only slower.
+pub const MAX_SCALE: f32 = 3.0;
+
 /// The shadow at `level`. Dark pages need a heavier one to show at all; a
-/// light page needs only a whisper.
+/// light page needs only a whisper. Soft by offset and opacity rather than by
+/// blur, which the raster's fast path caps (see [`KERNEL_BLUR_LIMIT`]).
 pub fn shadow(appearance: &iced_core::Theme, level: Elevation) -> Shadow {
     let dark = !matches!(appearance, iced_core::Theme::Light);
-    let (alpha, y, blur) = match (level, dark) {
-        (Elevation::Raised, true) => (0.40, 2.0, 8.0),
-        (Elevation::Raised, false) => (0.09, 1.0, 6.0),
-        (Elevation::Floating, true) => (0.55, 8.0, 20.0),
-        (Elevation::Floating, false) => (0.16, 6.0, 16.0),
+    let (alpha, y, blur): (f32, f32, f32) = match (level, dark) {
+        (Elevation::Raised, true) => (0.42, 2.0, 3.0),
+        (Elevation::Raised, false) => (0.10, 1.0, 3.0),
+        (Elevation::Floating, true) => (0.60, 5.0, 3.0),
+        (Elevation::Floating, false) => (0.20, 4.0, 3.0),
     };
     Shadow {
         color: Color::from_rgba(0.0, 0.0, 0.0, alpha),
         offset: iced_core::Vector::new(0.0, y),
-        blur_radius: blur,
+        // Whatever the design asks, never past what the fast path takes.
+        blur_radius: blur.min(KERNEL_BLUR_LIMIT / MAX_SCALE),
     }
 }
 
@@ -224,45 +237,19 @@ pub fn mix(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-/// A fill lit from above: a little lighter at the top on a dark page, a little
-/// shaded at the foot on a light one. Subtle by design; it should be felt, not
-/// seen.
-pub fn lit(appearance: &iced_core::Theme, base: Color) -> Background {
-    let (top, bottom) = if matches!(appearance, iced_core::Theme::Light) {
-        (base, mix(base, Color::BLACK, 0.025))
-    } else {
-        (mix(base, Color::WHITE, 0.045), base)
-    };
-    vertical(top, bottom)
-}
-
-/// A top-to-bottom gradient.
-pub fn vertical(top: Color, bottom: Color) -> Background {
-    Background::Gradient(Gradient::Linear(
-        gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2))
-            .add_stop(0.0, top)
-            .add_stop(1.0, bottom),
-    ))
-}
-
-/// The accent as a fill: brighter at the top, deeper at the foot. `lift` moves
-/// it toward white (hover) or black (pressed) by that much.
+/// The accent as a fill. `lift` moves it toward white (positive, a hover) or
+/// toward black (negative, a press) by that much. A single colour: the raster's
+/// fast path draws only solid fills (see [`KERNEL_BLUR_LIMIT`]).
 pub fn accent_fill(appearance: &iced_core::Theme, lift: f32) -> Background {
     let base = color(appearance, MAGENTA);
-    let toward = |c: Color| {
-        if lift >= 0.0 {
-            mix(c, Color::WHITE, lift)
-        } else {
-            mix(c, Color::BLACK, -lift)
-        }
-    };
-    vertical(
-        toward(mix(base, Color::WHITE, 0.10)),
-        toward(mix(base, Color::BLACK, 0.06)),
-    )
+    Background::Color(if lift >= 0.0 {
+        mix(base, Color::WHITE, lift)
+    } else {
+        mix(base, Color::BLACK, -lift)
+    })
 }
 
-/// A raised or floating surface: lit from above, edged, and shadowed.
+/// A raised or floating surface: a solid fill, edged, and shadowed.
 pub fn surface(
     appearance: &iced_core::Theme,
     fill: Tone,
@@ -271,7 +258,7 @@ pub fn surface(
     level: Elevation,
 ) -> iced_widget::container::Style {
     iced_widget::container::Style {
-        background: Some(lit(appearance, color(appearance, fill))),
+        background: Some(Background::Color(color(appearance, fill))),
         border: match edge {
             Some(edge) => border(appearance, edge, radius),
             None => Border {
@@ -435,7 +422,9 @@ mod tests {
             let raised = shadow(&appearance, Elevation::Raised);
             let floating = shadow(&appearance, Elevation::Floating);
             assert!(raised.blur_radius > 0.0);
-            assert!(floating.blur_radius > raised.blur_radius);
+            // Blur is capped for the raster; a floating surface stands higher by
+            // its offset and its opacity instead.
+            assert!(floating.blur_radius >= raised.blur_radius);
             assert!(floating.offset.y > raised.offset.y);
             assert!(floating.color.a > raised.color.a);
         }
@@ -457,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_is_lit_edged_and_shadowed_at_its_level() {
+    fn a_surface_is_solid_edged_and_shadowed_at_its_level() {
         let styled = surface(
             &iced_core::Theme::Dark,
             PANEL,
@@ -465,21 +454,37 @@ mod tests {
             RADIUS_LG,
             Elevation::Raised,
         );
-        assert!(matches!(styled.background, Some(Background::Gradient(_))));
+        assert!(matches!(styled.background, Some(Background::Color(_))));
         assert_eq!(styled.border.width, 1.0);
         assert!(styled.shadow.blur_radius > 0.0);
     }
 
     #[test]
     fn the_accent_fill_lifts_and_sinks_around_its_resting_colour() {
-        let stops = |lift| match accent_fill(&iced_core::Theme::Dark, lift) {
-            Background::Gradient(Gradient::Linear(linear)) => {
-                let top = linear.stops[0].unwrap().color;
-                top.r + top.g + top.b
-            }
-            other => panic!("expected a gradient, got {other:?}"),
+        let brightness = |lift| match accent_fill(&iced_core::Theme::Dark, lift) {
+            Background::Color(c) => c.r + c.g + c.b,
+            other => panic!("expected a solid colour, got {other:?}"),
         };
-        assert!(stops(0.1) > stops(0.0));
-        assert!(stops(0.0) > stops(-0.1));
+        assert!(brightness(0.1) > brightness(0.0));
+        assert!(brightness(0.0) > brightness(-0.1));
+    }
+
+    /// Axiom's SIMD raster takes a shadow only up to a blur of ten physical
+    /// pixels. One past it sent every card down the scalar fallback and turned
+    /// a 3 ms frame into a 130 ms one (measured at 2880x1800, release).
+    #[test]
+    fn every_shadow_stays_on_the_raster_fast_path_at_every_supported_scale() {
+        for appearance in [iced_core::Theme::Dark, iced_core::Theme::Light] {
+            for level in [Elevation::Raised, Elevation::Floating] {
+                let blur = shadow(&appearance, level).blur_radius;
+                for scale in [1.0_f32, 1.25, 1.5, 2.0, 2.5, MAX_SCALE] {
+                    assert!(
+                        (blur * scale).round() <= KERNEL_BLUR_LIMIT,
+                        "{level:?} blur {blur} at {scale}x is {} physical pixels",
+                        (blur * scale).round()
+                    );
+                }
+            }
+        }
     }
 }

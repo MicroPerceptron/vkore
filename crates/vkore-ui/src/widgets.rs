@@ -214,8 +214,7 @@ fn styled(kind: Button, fading: bool) -> impl Fn(&Theme, button::Status) -> butt
             Fill::Tint(tone, alpha) => {
                 Some(Background::Color(dim(theme::rgba(appearance, tone, alpha))))
             }
-            // A gradient cannot be dimmed channel by channel; a disabled
-            // accent is the plain accent at forty percent.
+            // A disabled accent is the plain accent at forty percent.
             Fill::Accent(_) if disabled => Some(Background::Color(dim(theme::color(
                 appearance,
                 theme::MAGENTA,
@@ -315,7 +314,7 @@ pub fn page_frame<'a>(content: impl Into<crate::UiElement<'a>>) -> crate::UiElem
     .into()
 }
 
-/// A card resting on the page: lit from above, edged, softly shadowed.
+/// A card resting on the page: solid, edged, softly shadowed.
 pub fn card(appearance: &Theme) -> container::Style {
     theme::surface(
         appearance,
@@ -449,6 +448,14 @@ mod tests {
         theme::color(&Theme::Dark, tone)
     }
 
+    /// Opaque and in the accent's family: a fill that is the accent, not a tint.
+    fn is_accent_fill(background: Option<Background>) -> bool {
+        matches!(
+            background,
+            Some(Background::Color(c)) if c.a >= 0.999 && c.r > c.g + 0.2 && c.b > c.g + 0.2
+        )
+    }
+
     #[test]
     fn only_the_primary_button_is_filled_with_the_accent() {
         for kind in ALL {
@@ -458,20 +465,54 @@ mod tests {
                 button::Status::Pressed,
             ] {
                 let style = styled(kind, status);
-                let accent_fill = matches!(style.background, Some(Background::Gradient(_)));
                 assert_eq!(
-                    accent_fill,
+                    is_accent_fill(style.background),
                     kind == Button::Primary,
                     "{kind:?} {status:?}: {:?}",
                     style.background
                 );
-                // A tint is faint: nothing but the primary reaches half opacity.
+                // A tint is faint: nothing but the primary reaches half opacity
+                // in the accent's colour.
                 if let Some(Background::Color(fill)) = style.background
                     && fill.r > fill.g
                     && fill.b > fill.g
+                    && kind != Button::Primary
                 {
                     assert!(fill.a < 0.5, "{kind:?} fills with a loud accent");
                 }
+            }
+        }
+    }
+
+    /// A gradient fill leaves Axiom's SIMD raster for its scalar fallback,
+    /// which made every frame forty times slower. Nothing the app styles may
+    /// fill with one.
+    #[test]
+    fn no_control_or_surface_fills_with_a_gradient() {
+        for appearance in [Theme::Dark, Theme::Light] {
+            for kind in ALL {
+                for status in [
+                    button::Status::Active,
+                    button::Status::Hovered,
+                    button::Status::Pressed,
+                    button::Status::Disabled,
+                ] {
+                    let style = button_style(kind)(&appearance, status);
+                    assert!(
+                        !matches!(style.background, Some(Background::Gradient(_))),
+                        "{kind:?} {status:?}"
+                    );
+                    let fading = button_style_fading(kind)(&appearance, status);
+                    assert!(!matches!(fading.background, Some(Background::Gradient(_))));
+                }
+            }
+            for surface in [
+                card(&appearance),
+                floating(&appearance),
+                dialog(&appearance),
+                well(&appearance),
+            ] {
+                assert!(!matches!(surface.background, Some(Background::Gradient(_))));
             }
         }
     }
@@ -492,7 +533,7 @@ mod tests {
         let pressed = styled(Button::Primary, button::Status::Pressed);
         assert_eq!(rest.text_color, dark(theme::ON_ACCENT));
         assert_eq!(rest.border.width, 0.0);
-        assert!(matches!(rest.background, Some(Background::Gradient(_))));
+        assert!(is_accent_fill(rest.background));
         // Hover lifts, press sinks: the three fills are three different ones.
         assert_ne!(rest.background, hover.background);
         assert_ne!(rest.background, pressed.background);
@@ -600,7 +641,7 @@ mod tests {
             disabled.background,
             Some(Background::Color(c)) if (c.a - 0.4).abs() < 0.001 && c.r == dark(theme::PANEL).r
         ));
-        // A disabled accent is the flat accent at forty percent, not a gradient.
+        // A disabled accent is the accent at forty percent.
         let primary = styled(Button::Primary, button::Status::Disabled);
         assert!(matches!(
             primary.background,
@@ -639,9 +680,10 @@ mod tests {
             let card = card(&appearance);
             let floating = floating(&appearance);
             assert_eq!(card.border.width, 1.0);
-            assert!(matches!(card.background, Some(Background::Gradient(_))));
+            assert!(matches!(card.background, Some(Background::Color(_))));
             assert!(card.shadow.blur_radius > 0.0 && card.shadow.color.a > 0.0);
-            assert!(floating.shadow.blur_radius > card.shadow.blur_radius);
+            assert!(floating.shadow.blur_radius >= card.shadow.blur_radius);
+            assert!(floating.shadow.color.a > card.shadow.color.a);
             assert!(floating.shadow.offset.y > card.shadow.offset.y);
         }
     }

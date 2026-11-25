@@ -236,6 +236,12 @@ impl Pane {
                 }
             }
             Reply::Notice(Event::Presented(id)) => {
+                #[cfg(target_os = "macos")]
+                if let Err(error) = self.presentation.receive_frame() {
+                    self.ready = false;
+                    self.status = error.to_string();
+                    return;
+                }
                 self.presented = Some(id);
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     tab.waiting = false;

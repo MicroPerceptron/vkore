@@ -145,7 +145,7 @@ struct Browser {
     context: Rc<WindowRenderingContext>,
     // The native surface must outlive every offscreen context.
     #[cfg(target_os = "macos")]
-    _export: wire::macos::Export,
+    export: wire::macos::Export,
     #[cfg(target_os = "linux")]
     dma: Option<dmabuf::Exporter>,
     window: Window,
@@ -178,16 +178,15 @@ impl Browser {
             .preferences(preferences)
             .event_loop_waker(Box::new(wake))
             .build();
+        #[cfg(not(target_os = "macos"))]
         let handle = window.window_handle()?.as_raw();
         #[cfg(target_os = "macos")]
         let (export, surface) = {
-            let RawWindowHandle::AppKit(handle) = handle else {
-                return Err("Missing AppKit window".into());
-            };
-            let name = std::ffi::CString::new(std::env::var("VKORE_CA_SERVER")?)?;
-            // The hidden window and its Surfman view outlive the exported layer.
-            let (export, id) = unsafe { wire::macos::Export::new(&name, handle.ns_view)? };
-            (export, wire::Surface::CoreAnimation(id))
+            let name = std::ffi::CString::new(std::env::var("VKORE_SURFACE_SERVER")?)?;
+            (
+                wire::macos::Export::connect(&name)?,
+                wire::Surface::MacIoSurface,
+            )
         };
         #[cfg(not(target_os = "macos"))]
         let surface = match handle {
@@ -208,7 +207,7 @@ impl Browser {
             servo,
             context,
             #[cfg(target_os = "macos")]
-            _export: export,
+            export,
             #[cfg(target_os = "linux")]
             dma,
             window,
@@ -308,6 +307,13 @@ impl Browser {
                             send(Event::DmaFrame(id, frame));
                             return Ok(());
                         }
+                        #[cfg(target_os = "macos")]
+                        {
+                            self.context.prepare_for_rendering();
+                            let size = self.context.size();
+                            self.export.send(size.width, size.height)?;
+                        }
+                        #[cfg(not(target_os = "macos"))]
                         self.context.present();
                         send(Event::Presented(id));
                     }

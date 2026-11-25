@@ -14,11 +14,12 @@ pub mod windows;
 #[cfg(feature = "presentation")]
 pub mod presentation;
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const MAX_TABS: usize = 4;
 pub const MAX_ADDRESS: usize = 2048;
 pub const MAX_WIDTH: u32 = 8192;
 pub const MAX_HEIGHT: u32 = 8192;
+pub const MAX_PIXELS: u64 = 16_777_216;
 const MAX_HEADER: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ pub enum Event {
 /// A desktop compositor resource, never an address in the other process.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Surface {
-    CoreAnimation(u32),
+    MacIoSurface,
     X11(u32),
     Wayland,
     Win32(isize),
@@ -78,7 +79,7 @@ pub struct DmaBuffer {
 pub fn check_size(width: u32, height: u32) -> io::Result<()> {
     if !(1..=MAX_WIDTH).contains(&width)
         || !(1..=MAX_HEIGHT).contains(&height)
-        || u64::from(width) * u64::from(height) > 16_777_216
+        || u64::from(width) * u64::from(height) > MAX_PIXELS
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

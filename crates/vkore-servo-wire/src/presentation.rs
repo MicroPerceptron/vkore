@@ -14,7 +14,7 @@ pub struct TileRect {
 
 pub struct Presentation {
     #[cfg(target_os = "macos")]
-    registration: Option<crate::macos::Registration>,
+    registration: crate::macos::Registration,
     native: Option<Native>,
     last: Option<(Option<TileRect>, f64)>,
 }
@@ -30,12 +30,8 @@ impl Presentation {
                 "org.microperceptron.vkore.layer.{:032x}",
                 u128::from_ne_bytes(nonce)
             );
-            let reg = crate::macos::Registration::new(std::ffi::CString::new(name)?)?;
-            command.env(
-                "VKORE_CA_SERVER",
-                reg.name().to_str().map_err(io::Error::other)?,
-            );
-            Some(reg)
+            command.env("VKORE_SURFACE_SERVER", &name);
+            crate::macos::Registration::new(std::ffi::CString::new(name)?)?
         };
         let _ = command;
         Ok(Self {
@@ -49,11 +45,20 @@ impl Presentation {
     pub fn attach(&mut self, surface: Surface) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            self.registration.take();
+            self.registration.unpublish();
         }
         self.native = Some(Native::new(surface)?);
         self.last = None;
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn receive_frame(&self) -> io::Result<()> {
+        self.native
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Browser surface has not connected"))?
+            .0
+            .receive(&self.registration)
     }
 
     pub fn place(
@@ -79,10 +84,10 @@ struct Native(crate::macos::Layer);
 #[cfg(target_os = "macos")]
 impl Native {
     fn new(surface: Surface) -> io::Result<Self> {
-        let Surface::CoreAnimation(id) = surface else {
+        let Surface::MacIoSurface = surface else {
             return Err(io::Error::other("Expected a Core Animation surface"));
         };
-        Ok(Self(crate::macos::Layer::new(id)?))
+        Ok(Self(crate::macos::Layer::new()?))
     }
     fn place(
         &self,

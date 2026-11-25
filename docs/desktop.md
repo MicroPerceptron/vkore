@@ -161,7 +161,7 @@ display scale determine the viewport, up to 16 megapixels.
 
 | Desktop | Presentation |
 | --- | --- |
-| macOS | Core Animation imports the helper's remote layer. |
+| macOS | The helper copies each rendered frame to an IOSurface on the GPU. A private Mach port delivers the surface to the tile’s Core Animation layer. |
 | Linux, X11 or XWayland | An embedded graphics window has an empty input region. vKore handles keyboard and mouse input. |
 | Linux, native Wayland | EGL exports a GPU snapshot via DMA-BUF. A private socket carries the descriptor and the compositor imports it into a subsurface. Requires the driver’s single-plane export, Linux DMA-BUF v3 and viewporter. |
 | Windows (experimental) | Desktop Window Manager composites the helper's live client area. Windows desktop integration still needs a runtime test. |
@@ -171,7 +171,7 @@ installed helper against a real desktop compositor, set `VKORE_SERVO` to its
 absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
 The smoke test opens a test window and loads example.org. Append
 `-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.
-The smoke test reports the final page, including redirects. The repo’s Cargo
+On macOS the test also checks the tile for visible page pixels. The smoke test reports the final page, including redirects. The repo’s Cargo
 configuration sets an 8 MiB stack per Stylo
 worker at build time so the development helper can lay out complex pages.
 

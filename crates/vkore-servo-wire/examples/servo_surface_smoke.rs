@@ -17,6 +17,13 @@ use winit::{
     window::{Window, WindowId},
 };
 
+const TILE: TileRect = TileRect {
+    x: 12.,
+    y: 18.,
+    width: 640.,
+    height: 360.,
+};
+
 enum Reply {
     Notice(Event),
     #[cfg(target_os = "linux")]
@@ -65,8 +72,8 @@ impl Test {
                     let scale = self.window.as_ref().unwrap().scale_factor() as f32;
                     self.send(Input::Resize(
                         0,
-                        (640. * scale) as u32,
-                        (360. * scale) as u32,
+                        (TILE.width * scale) as u32,
+                        (TILE.height * scale) as u32,
                         scale,
                     ));
                     self.send(Input::Navigate(0, self.url.clone()));
@@ -80,7 +87,13 @@ impl Test {
                     self.loaded = true;
                     self.dirty = true;
                 }
-                Reply::Notice(Event::Presented(_)) => self.painted = true,
+                Reply::Notice(Event::Presented(_)) => {
+                    #[cfg(target_os = "macos")]
+                    self.native
+                        .receive_frame()
+                        .expect("import browser IOSurface");
+                    self.painted = true;
+                }
                 Reply::Notice(Event::Error(reason)) => panic!("{reason}"),
                 #[cfg(target_os = "linux")]
                 Reply::Buffer(id, f, fd) => {
@@ -106,17 +119,17 @@ impl Test {
                 .place(
                     self.window.as_ref().unwrap(),
                     self.window.as_ref().unwrap().scale_factor(),
-                    Some(TileRect {
-                        x: 12.,
-                        y: 18.,
-                        width: 640.,
-                        height: 360.,
-                    }),
+                    Some(TILE),
                 )
                 .unwrap();
             self.send(Input::ShowSurface(true));
             self.painted = false;
             if self.loaded {
+                #[cfg(target_os = "macos")]
+                if !has_page_pixels(self.window.as_ref().unwrap()) {
+                    self.dirty = true;
+                    return;
+                }
                 self.passed = true;
                 events.exit();
             }
@@ -157,6 +170,8 @@ impl ApplicationHandler for Test {
         .unwrap();
         let mut b = s.buffer_mut().unwrap();
         b.fill(0x202020);
+        // Red reference stripe marks the top of the host window.
+        b[..size.width as usize * 8].fill(0xff0000);
         w.pre_present_notify();
         b.present().unwrap();
         self.window = Some(w);
@@ -171,6 +186,79 @@ impl ApplicationHandler for Test {
         }
     }
 }
+/// Render only this test window's layer tree. A presentation acknowledgment
+/// alone also succeeds when the browser tile is blank.
+#[cfg(target_os = "macos")]
+fn has_page_pixels(window: &Window) -> bool {
+    use objc2_app_kit::NSView;
+    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
+        unreachable!()
+    };
+    // Winit owns this view and calls us on the AppKit main thread.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let layer = view.layer().unwrap();
+    let bounds = layer.bounds();
+    let (w, h) = (
+        bounds.size.width.round() as usize,
+        bounds.size.height.round() as usize,
+    );
+    if w < (TILE.x + TILE.width) as usize
+        || h < (TILE.y + TILE.height) as usize
+        || w > 2048
+        || h > 2048
+    {
+        return false;
+    }
+    let mut rgba = vec![0_u8; w * h * 4];
+    let rgb = CGColorSpace::new_device_rgb().unwrap();
+    // The context cannot outlive the buffer. Premultiplied-last RGBA.
+    let ctx =
+        unsafe { CGBitmapContextCreate(rgba.as_mut_ptr().cast(), w, h, 8, w * 4, Some(&rgb), 1) }
+            .unwrap();
+    if layer.isGeometryFlipped() {
+        objc2_core_graphics::CGContext::translate_ctm(Some(&ctx), 0., h as f64);
+        objc2_core_graphics::CGContext::scale_ctm(Some(&ctx), 1., -1.);
+    }
+    layer.renderInContext(&ctx);
+    drop(ctx);
+    let mut dark = 0;
+    let mut light = 0;
+    for row in rgba
+        .chunks_exact(w * 4)
+        .skip(TILE.y as usize + 1)
+        .take(TILE.height as usize - 2)
+    {
+        for pixel in row
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .skip(TILE.x as usize + 1)
+            .take(TILE.width as usize - 2)
+        {
+            if pixel[3] > 245 {
+                let luma = (u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3;
+                dark += usize::from(luma < 128);
+                light += usize::from(luma > 180);
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("VKORE_TEST_TILE_PPM") {
+        let mut f = std::fs::File::create(path).unwrap();
+        write!(f, "P6\n{w} {h}\n255\n").unwrap();
+        let bytes: Vec<_> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| p[..3].iter().copied())
+            .collect();
+        f.write_all(&bytes).unwrap();
+    }
+    rgba[..3] == [255, 0, 0] && dark >= 30 && light >= 30
+}
+
 fn main() {
     let events = EventLoop::new().unwrap();
     let mut cmd = Command::new(

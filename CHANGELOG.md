@@ -7,7 +7,7 @@ See [the versioning policy](docs/versioning.md) for contribution and release che
 
 ### Changed
 - Give the desktop depth and lead it with marks instead of words. Cards are lit from above and cast soft shadows, higher for what floats; the primary action is filled with the accent, selections and danger controls are faint tints, and state chips wash in their own colour. Hovers ease in and out instead of snapping.
-- The icon set grows to 38 glyphs. Machine state is a beacon that spins while booting and pulses while running, with a five-segment boot track; commands are glyph buttons with tooltips; a machine's resources show as metric cards with rings, and long paths and hashes truncate with the whole value in a tooltip. Tile controls, page headers, the sidebar, Plugins, browser tabs, Account and Volumes use the same marks; a volume's facts are chips, its files carry folder and file glyphs, and the disk chooser shows each disk's DagFS state as a tinted chip. Animated marks request frames only while they move.
+- The icon set grows to 38 glyphs. Machine state is a beacon that spins while booting and pulses while running, with a five-segment boot track; commands are glyph buttons with tooltips; a machine's resources show as metric cards with rings, and long paths and hashes truncate with the whole value in a tooltip. Tile controls, page headers, the sidebar, Plugins, browser tabs, Account and Volumes use the same marks; a volume's facts are chips, its files carry folder and file glyphs, and the disk chooser shows each disk's DagFS state as a tinted chip. The hardware editor gets glyph section titles, stat chips, glyph steppers, info-led notes and tinted cautions and errors. Animated marks request frames only while they move.
 
 ## [0.10.0] - 2026-11-24
 

@@ -269,6 +269,33 @@ pub fn tile_stat<'a>(
     .into()
 }
 
+/// The lead of a form or dialog: an accent plate with its glyph, a title, and
+/// an optional line under it. Smaller than a page header. The title is an
+/// element so that a name from outside can be set through the data face.
+pub fn lead<'a>(
+    ty: Typography,
+    icon: Icon,
+    title: impl Into<UiElement<'a>>,
+    subtitle: Option<&'static str>,
+) -> UiElement<'a> {
+    let plate = ty.size(40.);
+    let mut words = column![title.into()].spacing(theme::SPACE_1);
+    if let Some(subtitle) = subtitle {
+        words = words.push(ty.body(subtitle, 13., theme::TEXT_MUTED));
+    }
+    row![
+        container(visuals::icon(icon, theme::MAGENTA, plate * 0.5))
+            .center(plate)
+            .style(|appearance| {
+                theme::tinted(appearance, theme::MAGENTA, 0.13, 0.30, theme::RADIUS_MD)
+            }),
+        words.width(Length::Fill),
+    ]
+    .spacing(theme::SPACE_4 - 2.)
+    .align_y(alignment::Vertical::Center)
+    .into()
+}
+
 /// A fact about a thing, as a small tinted pill: its glyph and a short word.
 pub fn chip<'a>(
     ty: Typography,

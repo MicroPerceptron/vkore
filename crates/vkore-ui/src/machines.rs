@@ -1560,8 +1560,8 @@ fn create_form(state: &State, ty: Typography) -> PageColumn<'_> {
 
 fn new_hardware(state: &State, ty: Typography) -> UiElement<'_> {
     widgets::scroll(column![
-            ty.body("New machine hardware",23.,theme::TEXT),
-            ty.body("Start with half your physical cores and memory. Adjust the allocation to suit this image.",13.,theme::TEXT_MUTED),
+            kit::lead(ty, Icon::Cpu, ty.body("New machine hardware", 21., theme::TEXT),
+                Some("Start with half your physical cores and memory. Adjust the allocation to suit this image.")),
             crate::hardware::view(&state.form_hardware,&state.host,false,state.hardware_busy||state.importing.is_some(),ty),
             kit::icon_label(ty, Icon::Check, "Done", widgets::Button::Primary,
                 (!state.hardware_busy && state.importing.is_none())
@@ -1573,8 +1573,13 @@ fn edit_hardware<'a>(state: &'a State, config: &MachineConfig, ty: Typography) -
     let (_, draft) = state.edit_hardware.as_ref().unwrap();
     widgets::scroll(
         column![
-            ty.data(format!("Configure {}", config.name), theme::TEXT)
-                .size(ty.size(23.)),
+            kit::lead(
+                ty,
+                Icon::Cpu,
+                ty.data(format!("Configure {}", config.name), theme::TEXT)
+                    .size(ty.size(21.)),
+                None,
+            ),
             crate::hardware::view(draft, &state.host, true, state.hardware_busy, ty),
             row![
                 kit::icon_label(

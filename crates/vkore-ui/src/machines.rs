@@ -122,7 +122,7 @@ pub struct State {
     pub configs: Vec<MachineConfig>,
     pub selected: Option<String>,
     pub plugins: crate::plugins::State,
-    layouts: BTreeMap<String, tiles::Workspace>,
+    layouts: BTreeMap<String, tiles::Workspace<Tile>>,
     pub console_focus: Option<String>,
     console_focus_epoch: u64,
     paste_pending: bool,
@@ -144,12 +144,66 @@ pub struct State {
     pub closing: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tile {
+    Console,
+    Overview,
+    BootActivity,
+    Plugins,
+    #[cfg(feature = "browser-preview")]
+    Plugin(crate::plugins::TileId),
+}
+
+impl Tile {
+    #[cfg(test)]
+    const BUILTIN: [Self; 4] = [
+        Self::Console,
+        Self::Overview,
+        Self::BootActivity,
+        Self::Plugins,
+    ];
+
+    fn info(self) -> tiles::TileInfo {
+        let (title, closable) = match self {
+            Self::Console => ("Console", false),
+            Self::Overview => ("Overview", false),
+            Self::BootActivity => ("Boot activity", false),
+            Self::Plugins => ("Plugins", false),
+            #[cfg(feature = "browser-preview")]
+            Self::Plugin(_) => ("Plugin", true),
+        };
+        tiles::TileInfo { title, closable }
+    }
+}
+
+fn workspace() -> tiles::Workspace<Tile> {
+    use iced_widget::pane_grid::Axis;
+    use tiles::Layout;
+
+    tiles::Workspace::new(Layout::split(
+        Axis::Vertical,
+        0.57,
+        Layout::split(
+            Axis::Horizontal,
+            0.66,
+            Layout::tile(Tile::Console),
+            Layout::tile(Tile::Plugins),
+        ),
+        Layout::split(
+            Axis::Horizontal,
+            0.54,
+            Layout::tile(Tile::Overview),
+            Layout::tile(Tile::BootActivity),
+        ),
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub enum MachineMessage {
     OpenLibrary,
     OpenCreate,
     Select(String),
-    TileLayout(String, tiles::Change),
+    TileLayout(String, tiles::Change<Tile>),
     Hardware(bool, crate::hardware::Change),
     EditHardware(String),
     ConfigureNew(bool),
@@ -258,6 +312,46 @@ impl State {
             .collect()
     }
 
+    pub fn update_plugin(
+        &mut self,
+        action: crate::plugins::Action,
+        proxy: &EventLoopProxy<UserEvent>,
+    ) {
+        #[cfg(feature = "browser-preview")]
+        let previous = self.plugins.opened_tile();
+        self.plugins.update(action, proxy);
+        #[cfg(feature = "browser-preview")]
+        self.place_plugin_tile(previous);
+    }
+
+    pub fn plugin_reply(&mut self, reply: crate::plugins::Reply) {
+        #[cfg(feature = "browser-preview")]
+        let previous = self.plugins.opened_tile();
+        self.plugins.reply(reply);
+        #[cfg(feature = "browser-preview")]
+        self.place_plugin_tile(previous);
+    }
+
+    #[cfg(feature = "browser-preview")]
+    fn place_plugin_tile(&mut self, previous: Option<(String, crate::plugins::TileId)>) {
+        let next = self.plugins.opened_tile();
+        if previous == next {
+            return;
+        }
+        if let Some((name, tile)) = previous
+            && let Some(layout) = self.layouts.get_mut(&name)
+        {
+            layout.change(tiles::Change::Close(Tile::Plugin(tile)));
+        }
+        if let Some((name, tile)) = next {
+            self.unfocus_console();
+            self.layouts
+                .entry(name)
+                .or_insert_with(workspace)
+                .append(Tile::Plugin(tile));
+        }
+    }
+
     pub fn update(&mut self, message: MachineMessage, proxy: &EventLoopProxy<UserEvent>) {
         if self.closing {
             return;
@@ -345,7 +439,19 @@ impl State {
                     if !matches!(change, tiles::Change::Resize(_)) {
                         self.unfocus_console();
                     }
-                    self.layouts.entry(name).or_default().change(change);
+                    if let tiles::Change::Close(tile) = change {
+                        if !tile.info().closable {
+                            return;
+                        }
+                        #[cfg(feature = "browser-preview")]
+                        if let Tile::Plugin(id) = tile {
+                            self.plugins.close_tile(&name, id);
+                        }
+                    }
+                    self.layouts
+                        .entry(name)
+                        .or_insert_with(workspace)
+                        .change(change);
                 }
             }
             MachineMessage::Hardware(editing, change) => {
@@ -1438,8 +1544,8 @@ fn instance<'a>(
                 MachineMessage::Start(config.name.clone(), false),
             ));
     }
-    static DEFAULT: std::sync::LazyLock<tiles::Workspace> =
-        std::sync::LazyLock::new(tiles::Workspace::default);
+    static DEFAULT: std::sync::LazyLock<tiles::Workspace<Tile>> =
+        std::sync::LazyLock::new(workspace);
     let workspace = state.layouts.get(&config.name).unwrap_or(&DEFAULT);
     let terminal = crate::console::Presentation::tile(ty, appearance);
     column![
@@ -1447,12 +1553,29 @@ fn instance<'a>(
             .spacing(theme::SPACE_2)
             .align_y(alignment::Vertical::Center)
             .wrap(),
-        container(workspace.view(&config.name, ty, |tile| match tile {
-            tiles::Tile::Overview => overview(config, ty),
-            tiles::Tile::BootActivity => boot_activity(state, &config.name, ty),
-            tiles::Tile::Console => console_tile(state, &config.name, terminal),
-            tiles::Tile::Plugins => state.plugins.machine(&config.name, ty),
-        }))
+        container(workspace.view(
+            ty,
+            |tile| {
+                let info = tile.info();
+                #[cfg(feature = "browser-preview")]
+                if let Tile::Plugin(id) = tile {
+                    return tiles::TileInfo {
+                        title: state.plugins.tile_title(&config.name, id),
+                        ..info
+                    };
+                }
+                info
+            },
+            |tile| match tile {
+                Tile::Overview => overview(config, ty),
+                Tile::BootActivity => boot_activity(state, &config.name, ty),
+                Tile::Console => console_tile(state, &config.name, terminal),
+                Tile::Plugins => state.plugins.machine(&config.name, ty),
+                #[cfg(feature = "browser-preview")]
+                Tile::Plugin(id) => state.plugins.tile(&config.name, id, ty),
+            },
+            |change| wrap(MachineMessage::TileLayout(config.name.clone(), change))
+        ))
         .id("machine-workspace")
         .width(Length::Fill)
         .height(Length::Fill),

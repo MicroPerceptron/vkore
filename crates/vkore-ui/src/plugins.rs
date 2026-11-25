@@ -44,15 +44,24 @@ pub enum Action {
     #[cfg(feature = "browser-preview")]
     OpenBrowser(String, Source),
     #[cfg(feature = "browser-preview")]
-    CloseBrowser(String),
-    #[cfg(feature = "browser-preview")]
-    BrowserInput(String, crate::browser::Input),
+    Browser(String, TileId, crate::browser::Action),
 }
 
 #[derive(Debug)]
 pub enum Reply {
     Imported(Result<Option<(Source, Bundle)>, String>),
     Reloaded(String, Source, Result<Bundle, String>),
+}
+
+#[cfg(feature = "browser-preview")]
+pub type TileId = u64;
+
+#[cfg(feature = "browser-preview")]
+struct BrowserTile {
+    machine: String,
+    source: Source,
+    id: TileId,
+    content: crate::browser::Pane,
 }
 
 #[derive(Default)]
@@ -65,7 +74,9 @@ pub struct State {
     #[cfg(feature = "gpu-canvas")]
     pub canvas: Option<crate::gpu_canvas::Pane>,
     #[cfg(feature = "browser-preview")]
-    browser: Option<(String, Source, crate::browser::Pane)>,
+    browser: Option<BrowserTile>,
+    #[cfg(feature = "browser-preview")]
+    next_tile: TileId,
 }
 
 impl State {
@@ -75,9 +86,9 @@ impl State {
         }
         self.status_machine = match &action {
             #[cfg(feature = "browser-preview")]
-            Action::OpenBrowser(machine, _)
-            | Action::CloseBrowser(machine)
-            | Action::BrowserInput(machine, _) => Some(machine.clone()),
+            Action::OpenBrowser(machine, _) | Action::Browser(machine, _, _) => {
+                Some(machine.clone())
+            }
             Action::Load(machine, _) | Action::Reload(machine, _) | Action::Unload(machine, _) => {
                 Some(machine.clone())
             }
@@ -125,34 +136,35 @@ impl State {
             Action::Unload(machine, source) => self.unload(&machine, &source),
             #[cfg(feature = "browser-preview")]
             Action::OpenBrowser(machine, source) => {
-                if let Some(bundle) = self
-                    .attached
-                    .get(&machine)
-                    .and_then(|plugins| plugins.get(&source))
+                if self.browser.is_none()
+                    && let Some(bundle) = self
+                        .attached
+                        .get(&machine)
+                        .and_then(|plugins| plugins.get(&source))
                     && bundle.supports_browser()
                 {
                     match crate::browser::Pane::open(bundle.clone(), proxy.clone()) {
-                        Ok(pane) => self.browser = Some((machine, source, pane)),
+                        Ok(content) => {
+                            self.browser = Some(BrowserTile {
+                                machine,
+                                source,
+                                id: self.next_tile,
+                                content,
+                            });
+                            self.next_tile += 1;
+                        }
                         Err(error) => self.status = format!("Could not open browser. {error}"),
                     }
                 }
             }
             #[cfg(feature = "browser-preview")]
-            Action::CloseBrowser(machine) => {
-                if self
-                    .browser
-                    .as_ref()
-                    .is_some_and(|(name, _, _)| *name == machine)
+            Action::Browser(machine, id, action) => {
+                if let Some(tile) = &mut self.browser
+                    && tile.machine == machine
+                    && tile.id == id
+                    && tile.content.update(action)
                 {
                     self.browser = None;
-                }
-            }
-            #[cfg(feature = "browser-preview")]
-            Action::BrowserInput(machine, input) => {
-                if let Some((name, _, pane)) = &mut self.browser
-                    && *name == machine
-                {
-                    pane.input(input);
                 }
             }
             #[cfg(feature = "gpu-canvas")]
@@ -269,7 +281,7 @@ impl State {
         if self
             .browser
             .as_ref()
-            .is_some_and(|(name, _, _)| !keep(name))
+            .is_some_and(|tile| !keep(&tile.machine))
         {
             self.browser = None;
         }
@@ -280,7 +292,7 @@ impl State {
         if self
             .browser
             .as_ref()
-            .is_some_and(|(name, loaded, _)| name == machine && loaded == source)
+            .is_some_and(|tile| tile.machine == machine && &tile.source == source)
         {
             self.browser = None;
         }
@@ -288,8 +300,49 @@ impl State {
 
     #[cfg(feature = "browser-preview")]
     pub fn receive_browser(&mut self) {
-        if let Some((_, _, pane)) = &mut self.browser {
-            pane.receive();
+        if let Some(tile) = &mut self.browser {
+            tile.content.receive();
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn opened_tile(&self) -> Option<(String, TileId)> {
+        self.browser
+            .as_ref()
+            .map(|tile| (tile.machine.clone(), tile.id))
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn tile_title(&self, machine: &str, id: TileId) -> &'static str {
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|tile| tile.machine == machine && tile.id == id)
+        {
+            "Browser"
+        } else {
+            "Plugin"
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn close_tile(&mut self, machine: &str, id: TileId) {
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|tile| tile.machine == machine && tile.id == id)
+        {
+            self.browser = None;
+        }
+    }
+
+    #[cfg(feature = "browser-preview")]
+    pub fn tile<'a>(&'a self, machine: &'a str, id: TileId, ty: Typography) -> UiElement<'a> {
+        match &self.browser {
+            Some(tile) if tile.machine == machine && tile.id == id => {
+                tile.content.view(machine, id, ty)
+            }
+            _ => iced_widget::space::vertical().into(),
         }
     }
 
@@ -376,12 +429,6 @@ impl State {
     }
 
     pub fn machine<'a>(&'a self, machine: &'a str, ty: Typography) -> UiElement<'a> {
-        #[cfg(feature = "browser-preview")]
-        if let Some((name, _, pane)) = &self.browser
-            && name == machine
-        {
-            return pane.view(machine, ty);
-        }
         let attached = self.attached.get(machine);
         let mut entries = column![].width(Length::Fill).spacing(theme::SPACE_2);
         if let Some(attached) = attached {

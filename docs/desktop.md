@@ -151,14 +151,22 @@ cargo run --release --locked -p vkore-ui
 ```
 
 Add `artifacts/kitesurf-browser.wasm` through **Plugins → Add plugin**, then
-open a machine and use **Load → Open browser** in its **Plugins** tile. Use
-**Update page** to run the page script, **About this demo** to follow the
-link, and **Back** to return. The tile runs on the host with the machine
-stopped or running. Expand the tile with **+** for a larger preview. The
-desktop allows one browser preview at a time. The standard desktop build
-includes browser preview. A build with `--no-default-features` can store
-the bundle and shows that browser preview is disabled. The debug build can
-take about two minutes to compile the component on first open.
+open a machine and use **Load → Open browser** in its **Plugins** tile. The
+browser opens alongside the other machine tiles. Move it by dragging the
+title bar, resize it with the divider, or expand it with **+**.
+
+Enter `index.html` or `about.html` in the address bar and press **Go** or
+Enter. **Update page** runs the page script, **About this demo** follows a
+link, and **Back** returns to the preceding page. **New tab** opens another
+WASI instance with independent page state. The preview allows up to four
+tabs that share the compiled browser. Older bundles still open and follow
+links. Rebuild the bundle from this checkout to enable the address bar.
+
+The tile runs on the host with the machine stopped or running. The desktop
+allows one browser preview at a time. The standard desktop build includes
+browser preview. A build with `--no-default-features` can store the bundle
+and shows that preview is disabled. The debug build can take about two
+minutes to compile the component on first open.
 
 The [browser WIT world](../crates/vkored/wit/browser/browser.wit) exchanges
 input and bounded RGBA frames. vKore grants the component no network or

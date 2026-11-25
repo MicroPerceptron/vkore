@@ -11,13 +11,21 @@ const WIDTH: u32 = 720;
 const HEIGHT: u32 = 420;
 const BASE: &str = "https://kitesurf.local/";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Index,
     About,
 }
 
 impl Page {
+    fn resolve(path: &str) -> Result<Self, String> {
+        match path.trim().trim_start_matches('/') {
+            "" | "index.html" => Ok(Self::Index),
+            "about.html" => Ok(Self::About),
+            _ => Err("Enter a bundled path: index.html or about.html.".into()),
+        }
+    }
+
     fn location(self) -> &'static str {
         match self {
             Self::Index => "index.html",
@@ -125,6 +133,15 @@ struct Session {
 }
 
 impl Session {
+    fn navigate(&mut self, path: &str) -> Result<BrowserFrame, String> {
+        let page = Page::resolve(path)?;
+        if page != self.current.page {
+            let next = Document::open(page)?;
+            self.previous = Some(std::mem::replace(&mut self.current, next));
+        }
+        self.frame()
+    }
+
     fn frame(&self) -> Result<BrowserFrame, String> {
         Ok(BrowserFrame {
             location: self.current.page.location().into(),
@@ -143,14 +160,7 @@ impl Session {
                 break;
             }
             if let Some(href) = self.current.dom.element_attribute(node, Some("a"), "href") {
-                let page = match href.as_str() {
-                    "index.html" => Page::Index,
-                    "about.html" => Page::About,
-                    _ => return Err("Only bundled pages are available".into()),
-                };
-                let next = Document::open(page)?;
-                self.previous = Some(std::mem::replace(&mut self.current, next));
-                break;
+                return self.navigate(&href);
             }
             hit = self.current.dom.parent_id(node);
         }
@@ -197,6 +207,15 @@ impl Guest for Kitesurf {
                 session.current = previous;
             }
             session.frame()
+        })
+    }
+
+    fn browser_navigate(path: String) -> Result<BrowserFrame, String> {
+        SESSION.with_borrow_mut(|session| {
+            session
+                .as_mut()
+                .ok_or("Browser is not open")?
+                .navigate(&path)
         })
     }
 }

@@ -1,4 +1,4 @@
-package vkore:browser@0.1.0;
+package vkore:browser@0.2.0;
 
 world browser {
     record browser-frame {
@@ -14,4 +14,6 @@ world browser {
     /// Click at a pixel in the most recent frame.
     export browser-click: func(x: u32, y: u32) -> result<browser-frame, string>;
     export browser-back: func() -> result<browser-frame, string>;
+    /// Navigate within the component's bundled pages.
+    export browser-navigate: func(path: string) -> result<browser-frame, string>;
 }

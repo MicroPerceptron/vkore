@@ -18,6 +18,8 @@ mod hardware;
 mod logo;
 mod machines;
 mod navigation;
+#[cfg(feature = "browser-preview")]
+mod plugin_view;
 mod plugins;
 mod render_backend;
 mod settings;
@@ -151,9 +153,7 @@ impl Model {
                 use plugins::Action;
                 let on_expected_page = match &action {
                     #[cfg(feature = "browser-preview")]
-                    plugins::Action::OpenBrowser(name, _)
-                    | plugins::Action::CloseBrowser(name)
-                    | plugins::Action::BrowserInput(name, _) => {
+                    Action::OpenBrowser(name, _) | Action::Browser(name, _, _) => {
                         self.page == Page::Machines && self.machines.selected.as_ref() == Some(name)
                     }
                     Action::Load(name, _) | Action::Reload(name, _) | Action::Unload(name, _) => {
@@ -162,7 +162,7 @@ impl Model {
                     _ => self.page == Page::Plugins,
                 };
                 if on_expected_page {
-                    self.machines.plugins.update(action, &self.proxy);
+                    self.machines.update_plugin(action, &self.proxy);
                 }
             }
 
@@ -223,7 +223,7 @@ impl Model {
                     canvas.receive();
                 }
             }
-            UserEvent::Plugin(reply) => self.machines.plugins.reply(reply),
+            UserEvent::Plugin(reply) => self.machines.plugin_reply(reply),
             UserEvent::Account(reply) => {
                 if self.settings.account.reply(reply) {
                     self.machines.refresh_images(self.proxy.clone());

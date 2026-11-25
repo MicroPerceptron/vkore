@@ -147,7 +147,7 @@ vKore Rust toolchain installed.
 ```sh
 rustup target add wasm32-wasip2
 examples/kitesurf-browser/build.sh
-cargo run --locked -p vkore-ui --features browser-preview
+cargo run --release --locked -p vkore-ui
 ```
 
 Add `artifacts/kitesurf-browser.wasm` through **Plugins → Add plugin**, then
@@ -155,8 +155,10 @@ open a machine and use **Load → Open browser** in its **Plugins** tile. Use
 **Update page** to run the page script, **About this demo** to follow the
 link, and **Back** to return. The tile runs on the host with the machine
 stopped or running. Expand the tile with **+** for a larger preview. The
-desktop allows one browser preview at a time. The debug build can take
-about two minutes to compile the component on first open.
+desktop allows one browser preview at a time. The standard desktop build
+includes browser preview. A build with `--no-default-features` can store
+the bundle and shows that browser preview is disabled. The debug build can
+take about two minutes to compile the component on first open.
 
 The [browser WIT world](../crates/vkored/wit/browser/browser.wit) exchanges
 input and bounded RGBA frames. vKore grants the component no network or

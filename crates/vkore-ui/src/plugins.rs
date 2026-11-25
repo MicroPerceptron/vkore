@@ -409,19 +409,30 @@ impl State {
                 } else {
                     controls
                 };
-                entries = entries.push(
-                    column![
-                        ty.data(source.name(), theme::TEXT)
-                            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                let plugin = column![
+                    ty.data(source.name(), theme::TEXT)
+                        .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                    ty.body(
+                        format!("Loaded · {}", bundle.kind()),
+                        12.,
+                        theme::TEXT_MUTED
+                    ),
+                    controls.spacing(theme::SPACE_2).wrap(),
+                ];
+                #[cfg(not(feature = "browser-preview"))]
+                let plugin = if bundle.supports_browser() {
+                    plugin.push(
                         ty.body(
-                            format!("Loaded · {}", bundle.kind()),
+                            "Browser preview is disabled in this build.",
                             12.,
-                            theme::TEXT_MUTED
-                        ),
-                        controls.spacing(theme::SPACE_2).wrap(),
-                    ]
-                    .spacing(theme::SPACE_1),
-                );
+                            theme::TEXT_MUTED,
+                        )
+                        .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+                    )
+                } else {
+                    plugin
+                };
+                entries = entries.push(plugin.spacing(theme::SPACE_1));
             }
         }
         let demo = Source::AnimatedCanvas;

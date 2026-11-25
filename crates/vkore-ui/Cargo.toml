@@ -7,6 +7,7 @@ license = "MPL-2.0"
 description = "vKore's native desktop: Kore machines and their DagFS volumes, rendered with Iced over Axiom."
 
 [features]
+default = ["browser-preview"]
 browser-preview = ["vkored/browser-preview"]
 gpu-canvas = ["vkored/gpu-canvas"]
 

@@ -335,6 +335,17 @@ pub fn well(appearance: &Theme) -> container::Style {
     )
 }
 
+/// A dialog over a scrim: the floating surface, with the softer large radius.
+pub fn dialog(appearance: &Theme) -> container::Style {
+    theme::surface(
+        appearance,
+        theme::PANEL,
+        Some(theme::BORDER),
+        theme::RADIUS_LG,
+        theme::Elevation::Floating,
+    )
+}
+
 /// A surface over the page: a tooltip, a menu.
 pub fn floating(appearance: &Theme) -> container::Style {
     theme::surface(

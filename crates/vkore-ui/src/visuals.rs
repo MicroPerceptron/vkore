@@ -38,6 +38,8 @@ pub enum Icon {
     Globe,
     ChevronDown,
     ChevronUp,
+    ChevronRight,
+    Trash,
     Refresh,
     Maximize,
     Restore,
@@ -79,7 +81,7 @@ use Part::{Arc, Circle, Dot, Line, Loop};
 impl Icon {
     /// Every glyph, for the tests and for any gallery that wants the set.
     #[cfg(test)]
-    const ALL: [Self; 38] = [
+    const ALL: [Self; 40] = [
         Self::Machine,
         Self::Volume,
         Self::Settings,
@@ -100,6 +102,8 @@ impl Icon {
         Self::Globe,
         Self::ChevronDown,
         Self::ChevronUp,
+        Self::ChevronRight,
+        Self::Trash,
         Self::Refresh,
         Self::Maximize,
         Self::Restore,
@@ -227,6 +231,14 @@ impl Icon {
                 ]),
             ],
             Self::ChevronDown => &[Line(&[(6., 9.), (12., 15.), (18., 9.)])],
+            Self::ChevronRight => &[Line(&[(9., 6.), (15., 12.), (9., 18.)])],
+            Self::Trash => &[
+                Line(&[(4., 7.), (20., 7.)]),
+                Line(&[(9., 7.), (9., 4.), (15., 4.), (15., 7.)]),
+                Line(&[(6., 7.), (7., 21.), (17., 21.), (18., 7.)]),
+                Line(&[(10., 11.), (10., 17.)]),
+                Line(&[(14., 11.), (14., 17.)]),
+            ],
             Self::ChevronUp => &[Line(&[(6., 15.), (12., 9.), (18., 15.)])],
             Self::Refresh => &[
                 Arc(12., 12., 8., 40., 326.),

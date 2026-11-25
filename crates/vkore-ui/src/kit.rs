@@ -269,6 +269,48 @@ pub fn tile_stat<'a>(
     .into()
 }
 
+/// A fact about a thing, as a small tinted pill: its glyph and a short word.
+pub fn chip<'a>(
+    ty: Typography,
+    icon: Icon,
+    label: impl Into<String>,
+    tone: theme::Tone,
+) -> UiElement<'a> {
+    let em = ty.size(12.);
+    container(
+        row![
+            visuals::icon(icon, tone, ty.size(13.)),
+            ty.body(label.into(), 12., tone),
+        ]
+        .spacing(em / 2.)
+        .align_y(alignment::Vertical::Center),
+    )
+    .padding([em / 3., em * 0.75])
+    .style(move |appearance| theme::tinted(appearance, tone, 0.12, 0.26, em * 2.))
+    .into()
+}
+
+/// A name and its value on one line: the name muted and fixed-width so a
+/// column of them lines up, the value free to wrap. Both are outside text and
+/// go through the data face.
+pub fn pair<'a>(
+    ty: Typography,
+    key: impl Into<std::borrow::Cow<'a, str>>,
+    value: impl Into<std::borrow::Cow<'a, str>>,
+) -> UiElement<'a> {
+    row![
+        ty.data(key, theme::TEXT_MUTED)
+            .width(ty.size(104.))
+            .wrapping(iced_core::text::Wrapping::None)
+            .ellipsis(iced_core::text::Ellipsis::End),
+        ty.data(value, theme::TEXT)
+            .width(Length::Fill)
+            .wrapping(iced_core::text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(theme::SPACE_2)
+    .into()
+}
+
 /// A capability that is on or off: its glyph lit or dimmed, with its name.
 /// The lit glyph is a tick, so state never rests on colour alone.
 pub fn feature<'a>(ty: Typography, icon: Icon, label: &'static str, on: bool) -> UiElement<'a> {

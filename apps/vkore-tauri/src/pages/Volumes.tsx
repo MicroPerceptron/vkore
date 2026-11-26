@@ -228,6 +228,15 @@ export function Volumes() {
   );
 }
 
+/** A picture, and a plain statement if the window could not decode it. */
+function Picture({ url, label, width, height }: { url: string; label: string; width: number; height: number }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <p className="notice bad" role="alert">The window could not draw this picture ({width} × {height}, {Math.round(url.length / 1024)} KiB sent).</p>;
+  }
+  return <img className="shot" src={url} alt={`Preview of ${label}`} width={width} height={height} onError={() => setFailed(true)} />;
+}
+
 function PreviewBody({ label, preview }: { label: string; preview: Preview }) {
   return (
     <>
@@ -238,9 +247,11 @@ function PreviewBody({ label, preview }: { label: string; preview: Preview }) {
       {preview.kind === 'image' && (
         <>
           {preview.dataUrl ? (
-            <img className="shot" src={preview.dataUrl} alt={`Preview of ${label}`} width={preview.width} height={preview.height} />
+            <Picture key={preview.dataUrl.length + label} url={preview.dataUrl} label={label} width={preview.width} height={preview.height} />
           ) : (
-            <p className="notice">Too large to show here ({preview.width} × {preview.height}).</p>
+            <p className="notice">
+              Not shown: {preview.len > 2 << 20 ? `the file is over 2 MiB (${bytes(preview.len)})` : `the picture is too large (${preview.width} × ${preview.height})`}.
+            </p>
           )}
           <p className="faint small">{preview.width} × {preview.height} PNG</p>
           {preview.capture && (

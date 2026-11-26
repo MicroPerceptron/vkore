@@ -1,6 +1,7 @@
 import { Boxes, HardDrive, LayoutDashboard, Moon, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MpMark } from './MpMark';
 import { Dashboard } from './pages/Dashboard';
 import { MachinePage } from './pages/MachinePage';
@@ -36,6 +37,7 @@ function Shell() {
     applyPreset(preset, theme);
   }, [theme, preset]);
   const next: Theme = theme === 'dark' ? 'light' : 'dark';
+  const location = useLocation();
 
   return (
     <div className="shell">
@@ -68,6 +70,7 @@ function Shell() {
       </header>
       {error && <p className="notice bad" role="alert">{error}</p>}
       <main>
+        <ErrorBoundary resetKey={location.pathname}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/machines" element={<Machines />} />
@@ -76,6 +79,7 @@ function Shell() {
           <Route path="/volumes/:name" element={<Volumes />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -83,8 +87,10 @@ function Shell() {
 
 export function App() {
   return (
-    <StoreProvider>
-      <Shell />
-    </StoreProvider>
+    <ErrorBoundary>
+      <StoreProvider>
+        <Shell />
+      </StoreProvider>
+    </ErrorBoundary>
   );
 }

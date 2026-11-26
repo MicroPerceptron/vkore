@@ -574,4 +574,121 @@ mod tests {
         assert!(volumes.lock().0.is_none());
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    // Real-sized PNGs: a stored-deflate encoder, so no new dependency is needed to test.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A valid RGB PNG of `width` x `height` with stored (uncompressed) deflate blocks.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let chunk = |kind: &[u8; 4], data: &[u8]| {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+            out
+        };
+        let mut raw = Vec::new();
+        for y in 0..height {
+            raw.push(0);
+            for x in 0..width {
+                raw.extend_from_slice(&[(x * 7) as u8, (y * 3) as u8, (x ^ y) as u8]);
+            }
+        }
+        let mut z = vec![0x78, 0x01];
+        let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+        for (i, block) in blocks.iter().enumerate() {
+            z.push(u8::from(i + 1 == blocks.len()));
+            z.extend_from_slice(&(block.len() as u16).to_le_bytes());
+            z.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+            z.extend_from_slice(block);
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in &raw {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let mut ihdr = width.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend(chunk(b"IHDR", &ihdr));
+        out.extend(chunk(b"IDAT", &z));
+        out.extend(chunk(b"IEND", &[]));
+        out
+    }
+
+    #[test]
+    fn images_within_the_limit_are_shown_and_larger_ones_are_not() {
+        let root =
+            std::env::temp_dir().join(format!("vkore-tauri-vol-pics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = Runtime::new(root.clone(), None);
+        let store = runtime.store().unwrap();
+        store
+            .create(&vkored::MachineConfig::new("kore-dev", "/images/kore.iso"))
+            .unwrap();
+        let disk = Disk::create_image(store.state().machine("kore-dev").disk, 256 << 20).unwrap();
+        disk.format().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // 0.34 MiB, 1.2 MiB, and 2.6 MiB (over the 2 MiB limit): real, valid PNGs.
+        for (name, w, h) in [
+            ("small.png", 400, 300),
+            ("mid.png", 700, 600),
+            ("big.png", 960, 960),
+        ] {
+            std::fs::write(project.join(name), png(w, h)).unwrap();
+        }
+        disk.install(&project, &VolPath::parse(0, "pics").unwrap(), false)
+            .unwrap();
+        let volumes = Volumes::default();
+        let mut open = volumes.lock();
+        let shown = |open: &mut VolumeGuard<'_>, name: &str| {
+            let at = Where {
+                place: "home".into(),
+                face: 0,
+                names: vec!["pics".into(), name.into()],
+            };
+            match open.preview(&runtime, "kore-dev", &at).unwrap() {
+                PreviewView::Image {
+                    width,
+                    height,
+                    data_url,
+                    ..
+                } => (width, height, data_url),
+                other => panic!("{name}: an image, got {other:?}"),
+            }
+        };
+        let (w, h, url) = shown(&mut open, "small.png");
+        assert_eq!((w, h), (400, 300));
+        assert!(
+            url.unwrap()
+                .starts_with("data:image/png;base64,iVBORw0KGgo")
+        );
+        let (_, _, url) = shown(&mut open, "mid.png");
+        assert!(url.is_some());
+        let (w, h, url) = shown(&mut open, "big.png");
+        assert_eq!((w, h), (960, 960));
+        assert!(
+            url.is_none(),
+            "a file over the image limit is described, not sent"
+        );
+        drop(open);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

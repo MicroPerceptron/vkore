@@ -270,6 +270,9 @@ button.icon { padding: 8px; width: 36px; height: 36px; }
 .facts.compact { margin: 12px 0 0; }
 @media (max-width: 720px) { .browser { grid-template-columns: 1fr; } }
 
+.crash h2 { display: flex; align-items: center; gap: 10px; color: var(--bad); }
+.crash .text-preview { margin: 12px 0 16px; }
+
 /* Console */
 .term { --term-bg: #0f1716; --term-fg: #d7e3df; background: var(--term-bg); color: var(--term-fg); border-radius: 12px; border: 1px solid var(--border); height: 340px; overflow: auto; padding: 10px 14px; outline: none; cursor: text; position: relative; transition: border-color 0.15s, box-shadow 0.15s; }
 .term.focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

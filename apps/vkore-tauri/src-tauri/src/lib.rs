@@ -2,7 +2,7 @@
 //!
 //! The window is a view over the engine, as the iced desktop is: machines are
 //! read from vKore's store and run through `vkored::Session`, and nothing here
-//! parses a volume or reimplements a boot. The web side gets eight commands, each
+//! parses a volume or reimplements a boot. The web side gets twelve commands, each
 //! validating its input, bounding its output and escaping every string that came
 //! from disk or a guest ([`shown`]); it has no file, shell or network access.
 
@@ -12,11 +12,13 @@ pub mod console;
 pub mod runtime;
 pub mod shown;
 pub mod views;
+pub mod volumes;
 
 use tauri::{Emitter, Manager, RunEvent, State};
 
 use runtime::{Notice, Runtime};
 use views::{HostView, MachineDetail, MachineView};
+use volumes::{ListingView, PreviewView, VolumeView, Volumes, Where};
 
 /// The event a worker emits when a machine changes.
 pub const UPDATE_EVENT: &str = "machine-update";
@@ -52,7 +54,16 @@ fn machine_get(runtime: State<'_, Runtime>, name: String) -> Reply<MachineDetail
 }
 
 #[tauri::command]
-fn machine_start(app: tauri::AppHandle, runtime: State<'_, Runtime>, name: String) -> Reply<()> {
+fn machine_start(
+    app: tauri::AppHandle,
+    runtime: State<'_, Runtime>,
+    volumes: State<'_, Volumes>,
+    name: String,
+) -> Reply<()> {
+    // Release the machine's disk if a volume is open on it, holding the lock that
+    // opening takes, so the two cannot interleave.
+    let mut open = volumes.lock();
+    open.close_for(&name);
     runtime
         .start(&name, move |notice| {
             let _ = match notice {
@@ -68,6 +79,58 @@ fn machine_start(app: tauri::AppHandle, runtime: State<'_, Runtime>, name: Strin
 #[tauri::command]
 fn machine_stop(runtime: State<'_, Runtime>, name: String) -> Reply<()> {
     runtime.stop(&name).map_err(refused)
+}
+
+/// Run engine work that may block (mounting, reading) off the window's threads.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, runtime::Refusal> + Send + 'static,
+) -> Reply<T> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(refused)?
+        .map_err(refused)
+}
+
+#[tauri::command]
+async fn volume_open(
+    runtime: State<'_, Runtime>,
+    volumes: State<'_, Volumes>,
+    name: String,
+) -> Reply<VolumeView> {
+    let (runtime, volumes) = (runtime.inner().clone(), volumes.inner().clone());
+    blocking(move || volumes.lock().open(&runtime, &name)).await
+}
+
+#[tauri::command]
+async fn volume_list(
+    runtime: State<'_, Runtime>,
+    volumes: State<'_, Volumes>,
+    name: String,
+    at: Where,
+) -> Reply<ListingView> {
+    let (runtime, volumes) = (runtime.inner().clone(), volumes.inner().clone());
+    blocking(move || volumes.lock().list(&runtime, &name, &at)).await
+}
+
+#[tauri::command]
+async fn volume_preview(
+    runtime: State<'_, Runtime>,
+    volumes: State<'_, Volumes>,
+    name: String,
+    at: Where,
+) -> Reply<PreviewView> {
+    let (runtime, volumes) = (runtime.inner().clone(), volumes.inner().clone());
+    blocking(move || volumes.lock().preview(&runtime, &name, &at)).await
+}
+
+#[tauri::command]
+async fn volume_close(volumes: State<'_, Volumes>) -> Reply<()> {
+    let volumes = volumes.inner().clone();
+    blocking(move || {
+        volumes.lock().close();
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -93,6 +156,7 @@ pub fn run() {
     let runtime = Runtime::new(root, vkored::run::default_qemu());
     let app = tauri::Builder::default()
         .manage(runtime)
+        .manage(Volumes::default())
         .invoke_handler(tauri::generate_handler![
             host_overview,
             machines_list,
@@ -101,7 +165,11 @@ pub fn run() {
             machine_stop,
             console_input,
             console_paste,
-            console_resize
+            console_resize,
+            volume_open,
+            volume_list,
+            volume_preview,
+            volume_close
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the vKore window");

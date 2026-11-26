@@ -52,7 +52,10 @@ export function MachinePage() {
           </div>
           <Pill phase={machine.run.phase} />
         </div>
-        <div className="actions"><StartStop machine={machine} /></div>
+        <div className="actions">
+          {!active && <Link to={`/volumes/${encodeURIComponent(machine.name)}`} className="button-link"><HardDrive size={15} /> Browse volume</Link>}
+          <StartStop machine={machine} />
+        </div>
       </header>
 
       {machine.run.phase === 'failed' && machine.run.message && <p className="notice bad">{machine.run.message}</p>}

@@ -19,14 +19,19 @@ it, and it is not part of the release train or CI.
   parses the guest's bytes, so the page only draws styled text; keys become
   terminal input, paste is bracketed when the guest asks, and the grid follows
   the panel's size. Shift+Tab leaves it.
+- **Volumes**: a stopped machine's disk, read-only, through Kore's own
+  filesystem engine (`vkore-volume`'s `Browser`), so you see what the machine
+  sees. Terminal homes and the volume root, folders, and a preview of a file's
+  first 32 KiB: text, a hex dump for anything else, and screenshots shown with
+  the capture metadata Kore stamps on them.
 - **Colour themes**: a palette button offers the logo studio's twelve palettes
   beside the default. A preset is eight colours (`src/themes/presets.ts`); the
   whole interface is derived from them for light and dark, and a test checks
   every preset and mode keeps text, muted text and buttons readable.
 
-Creating and editing machines, volumes and the browser stay in the `vkore`
-command and the iced desktop for now, and graphical images have no display here
-yet.
+Creating and editing machines, writing to a volume (install, remove, export),
+physical disks and the browser stay in the `vkore` command and the iced desktop
+for now, and graphical images have no display here yet.
 
 ## How it is built
 
@@ -44,9 +49,10 @@ yet.
 
 ## Boundaries the code keeps
 
-- The web side has eight commands (`host_overview`, `machines_list`,
+- The web side has twelve commands (`host_overview`, `machines_list`,
   `machine_get`, `machine_start`, `machine_stop`, `console_input`,
-  `console_paste`, `console_resize`) and two events (`machine-update`,
+  `console_paste`, `console_resize`, `volume_open`, `volume_list`,
+  `volume_preview`, `volume_close`) and two events (`machine-update`,
   `console-screen`). `build.rs` declares them and `capabilities/default.json`
   grants exactly those, plus event listening. No file, shell, network or window
   access is granted.
@@ -61,8 +67,13 @@ yet.
   (8), console input (4 KiB a command, 256 queued), pastes (16 KiB, plain text)
   and each console screen (64 K characters, newest kept) are bounded. A console
   has its own thread, which ends when its machine does.
-- A machine's disk has one owner: a machine that is already running cannot be
-  started again, and nothing here opens a volume.
+- A machine's disk has one owner. A machine that is already running cannot be
+  started again; a volume is never opened under a running machine; one volume is
+  open at a time; and starting a machine closes its open volume first, under the
+  same lock that opening takes, so the two cannot interleave. Volumes are only
+  read: a listing returns at most 2000 entries, a preview reads at most 32 KiB,
+  and an image is read whole only up to 2 MiB and 16 million pixels. A file name
+  is sent twice, raw (to navigate by, never drawn) and escaped (to draw).
 
 ## Run it
 
@@ -90,8 +101,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Not yet done
 
 - The window has been built and launched, and the interface has been driven in a
-  browser on the scripted engine in light and dark, and the console's thread is
-  tested against a real Unix socket. But a real Kore boot, and a real console
+  browser on the scripted engine in light and dark, the console's thread is
+  tested against a real Unix socket, and the volume page's backend against a real
+  formatted DagFS image populated and read back through Kore's engine. But a real Kore boot, and a real console
   session, through this window have not been run: it is not the acceptance the repository asks
   for until a machine has booted the ISO here.
 - The app icon is a placeholder; the brand mark is not exported for it yet.

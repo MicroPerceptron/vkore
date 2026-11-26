@@ -77,6 +77,49 @@ export interface Update extends RunState {
   line: LogLine | null;
 }
 
+/** A path on a volume: the root, or below a terminal's home. */
+export interface Where {
+  place: 'root' | 'home';
+  face: number;
+  names: string[];
+}
+
+export interface VolumeView {
+  machine: string;
+  generation: number;
+  formatVersion: number;
+  usedFallbackRoot: boolean;
+  faces: number[];
+}
+
+export interface VolumeEntry {
+  /** As the volume holds it: sent back to navigate, never drawn. */
+  name: string;
+  /** Made safe to draw. */
+  label: string;
+  directory: boolean;
+  len: number;
+}
+
+export type Listing =
+  | { kind: 'directory'; entries: VolumeEntry[]; truncated: boolean }
+  | { kind: 'file'; len: number }
+  | { kind: 'emptyHome' };
+
+export interface Capture {
+  software: string | null;
+  created: string | null;
+  kernelBuild: string | null;
+  uptimeMs: string | null;
+  mode: string | null;
+  app: string | null;
+}
+
+export type Preview =
+  | { kind: 'image'; width: number; height: number; len: number; dataUrl: string | null; capture: Capture | null }
+  | { kind: 'text'; text: string; lines: number; truncated: boolean; len: number }
+  | { kind: 'binary'; len: number; headHex: string };
+
 export interface ConsoleUpdate extends ConsoleScreen {
   name: string;
 }
@@ -90,6 +133,10 @@ export interface Api {
   consoleInput(name: string, text: string): Promise<void>;
   consolePaste(name: string, text: string): Promise<void>;
   consoleResize(name: string, rows: number, cols: number): Promise<void>;
+  volumeOpen(name: string): Promise<VolumeView>;
+  volumeList(name: string, at: Where): Promise<Listing>;
+  volumePreview(name: string, at: Where): Promise<Preview>;
+  volumeClose(): Promise<void>;
   /** Each resolves to the function that stops listening. */
   onUpdate(listener: (update: Update) => void): Promise<() => void>;
   onConsole(listener: (update: ConsoleUpdate) => void): Promise<() => void>;
@@ -110,6 +157,10 @@ async function tauri(): Promise<Api> {
     consoleInput: (name, text) => invoke<void>('console_input', { name, text }),
     consolePaste: (name, text) => invoke<void>('console_paste', { name, text }),
     consoleResize: (name, rows, cols) => invoke<void>('console_resize', { name, rows, cols }),
+    volumeOpen: (name) => invoke<VolumeView>('volume_open', { name }),
+    volumeList: (name, at) => invoke<Listing>('volume_list', { name, at }),
+    volumePreview: (name, at) => invoke<Preview>('volume_preview', { name, at }),
+    volumeClose: () => invoke<void>('volume_close'),
     onUpdate: (listener) => listen<Update>(UPDATE_EVENT, (event) => listener(event.payload)),
     onConsole: (listener) => listen<ConsoleUpdate>(CONSOLE_EVENT, (event) => listener(event.payload)),
   };
@@ -122,7 +173,7 @@ export function api(): Promise<Api> {
   loaded ??= '__TAURI_INTERNALS__' in window
     ? tauri()
     : import.meta.env.DEV
-      ? import('./mock').then((mock) => mock.mockApi())
+      ? import('./mock').then((mock) => mock.mockApiWithVolumes())
       : Promise.reject(new Error('vKore must be run inside its app.'));
   return loaded;
 }

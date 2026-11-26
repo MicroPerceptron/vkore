@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-volume-preview"
+description = "Enables the volume_preview command without any pre-configured scope."
+commands.allow = ["volume_preview"]
+
+[[permission]]
+identifier = "deny-volume-preview"
+description = "Denies the volume_preview command without any pre-configured scope."
+commands.deny = ["volume_preview"]

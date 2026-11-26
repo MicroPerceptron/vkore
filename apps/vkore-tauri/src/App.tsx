@@ -1,10 +1,11 @@
-import { Boxes, LayoutDashboard, Moon, Sun } from 'lucide-react';
+import { Boxes, HardDrive, LayoutDashboard, Moon, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { MpMark } from './MpMark';
 import { Dashboard } from './pages/Dashboard';
 import { MachinePage } from './pages/MachinePage';
 import { Machines } from './pages/Machines';
+import { Volumes } from './pages/Volumes';
 import { StoreProvider, useStore } from './store';
 import { applyTheme, preferredTheme, saveTheme, type Theme } from './theme';
 import { applyPreset, preferredPreset, savePreset } from './themes/apply';
@@ -46,6 +47,7 @@ function Shell() {
         <nav className="nav" aria-label="Main">
           <NavLink to="/" end><LayoutDashboard size={16} /> Overview</NavLink>
           <NavLink to="/machines"><Boxes size={16} /> Machines</NavLink>
+          <NavLink to="/volumes"><HardDrive size={16} /> Volumes</NavLink>
         </nav>
         <div className="topbar-right">
           {host && <span className="chip">{host.running} running</span>}
@@ -70,6 +72,8 @@ function Shell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/machines" element={<Machines />} />
           <Route path="/machines/:name" element={<MachinePage />} />
+          <Route path="/volumes" element={<Volumes />} />
+          <Route path="/volumes/:name" element={<Volumes />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

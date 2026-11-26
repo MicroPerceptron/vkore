@@ -2,7 +2,7 @@
 // looked at and driven in an ordinary browser. It is compiled out of the
 // production build (`import.meta.env.DEV`), and is not the engine's behaviour:
 // real boots come from `vkored::Session`.
-import type { Api, ConsoleScreen, ConsoleUpdate, Host, LogLine, Machine, Phase, Span, Stage, Update } from './api';
+import type { Api, ConsoleScreen, ConsoleUpdate, Host, LogLine, Machine, Phase, Span, Stage, Update, Where } from './api';
 
 const host: Host = {
   cpuName: 'AMD Ryzen 9 7950X 16-Core Processor',
@@ -147,7 +147,9 @@ function emit(machine: Machine, line: string | null, began: number) {
 
 const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-export function mockApi(): Api {
+type Base = Omit<Api, 'volumeOpen' | 'volumeList' | 'volumePreview' | 'volumeClose'>;
+
+function mockApi(): Base {
   return {
     async host() {
       await wait(60);
@@ -239,4 +241,83 @@ export function mockApi(): Api {
 
 function isActive(phase: Phase) {
   return phase !== 'idle' && phase !== 'failed';
+}
+
+// ── Volumes: a small scripted DagFS tree per machine, for the interface alone ──
+const SHOT =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1c2a3a"/><stop offset="1" stop-color="#2a9d8f"/></linearGradient></defs><rect width="320" height="200" fill="url(#g)"/><rect x="24" y="24" width="272" height="30" rx="6" fill="#ef6151"/><rect x="24" y="70" width="180" height="14" rx="4" fill="#f0e8dc"/><rect x="24" y="94" width="220" height="14" rx="4" fill="#f0e8dc" opacity=".6"/></svg>',
+  );
+
+interface Dir { dir: Record<string, Node> }
+interface Leaf { len: number; kind: 'text' | 'image' | 'binary'; body?: string }
+type Node = Dir | Leaf;
+const tree: Record<string, Node> = {
+  proj: {
+    dir: {
+      'notes.txt': { len: 148, kind: 'text', body: 'vKore project notes\n\n- boot the console image\n- run the checks\n- export the screenshot\n' },
+      'Cargo.toml': { len: 212, kind: 'text', body: '[package]\nname = "demo"\nversion = "0.1.0"\n' },
+      'kore.bin': { len: 4096, kind: 'binary', body: '4b4f5245010000000000000000100000deadbeef' },
+      src: { dir: { 'main.rs': { len: 64, kind: 'text', body: 'fn main() {\n    println!("hello from kore");\n}\n' } } },
+    },
+  },
+  pictures: {
+    dir: { screenshots: { dir: { 'capture-001.png': { len: 48213, kind: 'image' }, 'capture-002.png': { len: 51877, kind: 'image' } } } },
+  },
+};
+
+function walk(names: string[], at: Where): Node | null {
+  if (at.place === 'root') return names.length === 0 ? { dir: { work: { dir: { 'face-0': { dir: tree } } } } } : null;
+  let node: Node = { dir: tree };
+  for (const name of names) {
+    if (!('dir' in node)) return null;
+    const next: Node | undefined = node.dir[name];
+    if (!next) return null;
+    node = next;
+  }
+  return node;
+}
+
+const baseApi = mockApi;
+export function mockApiWithVolumes(): Api {
+  const api = baseApi();
+  let open: string | null = null;
+  const require = (name: string) => {
+    if (isActive(find(name).run.phase)) throw new Error('a running machine owns its disk; stop it to look inside');
+    if (name === 'nightly') throw new Error('this disk is blank: the machine formats it at its first boot');
+    open = name;
+  };
+  return {
+    ...api,
+    async volumeOpen(name) {
+      require(name);
+      return { machine: name, generation: 42, formatVersion: 3, usedFallbackRoot: name === 'scratch', faces: [0, 1, 2, 3] };
+    },
+    async volumeList(name, at) {
+      require(name);
+      const node = walk(at.names, at.face === 0 || at.place === 'root' ? at : { ...at, names: [] });
+      if (at.place === 'home' && at.face !== 0) return { kind: 'emptyHome' };
+      if (!node) throw new Error('not found');
+      if (!('dir' in node)) return { kind: 'file', len: node.len };
+      const entries = Object.entries(node.dir)
+        .map(([entry, child]) => ({ name: entry, label: entry, directory: 'dir' in child, len: 'len' in child ? child.len : 0 }))
+        .sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+      return { kind: 'directory', entries, truncated: false };
+    },
+    async volumePreview(name, at) {
+      require(name);
+      const node = walk(at.names, at);
+      if (!node || 'dir' in node) throw new Error('that is not a file');
+      if (node.kind === 'image') {
+        return { kind: 'image', width: 320, height: 200, len: node.len, dataUrl: SHOT, capture: { software: 'kore 0.11.0', created: '2026-11-25T21:04:11Z', kernelBuild: 'a1b2c3d', uptimeMs: '48213', mode: 'screen', app: null } };
+      }
+      if (node.kind === 'binary') return { kind: 'binary', len: node.len, headHex: node.body ?? '' };
+      return { kind: 'text', text: node.body ?? '', lines: (node.body ?? '').split('\n').length - 1, truncated: false, len: node.len };
+    },
+    async volumeClose() {
+      open = null;
+      void open;
+    },
+  };
 }

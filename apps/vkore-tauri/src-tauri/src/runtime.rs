@@ -248,6 +248,11 @@ impl Runtime {
             .map_or_else(Snapshot::idle, Run::snapshot)
     }
 
+    /// Whether a worker owns machine `name`, and so its disk.
+    pub fn is_active(&self, name: &str) -> bool {
+        self.runs().get(name).is_some_and(|run| run.phase.active())
+    }
+
     /// The remembered log, oldest first, at most [`MAX_LINES`] lines.
     pub fn lines(&self, name: &str) -> Vec<Line> {
         self.runs()
@@ -668,6 +673,17 @@ mod tests {
             run.lines.front().unwrap().text,
             format!("line {}\\u{{202E}}", MAX_LINES * 2)
         );
+    }
+
+    #[test]
+    fn a_machine_with_a_worker_is_active_and_owns_its_disk() {
+        let (_dir, runtime) = runtime();
+        assert!(!runtime.is_active("kore"));
+        let (stop, _keep) = mpsc::channel();
+        runtime.runs().insert("kore".into(), Run::new(stop));
+        assert!(runtime.is_active("kore"));
+        runtime.runs().get_mut("kore").unwrap().phase = Phase::Failed;
+        assert!(!runtime.is_active("kore"));
     }
 
     #[test]

@@ -11,6 +11,10 @@ const COMMANDS: &[&str] = &[
     "console_input",
     "console_paste",
     "console_resize",
+    "volume_open",
+    "volume_list",
+    "volume_preview",
+    "volume_close",
 ];
 
 fn main() {

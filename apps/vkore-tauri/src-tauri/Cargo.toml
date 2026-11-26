@@ -20,6 +20,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vkored = { path = "../../../crates/vkored" }
 vkore-vm = { path = "../../../crates/vkore-vm" }
+vkore-volume = { path = "../../../crates/vkore-volume" }
+# MIT/Apache, already in the tree through Tauri; encodes a previewed image for the page.
+base64 = "0.22"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

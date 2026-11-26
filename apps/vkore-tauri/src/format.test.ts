@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mib, plural, seconds, share } from './format';
+import { bytes, hexRows, mib, plural, seconds, share } from './format';
 
 describe('format', () => {
   it('writes sizes in the unit a person would', () => {
@@ -20,5 +20,15 @@ describe('format', () => {
     expect(share(20, 10)).toBe(1);
     expect(share(-1, 10)).toBe(0);
     expect(share(5, 10)).toBe(0.5);
+  });
+  it('writes byte counts', () => {
+    expect(bytes(512)).toBe('512 B');
+    expect(bytes(1536)).toBe('1.5 KiB');
+    expect(bytes(5 << 20)).toBe('5 MiB');
+    expect(bytes(123 << 20)).toBe('123 MiB');
+  });
+  it('lays hex out as a dump with printable characters', () => {
+    expect(hexRows('48690aff')).toEqual([{ offset: '0000', bytes: '48 69 0a ff', ascii: 'Hi··' }]);
+    expect(hexRows('')).toEqual([]);
   });
 });

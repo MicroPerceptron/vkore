@@ -7,6 +7,8 @@ import { MachinePage } from './pages/MachinePage';
 import { Machines } from './pages/Machines';
 import { StoreProvider, useStore } from './store';
 import { applyTheme, preferredTheme, saveTheme, type Theme } from './theme';
+import { applyPreset, preferredPreset, savePreset } from './themes/apply';
+import { ThemePicker } from './themes/ThemePicker';
 
 function Brand({ busy }: { busy: boolean }) {
   // The mark boots once as the window opens, then shows the host's activity.
@@ -27,7 +29,11 @@ function Shell() {
   const { error, host, machines } = useStore();
   const booting = machines?.some((m) => ['starting', 'booting', 'stopping'].includes(m.run.phase)) ?? false;
   const [theme, setTheme] = useState<Theme>(preferredTheme);
-  useEffect(() => applyTheme(theme), [theme]);
+  const [preset, setPreset] = useState(preferredPreset);
+  useEffect(() => {
+    applyTheme(theme);
+    applyPreset(preset, theme);
+  }, [theme, preset]);
   const next: Theme = theme === 'dark' ? 'light' : 'dark';
 
   return (
@@ -43,6 +49,13 @@ function Shell() {
         </nav>
         <div className="topbar-right">
           {host && <span className="chip">{host.running} running</span>}
+          <ThemePicker
+            value={preset}
+            onChange={(id) => {
+              savePreset(id);
+              setPreset(id);
+            }}
+          />
           <button className="icon" onClick={() => {
               saveTheme(next);
               setTheme(next);

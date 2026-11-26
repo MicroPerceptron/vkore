@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
-import { api, type Host, type LogLine, type Machine, type Update } from './api';
+import { api, type ConsoleScreen, type ConsoleUpdate, type Host, type LogLine, type Machine, type Update } from './api';
 
 const MAX_LINES = 200;
 
@@ -7,6 +7,7 @@ interface State {
   host: Host | null;
   machines: Machine[] | null;
   logs: Record<string, LogLine[]>;
+  consoles: Record<string, ConsoleScreen>;
   error: string | null;
 }
 
@@ -14,7 +15,8 @@ type Action =
   | { kind: 'loaded'; host: Host; machines: Machine[] }
   | { kind: 'failed'; error: string }
   | { kind: 'update'; update: Update }
-  | { kind: 'log'; name: string; lines: LogLine[] };
+  | { kind: 'log'; name: string; lines: LogLine[]; console: ConsoleScreen | null }
+  | { kind: 'console'; update: ConsoleUpdate };
 
 export function reduce(state: State, action: Action): State {
   switch (action.kind) {
@@ -23,7 +25,15 @@ export function reduce(state: State, action: Action): State {
     case 'failed':
       return { ...state, error: action.error };
     case 'log':
-      return { ...state, logs: { ...state.logs, [action.name]: action.lines.slice(-MAX_LINES) } };
+      return {
+        ...state,
+        logs: { ...state.logs, [action.name]: action.lines.slice(-MAX_LINES) },
+        consoles: action.console ? { ...state.consoles, [action.name]: action.console } : state.consoles,
+      };
+    case 'console': {
+      const { name, ...screen } = action.update;
+      return { ...state, consoles: { ...state.consoles, [name]: screen } };
+    }
     case 'update': {
       const { update } = action;
       const machines = state.machines?.map((machine) =>
@@ -48,7 +58,13 @@ export function reduce(state: State, action: Action): State {
       const host = state.host && machines
         ? { ...state.host, running: machines.filter((m) => m.run.phase !== 'idle' && m.run.phase !== 'failed').length }
         : state.host;
-      return { ...state, machines, logs, host };
+      // A machine that has stopped no longer has a live console.
+      const old = state.consoles[update.name];
+      const ended = update.phase === 'idle' || update.phase === 'failed';
+      const consoles = old && ended && old.connected
+        ? { ...state.consoles, [update.name]: { ...old, connected: false } }
+        : state.consoles;
+      return { ...state, machines, logs, host, consoles };
     }
   }
 }
@@ -63,7 +79,7 @@ interface Store extends State {
 const Context = createContext<Store | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reduce, { host: null, machines: null, logs: {}, error: null });
+  const [state, dispatch] = useReducer(reduce, { host: null, machines: null, logs: {}, consoles: {}, error: null });
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -81,7 +97,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     let stop: (() => void) | undefined;
     void refresh();
     void api()
-      .then((engine) => engine.onUpdate((update) => dispatch({ kind: 'update', update })))
+      .then(async (engine) => {
+        const unlisten = await Promise.all([
+          engine.onUpdate((update) => dispatch({ kind: 'update', update })),
+          engine.onConsole((update) => dispatch({ kind: 'console', update })),
+        ]);
+        return () => unlisten.forEach((off) => off());
+      })
       .then((unlisten) => {
         if (mounted.current) stop = unlisten;
         else unlisten();
@@ -116,7 +138,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       loadLog: async (name) => {
         try {
           const detail = await (await api()).machine(name);
-          if (mounted.current) dispatch({ kind: 'log', name, lines: detail.lines });
+          if (mounted.current) dispatch({ kind: 'log', name, lines: detail.lines, console: detail.console });
         } catch {
           // The list already carries the failure; an empty log is the honest view.
         }

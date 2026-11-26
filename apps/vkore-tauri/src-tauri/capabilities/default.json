@@ -10,6 +10,9 @@
     "allow-machines-list",
     "allow-machine-get",
     "allow-machine-start",
-    "allow-machine-stop"
+    "allow-machine-stop",
+    "allow-console-input",
+    "allow-console-paste",
+    "allow-console-resize"
   ]
 }

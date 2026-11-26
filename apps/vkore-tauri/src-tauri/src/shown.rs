@@ -7,6 +7,20 @@
 //! escape, the same boundary `Typography::data` keeps in the iced desktop. The
 //! result is also bounded, so no field is unbounded on the wire.
 
+/// Text a guest drew on its console: hidden characters are escaped as in
+/// [`shown`], line breaks are kept, and the length is the caller's to bound.
+pub fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c != '\n' && is_hidden(c) {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The longest any one shown field may be, in characters.
 pub const MAX_CHARS: usize = 240;
 
@@ -70,6 +84,14 @@ mod tests {
             assert!(out.contains("\\u{"), "{c:?} was shown raw");
             assert!(!out.contains(c));
         }
+    }
+
+    #[test]
+    fn console_text_keeps_its_lines_and_escapes_the_rest() {
+        assert_eq!(
+            escape_text("ls\n\u{1b}[0m\u{202E}x"),
+            "ls\n\\u{001B}[0m\\u{202E}x"
+        );
     }
 
     #[test]

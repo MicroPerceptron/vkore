@@ -10,6 +10,7 @@ use serde::Serialize;
 use vkore_vm::{AccelChoice, hardware::HostResources};
 use vkored::{MachineConfig, config::Writeback};
 
+use crate::console::Screen;
 use crate::runtime::{Line, Refusal, Runtime, Snapshot};
 use crate::shown::shown;
 
@@ -61,6 +62,8 @@ pub struct MachineDetail {
     #[serde(flatten)]
     pub machine: MachineView,
     pub lines: Vec<Line>,
+    /// The console's newest screen, when the machine has shown one.
+    pub console: Option<Screen>,
 }
 
 fn file_name(path: &Path) -> String {
@@ -148,6 +151,7 @@ pub fn machine(runtime: &Runtime, name: &str) -> Result<MachineDetail, Refusal> 
     Ok(MachineDetail {
         machine: view(&config, runtime.snapshot(name)),
         lines: runtime.lines(name),
+        console: runtime.screen(name),
     })
 }
 
@@ -209,6 +213,7 @@ mod tests {
         assert_eq!(json["memoryMib"], 2048);
         assert_eq!(json["run"]["phase"], "idle");
         assert!(json["lines"].as_array().unwrap().is_empty());
+        assert!(json["console"].is_null());
 
         assert!(matches!(machine(&runtime, "ghost"), Err(Refusal::State(_))));
         // No QEMU, so nothing can start, and nothing is remembered for it.

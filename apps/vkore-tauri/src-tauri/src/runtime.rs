@@ -7,7 +7,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ use serde::Serialize;
 use vkore_vm::{Display, Stage};
 use vkored::{Event, MachineStore, Session, State, config::valid_name};
 
+use crate::console::{self, Command, Screen};
 use crate::shown::shown;
 
 /// Machines this process runs at once. Each is a QEMU process and a volume.
@@ -95,6 +97,10 @@ struct Run {
     began: Instant,
     stop: Option<mpsc::Sender<()>>,
     worker: Option<JoinHandle<()>>,
+    /// Input for the machine's console thread, once its shell is up.
+    console: Option<SyncSender<Command>>,
+    /// The newest screen the console thread published.
+    screen: Option<Screen>,
 }
 
 impl Run {
@@ -109,6 +115,8 @@ impl Run {
             began: Instant::now(),
             stop: Some(stop),
             worker: None,
+            console: None,
+            screen: None,
         }
     }
 
@@ -157,6 +165,16 @@ pub struct Update {
     pub line: Option<Line>,
 }
 
+/// Everything a worker tells the window.
+#[derive(Clone, Debug)]
+pub enum Notice {
+    Machine(Update),
+    Console { name: String, screen: Screen },
+}
+
+/// How workers reach the window; shared by a machine's worker and its console thread.
+pub type Notifier = Arc<dyn Fn(Notice) + Send + Sync>;
+
 /// Why a command was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -165,6 +183,9 @@ pub enum Refusal {
     TooMany,
     NotRunning,
     NoQemu,
+    NoConsole,
+    /// Input the console will not take: too long, or its queue is full.
+    Input(&'static str),
     State(String),
 }
 
@@ -176,6 +197,8 @@ impl std::fmt::Display for Refusal {
             Refusal::TooMany => write!(f, "at most {MAX_RUNNING} machines run at once"),
             Refusal::NotRunning => f.write_str("that machine is not running"),
             Refusal::NoQemu => f.write_str("qemu-system-x86_64 was not found on this host"),
+            Refusal::NoConsole => f.write_str("that machine has no console open"),
+            Refusal::Input(reason) => f.write_str(reason),
             Refusal::State(error) => f.write_str(&shown(error)),
         }
     }
@@ -244,7 +267,7 @@ impl Runtime {
     pub fn start(
         &self,
         name: &str,
-        notify: impl Fn(Update) + Send + Sync + 'static,
+        notify: impl Fn(Notice) + Send + Sync + 'static,
     ) -> Result<(), Refusal> {
         if !valid_name(name) {
             return Err(Refusal::BadName);
@@ -266,12 +289,12 @@ impl Runtime {
             }
             runs.insert(name.to_owned(), Run::new(stop));
         }
-        let notify = Arc::new(notify);
+        let notify: Notifier = Arc::new(notify);
         let runtime = self.clone();
         let worker_name = name.to_owned();
         let spawned = thread::Builder::new()
             .name(format!("vkore-machine-{name}"))
-            .spawn(move || runtime.work(&worker_name, &qemu, &stopping, &*notify));
+            .spawn(move || runtime.work(&worker_name, &qemu, &stopping, &notify));
         match spawned {
             Ok(handle) => {
                 if let Some(run) = self.runs().get_mut(name) {
@@ -323,7 +346,75 @@ impl Runtime {
         }
     }
 
-    fn update(&self, name: &str, notify: &dyn Fn(Update), change: impl FnOnce(&mut Run)) {
+    /// The console thread for machine `name`: it connects to `socket`, and
+    /// publishes each screen to the window and into the machine's record.
+    fn open_console(
+        &self,
+        name: &str,
+        socket: &Path,
+        notify: &Notifier,
+    ) -> Option<SyncSender<Command>> {
+        let (send, commands) = mpsc::sync_channel(console::QUEUE);
+        let runtime = self.clone();
+        let notify = Arc::clone(notify);
+        let socket = socket.to_owned();
+        let name = name.to_owned();
+        let spawned = thread::Builder::new()
+            .name(format!("vkore-console-{name}"))
+            .spawn(move || {
+                console::run(&socket, &commands, &|screen| {
+                    if let Some(run) = runtime.runs().get_mut(&name) {
+                        run.screen = Some(screen.clone());
+                    }
+                    notify(Notice::Console {
+                        name: name.clone(),
+                        screen,
+                    });
+                });
+            });
+        spawned.ok().map(|_| send)
+    }
+
+    /// The newest console screen of machine `name`, if it has shown one.
+    pub fn screen(&self, name: &str) -> Option<Screen> {
+        self.runs().get(name).and_then(|run| run.screen.clone())
+    }
+
+    fn send_console(&self, name: &str, command: Command) -> Result<(), Refusal> {
+        if !valid_name(name) {
+            return Err(Refusal::BadName);
+        }
+        let runs = self.runs();
+        let sender = runs
+            .get(name)
+            .and_then(|run| run.console.as_ref())
+            .ok_or(Refusal::NoConsole)?;
+        sender.try_send(command).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                Refusal::Input("console input is full; wait for the guest to catch up")
+            }
+            mpsc::TrySendError::Disconnected(_) => Refusal::NoConsole,
+        })
+    }
+
+    /// Terminal input as typed: bytes for the guest's shell, escape sequences included.
+    pub fn console_input(&self, name: &str, text: &str) -> Result<(), Refusal> {
+        if text.len() > console::MAX_INPUT_BYTES {
+            return Err(Refusal::Input("that is too much to type at once"));
+        }
+        self.send_console(name, Command::Input(text.as_bytes().to_vec()))
+    }
+
+    /// Plain text to paste; the engine refuses control sequences in it.
+    pub fn console_paste(&self, name: &str, text: &str) -> Result<(), Refusal> {
+        self.send_console(name, Command::Paste(text.to_owned()))
+    }
+
+    pub fn console_resize(&self, name: &str, rows: u16, cols: u16) -> Result<(), Refusal> {
+        self.send_console(name, Command::Resize { rows, cols })
+    }
+
+    fn update(&self, name: &str, notify: &Notifier, change: impl FnOnce(&mut Run)) {
         let (snapshot, line) = {
             let mut runs = self.runs();
             let Some(run) = runs.get_mut(name) else {
@@ -335,23 +426,23 @@ impl Runtime {
                 .flatten();
             (run.snapshot(), line)
         };
-        notify(Update {
+        notify(Notice::Machine(Update {
             name: name.to_owned(),
             snapshot,
             line,
-        });
+        }));
     }
 
-    fn work(
-        &self,
-        name: &str,
-        qemu: &Path,
-        stopping: &mpsc::Receiver<()>,
-        notify: &dyn Fn(Update),
-    ) {
+    fn work(&self, name: &str, qemu: &Path, stopping: &mpsc::Receiver<()>, notify: &Notifier) {
         let outcome = self.run(name, qemu, stopping, notify);
         self.update(name, notify, |run| {
             run.stop = None;
+            // Dropping the sender ends the console thread; what it last drew stays,
+            // marked closed, so the page can show how the session ended.
+            run.console = None;
+            if let Some(screen) = &mut run.screen {
+                screen.connected = false;
+            }
             match outcome {
                 Ok(summary) => {
                     run.phase = Phase::Idle;
@@ -373,7 +464,7 @@ impl Runtime {
         name: &str,
         qemu: &Path,
         stopping: &mpsc::Receiver<()>,
-        notify: &dyn Fn(Update),
+        notify: &Notifier,
     ) -> Result<String, String> {
         let store = self.store().map_err(|refusal| refusal.to_string())?;
         let config = store.get(name).map_err(|error| error.to_string())?;
@@ -415,7 +506,7 @@ impl Runtime {
         })
     }
 
-    fn on_event(&self, name: &str, notify: &dyn Fn(Update), event: &Event) {
+    fn on_event(&self, name: &str, notify: &Notifier, event: &Event) {
         self.update(name, notify, |run| {
             match event {
                 Event::Started { .. } => run.phase = Phase::Booting,
@@ -431,6 +522,10 @@ impl Runtime {
                     }
                 }
                 Event::Stopping => run.phase = Phase::Stopping,
+                Event::Console { socket } => {
+                    run.screen = None;
+                    run.console = self.open_console(name, socket, notify);
+                }
                 _ => {}
             }
             // QEMU's RTC ticks are not news.

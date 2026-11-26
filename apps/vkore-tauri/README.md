@@ -13,11 +13,20 @@ it, and it is not part of the release train or CI.
 - **Machines**: every configured machine as a card with its state, resources and
   a live boot track; start and stop.
 - **Machine**: boot progress by stage (firmware, kernel, services, shell,
-  ready), its resources against the host, its configuration and a bounded event
-  log.
+  ready), the machine's **console**, its resources against the host, its
+  configuration and a bounded event log.
+- **Console**: a console image's COM2 shell, live. The engine's terminal model
+  parses the guest's bytes, so the page only draws styled text; keys become
+  terminal input, paste is bracketed when the guest asks, and the grid follows
+  the panel's size. Shift+Tab leaves it.
+- **Colour themes**: a palette button offers the logo studio's twelve palettes
+  beside the default. A preset is eight colours (`src/themes/presets.ts`); the
+  whole interface is derived from them for light and dark, and a test checks
+  every preset and mode keeps text, muted text and buttons readable.
 
-Creating and editing machines, volumes, the console and the browser stay in the
-`vkore` command and the iced desktop for now.
+Creating and editing machines, volumes and the browser stay in the `vkore`
+command and the iced desktop for now, and graphical images have no display here
+yet.
 
 ## How it is built
 
@@ -35,9 +44,10 @@ Creating and editing machines, volumes, the console and the browser stay in the
 
 ## Boundaries the code keeps
 
-- The web side has five commands (`host_overview`, `machines_list`,
-  `machine_get`, `machine_start`, `machine_stop`) and one event
-  (`machine-update`). `build.rs` declares them and `capabilities/default.json`
+- The web side has eight commands (`host_overview`, `machines_list`,
+  `machine_get`, `machine_start`, `machine_stop`, `console_input`,
+  `console_paste`, `console_resize`) and two events (`machine-update`,
+  `console-screen`). `build.rs` declares them and `capabilities/default.json`
   grants exactly those, plus event listening. No file, shell, network or window
   access is granted.
 - The content security policy allows scripts, fonts and images from the app
@@ -47,8 +57,10 @@ Creating and editing machines, volumes, the console and the browser stay in the
   from disk or a guest (machine and image names, project names, engine messages)
   pass through `shown`: control, bidirectional and invisible characters are
   shown as visible `\u{..}` escapes, and each field is cut at 240 characters.
-  Paths are reduced to file names. Listings, logs (200 lines) and running
-  machines (8) are bounded.
+  Paths are reduced to file names. Listings, logs (200 lines), running machines
+  (8), console input (4 KiB a command, 256 queued), pastes (16 KiB, plain text)
+  and each console screen (64 K characters, newest kept) are bounded. A console
+  has its own thread, which ends when its machine does.
 - A machine's disk has one owner: a machine that is already running cannot be
   started again, and nothing here opens a volume.
 
@@ -78,8 +90,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Not yet done
 
 - The window has been built and launched, and the interface has been driven in a
-  browser on the scripted engine in light and dark, but a real Kore boot through
-  this window has not been run: it is not the acceptance the repository asks
+  browser on the scripted engine in light and dark, and the console's thread is
+  tested against a real Unix socket. But a real Kore boot, and a real console
+  session, through this window have not been run: it is not the acceptance the repository asks
   for until a machine has booted the ISO here.
 - The app icon is a placeholder; the brand mark is not exported for it yet.
 - Linux and Windows webviews are untested; this was built on macOS.

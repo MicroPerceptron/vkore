@@ -8,6 +8,9 @@ const COMMANDS: &[&str] = &[
     "machine_get",
     "machine_start",
     "machine_stop",
+    "console_input",
+    "console_paste",
+    "console_resize",
 ];
 
 fn main() {

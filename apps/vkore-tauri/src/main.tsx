@@ -7,9 +7,12 @@ import { HashRouter } from 'react-router-dom';
 import { App } from './App';
 import './styles.css';
 import { applyTheme, preferredTheme } from './theme';
+import { applyPreset, preferredPreset } from './themes/apply';
 
 // Set the theme before the first paint so a dark window never flashes light.
-applyTheme(preferredTheme());
+const mode = preferredTheme();
+applyTheme(mode);
+applyPreset(preferredPreset(), mode);
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

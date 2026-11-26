@@ -2,7 +2,7 @@
 // looked at and driven in an ordinary browser. It is compiled out of the
 // production build (`import.meta.env.DEV`), and is not the engine's behaviour:
 // real boots come from `vkored::Session`.
-import type { Api, Host, LogLine, Machine, Phase, Stage, Update } from './api';
+import type { Api, ConsoleScreen, ConsoleUpdate, Host, LogLine, Machine, Phase, Span, Stage, Update } from './api';
 
 const host: Host = {
   cpuName: 'AMD Ryzen 9 7950X 16-Core Processor',
@@ -81,6 +81,52 @@ const BOOT: [Stage, number, string][] = [
 const logs = new Map<string, LogLine[]>();
 const timers = new Map<string, number[]>();
 const listeners = new Set<(update: Update) => void>();
+const consoleListeners = new Set<(update: ConsoleUpdate) => void>();
+const shells = new Map<string, { history: string; line: string }>();
+
+const PROMPT = 'kore> ';
+
+function span(text: string, over: Partial<Span> = {}): Span {
+  return { text, fg: null, bg: null, bold: false, dim: false, inverse: false, underline: false, cursor: false, ...over };
+}
+
+function screenOf(name: string, connected = true): ConsoleScreen {
+  const shell = shells.get(name) ?? { history: '', line: '' };
+  return {
+    rows: 24,
+    cols: 100,
+    connected,
+    error: '',
+    applicationCursor: false,
+    spans: [
+      span(shell.history),
+      span(PROMPT, { fg: 6, bold: true }),
+      span(shell.line),
+      span(' ', { cursor: true }),
+    ],
+  };
+}
+
+function publishConsole(name: string, connected = true) {
+  const screen = screenOf(name, connected);
+  for (const listener of consoleListeners) listener({ name, ...screen });
+}
+
+function runLine(name: string, line: string) {
+  const shell = shells.get(name);
+  if (!shell) return;
+  const [command = '', ...rest] = line.trim().split(/\s+/);
+  const out: Record<string, string> = {
+    help: 'commands: help, ls, echo, uname, clear\n',
+    ls: 'applications/  pictures/  documents/  vkore/\n',
+    uname: 'Kore 0.11.0 x86_64\n',
+    echo: `${rest.join(' ')}\n`,
+  };
+  shell.history += `${PROMPT}${line}\n`;
+  if (command === 'clear') shell.history = '';
+  else if (command) shell.history += out[command] ?? `${command}: not found\n`;
+  shell.line = '';
+}
 
 function find(name: string): Machine {
   const found = machines.find((machine) => machine.name === name);
@@ -113,7 +159,11 @@ export function mockApi(): Api {
     },
     async machine(name) {
       await wait(30);
-      return { ...structuredClone(find(name)), lines: logs.get(name) ?? [] };
+      return {
+        ...structuredClone(find(name)),
+        lines: logs.get(name) ?? [],
+        console: shells.has(name) ? screenOf(name, isActive(find(name).run.phase)) : null,
+      };
     },
     async start(name) {
       const machine = find(name);
@@ -138,6 +188,10 @@ export function mockApi(): Api {
             uptimeMs: ms,
           };
           emit(machine, text, began);
+          if (stage === 'shell' && machine.iso.includes('console')) {
+            shells.set(name, { history: 'Kore 0.11.0 console\ntype help for commands\n', line: '' });
+            publishConsole(name);
+          }
         });
       }
       timers.set(name, pending);
@@ -150,9 +204,31 @@ export function mockApi(): Api {
       machine.run = { ...machine.run, phase: 'stopping' };
       emit(machine, 'stopping', began);
       window.setTimeout(() => {
+        if (shells.has(name)) publishConsole(name, false);
         machine.run = { phase: 'idle', stage: null, message: 'stopped', uptimeMs: null };
         emit(machine, 'stopped', began);
       }, 1200);
+    },
+    async consoleInput(name, text) {
+      const shell = shells.get(name);
+      if (!shell || !isActive(find(name).run.phase)) throw new Error('that machine has no console open');
+      for (const char of text) {
+        if (char === '\r') runLine(name, shell.line);
+        else if (char === '\x7f') shell.line = shell.line.slice(0, -1);
+        else if (char >= ' ' && !char.startsWith('\x1b')) shell.line += char;
+      }
+      publishConsole(name);
+    },
+    async consolePaste(name, text) {
+      const shell = shells.get(name);
+      if (!shell) throw new Error('that machine has no console open');
+      shell.line += text.replace(/[\r\n]+/g, ' ');
+      publishConsole(name);
+    },
+    async consoleResize() {},
+    async onConsole(listener) {
+      consoleListeners.add(listener);
+      return () => consoleListeners.delete(listener);
     },
     async onUpdate(listener) {
       listeners.add(listener);

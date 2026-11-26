@@ -4,12 +4,13 @@ import { Link, useParams } from 'react-router-dom';
 import { mib, seconds, share } from '../format';
 import { useStore } from '../store';
 import { MpMark } from '../MpMark';
+import { Console } from '../Console';
 import { Empty, Meter, Pill, Ring, Stages, isActive } from '../ui';
 import { StartStop } from './Machines';
 
 export function MachinePage() {
   const { name = '' } = useParams();
-  const { machines, host, logs, loadLog } = useStore();
+  const { machines, host, logs, consoles, loadLog } = useStore();
   const machine = machines?.find((entry) => entry.name === name);
   const lines = logs[name] ?? [];
   const log = useRef<HTMLOListElement>(null);
@@ -71,6 +72,14 @@ export function MachinePage() {
           />
           <Stages machine={machine} />
         </div>
+      </section>
+
+      <section className="card">
+        <header className="card-head">
+          <h2>Console</h2>
+          <span className="faint small">{consoles[name]?.connected ? 'COM2 shell' : 'not connected'}</span>
+        </header>
+        <Console name={name} screen={consoles[name]} running={active} />
       </section>
 
       <div className="columns">

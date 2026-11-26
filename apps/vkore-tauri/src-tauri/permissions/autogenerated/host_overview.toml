@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-host-overview"
+description = "Enables the host_overview command without any pre-configured scope."
+commands.allow = ["host_overview"]
+
+[[permission]]
+identifier = "deny-host-overview"
+description = "Denies the host_overview command without any pre-configured scope."
+commands.deny = ["host_overview"]

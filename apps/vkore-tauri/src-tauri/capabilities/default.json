@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window may listen for machine updates and call vKore's own bounded commands. It has no file, shell, network or window-management access.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-host-overview",
+    "allow-machines-list",
+    "allow-machine-get",
+    "allow-machine-start",
+    "allow-machine-stop",
+    "allow-console-input",
+    "allow-console-paste",
+    "allow-console-resize",
+    "allow-volume-open",
+    "allow-volume-list",
+    "allow-volume-preview",
+    "allow-volume-close",
+    "allow-hardware-get",
+    "allow-hardware-check",
+    "allow-hardware-save"
+  ]
+}

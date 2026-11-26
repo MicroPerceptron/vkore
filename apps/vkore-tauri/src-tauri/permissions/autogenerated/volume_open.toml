@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-volume-open"
+description = "Enables the volume_open command without any pre-configured scope."
+commands.allow = ["volume_open"]
+
+[[permission]]
+identifier = "deny-volume-open"
+description = "Denies the volume_open command without any pre-configured scope."
+commands.deny = ["volume_open"]

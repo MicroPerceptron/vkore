@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-volume-close"
+description = "Enables the volume_close command without any pre-configured scope."
+commands.allow = ["volume_close"]
+
+[[permission]]
+identifier = "deny-volume-close"
+description = "Denies the volume_close command without any pre-configured scope."
+commands.deny = ["volume_close"]

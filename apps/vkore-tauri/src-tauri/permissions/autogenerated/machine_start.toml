@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-machine-start"
+description = "Enables the machine_start command without any pre-configured scope."
+commands.allow = ["machine_start"]
+
+[[permission]]
+identifier = "deny-machine-start"
+description = "Denies the machine_start command without any pre-configured scope."
+commands.deny = ["machine_start"]

@@ -456,3 +456,7 @@ their last grid dimensions. Cursor positioning, colors and alternate screens use
 the existing VT parser. Guest control strings cannot change the host clipboard
 or window. All visible guest text still uses the bundled mono face and the
 usual control/unsupported-glyph escaping.
+
+## An experimental web desktop
+
+[`apps/vkore-tauri`](../apps/vkore-tauri/README.md) is a second, experimental desktop: the same engine behind a Tauri web front end in a different theme. It lives in its own Cargo workspace, is not built by CI, and covers an overview, the machine list and a machine's boot and resources so far.

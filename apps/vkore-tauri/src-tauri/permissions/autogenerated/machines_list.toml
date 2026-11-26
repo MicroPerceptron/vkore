@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-machines-list"
+description = "Enables the machines_list command without any pre-configured scope."
+commands.allow = ["machines_list"]
+
+[[permission]]
+identifier = "deny-machines-list"
+description = "Denies the machines_list command without any pre-configured scope."
+commands.deny = ["machines_list"]

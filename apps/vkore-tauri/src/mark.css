@@ -1,0 +1,69 @@
+/* The MicroPerceptron mark. Palettes are the logo studio's Cream Machine (light)
+   and Arctic (dark); `--mp-accent` can be overridden per use. Motion is the
+   studio's CRT Boot and Signal Noise presets at 30 fps, as seconds. */
+:root {
+  --mp-body: #3a3230;
+  --mp-panel: #f0e8dc;
+  --mp-side: #e8e0d4;
+  --mp-accent: #2a9d8f;
+  --mp-screen: #3a3230;
+  --mp-edge-hi: #9a8e84;
+  --mp-edge-dark: #4a4240;
+}
+[data-theme='dark'] {
+  --mp-body: #1c2a3a;
+  --mp-panel: #e4eaf0;
+  --mp-side: #d6dce4;
+  --mp-accent: #18b4cc;
+  --mp-screen: #1c2a3a;
+  --mp-edge-hi: #7a8a9a;
+  --mp-edge-dark: #2c3a4a;
+}
+
+.mp { display: block; flex: none; overflow: visible; }
+.mp path, .mp circle { transform-box: fill-box; transform-origin: center; }
+.mp-body { fill: var(--mp-body); }
+.mp-panel_front, .mp-panel_detail, .mp-glasses_R, .mp-glasses_L { fill: var(--mp-panel); }
+.mp-panel_side { fill: var(--mp-side); }
+.mp-edge_hi { fill: var(--mp-edge-hi); }
+.mp-side_edge { fill: var(--mp-edge-dark); }
+.mp-screen { fill: var(--mp-screen); }
+.mp-bar_top, .mp-content_orange { fill: var(--mp-accent); }
+.mp-dot1, .mp-dot2, .mp-dot3 { fill: var(--mp-body); }
+
+/* Intro: CRT Boot. Each part is a delay (frame / 30) and a duration. */
+.mp-intro .mp-body { animation: mp-slide 0.47s cubic-bezier(0.25, 0.6, 0.4, 1) both; }
+.mp-intro .mp-panel_front { animation: mp-fade 0.4s 0.17s ease both; }
+.mp-intro .mp-panel_side { animation: mp-fade 0.4s 0.23s ease both; }
+.mp-intro .mp-edge_hi, .mp-intro .mp-side_edge { animation: mp-fade 0.27s 0.3s ease both; }
+.mp-intro .mp-panel_detail { animation: mp-fade 0.4s 0.3s ease both; }
+.mp-intro .mp-screen { animation: mp-flicker-in 0.4s 0.47s steps(1, end) both; }
+.mp-intro .mp-bar_top { animation: mp-wipe 0.47s 0.73s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.mp-intro .mp-content_orange { animation: mp-wipe 0.53s 0.93s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.mp-intro .mp-glasses_R { animation: mp-pop 0.4s 1.33s cubic-bezier(0.15, 0.9, 0.3, 1) both; }
+.mp-intro .mp-glasses_L { animation: mp-pop 0.4s 1.47s cubic-bezier(0.15, 0.9, 0.3, 1) both; }
+.mp-intro .mp-dot1 { animation: mp-pop 0.33s 1.93s cubic-bezier(0.15, 0.9, 0.3, 1) both; }
+.mp-intro .mp-dot2 { animation: mp-pop 0.33s 2.07s cubic-bezier(0.15, 0.9, 0.3, 1) both; }
+.mp-intro .mp-dot3 { animation: mp-pop 0.33s 2.2s cubic-bezier(0.15, 0.9, 0.3, 1) both; }
+
+/* Busy: Signal Noise. The display flickers and the glasses jitter, in short bursts. */
+.mp-busy .mp-screen, .mp-busy .mp-bar_top, .mp-busy .mp-content_orange { animation: mp-noise 2.4s ease-in-out infinite; }
+.mp-busy .mp-bar_top { animation-delay: 0.05s; }
+.mp-busy .mp-content_orange { animation-delay: 0.1s; }
+.mp-busy .mp-glasses_R { animation: mp-jitter 2.4s ease-in-out infinite; }
+.mp-busy .mp-glasses_L { animation: mp-jitter 2.4s 0.08s ease-in-out infinite reverse; }
+.mp-busy .mp-dot1, .mp-busy .mp-dot2, .mp-busy .mp-dot3 { animation: mp-noise 2.4s 0.2s ease-in-out infinite; }
+.mp-busy .mp-dot2 { animation-delay: 0.28s; }
+.mp-busy .mp-dot3 { animation-delay: 0.36s; }
+
+@keyframes mp-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mp-slide { from { opacity: 0; transform: translateY(25px); } to { opacity: 1; transform: none; } }
+@keyframes mp-flicker-in { 0% { opacity: 0; } 8% { opacity: 0.6; } 25% { opacity: 0.2; } 42% { opacity: 0.9; } 58% { opacity: 0.5; } 100% { opacity: 1; } }
+@keyframes mp-wipe { from { opacity: 0; transform: scaleX(0); } 12% { opacity: 1; } to { opacity: 1; transform: none; } }
+@keyframes mp-pop { from { opacity: 0; transform: scale(0); } 40% { opacity: 1; } to { opacity: 1; transform: none; } }
+@keyframes mp-noise { 0%, 30%, 100% { opacity: 1; } 5% { opacity: 0.45; } 10% { opacity: 0.85; } 16% { opacity: 0.55; } 24% { opacity: 1; } }
+@keyframes mp-jitter { 0%, 30%, 100% { transform: none; } 6% { transform: translateX(10px); } 12% { transform: translateX(-6px); } 20% { transform: translateX(3px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mp *, .mp-intro *, .mp-busy * { animation: none !important; }
+}

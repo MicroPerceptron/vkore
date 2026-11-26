@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-machine-stop"
+description = "Enables the machine_stop command without any pre-configured scope."
+commands.allow = ["machine_stop"]
+
+[[permission]]
+identifier = "deny-machine-stop"
+description = "Denies the machine_stop command without any pre-configured scope."
+commands.deny = ["machine_stop"]

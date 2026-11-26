@@ -2,13 +2,14 @@
 //!
 //! The window is a view over the engine, as the iced desktop is: machines are
 //! read from vKore's store and run through `vkored::Session`, and nothing here
-//! parses a volume or reimplements a boot. The web side gets twelve commands, each
+//! parses a volume or reimplements a boot. The web side gets fifteen commands, each
 //! validating its input, bounding its output and escaping every string that came
 //! from disk or a guest ([`shown`]); it has no file, shell or network access.
 
 #![cfg(unix)]
 
 pub mod console;
+pub mod hardware;
 pub mod runtime;
 pub mod shown;
 pub mod views;
@@ -16,6 +17,7 @@ pub mod volumes;
 
 use tauri::{Emitter, Manager, RunEvent, State};
 
+use hardware::{Check, Draft, HardwareView};
 use runtime::{Notice, Runtime};
 use views::{HostView, MachineDetail, MachineView};
 use volumes::{ListingView, PreviewView, VolumeView, Volumes, Where};
@@ -109,6 +111,25 @@ async fn blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
+async fn hardware_get(runtime: State<'_, Runtime>, name: String) -> Reply<HardwareView> {
+    let runtime = runtime.inner().clone();
+    blocking(move || hardware::get(&runtime, &name)).await
+}
+
+#[tauri::command]
+async fn hardware_check(runtime: State<'_, Runtime>, name: String, draft: Draft) -> Reply<Check> {
+    let runtime = runtime.inner().clone();
+    blocking(move || hardware::check(&runtime, &name, &draft)).await
+}
+
+/// Saving may wait on the desktop's authentication agent, so it never runs on the window's threads.
+#[tauri::command]
+async fn hardware_save(runtime: State<'_, Runtime>, name: String, draft: Draft) -> Reply<()> {
+    let runtime = runtime.inner().clone();
+    blocking(move || hardware::save(&runtime, &name, &draft)).await
+}
+
+#[tauri::command]
 async fn volume_open(
     runtime: State<'_, Runtime>,
     volumes: State<'_, Volumes>,
@@ -198,7 +219,10 @@ pub fn run() {
             volume_open,
             volume_list,
             volume_preview,
-            volume_close
+            volume_close,
+            hardware_get,
+            hardware_check,
+            hardware_save
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the vKore window");

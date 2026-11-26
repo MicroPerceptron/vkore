@@ -17,6 +17,9 @@
     "allow-volume-open",
     "allow-volume-list",
     "allow-volume-preview",
-    "allow-volume-close"
+    "allow-volume-close",
+    "allow-hardware-get",
+    "allow-hardware-check",
+    "allow-hardware-save"
   ]
 }

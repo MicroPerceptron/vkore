@@ -2,7 +2,7 @@
 // looked at and driven in an ordinary browser. It is compiled out of the
 // production build (`import.meta.env.DEV`), and is not the engine's behaviour:
 // real boots come from `vkored::Session`.
-import type { Api, ConsoleScreen, ConsoleUpdate, Host, LogLine, Machine, Phase, Span, Stage, Update, Where } from './api';
+import type { Api, ConsoleScreen, ConsoleUpdate, HardwareCheck, HardwareDraft, HardwareView, Host, LogLine, Machine, Phase, Span, Stage, Update, Where } from './api';
 
 const host: Host = {
   cpuName: 'AMD Ryzen 9 7950X 16-Core Processor',
@@ -147,7 +147,7 @@ function emit(machine: Machine, line: string | null, began: number) {
 
 const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-type Base = Omit<Api, 'volumeOpen' | 'volumeList' | 'volumePreview' | 'volumeClose'>;
+type Base = Omit<Api, 'volumeOpen' | 'volumeList' | 'volumePreview' | 'volumeClose' | 'hardwareGet' | 'hardwareCheck' | 'hardwareSave'>;
 
 function mockApi(): Base {
   return {
@@ -279,6 +279,42 @@ function walk(names: string[], at: Where): Node | null {
   return node;
 }
 
+// ── Hardware: the engine's rules in miniature, so the editor can be driven alone ──
+const hostHardware = {
+  logicalCpus: 16,
+  physicalCores: 8,
+  cores: Array.from({ length: 8 }, (_, id) => ({ id, kind: id < 4 ? 'Performance' : 'Efficiency', threads: [id, id + 8] })),
+  memoryMib: 65536,
+  availableMemoryMib: 48000,
+  cpuPinning: true,
+  memoryPinning: true,
+  hugetlb: true,
+  pools: [{ page: '2m' as const, freeMib: 16384 }],
+  nativeWaitsError: null,
+};
+const savedDrafts = new Map<string, HardwareDraft>();
+
+function draftOf(machine: Machine): HardwareDraft {
+  return (
+    savedDrafts.get(machine.name) ?? {
+      cpus: machine.cpus, memoryMib: machine.memoryMib, pinCpus: false, hostCpus: [], cpuPowerManagement: false,
+      pinMemory: machine.name === 'scratch', pages: 'system', network: 'isolated', guestNuma: 'split',
+    }
+  );
+}
+
+function judge(draft: HardwareDraft): HardwareCheck {
+  const refuse = (message: string) => ({ ok: false, message, needsAuthorization: false });
+  if (draft.cpus > hostHardware.logicalCpus) return refuse("guest CPU count exceeds the host's available logical CPUs");
+  if (draft.memoryMib > hostHardware.availableMemoryMib) return refuse('not enough available host RAM; reduce the allocation or close other workloads');
+  if (draft.cpuPowerManagement && !draft.pinCpus) return refuse('Native CPU waits require CPU pinning. Enable pinning or turn off native waits.');
+  if (draft.pinCpus && (draft.hostCpus.length !== draft.cpus || new Set(draft.hostCpus).size !== draft.cpus)) return refuse('select one distinct host logical CPU for every guest CPU');
+  const nodes = draft.guestNuma === 'split' ? 2 : 1;
+  const alignment = nodes * (draft.pages === '2m' ? 2 : draft.pages === '1g' ? 1024 : 1);
+  if (draft.memoryMib % alignment !== 0) return refuse(`${draft.pages === '2m' ? '2 MiB hugepages' : '1 GiB hugepages'} requires RAM in multiples of ${alignment} MiB for the selected guest topology`);
+  return { ok: true, message: '', needsAuthorization: draft.pinMemory || draft.pages !== 'system' };
+}
+
 const baseApi = mockApi;
 export function mockApiWithVolumes(): Api {
   const api = baseApi();
@@ -290,6 +326,25 @@ export function mockApiWithVolumes(): Api {
   };
   return {
     ...api,
+    async hardwareGet(name): Promise<HardwareView> {
+      const machine = find(name);
+      return { machine: name, draft: draftOf(machine), minCpus: 2, minMemoryMib: 2048, maxCpus: hostHardware.logicalCpus, diskMib: machine.diskMib, reserveStorage: true, devices: name === 'inference' ? 1 : 0, host: structuredClone(hostHardware) };
+    },
+    async hardwareCheck(name, draft) {
+      if (isActive(find(name).run.phase)) throw new Error('stop the machine before changing its hardware');
+      await new Promise((done) => setTimeout(done, 80));
+      return judge(draft);
+    },
+    async hardwareSave(name, draft) {
+      const machine = find(name);
+      if (isActive(machine.run.phase)) throw new Error('stop the machine before changing its hardware');
+      const verdict = judge(draft);
+      if (!verdict.ok) throw new Error(verdict.message);
+      await new Promise((done) => setTimeout(done, verdict.needsAuthorization ? 1800 : 400));
+      savedDrafts.set(name, structuredClone(draft));
+      machine.cpus = draft.cpus;
+      machine.memoryMib = draft.memoryMib;
+    },
     async volumeOpen(name) {
       require(name);
       return { machine: name, generation: 42, formatVersion: 3, usedFallbackRoot: name === 'scratch', faces: [0, 1, 2, 3] };

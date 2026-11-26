@@ -120,6 +120,49 @@ export type Preview =
   | { kind: 'text'; text: string; lines: number; truncated: boolean; len: number }
   | { kind: 'binary'; len: number; headHex: string };
 
+export interface HardwareDraft {
+  cpus: number;
+  memoryMib: number;
+  pinCpus: boolean;
+  hostCpus: number[];
+  cpuPowerManagement: boolean;
+  pinMemory: boolean;
+  pages: 'system' | '2m' | '1g';
+  network: 'isolated' | 'e1000e';
+  guestNuma: 'single' | 'split';
+}
+
+export interface HostHardware {
+  logicalCpus: number;
+  physicalCores: number;
+  cores: { id: number; kind: string; threads: number[] }[];
+  memoryMib: number;
+  availableMemoryMib: number;
+  cpuPinning: boolean;
+  memoryPinning: boolean;
+  hugetlb: boolean;
+  pools: { page: 'system' | '2m' | '1g'; freeMib: number }[];
+  nativeWaitsError: string | null;
+}
+
+export interface HardwareView {
+  machine: string;
+  draft: HardwareDraft;
+  minCpus: number;
+  minMemoryMib: number;
+  maxCpus: number;
+  diskMib: number;
+  reserveStorage: boolean;
+  devices: number;
+  host: HostHardware;
+}
+
+export interface HardwareCheck {
+  ok: boolean;
+  message: string;
+  needsAuthorization: boolean;
+}
+
 export interface ConsoleUpdate extends ConsoleScreen {
   name: string;
 }
@@ -133,6 +176,10 @@ export interface Api {
   consoleInput(name: string, text: string): Promise<void>;
   consolePaste(name: string, text: string): Promise<void>;
   consoleResize(name: string, rows: number, cols: number): Promise<void>;
+  hardwareGet(name: string): Promise<HardwareView>;
+  hardwareCheck(name: string, draft: HardwareDraft): Promise<HardwareCheck>;
+  /** May wait on the desktop's authentication agent. */
+  hardwareSave(name: string, draft: HardwareDraft): Promise<void>;
   volumeOpen(name: string): Promise<VolumeView>;
   volumeList(name: string, at: Where): Promise<Listing>;
   volumePreview(name: string, at: Where): Promise<Preview>;
@@ -157,6 +204,9 @@ async function tauri(): Promise<Api> {
     consoleInput: (name, text) => invoke<void>('console_input', { name, text }),
     consolePaste: (name, text) => invoke<void>('console_paste', { name, text }),
     consoleResize: (name, rows, cols) => invoke<void>('console_resize', { name, rows, cols }),
+    hardwareGet: (name) => invoke<HardwareView>('hardware_get', { name }),
+    hardwareCheck: (name, draft) => invoke<HardwareCheck>('hardware_check', { name, draft }),
+    hardwareSave: (name, draft) => invoke<void>('hardware_save', { name, draft }),
     volumeOpen: (name) => invoke<VolumeView>('volume_open', { name }),
     volumeList: (name, at) => invoke<Listing>('volume_list', { name, at }),
     volumePreview: (name, at) => invoke<Preview>('volume_preview', { name, at }),

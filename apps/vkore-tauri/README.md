@@ -19,6 +19,14 @@ it, and it is not part of the release train or CI.
   parses the guest's bytes, so the page only draws styled text; keys become
   terminal input, paste is bracketed when the guest asks, and the grid follows
   the panel's size. Shift+Tab leaves it.
+- **Hardware**: an existing, stopped machine's CPUs, memory, CPU pinning with a
+  host-core picker, native CPU waits, memory locking, page size (system, 2 MiB or
+  1 GiB hugepages), guest memory nodes and network mode. The engine is the judge:
+  the page asks `vkored::hardware::validate_host` as you edit and shows its words,
+  and saving goes through `save_authorized`, which holds the machine's session
+  lease, may wait on the desktop's authentication agent, and never changes what is
+  saved when refused. The disk's size and storage reservation are fixed after
+  creation, and assigned devices are shown but kept as they are.
 - **Volumes**: a stopped machine's disk, read-only, through Kore's own
   filesystem engine (`vkore-volume`'s `Browser`), so you see what the machine
   sees. Terminal homes and the volume root, folders, and a preview of a file's
@@ -29,7 +37,7 @@ it, and it is not part of the release train or CI.
   whole interface is derived from them for light and dark, and a test checks
   every preset and mode keeps text, muted text and buttons readable.
 
-Creating and editing machines, writing to a volume (install, remove, export),
+Creating machines, assigning devices, writing to a volume (install, remove, export),
 physical disks and the browser stay in the `vkore` command and the iced desktop
 for now, and graphical images have no display here yet.
 
@@ -66,10 +74,11 @@ A desktop authentication agent must be running for the prompt to appear.
 
 ## Boundaries the code keeps
 
-- The web side has twelve commands (`host_overview`, `machines_list`,
+- The web side has fifteen commands (`host_overview`, `machines_list`,
   `machine_get`, `machine_start`, `machine_stop`, `console_input`,
   `console_paste`, `console_resize`, `volume_open`, `volume_list`,
-  `volume_preview`, `volume_close`) and two events (`machine-update`,
+  `volume_preview`, `volume_close`, `hardware_get`, `hardware_check`,
+  `hardware_save`) and two events (`machine-update`,
   `console-screen`). `build.rs` declares them and `capabilities/default.json`
   grants exactly those, plus event listening. No file, shell, network or window
   access is granted.

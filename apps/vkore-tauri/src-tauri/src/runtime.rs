@@ -253,6 +253,13 @@ impl Runtime {
         self.runs().get(name).is_some_and(|run| run.phase.active())
     }
 
+    /// Pretend a worker owns machine `name`, for tests of what a running machine refuses.
+    #[cfg(test)]
+    pub fn mark_active_for_test(&self, name: &str) {
+        let (stop, _keep) = mpsc::channel();
+        self.runs().insert(name.to_owned(), Run::new(stop));
+    }
+
     /// The remembered log, oldest first, at most [`MAX_LINES`] lines.
     pub fn lines(&self, name: &str) -> Vec<Line> {
         self.runs()

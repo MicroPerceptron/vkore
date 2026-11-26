@@ -15,6 +15,9 @@ const COMMANDS: &[&str] = &[
     "volume_list",
     "volume_preview",
     "volume_close",
+    "hardware_get",
+    "hardware_check",
+    "hardware_save",
 ];
 
 fn main() {

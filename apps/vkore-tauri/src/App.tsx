@@ -5,6 +5,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { MpMark } from './MpMark';
 import { Dashboard } from './pages/Dashboard';
 import { MachinePage } from './pages/MachinePage';
+import { Hardware } from './pages/Hardware';
 import { Machines } from './pages/Machines';
 import { Volumes } from './pages/Volumes';
 import { StoreProvider, useStore } from './store';
@@ -75,6 +76,7 @@ function Shell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/machines" element={<Machines />} />
           <Route path="/machines/:name" element={<MachinePage />} />
+          <Route path="/machines/:name/hardware" element={<Hardware />} />
           <Route path="/volumes" element={<Volumes />} />
           <Route path="/volumes/:name" element={<Volumes />} />
           <Route path="*" element={<Navigate to="/" replace />} />

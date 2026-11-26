@@ -1,4 +1,4 @@
-import { ArrowLeft, Cpu, FileDigit, FolderGit2, HardDrive, MemoryStick, Monitor, ScrollText, Server, Zap } from 'lucide-react';
+import { ArrowLeft, Cpu, FileDigit, SlidersHorizontal, FolderGit2, HardDrive, MemoryStick, Monitor, ScrollText, Server, Zap } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { mib, seconds, share } from '../format';
@@ -53,6 +53,7 @@ export function MachinePage() {
           <Pill phase={machine.run.phase} />
         </div>
         <div className="actions">
+          {!active && <Link to={`/machines/${encodeURIComponent(machine.name)}/hardware`} className="button-link"><SlidersHorizontal size={15} /> Hardware</Link>}
           {!active && <Link to={`/volumes/${encodeURIComponent(machine.name)}`} className="button-link"><HardDrive size={15} /> Browse volume</Link>}
           <StartStop machine={machine} />
         </div>

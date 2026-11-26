@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use vkored::console::{Color, Console, Output};
+use vkored::console::{COLS, Color, Console, Output, ROWS};
 
 use crate::shown::{escape_text, shown};
 
@@ -84,6 +84,10 @@ pub struct Screen {
     pub error: String,
     /// Cursor keys send `ESC O` rather than `ESC [` while this is set.
     pub application_cursor: bool,
+    /// Where the guest's cursor is, as a character offset into the text of `spans`
+    /// (padded with spaces when the cursor is past the end), when it is shown and
+    /// at the end of the output, where a shell's prompt keeps it.
+    pub cursor: Option<usize>,
     pub spans: Vec<Span>,
 }
 
@@ -96,6 +100,7 @@ impl Screen {
             connected: false,
             error: shown(error),
             application_cursor: false,
+            cursor: None,
             spans: Vec::new(),
         }
     }
@@ -103,41 +108,141 @@ impl Screen {
     fn of(console: &Console, note: Option<&str>) -> Self {
         let output: &Output = console.output();
         let error = note.or_else(|| console.error()).unwrap_or_default();
+        let (runs, cursor) = with_cursor_padding(output);
+        let mut mapped = cursor;
+        let spans = runs
+            .iter()
+            .map(|run| Span {
+                text: escape_text(&run.text),
+                fg: Paint::from(run.style.foreground),
+                bg: Paint::from(run.style.background),
+                bold: run.style.bold,
+                dim: run.style.dim,
+                inverse: run.style.inverse,
+                underline: run.style.underline,
+                cursor: false,
+            })
+            .collect::<Vec<_>>();
+        // Escaping lengthens hidden characters, so the offset is carried across it.
+        if let Some(offset) = cursor {
+            mapped = Some(escaped_offset(&runs, offset));
+        }
+        let (spans, cursor) = bound(spans, mapped);
         Self {
             rows: output.rows,
             cols: output.cols,
             connected: console.connected(),
             error: shown(error),
             application_cursor: output.application_cursor,
-            spans: bound(
-                output
-                    .runs
-                    .iter()
-                    .map(|run| Span {
-                        text: escape_text(&run.text),
-                        fg: Paint::from(run.style.foreground),
-                        bg: Paint::from(run.style.background),
-                        bold: run.style.bold,
-                        dim: run.style.dim,
-                        inverse: run.style.inverse,
-                        underline: run.style.underline,
-                        cursor: run.style.cursor,
-                    })
-                    .collect(),
-            ),
+            cursor,
+            spans,
         }
     }
 }
 
+/// The transcript's runs and where the guest's cursor sits in them.
+///
+/// The engine marks the cursor only in its viewport grid, not in the transcript this
+/// window draws (which reflows to the pane). A shell keeps its cursor on the last
+/// line, so when the cursor is on the grid's last row that has anything on it, the
+/// transcript's last line is that row and the cursor is `column` characters into it.
+/// Anywhere else (a program moving the cursor about the screen) there is no caret.
+/// A cursor past the end of the text, after a prompt's trailing space, is reached by
+/// padding the last run with spaces.
+fn with_cursor_padding(output: &Output) -> (Vec<vkored::console::Run>, Option<usize>) {
+    let mut runs = output.runs.clone();
+    let Some(offset) = cursor_offset(output) else {
+        return (runs, None);
+    };
+    let total: usize = runs.iter().map(|run| run.text.chars().count()).sum();
+    if offset > total {
+        let pad = " ".repeat(offset - total);
+        match runs.last_mut() {
+            Some(last) => last.text.push_str(&pad),
+            None => runs.push(vkored::console::Run {
+                text: pad,
+                style: vkored::console::Style::default(),
+            }),
+        }
+    }
+    (runs, Some(offset))
+}
+
+/// The cursor's character offset into the transcript, when it is on the last line.
+fn cursor_offset(output: &Output) -> Option<usize> {
+    let grid: String = output.grid.iter().map(|run| run.text.as_str()).collect();
+    let mut before = String::new();
+    let mut at = None;
+    for run in &output.grid {
+        if run.style.cursor {
+            at = Some(before.chars().count());
+            break;
+        }
+        before.push_str(&run.text);
+    }
+    let at = at?;
+    let chars: Vec<char> = grid.chars().collect();
+    // The grid's physical rows are separated by newlines.
+    let row_start = chars[..at]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let column = at - row_start;
+    let row_end = chars[at..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(chars.len(), |i| at + i);
+    // Anything on a later row means the cursor is not at the end of the output.
+    if chars[row_end..].iter().any(|c| !c.is_whitespace()) {
+        return None;
+    }
+    // The transcript's last line is this row, except that the row also holds the
+    // cursor's own cell: a blank one is not in the transcript, but a space the guest
+    // wrote is. Match the row against the transcript's real tail to tell which.
+    let transcript: String = output.runs.iter().map(|run| run.text.as_str()).collect();
+    let row: String = chars[row_start..row_end].iter().collect();
+    let content = if transcript.ends_with(&row) {
+        row.chars().count()
+    } else if let Some(shorter) = row
+        .strip_suffix(' ')
+        .filter(|shorter| transcript.ends_with(shorter))
+    {
+        shorter.chars().count()
+    } else {
+        row.trim_end_matches(' ').chars().count()
+    };
+    let total = transcript.chars().count();
+    Some(total.saturating_sub(content) + column)
+}
+
+/// `offset` (in characters of the unescaped runs) as an offset into their escaped text.
+fn escaped_offset(runs: &[vkored::console::Run], offset: usize) -> usize {
+    let mut remaining = offset;
+    let mut mapped = 0;
+    for run in runs {
+        for c in run.text.chars() {
+            if remaining == 0 {
+                return mapped;
+            }
+            remaining -= 1;
+            mapped += escape_text(c.encode_utf8(&mut [0; 4])).chars().count();
+        }
+    }
+    mapped
+}
+
 /// Keep the newest `MAX_CHARS` characters, cutting whole spans from the front
-/// and the first kept span at a character boundary.
-fn bound(mut spans: Vec<Span>) -> Vec<Span> {
+/// and the first kept span at a character boundary. `cursor` moves with the text
+/// and is dropped if the text it pointed into was cut.
+fn bound(mut spans: Vec<Span>, cursor: Option<usize>) -> (Vec<Span>, Option<usize>) {
     let mut total: usize = spans.iter().map(|span| span.text.chars().count()).sum();
     let mut cut = 0;
+    let mut dropped = 0;
     while total > MAX_CHARS && cut < spans.len() {
         let length = spans[cut].text.chars().count();
         if total - length >= MAX_CHARS {
             total -= length;
+            dropped += length;
             cut += 1;
         } else {
             let drop = total - MAX_CHARS;
@@ -147,11 +252,12 @@ fn bound(mut spans: Vec<Span>) -> Vec<Span> {
                 .nth(drop)
                 .map_or(spans[cut].text.len(), |(at, _)| at);
             spans[cut].text.drain(..at);
+            dropped += drop;
             total = MAX_CHARS;
         }
     }
     spans.drain(..cut);
-    spans
+    (spans, cursor.and_then(|at| at.checked_sub(dropped)))
 }
 
 /// Own the console at `socket` until the window drops the sender or the guest
@@ -184,7 +290,10 @@ pub fn run(socket: &Path, commands: &Receiver<Command>, publish: &dyn Fn(Screen)
                 Command::Input(bytes) => console.send_input(&bytes),
                 Command::Paste(text) => console.send_paste(&text),
                 Command::Resize { rows, cols } => {
-                    dirty |= console.resize(rows, cols);
+                    // Never below the engine's default grid: narrowing it crops what
+                    // the guest has already printed (a banner ends mid-word), and the
+                    // page reflows its text to the pane without needing a narrower one.
+                    dirty |= console.resize(rows.max(ROWS), cols.max(COLS));
                     Ok(())
                 }
             };
@@ -237,14 +346,19 @@ mod tests {
     #[test]
     fn the_screen_keeps_its_newest_characters() {
         let big = "a".repeat(MAX_CHARS - 10);
-        let spans = bound(vec![span(&big), span(&"b".repeat(100))]);
+        let (spans, _) = bound(vec![span(&big), span(&"b".repeat(100))], None);
         let total: usize = spans.iter().map(|s| s.text.chars().count()).sum();
         assert_eq!(total, MAX_CHARS);
         assert!(spans.last().unwrap().text.ends_with('b'));
         assert_eq!(spans.last().unwrap().text.chars().count(), 100);
         // Whole spans go first; a short screen is untouched.
-        assert_eq!(bound(vec![span("hi")]).len(), 1);
-        let many = bound(vec![span(&"x".repeat(MAX_CHARS)), span("y")]);
+        let (short, at) = bound(vec![span("hi")], Some(2));
+        assert_eq!((short.len(), at), (1, Some(2)));
+        let (many, cursor) = bound(
+            vec![span(&"x".repeat(MAX_CHARS)), span("y")],
+            Some(MAX_CHARS + 1),
+        );
+        assert_eq!(cursor, Some(MAX_CHARS));
         assert_eq!(
             many.iter().map(|s| s.text.chars().count()).sum::<usize>(),
             MAX_CHARS
@@ -261,6 +375,7 @@ mod tests {
             connected: true,
             error: String::new(),
             application_cursor: false,
+            cursor: Some(2),
             spans: vec![span],
         };
         let wire = serde_json::to_value(&screen).unwrap();
@@ -361,5 +476,145 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert!(!seen[0].connected && seen[0].error.contains("did not connect"));
+    }
+    /// A live console on a socket, to feed and watch.
+    struct Rig {
+        guest: std::os::unix::net::UnixStream,
+        send: mpsc::SyncSender<Command>,
+        screens: Arc<Mutex<Vec<Screen>>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        dir: std::path::PathBuf,
+    }
+
+    impl Rig {
+        fn new(tag: &str) -> Self {
+            let dir = scratch(tag);
+            let socket = dir.join("com2.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (send, commands) = mpsc::sync_channel(QUEUE);
+            let screens: Arc<Mutex<Vec<Screen>>> = Arc::default();
+            let seen = screens.clone();
+            let worker = std::thread::spawn(move || {
+                run(&socket, &commands, &move |screen| {
+                    seen.lock().unwrap().push(screen)
+                });
+            });
+            let (guest, _) = listener.accept().unwrap();
+            Rig {
+                guest,
+                send,
+                screens,
+                worker: Some(worker),
+                dir,
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            self.guest.write_all(bytes).unwrap();
+        }
+
+        /// The newest screen once `ready` holds for it.
+        fn screen(&self, ready: impl Fn(&Screen) -> bool) -> Screen {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(screen) = self.screens.lock().unwrap().last().cloned().filter(&ready) {
+                    return screen;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the console never showed what was fed"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let (dead, _) = mpsc::sync_channel(1);
+            drop(std::mem::replace(&mut self.send, dead));
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn text(screen: &Screen) -> String {
+        screen.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_narrow_window_does_not_cut_what_the_guest_already_printed() {
+        let mut rig = Rig::new("narrow");
+        let banner = "kore 0.40.0 (8e0cd864d) - programs: <image> [args]; a command file is run with source <file> (help source)";
+        rig.feed(format!("{banner}\r\nterminal:0> ").as_bytes());
+        rig.screen(|s| text(s).contains("(help source)"));
+        // The tile is only 56 columns wide: the engine's grid must not follow it down.
+        rig.send
+            .send(Command::Resize { rows: 10, cols: 56 })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        let screen = rig.screen(|_| true);
+        assert!(
+            text(&screen).contains(banner),
+            "the banner was cut: {:?}",
+            text(&screen)
+        );
+        assert_eq!((screen.cols, screen.rows), (COLS, ROWS));
+        // A wider window is honoured.
+        rig.send
+            .send(Command::Resize {
+                rows: 40,
+                cols: 200,
+            })
+            .unwrap();
+        let screen = rig.screen(|s| s.cols == 200);
+        assert_eq!(screen.rows, 40);
+        assert!(text(&screen).contains(banner));
+    }
+
+    #[test]
+    fn the_cursor_is_drawn_where_the_guest_keeps_it() {
+        let mut rig = Rig::new("cursor");
+        // After a prompt with a trailing space, the cursor is past the last character.
+        rig.feed(b"terminal:0> ");
+        let screen = rig.screen(|s| text(s).contains("terminal:0>"));
+        assert_eq!(screen.cursor, Some(12));
+        assert_eq!(
+            text(&screen).chars().count(),
+            12,
+            "padded to the cursor: {:?}",
+            text(&screen)
+        );
+        crate::assert_camel_keys(&serde_json::to_value(&screen).unwrap());
+
+        // Typing moves it; moving left to edit puts it back inside the line.
+        rig.feed(b"abc");
+        let screen = rig.screen(|s| text(s).contains("abc"));
+        assert_eq!(screen.cursor, Some(15));
+        rig.feed(b"\x1b[2D");
+        let screen = rig.screen(|s| s.cursor == Some(13));
+        assert_eq!(text(&screen), "terminal:0> abc");
+
+        // A character the page escapes is longer, and the cursor offset follows it.
+        rig.feed(b"\r\nx\xe2\x80\x8by");
+        let screen = rig.screen(|s| text(s).ends_with("y"));
+        assert_eq!(screen.cursor, Some(text(&screen).chars().count()));
+    }
+
+    #[test]
+    fn no_cursor_is_drawn_when_the_guest_hides_it_or_is_not_at_the_end() {
+        let mut rig = Rig::new("nocursor");
+        rig.feed(b"one\r\ntwo\r\n");
+        rig.screen(|s| text(s).contains("two"));
+        // A program moving the cursor to the top of a screen with text below it.
+        rig.feed(b"\x1b[1;1H");
+        let screen = rig.screen(|s| s.cursor.is_none() && text(s).contains("two"));
+        assert_eq!(screen.cursor, None);
+        // And a hidden cursor stays hidden.
+        rig.feed(b"\x1b[?25l\x1b[3;1H");
+        let screen = rig.screen(|s| s.cursor.is_none());
+        assert_eq!(screen.cursor, None);
     }
 }

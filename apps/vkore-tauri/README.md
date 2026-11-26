@@ -22,11 +22,15 @@ it, and it is not part of the release train or CI.
   vetted for licence and release age); a saved layout that names a tile this
   version does not have is ignored rather than trusted.
 - **Sidebar**: the vertical menu: Overview, Machines, Volumes, and every machine's
-  workspace with a state dot; it folds to icons in a narrow window.
+  workspace with a state dot. It folds to icons with its toggle, or by itself in
+  a narrow window.
 - **Console**: a console image's COM2 shell, live. The engine's terminal model
   parses the guest's bytes, so the page only draws styled text; keys become
-  terminal input, paste is bracketed when the guest asks, and the grid follows
-  the panel's size. Shift+Tab leaves it.
+  terminal input, paste is bracketed when the guest asks, and the text reflows to
+  whatever size the tile is. The engine's grid is never narrowed to fit a tile:
+  doing so crops what the guest already printed. The guest's cursor is drawn as a
+  line caret, and the terminal's colours follow light/dark and the colour preset.
+  Shift+Tab leaves it.
 - **Hardware**: an existing, stopped machine's CPUs, memory, CPU pinning with a
   host-core picker, native CPU waits, memory locking, page size (system, 2 MiB or
   1 GiB hugepages), guest memory nodes and network mode. The engine is the judge:

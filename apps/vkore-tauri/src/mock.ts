@@ -98,12 +98,8 @@ function screenOf(name: string, connected = true): ConsoleScreen {
     connected,
     error: '',
     applicationCursor: false,
-    spans: [
-      span(shell.history),
-      span(PROMPT, { fg: 6, bold: true }),
-      span(shell.line),
-      span(' ', { cursor: true }),
-    ],
+    cursor: Array.from(shell.history + PROMPT + shell.line).length,
+    spans: [span(shell.history), span(PROMPT, { fg: 6, bold: true }), span(shell.line)],
   };
 }
 

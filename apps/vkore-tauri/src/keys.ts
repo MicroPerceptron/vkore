@@ -46,16 +46,13 @@ export function keyToInput(event: KeyLike, applicationCursor: boolean): string |
   return event.altKey ? `\x1b${event.key}` : event.key;
 }
 
-const BASE: string[] = [
-  '#1b2321', '#d95f4f', '#5fb97c', '#d9a13b', '#5b95d6', '#b573c4', '#4fb6a8', '#cfd8d4',
-  '#55635f', '#ff8b79', '#74cfa0', '#e2b877', '#7fb2f0', '#d298e0', '#6fd3c2', '#f4f8f6',
-];
-
 /** A terminal colour as CSS, or `null` for the terminal's own default. */
 export function paintCss(paint: null | number | string): string | null {
   if (paint === null) return null;
   if (typeof paint === 'string') return /^#[0-9a-f]{6}$/i.test(paint) ? paint : null;
-  if (paint < 16) return BASE[paint] ?? null;
+  // The sixteen named colours come from the theme (`--ansi-N`), so they read on a light
+  // terminal as well as a dark one.
+  if (paint < 16) return `var(--ansi-${paint})`;
   if (paint < 232) {
     const n = paint - 16;
     const level = (v: number) => (v === 0 ? 0 : 55 + v * 40);

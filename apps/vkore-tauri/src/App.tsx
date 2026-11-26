@@ -11,10 +11,21 @@ import { StoreProvider, useStore } from './store';
 import { applyTheme, preferredTheme, saveTheme, type Theme } from './theme';
 import { applyPreset, preferredPreset, savePreset } from './themes/apply';
 
+const SIDEBAR_KEY = 'vkore.sidebar';
+
+function savedCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === 'collapsed';
+  } catch {
+    return false;
+  }
+}
+
 function Shell() {
   const { error, machines } = useStore();
   const [theme, setTheme] = useState<Theme>(preferredTheme);
   const [preset, setPreset] = useState(preferredPreset);
+  const [collapsed, setCollapsed] = useState(savedCollapsed);
   useEffect(() => {
     applyTheme(theme);
     applyPreset(preset, theme);
@@ -32,8 +43,17 @@ function Shell() {
   const booting = machines?.some((m) => ['starting', 'booting', 'stopping'].includes(m.run.phase)) ?? false;
 
   return (
-    <div className="app">
+    <div className={`app ${collapsed ? 'collapsed' : ''}`}>
       <Sidebar
+        collapsed={collapsed}
+        onCollapse={(next) => {
+          try {
+            localStorage.setItem(SIDEBAR_KEY, next ? 'collapsed' : 'open');
+          } catch {
+            // Not persisted; still applied for this session.
+          }
+          setCollapsed(next);
+        }}
         mark={intro ? 'intro' : booting ? 'busy' : 'still'}
         theme={theme}
         onTheme={(next) => {

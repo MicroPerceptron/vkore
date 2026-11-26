@@ -1,4 +1,4 @@
-import { Boxes, HardDrive, LayoutDashboard, Moon, Sun } from 'lucide-react';
+import { Boxes, HardDrive, LayoutDashboard, Moon, PanelLeftClose, PanelLeftOpen, Sun } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import type { Phase } from './api';
 import { MpMark, type MarkMotion } from './MpMark';
@@ -17,8 +17,10 @@ const DOT: Record<Phase, string> = {
   failed: 'bad',
 };
 
-export function Sidebar({ mark, theme, onTheme, preset, onPreset }: {
+export function Sidebar({ mark, theme, onTheme, preset, onPreset, collapsed, onCollapse }: {
   mark: MarkMotion;
+  collapsed: boolean;
+  onCollapse: (next: boolean) => void;
   theme: Theme;
   onTheme: (next: Theme) => void;
   preset: string;
@@ -35,6 +37,15 @@ export function Sidebar({ mark, theme, onTheme, preset, onPreset }: {
           <span className="context">experimental</span>
         </span>
       </div>
+      <button
+        className="icon side-toggle"
+        onClick={() => onCollapse(!collapsed)}
+        aria-label={collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'}
+        aria-expanded={!collapsed}
+        title={collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'}
+      >
+        {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+      </button>
 
       <nav className="side-nav" aria-label="Main">
         <NavLink to="/" end title="Overview"><LayoutDashboard size={18} /><span className="label">Overview</span></NavLink>

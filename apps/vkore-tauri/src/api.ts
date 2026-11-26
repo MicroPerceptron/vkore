@@ -51,6 +51,8 @@ export interface ConsoleScreen {
   connected: boolean;
   error: string;
   applicationCursor: boolean;
+  /** The guest's cursor as a character offset into the spans' text, when it is shown at the end of the output. */
+  cursor: number | null;
   spans: Span[];
 }
 

@@ -46,7 +46,8 @@ describe('keyToInput', () => {
 describe('paintCss', () => {
   it('maps the three kinds of terminal colour', () => {
     expect(paintCss(null)).toBeNull();
-    expect(paintCss(1)).toBe('#d95f4f');
+    expect(paintCss(1)).toBe('var(--ansi-1)');
+    expect(paintCss(15)).toBe('var(--ansi-15)');
     expect(paintCss(196)).toBe('rgb(255, 0, 0)');
     expect(paintCss(232)).toBe('rgb(8, 8, 8)');
     expect(paintCss('#ff0010')).toBe('#ff0010');

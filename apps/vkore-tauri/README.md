@@ -89,6 +89,10 @@ pnpm tauri dev          # the app, with hot reload
 pnpm dev                # the interface alone, on a scripted engine, at http://127.0.0.1:1420
 ```
 
+`.npmrc` sets a 7-day `minimum-release-age`, so a fresh resolution takes nothing
+published in the last week and agrees with a supply-chain policy that rejects
+new releases; keep new dependencies' floors low enough for that to resolve.
+
 Checks:
 
 ```sh

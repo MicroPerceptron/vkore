@@ -20,6 +20,23 @@ use runtime::{Notice, Runtime};
 use views::{HostView, MachineDetail, MachineView};
 use volumes::{ListingView, PreviewView, VolumeView, Volumes, Where};
 
+/// Fail on any object key that is not camelCase. The page reads camelCase only, and
+/// serde's `rename_all` on an enum renames its variants, not the fields inside them,
+/// so a snake_case key reaches the page as `undefined` without any other sign.
+#[cfg(test)]
+pub(crate) fn assert_camel_keys(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                assert!(!key.contains('_'), "the key {key:?} is not camelCase");
+                assert_camel_keys(inner);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(assert_camel_keys),
+        _ => {}
+    }
+}
+
 /// The event a worker emits when a machine changes.
 pub const UPDATE_EVENT: &str = "machine-update";
 /// The event the console thread emits when a machine's console screen changes.

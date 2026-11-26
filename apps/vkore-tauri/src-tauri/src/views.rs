@@ -209,6 +209,8 @@ mod tests {
         assert_eq!(detail.machine.memory_mib, 2048);
         assert!(detail.lines.is_empty());
         let json = serde_json::to_value(&detail).unwrap();
+        crate::assert_camel_keys(&json);
+        crate::assert_camel_keys(&serde_json::to_value(&listed).unwrap());
         // The wire shape the front end reads: camelCase, run nested, log beside it.
         assert_eq!(json["memoryMib"], 2048);
         assert_eq!(json["run"]["phase"], "idle");

@@ -93,7 +93,11 @@ pub struct EntryView {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ListingView {
     Directory {
         entries: Vec<EntryView>,
@@ -117,7 +121,11 @@ pub struct CaptureView {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PreviewView {
     Image {
         width: u32,
@@ -445,6 +453,7 @@ mod tests {
         let volumes = Volumes::default();
         let mut open = volumes.lock();
         let view = open.open(&runtime, "kore-dev").unwrap();
+        crate::assert_camel_keys(&serde_json::to_value(&view).unwrap());
         assert_eq!(view.machine, "kore-dev");
         assert!(view.faces.contains(&0));
 
@@ -453,9 +462,9 @@ mod tests {
             face: 0,
             names: vec!["proj".into()],
         };
-        let ListingView::Directory { entries, truncated } =
-            open.list(&runtime, "kore-dev", &home).unwrap()
-        else {
+        let listed = open.list(&runtime, "kore-dev", &home).unwrap();
+        crate::assert_camel_keys(&serde_json::to_value(&listed).unwrap());
+        let ListingView::Directory { entries, truncated } = listed else {
             panic!("a directory");
         };
         assert!(!truncated);
@@ -481,6 +490,31 @@ mod tests {
             face: 0,
             names: vec!["proj".into(), name.into()],
         };
+        // The page reads these names exactly: a snake_case key arrives as `undefined`.
+        for name in ["notes.txt", "dot.png", "blob.bin"] {
+            let wire =
+                serde_json::to_value(open.preview(&runtime, "kore-dev", &file(name)).unwrap())
+                    .unwrap();
+            crate::assert_camel_keys(&wire);
+        }
+        let png = serde_json::to_value(
+            open.preview(&runtime, "kore-dev", &file("dot.png"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            png["dataUrl"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png"),
+            "{png}"
+        );
+        let bin = serde_json::to_value(
+            open.preview(&runtime, "kore-dev", &file("blob.bin"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bin["headHex"], "000102ff0007");
         match open
             .preview(&runtime, "kore-dev", &file("notes.txt"))
             .unwrap()

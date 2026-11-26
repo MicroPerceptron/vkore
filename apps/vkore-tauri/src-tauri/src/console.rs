@@ -252,6 +252,23 @@ mod tests {
     }
 
     #[test]
+    fn a_screen_has_camel_case_keys() {
+        let mut span = span("hi");
+        span.fg = Paint::from(Color::Idx(3));
+        let screen = Screen {
+            rows: 24,
+            cols: 80,
+            connected: true,
+            error: String::new(),
+            application_cursor: false,
+            spans: vec![span],
+        };
+        let wire = serde_json::to_value(&screen).unwrap();
+        crate::assert_camel_keys(&wire);
+        assert_eq!(wire["applicationCursor"], false);
+    }
+
+    #[test]
     fn colours_serialise_to_what_the_page_reads() {
         let json = serde_json::to_string(&[
             Paint::from(Color::Default),

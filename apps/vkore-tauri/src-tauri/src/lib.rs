@@ -165,7 +165,19 @@ fn console_resize(runtime: State<'_, Runtime>, name: String, rows: u16, cols: u1
     runtime.console_resize(&name, rows, cols).map_err(refused)
 }
 
+/// The private polkit helper modes. polkit re-executes *this binary* with one of
+/// these flags (`pkexec <exe> --vkore-memory-helper …`) to raise a limit or
+/// prepare a device, so they must be answered before any window exists: a binary
+/// that ignores them starts its whole application, as the authorising user's
+/// root, in place of the helper. Returns the exit code when a helper mode ran.
+pub fn helper_mode() -> Option<i32> {
+    vkore_volume::helper_entry().or_else(vkore_vm::passthrough::helper_entry)
+}
+
 pub fn run() {
+    if let Some(code) = helper_mode() {
+        std::process::exit(code);
+    }
     let root = vkored::State::default_root().unwrap_or_else(|| {
         eprintln!("vkore: cannot find a state directory; set VKORE_STATE");
         std::process::exit(2);

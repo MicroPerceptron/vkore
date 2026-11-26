@@ -47,6 +47,23 @@ for now, and graphical images have no display here yet.
   so the interface can be driven in an ordinary browser. It is compiled out of
   the production build.
 
+## Launching on Linux: memory locking and polkit
+
+A machine with memory pinning, hugepages or an assigned device needs a permission
+the app does not have. The engine asks polkit for it by re-running **this
+binary** under `pkexec` in a private helper mode (`--vkore-memory-helper`,
+`--vkore-device-helper`, `--vkore-volume-reader`, `--vkore-volume-identify`). The
+app answers those flags before it creates any window (`helper_mode`), exactly as
+`vkore-ui` and `vkore` do, and a test runs the real binary to check that each
+mode exits instead of starting the app. To give the prompts their own text,
+install the policy for the binary you run:
+
+```sh
+python3 tools/install-linux-policy.py --executable <path to the vkore-tauri binary>
+```
+
+A desktop authentication agent must be running for the prompt to appear.
+
 ## Boundaries the code keeps
 
 - The web side has twelve commands (`host_overview`, `machines_list`,

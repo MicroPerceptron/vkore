@@ -1,6 +1,8 @@
 //! One native Servo engine per desktop browser tile. No listening sockets.
+mod batch;
 #[cfg(target_os = "linux")]
 mod dmabuf;
+mod icon;
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -44,7 +46,7 @@ impl EventLoopWaker for Wake {
 }
 
 enum Message {
-    Input(Command, std::sync::mpsc::SyncSender<()>),
+    Input(Vec<Command>, std::sync::mpsc::SyncSender<()>),
     Spin,
     End,
 }
@@ -63,6 +65,8 @@ struct Observer {
     id: u64,
     dirty: Cell<bool>,
     back: Cell<bool>,
+    forward: Cell<bool>,
+    cursor: Cell<wire::Cursor>,
 }
 impl Observer {
     fn invalidate(&self) {
@@ -73,9 +77,64 @@ impl Observer {
     fn location(&self, view: &WebView) {
         if let Some(url) = view.url() {
             let address: String = url.as_str().chars().take(wire::MAX_ADDRESS).collect();
-            send(Event::Location(self.id, address, self.back.get()));
+            send(Event::Location(
+                self.id,
+                address,
+                self.back.get(),
+                self.forward.get(),
+            ));
         }
     }
+}
+
+/// Servo's pointer shapes, as the few the desktop draws.
+fn cursor(cursor: servo::Cursor) -> wire::Cursor {
+    use servo::Cursor as C;
+    use wire::Cursor as W;
+    match cursor {
+        C::None => W::None,
+        C::Default => W::Default,
+        C::Pointer => W::Pointer,
+        C::ContextMenu => W::ContextMenu,
+        C::Help => W::Help,
+        C::Progress => W::Progress,
+        C::Wait => W::Wait,
+        C::Cell => W::Cell,
+        C::Crosshair => W::Crosshair,
+        C::Text | C::VerticalText => W::Text,
+        C::Alias => W::Alias,
+        C::Copy => W::Copy,
+        C::Move => W::Move,
+        C::NoDrop => W::NoDrop,
+        C::NotAllowed => W::NotAllowed,
+        C::Grab => W::Grab,
+        C::Grabbing => W::Grabbing,
+        C::EResize | C::WResize | C::EwResize => W::ResizeHorizontal,
+        C::NResize | C::SResize | C::NsResize => W::ResizeVertical,
+        C::NeResize | C::SwResize | C::NeswResize => W::ResizeDiagonalUp,
+        C::NwResize | C::SeResize | C::NwseResize => W::ResizeDiagonalDown,
+        C::ColResize => W::ResizeColumn,
+        C::RowResize => W::ResizeRow,
+        C::AllScroll => W::AllScroll,
+        C::ZoomIn => W::ZoomIn,
+        C::ZoomOut => W::ZoomOut,
+        #[allow(unreachable_patterns)]
+        _ => W::Default,
+    }
+}
+
+/// The page's icon as the wire carries it, if it has one the wire can.
+fn favicon(view: &WebView) -> Option<wire::Icon> {
+    use servo::PixelFormat as P;
+    let image = view.favicon()?;
+    let layout = match image.format {
+        P::K8 => icon::Layout::Gray,
+        P::KA8 => icon::Layout::GrayAlpha,
+        P::RGB8 => icon::Layout::Rgb,
+        P::RGBA8 => icon::Layout::Rgba,
+        P::BGRA8 => icon::Layout::Bgra,
+    };
+    icon::pack(image.width, image.height, layout, image.data())
 }
 
 impl WebViewDelegate for Observer {
@@ -88,11 +147,56 @@ impl WebViewDelegate for Observer {
     fn notify_load_status_changed(&self, _: WebView, status: servo::LoadStatus) {
         send(Event::Loading(
             self.id,
-            matches!(
-                status,
-                servo::LoadStatus::Started | servo::LoadStatus::HeadParsed
-            ),
+            match status {
+                servo::LoadStatus::Started => wire::Load::Started,
+                servo::LoadStatus::HeadParsed => wire::Load::Parsed,
+                servo::LoadStatus::Complete | servo::LoadStatus::Stopped => wire::Load::Done,
+            },
         ));
+    }
+    fn notify_page_title_changed(&self, _: WebView, title: Option<String>) {
+        send(Event::Title(
+            self.id,
+            title
+                .unwrap_or_default()
+                .chars()
+                .take(wire::MAX_TITLE)
+                .collect(),
+        ));
+    }
+    fn notify_favicon_changed(&self, view: WebView) {
+        send(Event::Favicon(self.id, favicon(&view)));
+    }
+    fn notify_status_text_changed(&self, _: WebView, status: Option<String>) {
+        send(Event::Status(
+            self.id,
+            status
+                .unwrap_or_default()
+                .chars()
+                .take(wire::MAX_STATUS)
+                .collect(),
+        ));
+    }
+    /// With `VKORE_SERVO_CONSOLE` set, the page's console messages go to
+    /// stderr: the way to see why a page does not work. The text is the
+    /// page's own, so it is cut and its control characters are replaced
+    /// before it reaches a terminal.
+    fn show_console_message(&self, _: WebView, level: servo::ConsoleLogLevel, message: String) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("VKORE_SERVO_CONSOLE").is_some()) {
+            let message: String = message
+                .chars()
+                .take(wire::MAX_STATUS)
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect();
+            eprintln!("[page {level:?}] {message}");
+        }
+    }
+    fn notify_cursor_changed(&self, _: WebView, shape: servo::Cursor) {
+        let shape = cursor(shape);
+        if self.cursor.replace(shape) != shape {
+            send(Event::Cursor(self.id, shape));
+        }
     }
     fn notify_new_frame_ready(&self, _: WebView) {
         self.invalidate();
@@ -100,8 +204,9 @@ impl WebViewDelegate for Observer {
     fn notify_url_changed(&self, view: WebView, _: Url) {
         self.location(&view);
     }
-    fn notify_history_changed(&self, view: WebView, _: Vec<Url>, current: usize) {
+    fn notify_history_changed(&self, view: WebView, entries: Vec<Url>, current: usize) {
         self.back.set(current > 0);
+        self.forward.set(current + 1 < entries.len());
         self.location(&view);
     }
     fn request_navigation(&self, _: WebView, request: NavigationRequest) {
@@ -167,11 +272,22 @@ impl Browser {
             .make_current()
             .map_err(|e| format!("Could not activate Servo GL: {e:?}"))?;
         let renderer = context.gleam_gl_api().get_string(gleam::gl::RENDERER);
+        // `VKORE_SERVO_WEBGL=off` makes WebGL unavailable, so pages that test for
+        // it fall back instead of running Servo's WebGL, which can keep a heavy
+        // scene from ever finishing loading (see docs/desktop.md).
+        let webgl_off = std::env::var("VKORE_SERVO_WEBGL").is_ok_and(|value| value == "off");
+        let webgl = !webgl_off;
         let preferences = servo::Preferences {
             dom_webgpu_enabled: true,
-            dom_webgl2_enabled: true,
+            dom_webgl2_enabled: webgl,
+            // Servo's switch for "context creation fails"; it is how WebGL1 is
+            // made unavailable, as it has no preference of its own.
+            webgl_testing_context_creation_error: !webgl,
             dom_web_animations_enabled: true,
             dom_intersection_observer_enabled: true,
+            // Constructable stylesheets: GitHub's web components read
+            // `adoptedStyleSheets` and throw without it, so the page never loads.
+            dom_adoptedstylesheet_enabled: true,
             ..Default::default()
         };
         let servo = ServoBuilder::default()
@@ -229,7 +345,24 @@ impl Browser {
         tab.observer.invalidate();
     }
 
-    fn input(&mut self, command: Command) -> io::Result<()> {
+    /// Applies a batch. The engine runs once at the end, and before a paint
+    /// that follows a change, so a paint always sees what was asked before it.
+    fn input(&mut self, commands: Vec<Command>) -> io::Result<()> {
+        let mut unspun = false;
+        for command in commands {
+            if unspun && matches!(command, Command::Paint(_)) {
+                self.servo.spin_event_loop();
+            }
+            self.apply(command)?;
+            unspun = true;
+        }
+        if unspun {
+            self.servo.spin_event_loop();
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, command: Command) -> io::Result<()> {
         match command {
             Command::ShowSurface(show) => {
                 if matches!(
@@ -253,6 +386,8 @@ impl Browser {
                     id,
                     dirty: Cell::new(false),
                     back: Cell::new(false),
+                    forward: Cell::new(false),
+                    cursor: Cell::new(wire::Cursor::Default),
                 });
                 let view = WebViewBuilder::new(&self.servo, context)
                     .delegate(observer.clone())
@@ -281,6 +416,12 @@ impl Browser {
                     }
                     Command::Back(target) if id == target => {
                         view.go_back(1);
+                    }
+                    Command::Forward(target) if id == target => {
+                        view.go_forward(1);
+                    }
+                    Command::Reload(target) if id == target => {
+                        view.reload();
                     }
                     Command::Resize(target, w, h, scale) if id == target => {
                         wire::check_size(w, h)?;
@@ -365,7 +506,6 @@ impl Browser {
                 }
             }
         }
-        self.servo.spin_event_loop();
         Ok(())
     }
 }
@@ -391,8 +531,8 @@ impl ApplicationHandler<Message> for App {
             return;
         };
         match event {
-            Message::Input(command, handled) => {
-                let result = browser.input(command);
+            Message::Input(commands, handled) => {
+                let result = browser.input(commands);
                 let _ = handled.send(());
                 if let Err(error) = result {
                     send(Event::Error(error.to_string()));
@@ -445,15 +585,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     thread::Builder::new()
         .name("vkore-input".into())
         .spawn(move || {
-            let mut input = io::stdin().lock();
+            // Read what is already waiting, so a burst is one batch and not one
+            // trip through the engine's event loop per command.
+            let mut input = io::BufReader::with_capacity(64 * 1024, io::stdin());
             let (handled, ack) = std::sync::mpsc::sync_channel(1);
-            while let Ok(command) = wire::read::<Command>(&mut input) {
+            while let Ok(first) = wire::read::<Command>(&mut input) {
+                let mut batch = vec![first];
+                let mut ended = false;
+                while !input.buffer().is_empty() && batch.len() < batch::MAX_BATCH {
+                    match wire::read::<Command>(&mut input) {
+                        Ok(command) => batch.push(command),
+                        Err(_) => {
+                            ended = true;
+                            break;
+                        }
+                    }
+                }
                 if proxy
-                    .send_event(Message::Input(command, handled.clone()))
+                    .send_event(Message::Input(batch::coalesce(batch), handled.clone()))
                     .is_err()
                     || ack.recv().is_err()
                 {
                     return;
+                }
+                if ended {
+                    break;
                 }
             }
             let _ = proxy.send_event(Message::End);

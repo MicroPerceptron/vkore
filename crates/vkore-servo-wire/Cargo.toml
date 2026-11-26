@@ -37,3 +37,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 [[example]]
 name = "servo_surface_smoke"
 required-features = ["presentation"]
+
+[[example]]
+name = "servo_latency"
+required-features = ["presentation"]

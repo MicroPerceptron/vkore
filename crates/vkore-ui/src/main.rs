@@ -221,10 +221,12 @@ impl Model {
             .update(machines::MachineMessage::Start(name, window), &self.proxy);
     }
 
-    fn user_event(&mut self, event: UserEvent) {
+    /// Applies an event. Returns whether the interface has anything new to
+    /// draw: a page that only changed its own pixels does not.
+    fn user_event(&mut self, event: UserEvent) -> bool {
         match event {
             #[cfg(feature = "browser-preview")]
-            UserEvent::BrowserFrame => self.machines.plugins.receive_browser(),
+            UserEvent::BrowserFrame => return self.machines.plugins.receive_browser(),
             #[cfg(feature = "gpu-canvas")]
             UserEvent::CanvasReady => {
                 if let Some(canvas) = &mut self.machines.plugins.canvas {
@@ -259,6 +261,7 @@ impl Model {
                 }
             }
         }
+        true
     }
 
     /// Whether the splash has frames left to show. The first call after it
@@ -589,8 +592,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        self.model.user_event(event);
-        self.redraw = true;
+        self.redraw |= self.model.user_event(event);
         if self.model.machines.closing && self.model.machines.running.is_empty() {
             event_loop.exit();
         }

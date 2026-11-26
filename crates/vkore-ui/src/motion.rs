@@ -385,40 +385,171 @@ pub fn ring<'a>(fraction: f32, tone: theme::Tone, size: f32) -> UiElement<'a> {
 /// How long a hover takes to arrive or leave.
 const GLIDE: Duration = Duration::from_millis(140);
 
-/// A value that eases toward zero or one, remembering where it was when it
-/// was told to turn round so a quick in-and-out never jumps.
-#[derive(Default)]
-struct Glide {
+/// A value that eases toward a target, remembering where it was when the
+/// target moved so a change of mind never jumps.
+pub struct Ease {
     from: Cell<f32>,
     to: Cell<f32>,
     since: Cell<Option<Instant>>,
+    span: Duration,
 }
 
-impl Glide {
-    fn level(&self, now: Instant) -> f32 {
+impl Ease {
+    pub fn new(span: Duration) -> Self {
+        Self {
+            from: Cell::new(0.0),
+            to: Cell::new(0.0),
+            since: Cell::new(None),
+            span,
+        }
+    }
+
+    pub fn level(&self, now: Instant) -> f32 {
         let Some(since) = self.since.get() else {
             return self.to.get();
         };
-        let progress = now.saturating_duration_since(since).as_secs_f32() / GLIDE.as_secs_f32();
+        let progress = now.saturating_duration_since(since).as_secs_f32() / self.span.as_secs_f32();
         self.from.get() + (self.to.get() - self.from.get()) * ease_out(progress)
     }
 
     /// Whether it has arrived.
-    fn settled(&self, now: Instant) -> bool {
+    pub fn settled(&self, now: Instant) -> bool {
         self.since
             .get()
-            .is_none_or(|since| now.saturating_duration_since(since) >= GLIDE)
+            .is_none_or(|since| now.saturating_duration_since(since) >= self.span)
     }
 
-    /// Head for one (`on`) or zero.
-    fn aim(&self, on: bool, now: Instant) {
-        let target = f32::from(u8::from(on));
+    /// Head for `target`, from wherever it is.
+    pub fn aim(&self, target: f32, now: Instant) {
         if (self.to.get() - target).abs() > f32::EPSILON {
             self.from.set(self.level(now));
             self.to.set(target);
             self.since.set(Some(now));
         }
     }
+
+    /// Be at `value` at once, with nothing in flight.
+    pub fn jump(&self, value: f32) {
+        self.from.set(value);
+        self.to.set(value);
+        self.since.set(None);
+    }
+}
+
+/// A hover: an [`Ease`] aimed at zero or one over [`GLIDE`].
+struct Glide(Ease);
+
+impl Default for Glide {
+    fn default() -> Self {
+        Self(Ease::new(GLIDE))
+    }
+}
+
+impl Glide {
+    fn level(&self, now: Instant) -> f32 {
+        self.0.level(now)
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        self.0.settled(now)
+    }
+
+    /// Head for one (`on`) or zero.
+    fn aim(&self, on: bool, now: Instant) {
+        self.0.aim(f32::from(u8::from(on)), now);
+    }
+}
+
+/// A page-load bar: a thin fill that grows toward `level`, with a highlight
+/// sweeping along it while `moving`, drawn at `opacity`. It asks for frames
+/// only while `moving`, which the caller sets from what it knows of the load.
+struct Loadbar {
+    level: f32,
+    opacity: f32,
+    moving: bool,
+}
+
+fn paint_loadbar(
+    frame: &mut Frame<AxUi>,
+    size: Size,
+    level: f32,
+    opacity: f32,
+    t: f32,
+    fill: Color,
+) {
+    let level = if level.is_finite() {
+        level.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let width = size.width * level;
+    if width <= 0.0 || opacity <= 0.0 {
+        return;
+    }
+    let radius = size.height / 2.0;
+    frame.fill(
+        &Path::rounded_rectangle(Point::ORIGIN, Size::new(width, size.height), radius.into()),
+        with_alpha(fill, opacity),
+    );
+    // A brighter band travelling along the fill says the load is alive even
+    // when the page has said nothing new for a moment.
+    let band = (width * 0.35).clamp(12.0, 80.0).min(width);
+    let travel = (width - band).max(0.0);
+    let x = travel * ((t / 1.4).fract());
+    frame.fill(
+        &Path::rounded_rectangle(
+            Point::new(x, 0.0),
+            Size::new(band, size.height),
+            radius.into(),
+        ),
+        with_alpha(Color::WHITE, 0.35 * opacity),
+    );
+}
+
+impl canvas::Program<Message, Theme, AxUi> for Loadbar {
+    type State = ();
+
+    fn update(
+        &self,
+        _: &mut (),
+        event: &canvas::Event,
+        _: Rectangle,
+        _: mouse::Cursor,
+    ) -> Option<Action<Message>> {
+        (self.moving && is_frame(event)).then(Action::request_redraw)
+    }
+
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &AxUi,
+        appearance: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry<AxUi>> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        paint_loadbar(
+            &mut frame,
+            bounds.size(),
+            self.level,
+            self.opacity,
+            if self.moving { seconds() } else { 0.0 },
+            theme::color(appearance, theme::MAGENTA),
+        );
+        vec![frame.into_geometry()]
+    }
+}
+
+/// A load bar `height` pixels tall across the available width.
+pub fn loadbar<'a>(level: f32, opacity: f32, moving: bool, height: f32) -> UiElement<'a> {
+    iced_widget::canvas(Loadbar {
+        level,
+        opacity,
+        moving,
+    })
+    .width(iced_core::Length::Fill)
+    .height(height)
+    .into()
 }
 
 /// A hover that eases in and out.
@@ -741,6 +872,54 @@ mod tests {
         glide.aim(false, turn + GLIDE * 4);
         assert_eq!(glide.level(turn + GLIDE * 4), before);
         assert!(glide.settled(turn + GLIDE * 4));
+    }
+
+    #[test]
+    fn an_ease_heads_for_any_target_and_can_jump() {
+        let ease = Ease::new(Duration::from_millis(100));
+        let t0 = Instant::now();
+        ease.aim(0.7, t0);
+        assert!(ease.level(t0 + Duration::from_millis(50)) > 0.35);
+        assert!((ease.level(t0 + Duration::from_millis(500)) - 0.7).abs() < 1e-6);
+        // Re-aiming starts from where it is.
+        let mid = t0 + Duration::from_millis(40);
+        let here = ease.level(mid);
+        ease.aim(1.0, mid);
+        assert!((ease.level(mid) - here).abs() < 1e-6);
+        ease.jump(0.0);
+        assert_eq!(ease.level(mid + Duration::from_secs(1)), 0.0);
+        assert!(ease.settled(mid));
+    }
+
+    #[test]
+    fn the_load_bar_paints_empty_partial_full_and_faded_without_a_refusal() {
+        for level in [0.0, 0.05, 0.5, 1.0, 7.0, f32::NAN] {
+            for opacity in [0.0, 0.4, 1.0] {
+                for t in [0.0, 0.7, 3.3] {
+                    let refused = refusals(|frame| {
+                        paint_loadbar(
+                            frame,
+                            Size::new(300., 3.),
+                            level,
+                            opacity,
+                            t,
+                            theme::rgb(0xCE15C4),
+                        );
+                    });
+                    assert_eq!(refused, 0, "{level} {opacity} {t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_load_bar_asks_for_frames_only_while_moving() {
+        for moving in [false, true] {
+            assert_eq!(
+                asks_for_the_next_frame(|| loadbar(0.5, 1.0, moving, 3.), &mut None),
+                moving
+            );
+        }
     }
 
     #[test]

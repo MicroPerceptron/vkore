@@ -67,7 +67,7 @@ impl Test {
                     self.send(Input::Open(0));
                 }
                 Reply::Notice(Event::Changed(_)) => self.dirty = true,
-                Reply::Notice(Event::Loading(_, false)) if !self.navigated => {
+                Reply::Notice(Event::Loading(_, wire::Load::Done)) if !self.navigated => {
                     self.navigated = true;
                     let scale = self.window.as_ref().unwrap().scale_factor() as f32;
                     self.send(Input::Resize(
@@ -78,10 +78,10 @@ impl Test {
                     ));
                     self.send(Input::Navigate(0, self.url.clone()));
                 }
-                Reply::Notice(Event::Location(_, url, _)) => {
+                Reply::Notice(Event::Location(_, url, _, _)) => {
                     self.location = url;
                 }
-                Reply::Notice(Event::Loading(_, false))
+                Reply::Notice(Event::Loading(_, wire::Load::Done))
                     if self.location.starts_with("https://") =>
                 {
                     self.loaded = true;

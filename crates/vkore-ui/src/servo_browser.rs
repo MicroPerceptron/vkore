@@ -38,6 +38,8 @@ pub enum Action {
     Select(u64),
     Edit(u64, String),
     Go(u64),
+    /// Open a page that stopped the browser engine, when the user asks to.
+    Restore(u64),
     Send(Command),
 }
 
@@ -63,6 +65,9 @@ struct Tab {
     phase: wire::Load,
     progress: motion::Ease,
     finished: Option<Instant>,
+    /// The page stopped the browser engine and was not reopened; the user
+    /// reopens it when ready.
+    crashed: bool,
     dirty: bool,
     waiting: bool,
     size: (u32, u32),
@@ -83,6 +88,7 @@ impl Default for Tab {
             phase: wire::Load::Done,
             progress: motion::Ease::new(PROGRESS),
             finished: None,
+            crashed: false,
             dirty: false,
             waiting: false,
             size: (0, 0),
@@ -126,6 +132,7 @@ impl Tab {
             Event::Loading(_, load) => {
                 match load {
                     wire::Load::Started => {
+                        self.crashed = false;
                         self.progress.jump(0.0);
                         self.progress.aim(0.18, now);
                         self.finished = None;
@@ -181,6 +188,20 @@ impl Tab {
         }
     }
 
+    /// What a tab keeps across a helper restart is what the page said about
+    /// itself; everything about the old helper's frames and loads is gone.
+    fn forget_helper(&mut self) {
+        self.dirty = false;
+        self.waiting = false;
+        self.size = (0, 0);
+        self.phase = wire::Load::Done;
+        self.progress.jump(0.0);
+        self.finished = None;
+        self.status.clear();
+        self.cursor = wire::Cursor::Default;
+        self.crashed = false;
+    }
+
     /// The progress line: how far, how visible, and whether it is moving.
     fn bar(&self, now: Instant) -> (f32, f32, bool) {
         let level = self.progress.level(now);
@@ -195,6 +216,88 @@ impl Tab {
             _ => (level, 1.0, true),
         }
     }
+}
+
+/// How often a helper that keeps stopping is started again.
+struct Restarts(Vec<Instant>);
+
+/// What follows a helper that stopped after it had been running.
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    /// Start another. `blame_all`: it stopped again soon after the last
+    /// start, so whatever was reopened is the cause and nothing may be.
+    Restart { blame_all: bool },
+    /// It keeps stopping: say so, and leave starting it to the user.
+    GiveUp,
+}
+
+impl Restarts {
+    /// Restarts counted over this long.
+    const WINDOW: Duration = Duration::from_secs(120);
+    /// At most this many in the window before giving up.
+    const MAX: usize = 3;
+    /// A stop this soon after a start is the restored pages' doing.
+    const QUICK: Duration = Duration::from_secs(20);
+
+    fn stopped(&mut self, now: Instant) -> Recovery {
+        self.0
+            .retain(|at| now.saturating_duration_since(*at) < Self::WINDOW);
+        if self.0.len() >= Self::MAX {
+            return Recovery::GiveUp;
+        }
+        let blame_all = self
+            .0
+            .last()
+            .is_some_and(|at| now.saturating_duration_since(*at) < Self::QUICK);
+        self.0.push(now);
+        Recovery::Restart { blame_all }
+    }
+}
+
+/// What follows a helper that stopped, and the tabs put in the state a
+/// restarted helper starts from.
+fn after_stop(restarts: &mut Restarts, tabs: &mut BTreeMap<u64, Tab>, now: Instant) -> Recovery {
+    let recovery = restarts.stopped(now);
+    if matches!(recovery, Recovery::Restart { .. }) {
+        tabs.values_mut().for_each(Tab::forget_helper);
+    }
+    recovery
+}
+
+/// How a restarted helper is brought back to where the old one was: the
+/// commands to send, and the tabs left stopped.
+#[derive(Debug, PartialEq)]
+struct Restore {
+    commands: Vec<Command>,
+    stopped: Vec<u64>,
+}
+
+/// Reopens every tab, in order, each at the address it had. The tab in front is
+/// the one most likely to have stopped the engine, so it is left stopped (and
+/// is not navigated) unless it had no page; with `blame_all`, so is every tab
+/// with a page. A page that crashes the engine would otherwise crash it again
+/// the moment it was reopened, in a loop.
+fn restore_plan<'a>(
+    tabs: impl Iterator<Item = (u64, &'a str)>,
+    active: u64,
+    blame_all: bool,
+) -> Restore {
+    let mut commands = Vec::new();
+    let mut stopped = Vec::new();
+    for (id, location) in tabs {
+        // Opening a tab selects it, so a navigation that follows is for it.
+        commands.push(Command::Open(id));
+        if location.is_empty() {
+            continue;
+        }
+        if blame_all || id == active {
+            stopped.push(id);
+        } else {
+            commands.push(Command::Navigate(id, location.to_owned()));
+        }
+    }
+    commands.push(Command::Select(active));
+    Restore { commands, stopped }
 }
 
 enum Reply {
@@ -212,16 +315,29 @@ impl Drop for Helper {
     }
 }
 
-pub struct Pane {
+/// Everything tied to one helper process: the native surface it paints to, the
+/// process itself, and the two threads that carry commands out and replies in.
+/// Dropping it ends the process and removes the surface, so replacing it is how
+/// a helper is restarted.
+struct Link {
     presentation: wire::presentation::Presentation,
+    _helper: Helper,
+    input: mpsc::SyncSender<Command>,
+    output: mpsc::Receiver<Reply>,
+}
+
+pub struct Pane {
+    link: Link,
+    proxy: EventLoopProxy<UserEvent>,
+    restarts: Restarts,
+    /// A restarted helper that has not said it is ready yet, and whether it
+    /// must reopen nothing (see [`restore_plan`]).
+    restoring: Option<bool>,
     pub bounds: Cell<Option<Rectangle>>,
     presented: Option<u64>,
     visible: bool,
     #[cfg(target_os = "linux")]
     importing: Option<u64>,
-    _helper: Helper,
-    input: mpsc::SyncSender<Command>,
-    output: mpsc::Receiver<Reply>,
     tabs: BTreeMap<u64, Tab>,
     active: u64,
     next: u64,
@@ -245,8 +361,8 @@ fn helper_path() -> io::Result<PathBuf> {
         .with_file_name(format!("vkore-servo{}", std::env::consts::EXE_SUFFIX)))
 }
 
-impl Pane {
-    pub fn open(proxy: EventLoopProxy<UserEvent>) -> io::Result<Self> {
+impl Link {
+    fn start(proxy: &EventLoopProxy<UserEvent>) -> io::Result<Self> {
         let mut command = Process::new(helper_path()?);
         let presentation = wire::presentation::Presentation::prepare(&mut command)?;
         #[cfg(target_os = "linux")]
@@ -277,6 +393,7 @@ impl Pane {
                 }
             })?;
         let (replies, output) = mpsc::sync_channel(4);
+        let proxy = proxy.clone();
         thread::Builder::new()
             .name("vkore-servo-output".into())
             .spawn(move || {
@@ -301,14 +418,26 @@ impl Pane {
             })?;
         Ok(Self {
             presentation,
+            _helper: helper,
+            input,
+            output,
+        })
+    }
+}
+
+impl Pane {
+    pub fn open(proxy: EventLoopProxy<UserEvent>) -> io::Result<Self> {
+        let link = Link::start(&proxy)?;
+        Ok(Self {
+            link,
+            proxy,
+            restarts: Restarts(Vec::new()),
+            restoring: None,
             bounds: Cell::default(),
             presented: None,
             visible: false,
             #[cfg(target_os = "linux")]
             importing: None,
-            _helper: helper,
-            input,
-            output,
             tabs: BTreeMap::from([(0, Tab::default())]),
             active: 0,
             next: 1,
@@ -320,7 +449,7 @@ impl Pane {
     }
 
     fn send(&mut self, command: Command) -> bool {
-        match self.input.try_send(command) {
+        match self.link.input.try_send(command) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(Command::Pointer(_, _, _, Pointer::Move))) => false,
             Err(e) => {
@@ -338,7 +467,7 @@ impl Pane {
     /// Returns whether the interface has anything new to show.
     pub fn receive(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(reply) = self.output.try_recv() {
+        while let Ok(reply) = self.link.output.try_recv() {
             changed |= self.handle(reply);
         }
         self.paint_if_due();
@@ -377,7 +506,7 @@ impl Pane {
                     }
                     return true;
                 }
-                match self.presentation.import(fd, frame) {
+                match self.link.presentation.import(fd, frame) {
                     Ok(()) => self.importing = Some(id),
                     Err(err) => {
                         self.ready = false;
@@ -392,14 +521,14 @@ impl Pane {
                 true
             }
             Reply::Notice(Event::Ready(wire::VERSION, renderer, surface)) => {
-                if let Err(e) = self.presentation.attach(surface) {
+                if let Err(e) = self.link.presentation.attach(surface) {
                     self.status = e.to_string();
                     return true;
                 }
                 self.renderer = renderer;
                 self.ready = true;
                 self.status.clear();
-                self.send(Command::Open(0));
+                self.reopen();
                 true
             }
             Reply::Notice(Event::Ready(..)) => {
@@ -408,7 +537,7 @@ impl Pane {
             }
             Reply::Notice(Event::Presented(id)) => {
                 #[cfg(target_os = "macos")]
-                if let Err(error) = self.presentation.receive_frame() {
+                if let Err(error) = self.link.presentation.receive_frame() {
                     self.ready = false;
                     self.status = error.to_string();
                     return true;
@@ -438,17 +567,75 @@ impl Pane {
                 .tabs
                 .get_mut(&id)
                 .is_some_and(|tab| tab.notice(event, Instant::now())),
-            Reply::End(e) => {
-                if self.status.is_empty() || self.status == "Starting Servo…" {
-                    self.status = if e.kind() == io::ErrorKind::UnexpectedEof {
-                        "The browser helper disconnected. Close this tile and reopen Servo to try again.".into()
-                    } else {
-                        format!("Servo stopped ({e}).")
-                    };
-                }
-                self.ready = false;
+            Reply::End(error) => {
+                self.helper_stopped(error);
                 true
             }
+        }
+    }
+
+    /// Brings a started helper's tabs to where they were: on first start, the
+    /// one blank tab; after a restart, each tab reopened (see [`restore_plan`]).
+    fn reopen(&mut self) {
+        let blame_all = self.restoring.take().unwrap_or(false);
+        let plan = restore_plan(
+            self.tabs
+                .iter()
+                .map(|(id, tab)| (*id, tab.location.as_str())),
+            self.active,
+            blame_all,
+        );
+        for id in &plan.stopped {
+            if let Some(tab) = self.tabs.get_mut(id) {
+                tab.crashed = true;
+            }
+        }
+        for command in plan.commands {
+            self.send(command);
+        }
+    }
+
+    /// The helper's end of the pipe closed. A helper that had been running
+    /// stopped under a page, and is started again, with the pages that may
+    /// have stopped it left for the user to reopen; one that never got going
+    /// failed in a way a restart would only repeat.
+    fn helper_stopped(&mut self, error: io::Error) {
+        let was_ready = std::mem::replace(&mut self.ready, false);
+        if !was_ready {
+            if self.status.is_empty() || self.status == "Starting Servo…" {
+                self.status = if error.kind() == io::ErrorKind::UnexpectedEof {
+                    "The browser helper disconnected. Close this tile and reopen Servo to try again.".into()
+                } else {
+                    format!("Servo stopped ({error}).")
+                };
+            }
+            return;
+        }
+        match after_stop(&mut self.restarts, &mut self.tabs, Instant::now()) {
+            Recovery::GiveUp => {
+                self.status = "The browser engine keeps stopping. Close this tile and reopen Servo to try again.".into();
+            }
+            Recovery::Restart { blame_all } => match Link::start(&self.proxy) {
+                Ok(link) => {
+                    // The old link goes: its process is ended and its native
+                    // surface, and the last frame on it, removed.
+                    self.link = link;
+                    self.presented = None;
+                    self.visible = false;
+                    self.focused = false;
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.importing = None;
+                    }
+                    self.renderer.clear();
+                    self.restoring = Some(blame_all);
+                    self.status = "The browser engine stopped. Restarting it…".into();
+                }
+                Err(error) => {
+                    self.status =
+                        format!("The browser engine stopped and could not be restarted ({error}).");
+                }
+            },
         }
     }
 
@@ -490,6 +677,16 @@ impl Pane {
                 self.tabs.get_mut(&id).expect("active tab").address =
                     fonts::shown(fonts::MONO, &address, fonts::Breaks::Escape).into_owned();
             }
+            Action::Restore(id)
+                if self.ready
+                    && self.active == id
+                    && self.tabs.get(&id).is_some_and(|tab| tab.crashed) =>
+            {
+                let tab = self.tabs.get_mut(&id).expect("a stopped tab");
+                tab.crashed = false;
+                let location = tab.location.clone();
+                self.send(Command::Navigate(id, location));
+            }
             Action::Go(id) if self.ready && self.active == id => {
                 self.status.clear();
                 self.send(Command::Navigate(id, self.tabs[&id].address.clone()));
@@ -518,7 +715,7 @@ impl Pane {
     pub fn present(&mut self, window: &std::rc::Rc<crate::winit::window::Window>) -> bool {
         let mut redraw = false;
         #[cfg(target_os = "linux")]
-        match self.presentation.poll() {
+        match self.link.presentation.poll() {
             Ok(progress) => {
                 redraw |= progress.pending && self.bounds.get().is_some();
                 if progress.imported
@@ -571,7 +768,7 @@ impl Pane {
             }
         }
         let visible = bounds.filter(|_| self.ready && self.presented == Some(self.active));
-        if let Err(error) = self.presentation.place(
+        if let Err(error) = self.link.presentation.place(
             window,
             window.scale_factor(),
             visible.map(|r| wire::presentation::TileRect {
@@ -839,7 +1036,56 @@ fn chrome<'a>(
     } else {
         space::vertical().height(0).into()
     };
-    content.push(surface).push(footer).into()
+    // A stopped tab shows what happened where the page would be. The page's
+    // surface is not drawn then, so the native one is hidden.
+    let page: UiElement<'a> = if tab.crashed {
+        stopped_page(ty, id, emit)
+    } else {
+        surface.into()
+    };
+    content.push(page).push(footer).into()
+}
+
+/// What a tab shows after the page in it stopped the browser engine and was not
+/// reopened: that, why it was not, and the way to reopen it.
+fn stopped_page<'a>(
+    ty: Typography,
+    id: u64,
+    emit: impl Fn(Action) -> Message + Copy + 'a,
+) -> UiElement<'a> {
+    let plate = ty.size(56.);
+    container(
+        column![
+            container(visuals::icon(Icon::Alert, theme::WARNING, plate * 0.5))
+                .center(plate)
+                .style(|appearance| theme::tinted(
+                    appearance,
+                    theme::WARNING,
+                    0.12,
+                    0.30,
+                    theme::RADIUS_LG
+                )),
+            ty.body("This page stopped the browser engine", 20., theme::TEXT),
+            ty.body(
+                "The engine was restarted. This page was not reopened for you, so that it cannot stop it again at once.",
+                theme::SIZE_SM,
+                theme::TEXT_MUTED,
+            )
+            .align_x(iced_core::text::Alignment::Center),
+            kit::icon_label(
+                ty,
+                Icon::Refresh,
+                "Reload page",
+                widgets::Button::Primary,
+                Some(emit(Action::Restore(id))),
+            ),
+        ]
+        .spacing(14)
+        .align_x(alignment::Horizontal::Center)
+        .width(Length::Fill.max(460)),
+    )
+    .center(Length::Fill)
+    .into()
 }
 
 struct Target<'a, F> {
@@ -1142,6 +1388,156 @@ mod tests {
         assert_eq!(interaction(C::None), mouse::Interaction::Hidden);
     }
 
+    fn tab_at(location: &str) -> Tab {
+        let mut tab = Tab::default();
+        if !location.is_empty() {
+            tab.notice(
+                Event::Location(0, location.into(), false, false),
+                Instant::now(),
+            );
+        }
+        tab
+    }
+
+    #[test]
+    fn a_helper_that_keeps_stopping_is_restarted_a_few_times_then_left_alone() {
+        let t0 = Instant::now();
+        let mut restarts = Restarts(Vec::new());
+        assert_eq!(restarts.stopped(t0), Recovery::Restart { blame_all: false });
+        // Stopping again soon after a start is the restored pages' doing.
+        assert_eq!(
+            restarts.stopped(t0 + Duration::from_secs(5)),
+            Recovery::Restart { blame_all: true }
+        );
+        // Later than that, it is one more stop, not a pattern.
+        assert_eq!(
+            restarts.stopped(t0 + Duration::from_secs(60)),
+            Recovery::Restart { blame_all: false }
+        );
+        assert_eq!(
+            restarts.stopped(t0 + Duration::from_secs(90)),
+            Recovery::GiveUp,
+            "three restarts inside the window are enough"
+        );
+        // The window slides: old restarts stop counting.
+        assert_eq!(
+            restarts.stopped(t0 + Duration::from_secs(400)),
+            Recovery::Restart { blame_all: false }
+        );
+    }
+
+    #[test]
+    fn a_restart_reopens_every_tab_but_leaves_the_one_in_front_stopped() {
+        let tabs = [
+            (0, "https://a.example/"),
+            (1, "https://b.example/"),
+            (2, ""),
+            (3, "https://c.example/"),
+        ];
+        let plan = restore_plan(tabs.into_iter(), 1, false);
+        assert_eq!(plan.stopped, [1], "the tab in front is the suspect");
+        assert_eq!(
+            plan.commands,
+            [
+                Command::Open(0),
+                Command::Navigate(0, "https://a.example/".into()),
+                Command::Open(1),
+                Command::Open(2),
+                Command::Open(3),
+                Command::Navigate(3, "https://c.example/".into()),
+                // The tab that was in front is in front again.
+                Command::Select(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn after_a_quick_second_stop_nothing_with_a_page_is_reopened() {
+        let tabs = [
+            (0, "https://a.example/"),
+            (1, "https://b.example/"),
+            (2, ""),
+        ];
+        let plan = restore_plan(tabs.into_iter(), 0, true);
+        assert_eq!(plan.stopped, [0, 1]);
+        assert!(
+            !plan
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Navigate(..))),
+            "a page is never navigated to when the last restart already failed"
+        );
+        assert_eq!(
+            plan.commands,
+            [
+                Command::Open(0),
+                Command::Open(1),
+                Command::Open(2),
+                Command::Select(0)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blank_tab_in_front_is_not_called_stopped_and_a_first_start_opens_one_tab() {
+        let plan = restore_plan([(0, "")].into_iter(), 0, false);
+        assert!(plan.stopped.is_empty());
+        assert_eq!(plan.commands, [Command::Open(0), Command::Select(0)]);
+    }
+
+    #[test]
+    fn a_stop_clears_what_belonged_to_the_old_helper_and_keeps_what_the_page_said() {
+        let now = Instant::now();
+        let mut tab = tab_at("https://a.example/");
+        tab.notice(Event::Title(0, "A page".into()), now);
+        tab.notice(Event::Favicon(0, Some(icon(16, [1, 2, 3, 255]))), now);
+        tab.notice(Event::Loading(0, wire::Load::Started), now);
+        tab.notice(Event::Status(0, "https://link.example/".into()), now);
+        tab.notice(Event::Cursor(0, wire::Cursor::Pointer), now);
+        tab.notice(Event::Changed(0), now);
+        tab.size = (900, 500);
+        tab.waiting = true;
+        let mut tabs = BTreeMap::from([(0, tab)]);
+        let mut restarts = Restarts(Vec::new());
+        assert_eq!(
+            after_stop(&mut restarts, &mut tabs, now),
+            Recovery::Restart { blame_all: false }
+        );
+        let tab = &tabs[&0];
+        assert!(!tab.loading() && !tab.dirty && !tab.waiting);
+        assert_eq!(tab.size, (0, 0), "the new helper has no size to start from");
+        assert!(tab.status.is_empty() && tab.cursor == wire::Cursor::Default);
+        // The tab is still the page it was.
+        assert_eq!(tab.title, "A page");
+        assert_eq!(tab.location, "https://a.example/");
+        assert!(tab.favicon.is_some());
+    }
+
+    #[test]
+    fn when_the_helper_is_given_up_on_the_tabs_are_left_as_they_were() {
+        let now = Instant::now();
+        let mut restarts = Restarts(vec![now; Restarts::MAX]);
+        let mut tab = tab_at("https://a.example/");
+        tab.size = (900, 500);
+        let mut tabs = BTreeMap::from([(0, tab)]);
+        assert_eq!(after_stop(&mut restarts, &mut tabs, now), Recovery::GiveUp);
+        assert_eq!(tabs[&0].size, (900, 500));
+    }
+
+    #[test]
+    fn a_stopped_tab_is_reopened_by_loading_it_and_by_nothing_else() {
+        let now = Instant::now();
+        let mut tab = tab_at("https://a.example/");
+        tab.crashed = true;
+        // Things the page says do not reopen it.
+        tab.notice(Event::Title(0, "x".into()), now);
+        tab.notice(Event::Status(0, String::new()), now);
+        assert!(tab.crashed);
+        // A load that starts does.
+        tab.notice(Event::Loading(0, wire::Load::Started), now);
+        assert!(!tab.crashed);
+    }
+
     #[test]
     fn the_chrome_draws_in_every_state_in_both_appearances() {
         let bounds = Cell::new(None);
@@ -1201,6 +1597,20 @@ mod tests {
                     "error",
                     BTreeMap::from([(0, Tab::default())]),
                     "Enter an HTTPS website address.",
+                ),
+                (
+                    "stopped",
+                    BTreeMap::from([(0, {
+                        let mut stopped = Tab::default();
+                        stopped.notice(
+                            Event::Location(0, "https://github.com/".into(), true, false),
+                            now,
+                        );
+                        stopped.notice(Event::Title(0, "GitHub".into()), now);
+                        stopped.crashed = true;
+                        stopped
+                    })]),
+                    "",
                 ),
             ]
         };

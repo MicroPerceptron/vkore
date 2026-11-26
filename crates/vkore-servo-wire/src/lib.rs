@@ -29,7 +29,7 @@ pub const MAX_HEIGHT: u32 = 8192;
 pub const MAX_PIXELS: u64 = 16_777_216;
 const MAX_HEADER: usize = 32 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     ShowSurface(bool),
     Open(u64),
@@ -46,7 +46,7 @@ pub enum Command {
     Paint(u64),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Pointer {
     Move,
     Down,

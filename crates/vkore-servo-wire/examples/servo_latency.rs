@@ -92,7 +92,18 @@ impl Test {
             std::process::exit(1);
         }
         while let Ok(reply) = self.messages.try_recv() {
-            match reply.unwrap() {
+            let event = match reply {
+                Ok(event) => event,
+                // In live mode a helper that stops is a finding, not a failure.
+                Err(error) if self.phase == Phase::Live => {
+                    let ms = self.live.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+                    println!("{ms:>8.1} ms  the helper stopped: {error}");
+                    events.exit();
+                    return;
+                }
+                Err(error) => panic!("the helper stopped: {error}"),
+            };
+            match event {
                 Event::Ready(wire::VERSION, renderer, surface) => {
                     println!("renderer: {renderer}");
                     self.native.attach(surface).unwrap();

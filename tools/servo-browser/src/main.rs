@@ -273,8 +273,8 @@ impl Browser {
             .map_err(|e| format!("Could not activate Servo GL: {e:?}"))?;
         let renderer = context.gleam_gl_api().get_string(gleam::gl::RENDERER);
         // `VKORE_SERVO_WEBGL=off` makes WebGL unavailable, so pages that test for
-        // it fall back instead of running Servo's WebGL, which can still crash
-        // the helper on heavy scenes (see docs/desktop.md).
+        // it fall back instead of running Servo's WebGL, which can keep a heavy
+        // scene from ever finishing loading (see docs/desktop.md).
         let webgl_off = std::env::var("VKORE_SERVO_WEBGL").is_ok_and(|value| value == "off");
         let webgl = !webgl_off;
         let preferences = servo::Preferences {

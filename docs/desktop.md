@@ -179,6 +179,13 @@ display scale determine the viewport, up to 16 megapixels.
 | Linux, native Wayland | EGL exports a GPU snapshot via DMA-BUF. A private socket carries the descriptor and the compositor imports it into a subsurface. Requires the driver’s single-plane export, Linux DMA-BUF v3 and viewporter. |
 | Windows (experimental) | Desktop Window Manager composites the helper's live client area. Windows desktop integration still needs a runtime test. |
 
+If the helper stops while it has been running, the desktop starts another and
+reopens the tabs where they were. The tab that was in front is the likeliest
+cause, so it comes back stopped, with a button to reload it when you choose, and
+so does every tab if the helper stops again within twenty seconds of a restart.
+After three restarts in two minutes it stops trying and says so. A helper that
+never started (a missing binary, an unsupported display) is not retried.
+
 An unsupported driver or compositor produces a visible error. To check the
 installed helper against a real desktop compositor, set `VKORE_SERVO` to its
 absolute path and run `cargo run -p vkore-servo-wire --features presentation --example servo_surface_smoke`.
@@ -191,11 +198,12 @@ each event the page produces with its timing; that one uses the network.
 Two environment variables help when a page misbehaves. `VKORE_SERVO_CONSOLE=1`
 forwards the page's console messages to the helper's stderr (cut, and with
 control characters replaced), which shows a script error directly.
-`VKORE_SERVO_WEBGL=off` makes WebGL unavailable: Servo's WebGL can still crash
-the helper on heavy scenes, and a page that tests for WebGL then falls back.
-For example, github.com throws without constructable stylesheets (enabled in
-the helper) and, with WebGL on, crashes Servo's WebGL on its 3D hero; with it
-off it finishes loading in about five seconds. The OpenGL "texture unloadable"
+`VKORE_SERVO_WEBGL=off` makes WebGL unavailable, so a page that tests for WebGL
+falls back. For example, github.com throws without constructable stylesheets
+(enabled in the helper) and, with WebGL on, never finishes loading: its 3D hero
+runs and the helper stays alive and silent (Servo's WebGL then panics when the
+helper shuts down, which does not matter once it is being ended). With WebGL off
+it finishes loading in about five seconds. The OpenGL "texture unloadable"
 line Apple's driver prints once comes from page painting, not from either.
 The smoke test opens a test window and loads example.org. Append
 `-- 'https://www.google.com/search?q=rust+language'` to test a search navigation.

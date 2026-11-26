@@ -45,8 +45,8 @@ function Choice<T extends string>({ value, options, onChange, disabled, label }:
   );
 }
 
-export function Hardware() {
-  const { name = '' } = useParams();
+/** A machine's hardware form. Used as a page and as a workspace tile. */
+export function HardwareEditor({ name }: { name: string }) {
   const { machines, refresh } = useStore();
   const machine = machines?.find((entry) => entry.name === name);
   const locked = machine ? isActive(machine.run.phase) : false;
@@ -118,18 +118,6 @@ export function Hardware() {
 
   return (
     <>
-      <Link to={`/machines/${encodeURIComponent(name)}`} className="back"><ArrowLeft size={15} /> {name}</Link>
-      <header className="page-head">
-        <div className="machine-title-row">
-          <span className="plate big"><Cpu size={24} /></span>
-          <div>
-            <p className="eyebrow">Hardware</p>
-            <h1>{view.machine}</h1>
-          </div>
-          {machine && <Pill phase={machine.run.phase} />}
-        </div>
-      </header>
-
       {locked && <p className="notice">A running machine owns its hardware. Stop it to change anything here.</p>}
 
       <section className="card">
@@ -230,6 +218,29 @@ export function Hardware() {
           <button className="primary" disabled={busy || !changed || !check?.ok} onClick={save}><Save size={15} /> Save hardware</button>
         </div>
       </footer>
+    </>
+  );
+}
+
+export function Hardware() {
+  const { name = '' } = useParams();
+  const { machines } = useStore();
+  const machine = machines?.find((entry) => entry.name === name);
+  return (
+    <>
+      <Link to={`/machines/${encodeURIComponent(name)}`} className="back"><ArrowLeft size={15} /> {name}</Link>
+      <header className="page-head">
+        <div className="machine-title-row">
+          <span className="plate big"><Cpu size={24} /></span>
+          <div>
+            <p className="eyebrow">Hardware</p>
+            <h1>{name}</h1>
+          </div>
+          {machine && <Pill phase={machine.run.phase} />}
+        </div>
+      </header>
+
+      <HardwareEditor key={name} name={name} />
     </>
   );
 }

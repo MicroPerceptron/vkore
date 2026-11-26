@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { PRESETS } from './presets';
 
 /** A button that opens the list of colour presets. It owns no theme state: the caller applies the choice. */
-export function ThemePicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+export function ThemePicker({ value, onChange, placement = 'down' }: { value: string; onChange: (id: string) => void; placement?: 'down' | 'up' }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
 
@@ -25,7 +25,7 @@ export function ThemePicker({ value, onChange }: { value: string; onChange: (id:
   }, [open]);
 
   return (
-    <div className="picker" ref={root}>
+    <div className={`picker ${placement}`} ref={root}>
       <button className="icon" onClick={() => setOpen(!open)} aria-haspopup="listbox" aria-expanded={open} aria-label="Colour theme" title="Colour theme">
         <Palette size={16} />
       </button>

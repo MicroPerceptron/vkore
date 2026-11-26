@@ -86,13 +86,13 @@ export function Ring({ fraction, value, caption }: { fraction: number; value: st
 }
 
 /** Where a boot has got to, as a row of stages. */
-export function Stages({ machine }: { machine: Machine }) {
+export function Stages({ machine, vertical = false }: { machine: Machine; vertical?: boolean }) {
   const { phase, stage } = machine.run;
   const reached = stage ? STAGES.findIndex((entry) => entry.stage === stage) : -1;
   const current = phase === 'starting' ? 0 : reached;
   const failed = phase === 'failed' || stage === 'failed';
   return (
-    <ol className="stages" aria-label="Boot progress">
+    <ol className={`stages ${vertical ? 'vertical' : ''}`} aria-label="Boot progress">
       {STAGES.map((entry, index) => {
         const done = isActive(phase) && (index < current || (index === current && stage === 'ready'));
         const active = isActive(phase) && index === current && stage !== 'ready' && phase !== 'idle';

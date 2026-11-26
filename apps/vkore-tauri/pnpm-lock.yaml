@@ -17,6 +17,9 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.12.0
         version: 2.12.5
+      dockview-react:
+        specifier: 8.9.0
+        version: 8.9.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       lucide-react:
         specifier: 1.73.0
         version: 1.73.0(@types/react@18.3.31)(react@18.3.1)
@@ -343,6 +346,18 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
+
+  dockview-core@8.9.1:
+    resolution: {integrity: sha512-OzqB63P65qeSquFoyYjQi5yT85ERcmceaJ0+YdQL68IZJmBd5kAfe4UD9bl3xILuXJ1tlXIoExdZ+vLpv30u1g==}
+
+  dockview-react@8.9.0:
+    resolution: {integrity: sha512-dyzV3u6PX5kLsxYQBd5hL1DManxVepGqnYZvqobDgJ8cDwZmad+VnChRUcaCY7OgQ0b1gUL55YYn9w/eymqcLg==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  dockview@8.9.1:
+    resolution: {integrity: sha512-y35BxYANBtHJ4q7AIkd2c1Oh2pPx3dsaMhm6s4YvMXyIWlklxHRZupXtN6bS8QuJ/hmy/5ih/Ow2oARbEx4Yog==}
 
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
@@ -820,6 +835,18 @@ snapshots:
   csstype@3.2.4: {}
 
   detect-libc@2.1.2: {}
+
+  dockview-core@8.9.1: {}
+
+  dockview-react@8.9.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
+    dependencies:
+      dockview: 8.9.1
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+
+  dockview@8.9.1:
+    dependencies:
+      dockview-core: 8.9.1
 
   es-module-lexer@2.3.2: {}
 

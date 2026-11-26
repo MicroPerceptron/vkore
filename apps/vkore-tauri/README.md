@@ -12,9 +12,17 @@ it, and it is not part of the release train or CI.
   the host's processor, acceleration, QEMU and free storage.
 - **Machines**: every configured machine as a card with its state, resources and
   a live boot track; start and stop.
-- **Machine**: boot progress by stage (firmware, kernel, services, shell,
-  ready), the machine's **console**, its resources against the host, its
-  configuration and a bounded event log.
+- **Workspace**: each machine opens as a set of tiles, as in the iced desktop:
+  Console, Boot, Events, Resources, Configuration, and the Volume and Hardware
+  editors below. Drag a tile's tab onto another tile to make it a tab there, or
+  onto an edge of one to split it; drag the dividers to resize; expand a tile to
+  fill the workspace, close it, and reopen it from the **Tiles** menu. The layout
+  is kept per machine (in `localStorage`, when available) and **Reset layout**
+  restores the default. Tiling is `dockview-react` (MIT, one dependency, pinned,
+  vetted for licence and release age); a saved layout that names a tile this
+  version does not have is ignored rather than trusted.
+- **Sidebar**: the vertical menu: Overview, Machines, Volumes, and every machine's
+  workspace with a state dot; it folds to icons in a narrow window.
 - **Console**: a console image's COM2 shell, live. The engine's terminal model
   parses the guest's bytes, so the page only draws styled text; keys become
   terminal input, paste is bracketed when the guest asks, and the grid follows

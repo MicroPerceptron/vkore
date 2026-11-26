@@ -23,7 +23,7 @@ function style(span: Span): CSSProperties {
  * A machine's console. The engine's terminal model has already parsed the guest's
  * bytes, so this only draws styled text, and turns key presses into terminal input.
  */
-export function Console({ name, screen, running }: { name: string; screen: ConsoleScreen | undefined; running: boolean }) {
+export function Console({ name, screen, running, fill = false }: { name: string; screen: ConsoleScreen | undefined; running: boolean; fill?: boolean }) {
   const view = useRef<HTMLDivElement>(null);
   const meter = useRef<HTMLSpanElement>(null);
   const [problem, setProblem] = useState('');
@@ -122,7 +122,7 @@ export function Console({ name, screen, running }: { name: string; screen: Conso
   }
 
   return (
-    <>
+    <div className={fill ? 'console-fill' : undefined}>
       <div
         ref={view}
         className={`term ${focused ? 'focus' : ''} ${connected ? '' : 'closed'}`}
@@ -150,6 +150,6 @@ export function Console({ name, screen, running }: { name: string; screen: Conso
           ? screen.error || 'The console is closed.'
           : problem || screen.error || (focused ? 'Typing goes to the machine. Shift+Tab leaves the console.' : 'Click the console to type.')}
       </p>
-    </>
+    </div>
   );
 }

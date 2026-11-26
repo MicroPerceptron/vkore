@@ -13,9 +13,8 @@ function fileIcon(entry: VolumeEntry) {
   return <File size={17} />;
 }
 
-export function Volumes() {
-  const { name } = useParams();
-  const navigate = useNavigate();
+/** One machine's volume: its places, folders and a preview. Used as a page and as a workspace tile. */
+export function VolumeBrowser({ name }: { name: string }) {
   const { machines } = useStore();
   const selected = machines?.find((machine) => machine.name === name);
 
@@ -99,43 +98,6 @@ export function Volumes() {
 
   return (
     <>
-      <header className="page-head">
-        <div className="machine-title-row">
-          <span className="plate big"><HardDrive size={24} /></span>
-          <div>
-            <p className="eyebrow">Volumes</p>
-            <h1>Look inside a disk</h1>
-          </div>
-        </div>
-      </header>
-
-      <div className="pickers" role="tablist" aria-label="Machines">
-        {(machines ?? []).map((machine) => {
-          const locked = isActive(machine.run.phase);
-          return (
-            <button
-              key={machine.name}
-              role="tab"
-              aria-selected={machine.name === name}
-              className={`pick ${machine.name === name ? 'on' : ''}`}
-              onClick={() => navigate(`/volumes/${encodeURIComponent(machine.name)}`)}
-            >
-              {locked ? <Lock size={15} /> : <HardDrive size={15} />}
-              {machine.name}
-              {locked && <Pill phase={machine.run.phase} />}
-            </button>
-          );
-        })}
-      </div>
-
-      {!name && (
-        <div className="card">
-          <Empty icon={HardDrive} title="Choose a machine">
-            Its disk opens read-only, through Kore&apos;s own filesystem engine, so you see what the machine sees.
-          </Empty>
-        </div>
-      )}
-
       {name && active && (
         <div className="card">
           <Empty icon={Lock} title={`${name} is running`}>
@@ -283,6 +245,54 @@ function PreviewBody({ label, preview }: { label: string; preview: Preview }) {
             {hexRows(preview.headHex).map((row) => `${row.offset}  ${row.bytes.padEnd(47)}  ${row.ascii}`).join('\n')}
           </pre>
         </>
+      )}
+    </>
+  );
+}
+
+export function Volumes() {
+  const { name } = useParams();
+  const navigate = useNavigate();
+  const { machines } = useStore();
+  return (
+    <>
+      <header className="page-head">
+        <div className="machine-title-row">
+          <span className="plate big"><HardDrive size={24} /></span>
+          <div>
+            <p className="eyebrow">Volumes</p>
+            <h1>Look inside a disk</h1>
+          </div>
+        </div>
+      </header>
+
+      <div className="pickers" role="tablist" aria-label="Machines">
+        {(machines ?? []).map((machine) => {
+          const locked = isActive(machine.run.phase);
+          return (
+            <button
+              key={machine.name}
+              role="tab"
+              aria-selected={machine.name === name}
+              className={`pick ${machine.name === name ? 'on' : ''}`}
+              onClick={() => navigate(`/volumes/${encodeURIComponent(machine.name)}`)}
+            >
+              {locked ? <Lock size={15} /> : <HardDrive size={15} />}
+              {machine.name}
+              {locked && <Pill phase={machine.run.phase} />}
+            </button>
+          );
+        })}
+      </div>
+
+      {name ? (
+        <VolumeBrowser key={name} name={name} />
+      ) : (
+        <div className="card">
+          <Empty icon={HardDrive} title="Choose a machine">
+            Its disk opens read-only, through Kore&apos;s own filesystem engine, so you see what the machine sees.
+          </Empty>
+        </div>
       )}
     </>
   );

@@ -2,12 +2,13 @@
 //!
 //! The window is a view over the engine, as the iced desktop is: machines are
 //! read from vKore's store and run through `vkored::Session`, and nothing here
-//! parses a volume or reimplements a boot. The web side gets fifteen commands, each
-//! validating its input, bounding its output and escaping every string that came
+//! parses a volume or reimplements a boot. The web side gets twenty-one commands,
+//! each validating its input, bounding its output and escaping every string that came
 //! from disk or a guest ([`shown`]); it has no file, shell or network access.
 
 #![cfg(unix)]
 
+pub mod agent;
 pub mod console;
 pub mod hardware;
 pub mod runtime;
@@ -15,8 +16,11 @@ pub mod shown;
 pub mod views;
 pub mod volumes;
 
+use std::sync::Arc;
+
 use tauri::{Emitter, Manager, RunEvent, State};
 
+use agent::{AgentView, Agents, MachineHost};
 use hardware::{Check, Draft, HardwareView};
 use runtime::{Notice, Runtime};
 use views::{HostView, MachineDetail, MachineView};
@@ -39,6 +43,8 @@ pub(crate) fn assert_camel_keys(value: &serde_json::Value) {
     }
 }
 
+/// The event emitted when a machine's agent changes.
+pub const AGENT_EVENT: &str = "agent-update";
 /// The event a worker emits when a machine changes.
 pub const UPDATE_EVENT: &str = "machine-update";
 /// The event the console thread emits when a machine's console screen changes.
@@ -72,6 +78,27 @@ fn machine_get(runtime: State<'_, Runtime>, name: String) -> Reply<MachineDetail
     views::machine(&runtime, &name).map_err(refused)
 }
 
+/// Start machine `name`, as the Start button and the agent both do.
+fn start_machine(
+    app: tauri::AppHandle,
+    runtime: &Runtime,
+    volumes: &Volumes,
+    name: &str,
+) -> Result<(), runtime::Refusal> {
+    // Release the machine's disk if a volume is open on it, holding the lock that
+    // opening takes, so the two cannot interleave.
+    let mut open = volumes.lock();
+    open.close_for(name);
+    runtime.start(name, move |notice| {
+        let _ = match notice {
+            Notice::Machine(update) => app.emit(UPDATE_EVENT, update),
+            Notice::Console { name, screen } => {
+                app.emit(CONSOLE_EVENT, ConsolePayload { name, screen })
+            }
+        };
+    })
+}
+
 #[tauri::command]
 fn machine_start(
     app: tauri::AppHandle,
@@ -79,20 +106,7 @@ fn machine_start(
     volumes: State<'_, Volumes>,
     name: String,
 ) -> Reply<()> {
-    // Release the machine's disk if a volume is open on it, holding the lock that
-    // opening takes, so the two cannot interleave.
-    let mut open = volumes.lock();
-    open.close_for(&name);
-    runtime
-        .start(&name, move |notice| {
-            let _ = match notice {
-                Notice::Machine(update) => app.emit(UPDATE_EVENT, update),
-                Notice::Console { name, screen } => {
-                    app.emit(CONSOLE_EVENT, ConsolePayload { name, screen })
-                }
-            };
-        })
-        .map_err(refused)
+    start_machine(app, &runtime, &volumes, &name).map_err(refused)
 }
 
 #[tauri::command]
@@ -186,6 +200,69 @@ fn console_resize(runtime: State<'_, Runtime>, name: String, rows: u16, cols: u1
     runtime.console_resize(&name, rows, cols).map_err(refused)
 }
 
+#[tauri::command]
+fn agent_view(agents: State<'_, Agents>, name: String) -> Reply<AgentView> {
+    agents.view(&name).map_err(refused)
+}
+
+/// Turn the agent on for one machine. From here its console, boot events and
+/// files may be read and sent to the configured model.
+#[tauri::command]
+fn agent_enable(
+    app: tauri::AppHandle,
+    runtime: State<'_, Runtime>,
+    volumes: State<'_, Volumes>,
+    agents: State<'_, Agents>,
+    name: String,
+) -> Reply<()> {
+    // Only a machine that exists.
+    views::machine(&runtime, &name).map_err(refused)?;
+    let (runtime, volumes) = (runtime.inner().clone(), volumes.inner().clone());
+    let starter = {
+        let (app, runtime, volumes, name) =
+            (app.clone(), runtime.clone(), volumes.clone(), name.clone());
+        move || {
+            start_machine(app.clone(), &runtime, &volumes, &name).map_err(|error| error.to_string())
+        }
+    };
+    let host = MachineHost {
+        runtime,
+        volumes,
+        name: name.clone(),
+        start: Box::new(starter),
+    };
+    agents
+        .enable(
+            &name,
+            host,
+            Arc::new(move |view| {
+                let _ = app.emit(AGENT_EVENT, view);
+            }),
+        )
+        .map_err(refused)
+}
+
+#[tauri::command]
+fn agent_disable(agents: State<'_, Agents>, name: String) -> Reply<()> {
+    agents.disable(&name).map_err(refused)
+}
+
+#[tauri::command]
+fn agent_send(agents: State<'_, Agents>, name: String, text: String) -> Reply<()> {
+    agents.send(&name, &text).map_err(refused)
+}
+
+/// The person's answer to a request, given in the window.
+#[tauri::command]
+fn agent_decide(agents: State<'_, Agents>, name: String, ask: String, choice: String) -> Reply<()> {
+    agents.decide(&name, &ask, &choice).map_err(refused)
+}
+
+#[tauri::command]
+fn agent_stop(agents: State<'_, Agents>, name: String) -> Reply<()> {
+    agents.stop(&name).map_err(refused)
+}
+
 /// The private polkit helper modes. polkit re-executes *this binary* with one of
 /// these flags (`pkexec <exe> --vkore-memory-helper …`) to raise a limit or
 /// prepare a device, so they must be answered before any window exists: a binary
@@ -203,9 +280,16 @@ pub fn run() {
         eprintln!("vkore: cannot find a state directory; set VKORE_STATE");
         std::process::exit(2);
     });
+    let endpoint = vkore_agent::Endpoint::from_env();
+    // The key now lives in `endpoint` alone, so QEMU and everything else this
+    // process starts does not inherit it.
+    // SAFETY: no other thread exists yet to read or write the environment.
+    unsafe { std::env::remove_var(vkore_agent::config::API_KEY) };
+    let agents = Agents::new(endpoint, &root);
     let runtime = Runtime::new(root, vkored::run::default_qemu());
     let app = tauri::Builder::default()
         .manage(runtime)
+        .manage(agents)
         .manage(Volumes::default())
         .invoke_handler(tauri::generate_handler![
             host_overview,
@@ -222,7 +306,13 @@ pub fn run() {
             volume_close,
             hardware_get,
             hardware_check,
-            hardware_save
+            hardware_save,
+            agent_view,
+            agent_enable,
+            agent_disable,
+            agent_send,
+            agent_decide,
+            agent_stop
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the vKore window");
@@ -231,6 +321,8 @@ pub fn run() {
         // A running machine is a QEMU process; closing the window must stop it
         // rather than orphan it. Hold the exit while the workers power off.
         if let RunEvent::ExitRequested { api, .. } = event {
+            // No agent may act on a machine once the window is closing.
+            handle.state::<Agents>().shutdown();
             let runtime = handle.state::<Runtime>().inner().clone();
             if runtime.running() == 0 || closing {
                 return;

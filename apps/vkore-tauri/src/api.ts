@@ -169,6 +169,39 @@ export interface ConsoleUpdate extends ConsoleScreen {
   name: string;
 }
 
+export interface AgentAsk {
+  id: string;
+  title: string;
+  /** Exactly what would be typed or touched. */
+  detail: string;
+  /** What "allow for this session" would cover, when it may be offered. */
+  remember: 'exact' | 'kind' | null;
+}
+
+export type AgentEntry =
+  | { kind: 'prompt'; id: number; text: string }
+  | { kind: 'reply'; id: number; text: string }
+  | { kind: 'action'; id: number; title: string; detail: string; state: 'pending' | 'done' | 'failed' | 'denied' | 'stopped'; output: string }
+  | { kind: 'note'; id: number; text: string; bad: boolean };
+
+/** One machine's agent, as the app keeps it. */
+export interface AgentView {
+  name: string;
+  configured: boolean;
+  /** Why no model is configured, when none is. */
+  problem: string;
+  model: string;
+  host: string;
+  /** The model's endpoint is on this computer. */
+  local: boolean;
+  enabled: boolean;
+  busy: boolean;
+  entries: AgentEntry[];
+  ask: AgentAsk | null;
+}
+
+export type Choice = 'once' | 'session' | 'deny';
+
 export interface Api {
   host(): Promise<Host>;
   machines(): Promise<Machine[]>;
@@ -186,13 +219,21 @@ export interface Api {
   volumeList(name: string, at: Where): Promise<Listing>;
   volumePreview(name: string, at: Where): Promise<Preview>;
   volumeClose(): Promise<void>;
+  agentView(name: string): Promise<AgentView>;
+  agentEnable(name: string): Promise<void>;
+  agentDisable(name: string): Promise<void>;
+  agentSend(name: string, text: string): Promise<void>;
+  agentDecide(name: string, ask: string, choice: Choice): Promise<void>;
+  agentStop(name: string): Promise<void>;
   /** Each resolves to the function that stops listening. */
   onUpdate(listener: (update: Update) => void): Promise<() => void>;
   onConsole(listener: (update: ConsoleUpdate) => void): Promise<() => void>;
+  onAgent(listener: (view: AgentView) => void): Promise<() => void>;
 }
 
 export const UPDATE_EVENT = 'machine-update';
 export const CONSOLE_EVENT = 'console-screen';
+export const AGENT_EVENT = 'agent-update';
 
 async function tauri(): Promise<Api> {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -213,6 +254,13 @@ async function tauri(): Promise<Api> {
     volumeList: (name, at) => invoke<Listing>('volume_list', { name, at }),
     volumePreview: (name, at) => invoke<Preview>('volume_preview', { name, at }),
     volumeClose: () => invoke<void>('volume_close'),
+    agentView: (name) => invoke<AgentView>('agent_view', { name }),
+    agentEnable: (name) => invoke<void>('agent_enable', { name }),
+    agentDisable: (name) => invoke<void>('agent_disable', { name }),
+    agentSend: (name, text) => invoke<void>('agent_send', { name, text }),
+    agentDecide: (name, ask, choice) => invoke<void>('agent_decide', { name, ask, choice }),
+    agentStop: (name) => invoke<void>('agent_stop', { name }),
+    onAgent: (listener) => listen<AgentView>(AGENT_EVENT, (event) => listener(event.payload)),
     onUpdate: (listener) => listen<Update>(UPDATE_EVENT, (event) => listener(event.payload)),
     onConsole: (listener) => listen<ConsoleUpdate>(CONSOLE_EVENT, (event) => listener(event.payload)),
   };

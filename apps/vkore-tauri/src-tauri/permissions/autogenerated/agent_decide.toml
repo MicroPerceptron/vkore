@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-decide"
+description = "Enables the agent_decide command without any pre-configured scope."
+commands.allow = ["agent_decide"]
+
+[[permission]]
+identifier = "deny-agent-decide"
+description = "Denies the agent_decide command without any pre-configured scope."
+commands.deny = ["agent_decide"]

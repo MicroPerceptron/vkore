@@ -3,6 +3,11 @@
 Release versions follow [Semantic Versioning](https://semver.org/).
 See [the versioning policy](docs/versioning.md) for contribution and release checks.
 
+## [0.12.0] - 2026-11-27
+
+### Added
+- `vkore-agent`, an experimental operator agent for one machine. It talks to any endpoint serving streamed OpenAI chat completions with function tools, hosted or local, configured by `VKORE_AGENT_BASE_URL`, `VKORE_AGENT_MODEL` and `VKORE_AGENT_API_KEY`. It can read a machine's state, console and, while stopped, its files, and can type into its console, start it and stop it. Every change is approved by a person and recorded through `vkore-policy`. The experimental Tauri desktop shows it as an Agent tile in each machine's workspace; it is off until turned on. See [docs/agent.md](docs/agent.md).
+
 ## [0.11.0] - 2026-11-25
 
 ### Added

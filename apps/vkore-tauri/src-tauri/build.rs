@@ -18,6 +18,12 @@ const COMMANDS: &[&str] = &[
     "hardware_get",
     "hardware_check",
     "hardware_save",
+    "agent_view",
+    "agent_enable",
+    "agent_disable",
+    "agent_send",
+    "agent_decide",
+    "agent_stop",
 ];
 
 fn main() {

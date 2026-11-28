@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/vkore-addon-sdk",
+    "crates/vkore-agent",
     "crates/vkore-git-addon",
     "crates/vkore-gmail-addon",
     "crates/vkore-reference-addon",
@@ -17,7 +18,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/MicroPerceptron/vkore"

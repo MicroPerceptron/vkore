@@ -186,6 +186,11 @@ impl Volumes {
 pub struct VolumeGuard<'a>(MutexGuard<'a, Option<Open>>);
 
 impl VolumeGuard<'_> {
+    /// Whether machine `name`'s volume is the open one.
+    pub fn holds(&self, name: &str) -> bool {
+        self.0.as_ref().is_some_and(|open| open.machine == name)
+    }
+
     /// Close the volume if it is machine `name`'s, releasing its disk. Called,
     /// with this guard held, immediately before the machine starts.
     pub fn close_for(&mut self, name: &str) {

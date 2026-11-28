@@ -231,6 +231,7 @@ Not verified yet: KVM or HVF acceleration, writing to a physical disk, macOS
 | `vkore-volume` | DagFS volumes from the host over `kore-host`: browse, preview, export, install, project staging |
 | `vkore-ui` | The desktop: Volumes and Machines, Iced over Axiom |
 | `vkore-policy` | Authenticated approvals, standing policy, revocation, tamper-evident audit |
+| `vkore-agent` | Experimental operator agent: OpenAI chat protocol, per-machine tools, gated actions |
 | `vkore-packages` | Signed, content-addressed artifacts, compatibility checks, rollback |
 | `vkore-addon-sdk` | Capability-scoped host, guest and split tool contracts |
 | `vkore-git-addon`, `vkore-gmail-addon`, `vkore-reference-addon` | Add-ons over the SDK |

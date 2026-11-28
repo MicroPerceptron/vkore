@@ -57,8 +57,11 @@ function defaultLayout(api: DockviewApi, name: string) {
   add('console');
   add('boot', { referencePanel: 'console', direction: 'right' }, { initialWidth: 400 });
   add('events', { referencePanel: 'console', direction: 'below' }, { initialHeight: 210 });
-  add('resources', { referencePanel: 'boot', direction: 'below' });
-  add('configuration', { referencePanel: 'resources', direction: 'within' });
+  add('resources', { referencePanel: 'boot', direction: 'within' });
+  add('configuration', { referencePanel: 'boot', direction: 'within' });
+  // The agent has room of its own, so a request for approval is never hidden behind a tab.
+  add('agent', { referencePanel: 'boot', direction: 'below' }, { initialHeight: 430 });
+  api.getPanel('boot')?.api.setActive();
   api.getPanel('console')?.api.setActive();
 }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-disable"
+description = "Enables the agent_disable command without any pre-configured scope."
+commands.allow = ["agent_disable"]
+
+[[permission]]
+identifier = "deny-agent-disable"
+description = "Denies the agent_disable command without any pre-configured scope."
+commands.deny = ["agent_disable"]

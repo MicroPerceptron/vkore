@@ -1,5 +1,6 @@
-import { Cpu, FileDigit, FolderGit2, HardDrive, MemoryStick, Monitor, ScrollText, Server, SlidersHorizontal, SquareTerminal, Zap, type LucideIcon } from 'lucide-react';
+import { Bot, Cpu, FileDigit, FolderGit2, HardDrive, MemoryStick, Monitor, ScrollText, Server, SlidersHorizontal, SquareTerminal, Zap, type LucideIcon } from 'lucide-react';
 import { useEffect, useRef, type FC } from 'react';
+import { AgentPanel } from '../AgentPanel';
 import { Console } from '../Console';
 import { mib, seconds, share } from '../format';
 import { MpMark } from '../MpMark';
@@ -9,7 +10,7 @@ import { useStore } from '../store';
 import { Empty, Meter, Ring, Stages, isActive } from '../ui';
 
 /** What a workspace can show. Each kind is one tile, opened at most once. */
-export type TileKind = 'console' | 'boot' | 'events' | 'resources' | 'configuration' | 'volume' | 'hardware';
+export type TileKind = 'console' | 'boot' | 'events' | 'resources' | 'configuration' | 'volume' | 'hardware' | 'agent';
 
 function useMachine(name: string) {
   const { machines, host } = useStore();
@@ -102,6 +103,7 @@ function ConfigurationTile({ name }: { name: string }) {
 
 export const TILES: Record<TileKind, { title: string; Icon: LucideIcon; Body: FC<{ name: string }>; flush?: boolean }> = {
   console: { title: 'Console', Icon: SquareTerminal, Body: ConsoleTile, flush: true },
+  agent: { title: 'Agent', Icon: Bot, Body: AgentPanel, flush: true },
   boot: { title: 'Boot', Icon: Server, Body: BootTile },
   events: { title: 'Events', Icon: ScrollText, Body: EventsTile, flush: true },
   resources: { title: 'Resources', Icon: Cpu, Body: ResourcesTile },

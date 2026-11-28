@@ -21,6 +21,13 @@ it, and it is not part of the release train or CI.
   restores the default. Tiling is `dockview-react` (MIT, one dependency, pinned,
   vetted for licence and release age); a saved layout that names a tile this
   version does not have is ignored rather than trusted.
+- **Agent**: a tile where a model operates the machine: it reads the console,
+  boot events and a stopped disk, and types, starts or stops only with your
+  approval. Off until you turn it on for that machine. It needs an
+  OpenAI-compatible endpoint, hosted or local; [docs/agent.md](../../docs/agent.md)
+  has the variables, what leaves this computer and the bounds. The tile is in the
+  default layout; a layout saved before it existed gains it from the **Tiles**
+  menu.
 - **Sidebar**: the vertical menu: Overview, Machines, Volumes, and every machine's
   workspace with a state dot. It folds to icons with its toggle, or by itself in
   a narrow window.
@@ -86,14 +93,16 @@ A desktop authentication agent must be running for the prompt to appear.
 
 ## Boundaries the code keeps
 
-- The web side has fifteen commands (`host_overview`, `machines_list`,
+- The web side has twenty-one commands (`host_overview`, `machines_list`,
   `machine_get`, `machine_start`, `machine_stop`, `console_input`,
   `console_paste`, `console_resize`, `volume_open`, `volume_list`,
   `volume_preview`, `volume_close`, `hardware_get`, `hardware_check`,
-  `hardware_save`) and two events (`machine-update`,
-  `console-screen`). `build.rs` declares them and `capabilities/default.json`
+  `hardware_save`, `agent_view`, `agent_enable`, `agent_disable`, `agent_send`,
+  `agent_decide`, `agent_stop`) and three events (`machine-update`,
+  `console-screen`, `agent-update`). `build.rs` declares them and `capabilities/default.json`
   grants exactly those, plus event listening. No file, shell, network or window
-  access is granted.
+  access is granted. The agent's requests to its model are made by the Rust
+  side, which keeps the key; the page has no network access.
 - The content security policy allows scripts, fonts and images from the app
   itself only, and no inline script. The page renders every engine string as
   text.
@@ -148,5 +157,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
   formatted DagFS image populated and read back through Kore's engine. But a real Kore boot, and a real console
   session, through this window have not been run: it is not the acceptance the repository asks
   for until a machine has booted the ISO here.
+- The agent has been run against a local `llama-server` on a pretend machine, and
+  its tile driven on the scripted engine. It has not been run against a hosted
+  provider, in this window, or on a real Kore machine.
 - The app icon is a placeholder; the brand mark is not exported for it yet.
 - Linux and Windows webviews are untested; this was built on macOS.

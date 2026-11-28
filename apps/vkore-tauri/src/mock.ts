@@ -3,6 +3,7 @@
 // production build (`import.meta.env.DEV`), and is not the engine's behaviour:
 // real boots come from `vkored::Session`.
 import type { Api, ConsoleScreen, ConsoleUpdate, HardwareCheck, HardwareDraft, HardwareView, Host, LogLine, Machine, Phase, Span, Stage, Update, Where } from './api';
+import { mockAgent } from './mockAgent';
 
 const host: Host = {
   cpuName: 'AMD Ryzen 9 7950X 16-Core Processor',
@@ -143,7 +144,8 @@ function emit(machine: Machine, line: string | null, began: number) {
 
 const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-type Base = Omit<Api, 'volumeOpen' | 'volumeList' | 'volumePreview' | 'volumeClose' | 'hardwareGet' | 'hardwareCheck' | 'hardwareSave'>;
+type Agent = 'agentView' | 'agentEnable' | 'agentDisable' | 'agentSend' | 'agentDecide' | 'agentStop' | 'onAgent';
+type Base = Omit<Api, 'volumeOpen' | 'volumeList' | 'volumePreview' | 'volumeClose' | 'hardwareGet' | 'hardwareCheck' | 'hardwareSave' | Agent>;
 
 function mockApi(): Base {
   return {
@@ -322,6 +324,7 @@ export function mockApiWithVolumes(): Api {
   };
   return {
     ...api,
+    ...mockAgent((name, input) => api.consoleInput(name, input)),
     async hardwareGet(name): Promise<HardwareView> {
       const machine = find(name);
       return { machine: name, draft: draftOf(machine), minCpus: 2, minMemoryMib: 2048, maxCpus: hostHardware.logicalCpus, diskMib: machine.diskMib, reserveStorage: true, devices: name === 'inference' ? 1 : 0, host: structuredClone(hostHardware) };
